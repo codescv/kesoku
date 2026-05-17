@@ -195,12 +195,8 @@ class SessionWorker:
                     )
                     await self.gateway.post(thought_msg)
 
+                tool_call_msgs = []
                 for call in res.tool_calls:
-                    # Check-in before each tool execution
-                    if not self.queue.empty():
-                        logger.info(f"Interruption prior to tool '{call.name}'. Aborting tool execution to pivot.")
-                        break
-
                     logger.info(f"Executing requested tool call: '{call.name}' with args {call.arguments}")
                     call_args_json = json.dumps(call.arguments, indent=2, ensure_ascii=False)
                     tool_call_msg = Message(
@@ -220,7 +216,20 @@ class SessionWorker:
                         },
                     )
                     await self.gateway.post(tool_call_msg)
+                    tool_call_msgs.append((call, tool_call_msg))
 
+                async def _exec_tool(call: Any, tc_msg: Message) -> Message:
+                    """Execute a single tool call asynchronously and return the resulting Message.
+
+                    Args:
+                        call: ToolCallRequest instance.
+                        tc_msg: The corresponding ToolCall Message.
+
+                    Returns:
+                        A Message representing either successful tool result or error.
+                    """
+                    if not self.queue.empty():
+                        logger.info(f"Interruption prior to tool '{call.name}'. Aborting tool execution.")
                     try:
                         tool_func = self.tool_registry.get_tool(call.name)
                         call_kwargs = dict(call.arguments)
@@ -229,7 +238,7 @@ class SessionWorker:
                             call_kwargs["context"] = tool_context
                         # Atomic tool execution
                         result = await asyncio.to_thread(tool_func, **call_kwargs)
-                        tool_result_msg = Message(
+                        return Message(
                             session_id=self.session_id,
                             chatbot_id=chatbot_id,
                             channel_id=channel_id,
@@ -241,10 +250,9 @@ class SessionWorker:
                             parent_id=current_msg.id,
                             metadata={"tool_name": call.name, "tool_result": str(result)},
                         )
-                        await self.gateway.post(tool_result_msg)
                     except Exception as te:
                         logger.error(f"Error executing tool '{call.name}': {te}")
-                        tool_error_msg = Message(
+                        return Message(
                             session_id=self.session_id,
                             chatbot_id=chatbot_id,
                             channel_id=channel_id,
@@ -256,7 +264,16 @@ class SessionWorker:
                             parent_id=current_msg.id,
                             metadata={"tool_name": call.name, "tool_error": str(te)},
                         )
-                        await self.gateway.post(tool_error_msg)
+
+                exec_tasks = [_exec_tool(call, tc_msg) for call, tc_msg in tool_call_msgs]
+                if not self.queue.empty():
+                    logger.info("Interruption detected before launching concurrent tool execution.")
+                    for coro in exec_tasks:
+                        coro.close()
+                    break
+                result_msgs = await asyncio.gather(*exec_tasks)
+                for rm in result_msgs:
+                    await self.gateway.post(rm)
 
                 continue
             else:

@@ -67,7 +67,7 @@ All message ingestion and routing is unified through `Gateway.post()`. Every mes
   - Tool call: `Kesoku`
   - Tool output: The specific tool name (e.g., `calculator`)
   - System notifications: `System`
-- **Native Function Calling & Metadata Storage**: Tool requests and execution results store structured dictionaries in message `metadata` (`{"tool_name": ..., "tool_arguments": ...}`). The LLM backend (`llm.py`) converts these directly into native `FunctionCall` and `FunctionResponse` parts rather than relying on synthetic intermediate text prompts.
+- **Native Function Calling, Thought Signatures & Parallel Batching**: Tool requests and execution results store structured dictionaries in message `metadata` (`{"tool_name": ..., "tool_arguments": ..., "thought_signature": ...}`). To strictly comply with the Gemini API specification for parallel function calling, all `tool_call` messages for a given model turn are batched and posted before executing the tools concurrently. Their corresponding `tool_result` messages are then posted together, guaranteeing that multiple parallel calls and responses are grouped correctly into consecutive parts without interleaving.
 
 
 ## Configuration Schema (`config.toml`)

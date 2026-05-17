@@ -8,7 +8,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from kesoku.agent.agent import Agent, _escape_session_title
-from kesoku.agent.llm import GeminiLLM, MockLLM, get_llm
+from kesoku.agent.llm import GeminiLLM, MockLLM, ToolCallRequest, get_llm
 from kesoku.agent.tools import ToolContext, ToolRegistry, run_shell_command
 from kesoku.config import KesokuConfig, WorkspaceConfig
 from kesoku.db import DatabaseManager, Message
@@ -122,3 +122,53 @@ def test_escape_session_title() -> None:
     assert _escape_session_title("Hello/World*?!") == "Hello_World"
     assert _escape_session_title("a" * 30) == "a" * 20
     assert _escape_session_title("___") == "session"
+
+
+@pytest.mark.asyncio
+async def test_agent_parallel_tool_calls(temp_db: str) -> None:
+    """Test that agent processes parallel tool calls and batches TC and TR messages."""
+    DatabaseManager(temp_db).init_tables()
+    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    reg = ToolRegistry()
+
+    @reg.register
+    def dummy_search(query: str, context: Any = None) -> str:
+        return f"Search result for {query}"
+
+    await gw.create_session("sess_parallel", title="Parallel Session")
+    await gw.post(
+        Message(
+            session_id="sess_parallel",
+            chatbot_id="cli",
+            channel_id="ch1",
+            sender="u1",
+            role="user",
+            type="text",
+            content="Search A and B",
+            status="pending_agent",
+        )
+    )
+
+    mock_tools = [
+        ToolCallRequest(name="dummy_search", arguments={"query": "A"}, thought_signature="sigA"),
+        ToolCallRequest(name="dummy_search", arguments={"query": "B"}, thought_signature=None),
+    ]
+    llm = MockLLM(mock_tools=mock_tools)
+    agent = Agent(gw, llm, reg)
+
+    agent_task = asyncio.create_task(agent.start())
+    await asyncio.sleep(0.5)
+    agent.stop()
+    await asyncio.gather(agent_task, return_exceptions=True)
+
+    history = await gw.get_session_history("sess_parallel")
+    tc_msgs = [m for m in history if m.type == "tool_call"]
+    tr_msgs = [m for m in history if m.type == "tool_result"]
+    assert len(tc_msgs) == 2
+    assert len(tr_msgs) == 2
+
+    # Verify order: both TC messages should appear before both TR messages
+    tc_indices = [history.index(m) for m in tc_msgs]
+    tr_indices = [history.index(m) for m in tr_msgs]
+    assert max(tc_indices) < min(tr_indices)
+
