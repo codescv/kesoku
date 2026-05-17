@@ -20,16 +20,26 @@ TYPE_TOOL_CALL = "tool_call"
 # The execution output or exception returned by an invoked tool.
 TYPE_TOOL_RESULT = "tool_result"
 
-# --- Message Lifecycle Statuses ---
-# Initial outgoing assistant response awaiting transmission to the chat platform.
-STATUS_PENDING = "pending"
-# Ingested user message awaiting processing by an agent session worker.
+# --- User Message Lifecycle Statuses ---
+# Ingested user prompt awaiting pickup by an agent session worker.
 STATUS_PENDING_AGENT = "pending_agent"
-# Message currently actively being processed by an agent worker or tool.
+# User prompt currently actively being evaluated by an agent session worker.
 STATUS_PROCESSING = "processing"
-# Successfully delivered or finalized message on the external chat platform.
-STATUS_COMPLETED = "completed"
-# Message processing halted or pivoted due to a newer user thought interruption.
+# User prompt successfully evaluated and answered by an agent session worker.
+STATUS_PROCESSED = "processed"
+# User prompt processing halted or pivoted due to a newer user thought interruption.
 STATUS_INTERRUPTED = "interrupted"
-# Successfully processed internal message, tool output, or system followup prompt.
+
+# --- Assistant & Tool Message Lifecycle Statuses ---
+# Outgoing assistant text response awaiting transmission by a chatbot adapter.
+STATUS_PENDING = "pending"
+# Successfully delivered final assistant text response on the external chat platform.
+STATUS_COMPLETED = "completed"
+# Successfully processed internal message (system instructions, thoughts, tool calls, tool outputs).
 STATUS_RESPONDED = "responded"
+
+# --- System Defaults ---
+# Default defining instructions for the autonomous agent loop.
+DEFAULT_SYSTEM_PROMPT = """You are Kesoku Agent, a helpful, highly capable autonomous AI assistant.
+You can use available tools to calculate equations, search information, and answer user questions precisely.
+"""

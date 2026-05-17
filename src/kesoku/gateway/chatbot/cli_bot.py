@@ -2,7 +2,7 @@
 
 import asyncio
 
-from kesoku.constants import ROLE_ASSISTANT, TYPE_TEXT
+from kesoku.constants import ROLE_ASSISTANT, STATUS_COMPLETED, TYPE_TEXT
 from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot
 from kesoku.gateway.gateway import Gateway
@@ -35,5 +35,6 @@ class CLIChatbot(Chatbot):
             # Intermediate tool calls, tool results, or thoughts can be logged or ignored for final CLI completion
             return
         self.final_response = message.content
+        await self.gateway.update_message_status(message.id, STATUS_COMPLETED)
         self.final_response_event.set()
         logger.debug(f"CLIChatbot received final response for channel {message.channel_id}")

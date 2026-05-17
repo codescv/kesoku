@@ -53,6 +53,7 @@ async def test_agent_execution_loop(temp_db: str) -> None:
     reg.register(calculator)
 
     # Ingest a math question
+    await gw.create_session("sess1", title="Math Session")
     await gw.post(
         Message(
             session_id="sess1",
@@ -77,7 +78,7 @@ async def test_agent_execution_loop(temp_db: str) -> None:
     agent.stop()
     await asyncio.gather(agent_task, return_exceptions=True)
 
-    # Verify message status was marked as responded
+    # Verify message status was marked as processed
     history = await gw.get_session_history("sess1")
     assert len(history) >= 1
-    assert history[0].status == "responded"
+    assert any(m.status == "processed" for m in history)

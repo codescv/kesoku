@@ -28,6 +28,7 @@ class DummyChatbot(Chatbot):
 
     async def handle_message(self, message: Message) -> None:
         self.sent_messages.append((message.channel_id, message.content))
+        await self.gateway.update_message_status(message.id, STATUS_COMPLETED)
 
 
 @pytest.fixture

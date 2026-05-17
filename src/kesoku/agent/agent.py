@@ -32,10 +32,6 @@ from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-DEFAULT_SYSTEM_PROMPT = """You are Kesoku Agent, a helpful, highly capable autonomous AI assistant.
-You can use available tools to calculate equations, search information, and answer user questions precisely.
-"""
-
 
 class SessionWorker:
     """Dedicated asynchronous worker handling message queues and tool execution for a single conversational session."""
@@ -46,7 +42,6 @@ class SessionWorker:
         gateway: Gateway,
         llm: BaseLLM,
         tool_registry: ToolRegistry,
-        system_prompt: str,
         dispatcher: Any,
     ) -> None:
         """Initialize SessionWorker.
@@ -56,14 +51,12 @@ class SessionWorker:
             gateway: Gateway instance.
             llm: LLM backend interface.
             tool_registry: Tool/skill registry.
-            system_prompt: System prompt instructions.
             dispatcher: Parent Agent dispatcher reference.
         """
         self.session_id = session_id
         self.gateway = gateway
         self.llm = llm
         self.tool_registry = tool_registry
-        self.system_prompt = system_prompt
         self.dispatcher = dispatcher
         self.queue: asyncio.Queue[Message] = asyncio.Queue()
         self.running = False
@@ -134,35 +127,26 @@ class SessionWorker:
     async def _process_turn(self, current_msg: Message) -> None:
         chatbot_id = current_msg.chatbot_id
         channel_id = current_msg.channel_id
-        original_user_msg = current_msg
 
         while self.running:
             # Check-in before atomic action (Thought Interruption)
-            latest_msg = await self._drain_queue_and_pivot(original_user_msg)
-            if latest_msg != original_user_msg:
-                original_user_msg = latest_msg
+            latest_msg = await self._drain_queue_and_pivot(current_msg)
+            if latest_msg != current_msg:
                 current_msg = latest_msg
 
-            # Retrieve recent history from DB
-            history = await self.gateway.get_session_history(self.session_id, limit=20)
-            # Exclude current_msg if it's in history
-            history = [m for m in history if m.id != current_msg.id]
+            # Retrieve recent history from DB (which includes current_msg and any tool turns)
+            history = await self.gateway.get_session_history(self.session_id, limit=50)
 
             tools_list = self.tool_registry.get_tools_list()
 
-            # Step 2: Perform ONE atomic action (LLM inference)
+            # LLM inference
             res = await self.llm.generate(
-                prompt=current_msg.content,
-                system_prompt=self.system_prompt,
                 history=history,
                 tools=tools_list,
             )
 
             # Check if LLM requested tool calls
             if res.tool_calls:
-                tool_execution_summaries = []
-                interrupted_in_tools = False
-
                 if res.content:
                     thought_msg = Message(
                         session_id=self.session_id,
@@ -173,15 +157,14 @@ class SessionWorker:
                         type=TYPE_THOUGHT,
                         content=res.content,
                         status=STATUS_RESPONDED,
-                        parent_id=original_user_msg.id,
+                        parent_id=current_msg.id,
                     )
                     await self.gateway.post(thought_msg)
 
                 for call in res.tool_calls:
-                    # 3. Check-in before each tool execution (Thought Interruption between LLM calls / tool runs)
+                    # Check-in before each tool execution
                     if not self.queue.empty():
                         logger.info(f"Interruption prior to tool '{call.name}'. Aborting tool execution to pivot.")
-                        interrupted_in_tools = True
                         break
 
                     logger.info(f"Executing requested tool call: '{call.name}' with args {call.arguments}")
@@ -195,15 +178,15 @@ class SessionWorker:
                         type=TYPE_TOOL_CALL,
                         content=f"Calling tool `{call.name}` with arguments:\n```json\n{call_args_json}\n```",
                         status=STATUS_RESPONDED,
-                        parent_id=original_user_msg.id,
+                        parent_id=current_msg.id,
+                        metadata={"tool_name": call.name, "tool_arguments": call.arguments},
                     )
                     await self.gateway.post(tool_call_msg)
 
                     try:
                         tool_func = self.tool_registry.get_tool(call.name)
-                        # Atomic tool execution (Never Kill Mid-Tool)
+                        # Atomic tool execution
                         result = await asyncio.to_thread(tool_func, **call.arguments)
-                        tool_execution_summaries.append(f"Tool '{call.name}' returned: {result}")
                         tool_result_msg = Message(
                             session_id=self.session_id,
                             chatbot_id=chatbot_id,
@@ -213,12 +196,12 @@ class SessionWorker:
                             type=TYPE_TOOL_RESULT,
                             content=f"Tool `{call.name}` returned:\n```\n{result}\n```",
                             status=STATUS_RESPONDED,
-                            parent_id=original_user_msg.id,
+                            parent_id=current_msg.id,
+                            metadata={"tool_name": call.name, "tool_result": str(result)},
                         )
                         await self.gateway.post(tool_result_msg)
                     except Exception as te:
                         logger.error(f"Error executing tool '{call.name}': {te}")
-                        tool_execution_summaries.append(f"Tool '{call.name}' error: {te}")
                         tool_error_msg = Message(
                             session_id=self.session_id,
                             chatbot_id=chatbot_id,
@@ -228,40 +211,12 @@ class SessionWorker:
                             type=TYPE_TOOL_RESULT,
                             content=f"Tool `{call.name}` error:\n```\n{te}\n```",
                             status=STATUS_RESPONDED,
-                            parent_id=original_user_msg.id,
+                            parent_id=current_msg.id,
+                            metadata={"tool_name": call.name, "tool_error": str(te)},
                         )
                         await self.gateway.post(tool_error_msg)
 
-                if interrupted_in_tools:
-                    # Let outer while self.running loop pick up the new user message in queue
-                    continue
-
-                # Check-in: check queue after tool execution
-                if not self.queue.empty():
-                    logger.info("Interruption after tool execution! Pivoting to new message.")
-                    continue
-
-                # Formulate followup prompt for LLM to generate final response
-                followup_prompt = (
-                    f"User request was: {original_user_msg.content}\n"
-                    f"Tool execution results:\n"
-                    + "\n".join(tool_execution_summaries)
-                    + "\nPlease formulate the final response to the user based on these results."
-                )
-                current_msg = Message(
-                    session_id=self.session_id,
-                    chatbot_id=chatbot_id,
-                    channel_id=channel_id,
-                    sender="System",
-                    role=ROLE_SYSTEM,
-                    type=TYPE_TEXT,
-                    content=followup_prompt,
-                    status=STATUS_RESPONDED,
-                    parent_id=original_user_msg.id,
-                )
-                await self.gateway.post(current_msg)
                 continue
-
             else:
                 final_content = res.content
                 if not final_content:
@@ -276,9 +231,10 @@ class SessionWorker:
                     type=TYPE_TEXT,
                     content=final_content,
                     status=STATUS_PENDING,
+                    parent_id=current_msg.id,
                 )
                 await self.gateway.post(final_msg)
-                await self.gateway.mark_message_responded(original_user_msg.id)
+                await self.gateway.mark_message_processed(current_msg.id)
                 break
 
 
@@ -290,7 +246,6 @@ class Agent:
         gateway: Gateway,
         llm: BaseLLM | None = None,
         tool_registry: ToolRegistry | None = None,
-        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     ) -> None:
         """Initialize the Agent dispatcher.
 
@@ -298,7 +253,6 @@ class Agent:
             gateway: The Gateway instance providing message queues and persistence.
             llm: The LLM backend interface. If None, initializes GeminiLLM.
             tool_registry: Registry of available tools/skills. If None, initializes default_registry.
-            system_prompt: Defining system instructions for the agent.
         """
         if llm is None:
             llm = GeminiLLM()
@@ -308,7 +262,6 @@ class Agent:
         self.gateway = gateway
         self.llm = llm
         self.tool_registry = tool_registry
-        self.system_prompt = system_prompt
         self.workers: dict[str, SessionWorker] = {}
         self._running = False
         self._master_task: asyncio.Task[None] | None = None
@@ -334,7 +287,6 @@ class Agent:
                             gateway=self.gateway,
                             llm=self.llm,
                             tool_registry=self.tool_registry,
-                            system_prompt=self.system_prompt,
                             dispatcher=self,
                         )
                         self.workers[msg.session_id] = worker

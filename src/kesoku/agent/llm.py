@@ -14,6 +14,14 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from kesoku.config import GeminiConfig, get_config
+from kesoku.constants import (
+    ROLE_ASSISTANT,
+    ROLE_SYSTEM,
+    ROLE_TOOL,
+    ROLE_USER,
+    TYPE_TOOL_CALL,
+    TYPE_TOOL_RESULT,
+)
 from kesoku.db import Message
 from kesoku.logger import setup_logger
 
@@ -40,7 +48,7 @@ class BaseLLM(ABC):
     @abstractmethod
     async def generate(
         self,
-        prompt: str,
+        prompt: str | None = None,
         system_prompt: str | None = None,
         history: list[Message] | None = None,
         tools: list[Callable] | None = None,
@@ -48,7 +56,7 @@ class BaseLLM(ABC):
         """Generate a response from the LLM given prompt and context.
 
         Args:
-            prompt: The latest user prompt string.
+            prompt: The latest user prompt string or None if continuation.
             system_prompt: Optional system instructions.
             history: Optional list of prior messages in the session.
             tools: Optional list of callable Python tool functions.
@@ -96,20 +104,62 @@ class GeminiLLM(BaseLLM):
 
     async def generate(
         self,
-        prompt: str,
+        prompt: str | None = None,
         system_prompt: str | None = None,
         history: list[Message] | None = None,
         tools: list[Callable] | None = None,
     ) -> LLMResponse:
         """Generate content using Google GenAI client."""
-        contents = []
+        contents: list[types.Content] = []
         if history:
             for msg in history:
-                role = "model" if msg.role == "assistant" else "user"
-                contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg.content)]))
+                if msg.role == ROLE_SYSTEM:
+                    if not system_prompt:
+                        system_prompt = msg.content
+                    elif msg != history[0]:
+                        part = types.Part.from_text(text=f"[System Notification]\n{msg.content}")
+                        if contents and contents[-1].role == "user":
+                            contents[-1].parts.append(part)
+                        else:
+                            contents.append(types.Content(role="user", parts=[part]))
+                    continue
 
-        # Append the current prompt
-        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=prompt)]))
+                role = "user"
+                part = None
+
+                if msg.role == ROLE_USER:
+                    role = "user"
+                    part = types.Part.from_text(text=msg.content)
+                elif msg.role == ROLE_ASSISTANT:
+                    role = "model"
+                    part = types.Part.from_text(text=msg.content)
+                elif msg.role == ROLE_TOOL:
+                    if msg.type == TYPE_TOOL_CALL:
+                        role = "model"
+                        tool_name = msg.metadata.get("tool_name", "unknown_tool")
+                        args = msg.metadata.get("tool_arguments", {})
+                        part = types.Part.from_function_call(name=tool_name, args=args)
+                    elif msg.type == TYPE_TOOL_RESULT:
+                        role = "tool"
+                        tool_name = msg.metadata.get("tool_name", "unknown_tool")
+                        if "tool_error" in msg.metadata:
+                            res_dict = {"error": msg.metadata["tool_error"]}
+                        else:
+                            res_dict = {"result": msg.metadata.get("tool_result", msg.content)}
+                        part = types.Part.from_function_response(name=tool_name, response=res_dict)
+
+                if part:
+                    if contents and contents[-1].role == role:
+                        contents[-1].parts.append(part)
+                    else:
+                        contents.append(types.Content(role=role, parts=[part]))
+
+        if prompt:
+            part = types.Part.from_text(text=prompt)
+            if contents and contents[-1].role == "user":
+                contents[-1].parts.append(part)
+            else:
+                contents.append(types.Content(role="user", parts=[part]))
 
         config = types.GenerateContentConfig()
         if system_prompt:
@@ -119,7 +169,17 @@ class GeminiLLM(BaseLLM):
             config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
 
         def _call() -> Any:
-            return self.client.models.generate_content(
+            if self.config.auth_mode == "vertex":
+                client = genai.Client(
+                    vertexai=True,
+                    project=self.config.project_id,
+                    location=self.config.location,
+                )
+            else:
+                key = self.config.api_key or os.getenv("GEMINI_API_KEY")
+                client = genai.Client(api_key=key)
+
+            return client.models.generate_content(
                 model=self.model_name,
                 contents=contents,
                 config=config,
@@ -153,17 +213,17 @@ class MockLLM(BaseLLM):
 
     async def generate(
         self,
-        prompt: str,
+        prompt: str | None = None,
         system_prompt: str | None = None,
         history: list[Message] | None = None,
         tools: list[Callable] | None = None,
     ) -> LLMResponse:
         """Return canned mock response."""
-        logger.debug(f"MockLLM received prompt: {prompt}")
-        if "tool execution results" in prompt.lower():
+        logger.debug(f"MockLLM received prompt: {prompt}, history count: {len(history or [])}")
+        prompt_str = prompt or (history[-1].content if history else "")
+        if history and history[-1].role == "tool" and history[-1].type == "tool_result":
             return LLMResponse(content="The calculation result is 35.", tool_calls=[])
-        # If user asks to calculate something, mock tool call
-        if "calculate" in prompt.lower() or "+" in prompt:
+        if "calculate" in prompt_str.lower() or "+" in prompt_str:
             return LLMResponse(
                 content="Let me calculate that.",
                 tool_calls=[ToolCallRequest(name="calculator", arguments={"expression": "25 + 10"})],

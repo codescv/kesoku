@@ -11,6 +11,13 @@ from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 from kesoku.config import WorkspaceConfig, get_config
+from kesoku.constants import (
+    DEFAULT_SYSTEM_PROMPT,
+    ROLE_SYSTEM,
+    STATUS_PROCESSED,
+    STATUS_RESPONDED,
+    TYPE_TEXT,
+)
 from kesoku.db import DatabaseManager, Message, Session
 from kesoku.logger import setup_logger
 
@@ -43,12 +50,18 @@ class Gateway:
         self.db = DatabaseManager(self.db_path)
         self.db.verify_db()
 
-    async def create_session(self, session_id: str | None = None, title: str = "New Session") -> Session:
-        """Create a new chat session record in SQLite.
+    async def create_session(
+        self,
+        session_id: str | None = None,
+        title: str = "New Session",
+        system_prompt: str | None = None,
+    ) -> Session:
+        """Create a new chat session record in SQLite and initialize system instructions.
 
         Args:
             session_id: Optional unique identifier. If None, a random 8-char hex is generated.
             title: Summary title or first message snippet for the session.
+            system_prompt: Optional defining system prompt instructions.
 
         Returns:
             The created Session instance.
@@ -58,6 +71,21 @@ class Gateway:
         now = time.time()
         sess = Session(id=session_id, title=title, created_at=now, updated_at=now)
         await asyncio.to_thread(self.db.create_session, sess)
+
+        # Save initial system prompt as the first message in the session
+        sys_msg = Message(
+            session_id=session_id,
+            chatbot_id="system",
+            channel_id="system",
+            sender="System",
+            role=ROLE_SYSTEM,
+            type=TYPE_TEXT,
+            content=system_prompt or DEFAULT_SYSTEM_PROMPT,
+            status=STATUS_RESPONDED,
+            # Use a timestamp slightly in the past to ensure system message always comes first
+            timestamp=now - 0.01,
+        )
+        await asyncio.to_thread(self.db.save_message, sys_msg)
         logger.debug(f"Created new chat session: {session_id} ({title})")
         return sess
 
@@ -150,14 +178,14 @@ class Gateway:
             if listener in self._listeners:
                 self._listeners.remove(listener)
 
-    async def mark_message_responded(self, message_id: str) -> None:
-        """Mark a processed message as 'responded' or 'completed' in SQLite storage.
+    async def mark_message_processed(self, message_id: str) -> None:
+        """Mark a completed user prompt as 'processed' in SQLite storage.
 
         Args:
-            message_id: Unique ID of the message.
+            message_id: Unique ID of the user message.
         """
-        await asyncio.to_thread(self.db.update_message_status, message_id, "responded")
-        logger.debug(f"Message {message_id} marked as responded.")
+        await asyncio.to_thread(self.db.update_message_status, message_id, STATUS_PROCESSED)
+        logger.debug(f"Message {message_id} marked as processed.")
 
     async def update_message_status(self, message_id: str, status: str) -> None:
         """Update the status of a message in storage.

@@ -33,11 +33,9 @@ class Chatbot(ABC):
         """
         self._listener_task = asyncio.current_task()
         try:
-            async for msg in self.gateway.listen(chatbot_id=self.chatbot_id):
+            async for msg in self.gateway.listen(chatbot_id=self.chatbot_id, status=STATUS_PENDING):
                 if msg.role == ROLE_USER:
                     continue
-                if msg.status == STATUS_PENDING:
-                    await self.gateway.update_message_status(msg.id, STATUS_COMPLETED)
                 await self.handle_message(msg)
         except asyncio.CancelledError:
             logger.debug(f"Chatbot '{self.chatbot_id}' listener cancelled.")

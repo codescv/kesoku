@@ -14,6 +14,7 @@ from kesoku.constants import (
     ROLE_USER,
     STATUS_INTERRUPTED,
     STATUS_PENDING_AGENT,
+    STATUS_PROCESSED,
     STATUS_RESPONDED,
     TYPE_TEXT,
 )
@@ -79,6 +80,8 @@ async def test_multi_user_simultaneous(temp_db: str) -> None:
     agent_task = asyncio.create_task(agent.start())
 
     # Ingest messages from two separate sessions simultaneously
+    await gw.create_session("sess_A", title="Sess A")
+    await gw.create_session("sess_B", title="Sess B")
     msg_a = await gw.post(
         Message(
             session_id="sess_A",
@@ -112,8 +115,8 @@ async def test_multi_user_simultaneous(temp_db: str) -> None:
     hist_a = await gw.get_session_history("sess_A")
     hist_b = await gw.get_session_history("sess_B")
 
-    assert any(m.status == STATUS_RESPONDED for m in hist_a)
-    assert any(m.status == STATUS_RESPONDED for m in hist_b)
+    assert any(m.status == STATUS_PROCESSED for m in hist_a)
+    assert any(m.status == STATUS_PROCESSED for m in hist_b)
 
 
 @pytest.mark.asyncio
@@ -129,6 +132,7 @@ async def test_user_thought_interruption(temp_db: str) -> None:
     agent_task = asyncio.create_task(agent.start())
 
     # Send first message
+    await gw.create_session("sess_int", title="Sess Int")
     msg1 = await gw.post(
         Message(
             session_id="sess_int",
@@ -164,4 +168,4 @@ async def test_user_thought_interruption(temp_db: str) -> None:
 
     # Verify msg1 was interrupted or msg2 was processed
     assert any(m.status == STATUS_INTERRUPTED or m.id == msg2.id for m in hist)
-    assert any(m.status == STATUS_RESPONDED for m in hist)
+    assert any(m.status == STATUS_PROCESSED for m in hist)

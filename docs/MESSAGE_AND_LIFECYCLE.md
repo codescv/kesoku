@@ -53,11 +53,7 @@ Tracks the operational state of the message within the asynchronous processing p
 [Tool Executes -> Output]                        [Chatbot Adapter Broadcasts]
 (status: responded)                                        │
            │                                               ▼
-           ▼                                     (status: completed)
-[System Followup Prompt]
-(status: responded)
-           │
-           └────────► (Loops back to LLM generation)
+           └────────► (Loops back to LLM generation)    (status: completed)
 ```
 
 ---
@@ -87,7 +83,7 @@ The Agent dispatcher detects `msg_001` (`pending_agent`) and assigns it to the `
 - **Update**: `msg_001` status changes from `pending_agent` ──► `processing`.
 
 ### Step 3: Assistant Thought & Tool Call Request
-The worker calls the LLM (Gemini). Gemini determines it needs to calculate the math expression. It generates an internal reasoning thought and requests the `calculator` tool. The worker posts both messages:
+The worker calls the LLM (Gemini). Gemini determines it needs to calculate the math expression. It generates an internal reasoning thought and requests the `calculator` tool. The worker posts both messages (including structured tool metadata):
 ```json
 {
   "id": "msg_002",
@@ -109,12 +105,18 @@ The worker calls the LLM (Gemini). Gemini determines it needs to calculate the m
   "role": "tool",
   "type": "tool_call",
   "content": "Calling tool `calculator` with arguments:\n```json\n{\n  \"expression\": \"25 * 40\"\n}\n```",
-  "status": "responded"
+  "status": "responded",
+  "metadata": {
+    "tool_name": "calculator",
+    "tool_arguments": {
+      "expression": "25 * 40"
+    }
+  }
 }
 ```
 
 ### Step 4: Tool Execution & Output
-The worker executes `calculator("25 * 40")`. It captures the result (`1000.0`) and posts a tool result message:
+The worker executes `calculator(expression="25 * 40")`. It captures the result (`1000.0`) and posts a tool result message with structured metadata. The worker then simply loops back for the next LLM generation turn without any synthetic text followup prompt:
 ```json
 {
   "id": "msg_004",
@@ -123,40 +125,30 @@ The worker executes `calculator("25 * 40")`. It captures the result (`1000.0`) a
   "sender": "calculator",
   "role": "tool",
   "type": "tool_result",
-  "content": "Tool `calculator` returned:\n```\nResult of 25 * 40 = 1000.0\n```",
-  "status": "responded"
+  "content": "Tool `calculator` returned:\n```\n1000.0\n```",
+  "status": "responded",
+  "metadata": {
+    "tool_name": "calculator",
+    "tool_result": "1000.0"
+  }
 }
 ```
 
-### Step 5: System Followup Orchestration
-To prompt the LLM to formulate the final human-friendly response, the worker synthesizes a system followup message containing the tool execution summaries and posts it:
+### Step 5: Final Assistant Response & Completion
+The worker invokes the LLM once more, providing the native tool execution history. Gemini generates the final answer. The worker posts the final message and marks the original user message as responded:
 ```json
 {
   "id": "msg_005",
   "session_id": "sess_abc",
   "parent_id": "msg_001",
-  "sender": "System",
-  "role": "system",
-  "type": "text",
-  "content": "User request was: What is 25 * 40?\nTool execution results:\nTool 'calculator' returned: Result of 25 * 40 = 1000.0\nPlease formulate the final response to the user based on these results.",
-  "status": "responded"
-}
-```
-
-### Step 6: Final Assistant Response & Completion
-The worker invokes the LLM once more, providing the updated history. Gemini generates the final answer. The worker posts the final message and marks the original user message as responded:
-```json
-{
-  "id": "msg_006",
-  "session_id": "sess_abc",
   "sender": "Kesoku",
   "role": "assistant",
   "type": "text",
-  "content": "25 * 40 is 1,000.",
+  "content": "The result of 25 * 40 is 1,000.",
   "status": "pending"
 }
 ```
 - **Update**: Original user message (`msg_001`) status changes from `processing` ──► `responded`.
 
-Because `msg_006` is posted with `status = "pending"`, the registered `CLIChatbot` listener detects it, prints the beautiful rich markdown panel to the terminal, and updates the DB status upon delivery:
-- **Update**: `msg_006` status changes from `pending` ──► `completed`.
+Because `msg_005` is posted with `status = "pending"`, the registered `CLIChatbot` listener detects it, prints the beautiful rich markdown panel to the terminal, and updates the DB status upon delivery:
+- **Update**: `msg_005` status changes from `pending` ──► `completed`.

@@ -313,14 +313,14 @@ class DatabaseManager:
             conn.close()
 
     def get_session_history(self, session_id: str, limit: int = 20) -> list[Message]:
-        """Retrieve historical messages for a specific session.
+        """Retrieve historical messages for a specific session ordered by logical conversational turn.
 
         Args:
             session_id: Session ID to query.
             limit: Max messages count.
 
         Returns:
-            List of Message objects.
+            List of Message objects ordered by turn timestamp and individual timestamp.
         """
         conn = self._get_connection()
         try:
@@ -329,12 +329,11 @@ class DatabaseManager:
                 """
                 SELECT * FROM messages
                 WHERE session_id = ?
-                ORDER BY timestamp ASC LIMIT ?
                 """,
-                (session_id, limit),
+                (session_id,),
             )
             rows = cursor.fetchall()
-            return [
+            all_msgs = [
                 Message(
                     id=row["id"],
                     session_id=row["session_id"],
@@ -351,6 +350,18 @@ class DatabaseManager:
                 )
                 for row in rows
             ]
+
+            # Build map for fast root lookup
+            msg_map = {m.id: m for m in all_msgs}
+
+            def get_root_timestamp(m: Message) -> float:
+                if m.parent_id and m.parent_id in msg_map:
+                    return msg_map[m.parent_id].timestamp
+                return m.timestamp
+
+            # Sort logically by turn root timestamp, then by message timestamp
+            all_msgs.sort(key=lambda m: (get_root_timestamp(m), m.timestamp))
+            return all_msgs[-limit:] if limit else all_msgs
         finally:
             conn.close()
 

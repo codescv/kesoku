@@ -47,7 +47,7 @@ Kesoku is a lightweight, highly readable, and robust autonomous AI agent framewo
 +------------------------------------------------------------------------+
 ```
 
-## Concurrency & Anti-Stall Mechanism (V3)
+## Concurrency, Anti-Stall Mechanism & Thread Sorting (V4)
 To handle multiple users and user interruptions gracefully, Kesoku implements an advanced concurrency model:
 1. **Stateless Pub/Sub Hub**: The Gateway provides `post(message)` to save messages and broadcast them to active in-memory `listen(**filters)` async generators.
 2. **Agent Dispatcher**: The master Agent runs `listen(role="user")`. Upon receiving a message, it checks if a `SessionWorker` task exists for that `session_id`. If not, it spawns one; otherwise, it pushes the message into the worker's queue.
@@ -55,8 +55,9 @@ To handle multiple users and user interruptions gracefully, Kesoku implements an
    - Each worker processes its queue atomic step by atomic step (LLM inference or Tool execution).
    - **Never Kill Mid-Tool**: For safety, tool executions are atomic. The worker waits for the tool to complete before checking for new user input.
    - **Thought Interruption**: If a new user message arrives in the queue while the LLM is generating or before a tool is invoked, the worker pivots immediately to the new message, updating previous pending actions as `interrupted`.
+4. **Turn-Based Thread Sorting**: To perfectly preserve interrupted branches and asynchronous tool outputs without temporal interleaving, session history is ordered logically by turn root timestamp: `(root_message_timestamp, message_timestamp)`.
 
-## Message Data Model & Unified Posting
+## Message Data Model & Native Tool Calling
 All message ingestion and routing is unified through `Gateway.post()`. Every message in Kesoku follows strict role, type, status, and sender conventions as detailed in [Message and Lifecycle Specification](MESSAGE_AND_LIFECYCLE.md):
 - **Roles**: `user`, `assistant`, `tool`, `system`
 - **Types**: `text`, `thought`, `tool_call`, `tool_result`
@@ -66,6 +67,7 @@ All message ingestion and routing is unified through `Gateway.post()`. Every mes
   - Tool call: `Kesoku`
   - Tool output: The specific tool name (e.g., `calculator`)
   - System notifications: `System`
+- **Native Function Calling & Metadata Storage**: Tool requests and execution results store structured dictionaries in message `metadata` (`{"tool_name": ..., "tool_arguments": ...}`). The LLM backend (`llm.py`) converts these directly into native `FunctionCall` and `FunctionResponse` parts rather than relying on synthetic intermediate text prompts.
 
 
 ## Configuration Schema (`config.toml`)
