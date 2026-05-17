@@ -242,3 +242,27 @@ class MockLLM(BaseLLM):
                 tool_calls=[ToolCallRequest(name="calculator", arguments={"expression": "25 + 10"})],
             )
         return LLMResponse(content=self.mock_response, tool_calls=self.mock_tools)
+
+
+def get_llm(provider: str | None = None) -> BaseLLM:
+    """Get an LLM instance based on config or specified provider.
+
+    Args:
+        provider: Optional provider name ('gemini' or 'mock'). If None, uses agent.llm from config.
+
+    Returns:
+        An instance of BaseLLM (GeminiLLM or MockLLM).
+
+    Raises:
+        ValueError: If an unsupported LLM provider is specified.
+    """
+    if provider is None:
+        provider = get_config().agent.llm
+
+    provider_lower = provider.lower()
+    if provider_lower == "gemini":
+        return GeminiLLM()
+    elif provider_lower == "mock":
+        return MockLLM()
+    else:
+        raise ValueError(f"Unsupported LLM provider: {provider}")

@@ -5,10 +5,12 @@ from typing import Any
 
 import pytest
 
+from unittest.mock import MagicMock, patch
+
 from kesoku.agent.agent import Agent
-from kesoku.agent.llm import MockLLM
+from kesoku.agent.llm import GeminiLLM, MockLLM, get_llm
 from kesoku.agent.tools import ToolRegistry, calculator
-from kesoku.config import WorkspaceConfig
+from kesoku.config import KesokuConfig, WorkspaceConfig
 from kesoku.db import DatabaseManager, Message
 from kesoku.gateway.gateway import Gateway
 
@@ -82,3 +84,19 @@ async def test_agent_execution_loop(temp_db: str) -> None:
     history = await gw.get_session_history("sess1")
     assert len(history) >= 1
     assert any(m.status == "processed" for m in history)
+
+
+def test_get_llm() -> None:
+    """Test get_llm factory function."""
+    with patch("kesoku.agent.llm.get_config") as mock_get_config:
+        mock_get_config.return_value = KesokuConfig()
+        # Test explicit providers
+        assert isinstance(get_llm("mock"), MockLLM)
+        assert isinstance(get_llm("gemini"), GeminiLLM)
+
+        with pytest.raises(ValueError, match="Unsupported LLM provider"):
+            get_llm("invalid")
+
+        # Test reading from config when provider is None
+        mock_get_config.return_value.agent.llm = "mock"
+        assert isinstance(get_llm(), MockLLM)

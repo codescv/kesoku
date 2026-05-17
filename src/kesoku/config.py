@@ -25,6 +25,12 @@ class WorkspaceConfig(BaseModel):
     skills_dir: str = Field(default="skills", description="Path to skills directory")
 
 
+class AgentConfig(BaseModel):
+    """Agent-level configuration settings."""
+
+    llm: str = Field(default="gemini", description="LLM provider identifier (e.g., gemini, mock)")
+
+
 class GeminiConfig(BaseModel):
     """Google GenAI / Gemini LLM configuration settings."""
 
@@ -49,6 +55,7 @@ class KesokuConfig(BaseModel):
     """Root Kesoku configuration structure."""
 
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
+    agent: AgentConfig = Field(default_factory=AgentConfig)
     gemini: GeminiConfig = Field(default_factory=GeminiConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
 

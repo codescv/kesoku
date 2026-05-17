@@ -34,6 +34,9 @@ Sample `config.toml`:
 db_path = "kesoku.db"
 skills_dir = "skills"
 
+[agent]
+llm = "gemini"
+
 [gemini]
 model_name = "gemini-2.5-flash"
 auth_mode = "api_key" # Use "vertex" for Google Cloud Vertex AI

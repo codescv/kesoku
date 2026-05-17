@@ -78,6 +78,9 @@ Kesoku is centrally configured via a structured TOML file managed by Pydantic mo
 db_path = "kesoku.db"
 skills_dir = "skills"
 
+[agent]
+llm = "gemini"
+
 [gemini]
 model_name = "gemini-2.5-flash"
 auth_mode = "api_key" # or "vertex"

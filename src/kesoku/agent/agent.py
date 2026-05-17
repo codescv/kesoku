@@ -9,7 +9,7 @@ import asyncio
 import json
 from typing import Any
 
-from kesoku.agent.llm import BaseLLM, GeminiLLM
+from kesoku.agent.llm import BaseLLM, get_llm
 from kesoku.agent.tools import ToolRegistry, default_registry
 from kesoku.constants import (
     ROLE_ASSISTANT,
@@ -255,11 +255,11 @@ class Agent:
 
         Args:
             gateway: The Gateway instance providing message queues and persistence.
-            llm: The LLM backend interface. If None, initializes GeminiLLM.
+            llm: The LLM backend interface. If None, initializes via get_llm().
             tool_registry: Registry of available tools/skills. If None, initializes default_registry.
         """
         if llm is None:
-            llm = GeminiLLM()
+            llm = get_llm()
         if tool_registry is None:
             tool_registry = default_registry
 
