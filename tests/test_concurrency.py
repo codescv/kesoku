@@ -7,7 +7,7 @@ import pytest
 
 from kesoku.agent.agent import Agent
 from kesoku.agent.llm import MockLLM
-from kesoku.agent.tools import ToolRegistry, calculator
+from kesoku.agent.tools import ToolRegistry
 from kesoku.config import WorkspaceConfig
 from kesoku.constants import (
     ROLE_ASSISTANT,
@@ -73,7 +73,11 @@ async def test_multi_user_simultaneous(temp_db: str) -> None:
     DatabaseManager(temp_db).init_tables()
     gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
     reg = ToolRegistry()
-    reg.register(calculator)
+
+    @reg.register
+    def calculator(expression: str, context: Any = None) -> str:
+        return "Result = 20.0"
+
     llm = MockLLM()
 
     agent = Agent(gw, llm, reg)
@@ -125,7 +129,11 @@ async def test_user_thought_interruption(temp_db: str) -> None:
     DatabaseManager(temp_db).init_tables()
     gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
     reg = ToolRegistry()
-    reg.register(calculator)
+
+    @reg.register
+    def calculator(expression: str, context: Any = None) -> str:
+        return "Result = 2.0"
+
     llm = MockLLM()
 
     agent = Agent(gw, llm, reg)

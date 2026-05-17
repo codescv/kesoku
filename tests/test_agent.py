@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from kesoku.agent.agent import Agent
 from kesoku.agent.llm import GeminiLLM, MockLLM, get_llm
-from kesoku.agent.tools import ToolContext, ToolRegistry, calculator, run_shell_command
+from kesoku.agent.tools import ToolContext, ToolRegistry, run_shell_command
 from kesoku.config import KesokuConfig, WorkspaceConfig
 from kesoku.db import DatabaseManager, Message
 from kesoku.gateway.gateway import Gateway
@@ -31,16 +31,6 @@ def test_tool_registry() -> None:
         reg.get_tool("non_existent")
 
 
-def test_calculator_tool() -> None:
-    """Test mathematical calculator tool."""
-    res = calculator("50 * 2 + 15")
-    assert "115.0" in res
-
-    # Test error handling on illegal expressions
-    err = calculator("import os; os.system('echo hello')")
-    assert "Error" in err
-
-
 @pytest.fixture
 def temp_db(tmp_path: Any) -> str:
     return str(tmp_path / "test_agent.db")
@@ -52,7 +42,10 @@ async def test_agent_execution_loop(temp_db: str) -> None:
     DatabaseManager(temp_db).init_tables()
     gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
     reg = ToolRegistry()
-    reg.register(calculator)
+
+    @reg.register
+    def calculator(expression: str, context: Any = None) -> str:
+        return "Result of 25 + 10 = 35.0"
 
     # Ingest a math question
     await gw.create_session("sess1", title="Math Session")

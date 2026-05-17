@@ -1,9 +1,7 @@
 """Tool registry and MVP skills for Kesoku AI Agent."""
 
-import ast
 import functools
 import inspect
-import operator
 import os
 import re
 import shlex
@@ -95,58 +93,6 @@ class ToolRegistry:
 
 # Default global registry instance
 default_registry = ToolRegistry()
-
-
-@default_registry.register
-def calculator(expression: str, context: ToolContext | None = None) -> str:
-    """Perform simple mathematical calculations on numerical expressions.
-
-    Supports addition (+), subtraction (-), multiplication (*), and division (/).
-
-    Args:
-        expression: A simple mathematical string expression (e.g., '25 * 4 + 10').
-
-    Returns:
-        The calculated numerical result as a string.
-    """
-    # Safe arithmetic evaluation using AST
-    operators = {
-        ast.Add: operator.add,
-        ast.Sub: operator.sub,
-        ast.Mult: operator.mul,
-        ast.Div: operator.truediv,
-    }
-
-    def _eval(node: ast.AST) -> float:
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-            return float(node.value)
-        elif isinstance(node, ast.BinOp):
-            left = _eval(node.left)
-            right = _eval(node.right)
-            op = type(node.op)
-            if op in operators:
-                return operators[op](left, right)
-        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-            return -_eval(node.operand)
-        raise ValueError(f"Unsupported mathematical construct in expression: {expression}")
-
-    try:
-        parsed = ast.parse(expression, mode="eval").body
-        result = _eval(parsed)
-        return f"Result of {expression} = {result}"
-    except Exception as e:
-        logger.error(f"Calculator tool failed to evaluate '{expression}': {e}")
-        return f"Error evaluating expression '{expression}': {e}"
-
-
-@default_registry.register
-def get_current_time(context: ToolContext | None = None) -> str:
-    """Retrieve the current local time and date formatted as a readable string.
-
-    Returns:
-        The current local time string.
-    """
-    return time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime())
 
 
 @default_registry.register
