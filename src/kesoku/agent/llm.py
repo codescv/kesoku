@@ -3,14 +3,17 @@
 Provides an abstract base class BaseLLM and a concrete GeminiLLM implementation.
 """
 
+import asyncio
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any
 
+from google import genai
+from google.genai import types
 from pydantic import BaseModel, Field
 
-from kesoku.config import GeminiConfig
+from kesoku.config import GeminiConfig, get_config
 from kesoku.db import Message
 from kesoku.logger import setup_logger
 
@@ -66,16 +69,12 @@ class GeminiLLM(BaseLLM):
             config: Configuration structure for Gemini backend.
         """
         if config is None:
-            from kesoku.config import get_config
-
             config = get_config().gemini
         self.config = config
         self.model_name = config.model_name
         logger.info(f"Using GeminiLLM backend ({self.model_name}).")
 
         try:
-            from google import genai
-
             if config.auth_mode == "vertex":
                 logger.info(
                     f"Initializing Gemini client in Vertex AI mode "
@@ -103,10 +102,6 @@ class GeminiLLM(BaseLLM):
         tools: list[Callable] | None = None,
     ) -> LLMResponse:
         """Generate content using Google GenAI client."""
-        import asyncio
-
-        from google.genai import types
-
         contents = []
         if history:
             for msg in history:

@@ -9,8 +9,8 @@ import asyncio
 import json
 from typing import Any
 
-from kesoku.agent.llm import BaseLLM
-from kesoku.agent.tools import ToolRegistry
+from kesoku.agent.llm import BaseLLM, GeminiLLM
+from kesoku.agent.tools import ToolRegistry, default_registry
 from kesoku.constants import (
     ROLE_ASSISTANT,
     ROLE_SYSTEM,
@@ -300,12 +300,8 @@ class Agent:
             system_prompt: Defining system instructions for the agent.
         """
         if llm is None:
-            from kesoku.agent.llm import GeminiLLM
-
             llm = GeminiLLM()
         if tool_registry is None:
-            from kesoku.agent.tools import default_registry
-
             tool_registry = default_registry
 
         self.gateway = gateway

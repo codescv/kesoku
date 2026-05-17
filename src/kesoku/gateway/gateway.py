@@ -10,7 +10,7 @@ import uuid
 from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
-from kesoku.config import WorkspaceConfig
+from kesoku.config import WorkspaceConfig, get_config
 from kesoku.db import DatabaseManager, Message, Session
 from kesoku.logger import setup_logger
 
@@ -36,8 +36,6 @@ class Gateway:
             workspace_config: Configuration settings for the workspace database and paths.
         """
         if workspace_config is None:
-            from kesoku.config import get_config
-
             workspace_config = get_config().workspace
         self.workspace_config = workspace_config
         self.db_path = self.workspace_config.db_path
