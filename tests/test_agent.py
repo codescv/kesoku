@@ -95,11 +95,12 @@ def test_get_llm() -> None:
         assert isinstance(get_llm(), MockLLM)
 
 
-def test_run_shell_command() -> None:
+def test_run_shell_command(tmp_path: Any) -> None:
     """Test secure shell command execution tool."""
     ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
     with patch("kesoku.agent.tools.get_config") as mock_get_config:
         cfg = KesokuConfig()
+        cfg.workspace.sessions_dir = str(tmp_path / "sessions")
         cfg.shell.enabled = False
         mock_get_config.return_value = cfg
         assert "disabled" in run_shell_command("echo hello", context=ctx)

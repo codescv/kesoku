@@ -1,9 +1,12 @@
 # Agent Features
 - [ ] History / context management (compaction etc)
+- [ ] System Prompt Design
+  - Inject current date, time, timezone etc.
 
 # Tools
-- [ ] Run shell command
-- [ ] Search tool
+- [x] Run shell command
+- [x] Search tool
+- [ ] Use skills
 
 # Sub Agent
 - [ ] Support sub agent
