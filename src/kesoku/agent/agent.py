@@ -6,16 +6,19 @@ anti-stall mechanisms.
 """
 
 import asyncio
+import inspect
 import json
+import time
 from typing import Any
 
 from kesoku.agent.llm import BaseLLM, get_llm
-from kesoku.agent.tools import ToolRegistry, default_registry
+from kesoku.agent.tools import ToolContext, ToolRegistry, default_registry
 from kesoku.constants import (
     ROLE_ASSISTANT,
     ROLE_SYSTEM,
     ROLE_TOOL,
     ROLE_USER,
+    STATUS_ERROR,
     STATUS_INTERRUPTED,
     STATUS_PENDING,
     STATUS_PENDING_AGENT,
@@ -128,6 +131,16 @@ class SessionWorker:
         chatbot_id = current_msg.chatbot_id
         channel_id = current_msg.channel_id
 
+        session = await self.gateway.get_session(self.session_id)
+        if not session:
+            logger.error(f"Session {self.session_id} not found in database. Aborting message processing.")
+            await self.gateway.update_message_status(current_msg.id, STATUS_ERROR)
+            return
+
+        ts_str = time.strftime("%y%m%d-%H-%M", time.localtime(session.created_at))
+        folder_name = f"{ts_str}_{self.session_id}"
+        tool_context = ToolContext(session_id=self.session_id, session_workspace=folder_name)
+
         while self.running:
             # Check-in before atomic action (Thought Interruption)
             latest_msg = await self._drain_queue_and_pivot(current_msg)
@@ -189,8 +202,12 @@ class SessionWorker:
 
                     try:
                         tool_func = self.tool_registry.get_tool(call.name)
+                        call_kwargs = dict(call.arguments)
+                        sig = inspect.signature(tool_func)
+                        if "context" in sig.parameters:
+                            call_kwargs["context"] = tool_context
                         # Atomic tool execution
-                        result = await asyncio.to_thread(tool_func, **call.arguments)
+                        result = await asyncio.to_thread(tool_func, **call_kwargs)
                         tool_result_msg = Message(
                             session_id=self.session_id,
                             chatbot_id=chatbot_id,

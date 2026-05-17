@@ -77,6 +77,7 @@ Kesoku is centrally configured via a structured TOML file managed by Pydantic mo
 [workspace]
 db_path = "kesoku.db"
 skills_dir = "skills"
+sessions_dir = "sessions"
 
 [agent]
 llm = "gemini"
@@ -92,4 +93,11 @@ location = "us-central1" # for vertex mode
 enabled = false
 bot_token = "discord-bot-token"
 chatbot_id = "discord_primary"
+
+[shell]
+enabled = true
+use_shell = true
+mode = "blocklist"
+allowlist_patterns = ["^(echo|ls|pwd|cat|git|uv|grep|find|python|sed|awk)(\\s|$)"]
+blocklist_patterns = ["(\\b|^)(rm|sudo|shutdown|reboot|mkfs|dd|chmod|chown)(\\b|\\s|$)"]
 ```

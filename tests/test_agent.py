@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from kesoku.agent.agent import Agent
 from kesoku.agent.llm import GeminiLLM, MockLLM, get_llm
-from kesoku.agent.tools import ToolRegistry, calculator
+from kesoku.agent.tools import ToolContext, ToolRegistry, calculator, run_shell_command
 from kesoku.config import KesokuConfig, WorkspaceConfig
 from kesoku.db import DatabaseManager, Message
 from kesoku.gateway.gateway import Gateway
@@ -100,3 +100,24 @@ def test_get_llm() -> None:
         # Test reading from config when provider is None
         mock_get_config.return_value.agent.llm = "mock"
         assert isinstance(get_llm(), MockLLM)
+
+
+def test_run_shell_command() -> None:
+    """Test secure shell command execution tool."""
+    ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
+    with patch("kesoku.agent.tools.get_config") as mock_get_config:
+        cfg = KesokuConfig()
+        cfg.shell.enabled = False
+        mock_get_config.return_value = cfg
+        assert "disabled" in run_shell_command("echo hello", context=ctx)
+
+        cfg.shell.enabled = True
+        cfg.shell.mode = "blocklist"
+        res = run_shell_command("echo test_hello", context=ctx)
+        assert "test_hello" in res
+
+        assert "Execution denied" in run_shell_command("rm -rf /", context=ctx)
+
+        cfg.shell.mode = "allowlist"
+        assert "Execution denied" in run_shell_command("unknown_binary_test", context=ctx)
+        assert "test_allow" in run_shell_command("echo test_allow", context=ctx)

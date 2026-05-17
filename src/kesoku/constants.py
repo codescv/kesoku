@@ -29,6 +29,8 @@ STATUS_PROCESSING = "processing"
 STATUS_PROCESSED = "processed"
 # User prompt processing halted or pivoted due to a newer user thought interruption.
 STATUS_INTERRUPTED = "interrupted"
+# Message processing failed due to missing session or unrecoverable error.
+STATUS_ERROR = "error"
 
 # --- Assistant & Tool Message Lifecycle Statuses ---
 # Outgoing assistant text response awaiting transmission by a chatbot adapter.

@@ -23,6 +23,7 @@ class WorkspaceConfig(BaseModel):
 
     db_path: str = Field(default="kesoku.db", description="Path to SQLite database file")
     skills_dir: str = Field(default="skills", description="Path to skills directory")
+    sessions_dir: str = Field(default="sessions", description="Path to session staging directory")
 
 
 class AgentConfig(BaseModel):
@@ -51,6 +52,30 @@ class DiscordConfig(BaseModel):
     chatbot_id: str = Field(default="discord_primary", description="Unique chatbot identifier")
 
 
+class ShellConfig(BaseModel):
+    """Shell command execution tool configuration settings."""
+
+    enabled: bool = Field(default=True, description="Whether the shell command execution tool is enabled")
+    use_shell: bool = Field(
+        default=True, description="Whether to execute commands via system shell (enabling pipes/redirection)"
+    )
+    mode: Literal["allowlist", "blocklist"] = Field(
+        default="blocklist",
+        description="Filtering mode: 'allowlist' strictly permits matching patterns, 'blocklist' prohibits matching patterns",
+    )
+    allowlist_patterns: list[str] = Field(
+        default_factory=lambda: [r"^(echo|ls|pwd|cat|git|uv|grep|find|python|sed|awk)(\s|$)"],
+        description="Regex patterns for allowed commands in allowlist mode",
+    )
+    blocklist_patterns: list[str] = Field(
+        default_factory=lambda: [r"(\b|^)(rm|sudo|shutdown|reboot|mkfs|dd|chmod|chown)(\b|\s|$)"],
+        description="Regex patterns for prohibited commands in blocklist mode",
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict, description="Custom environment variables injected into subprocesses"
+    )
+
+
 class KesokuConfig(BaseModel):
     """Root Kesoku configuration structure."""
 
@@ -58,6 +83,7 @@ class KesokuConfig(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     gemini: GeminiConfig = Field(default_factory=GeminiConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
+    shell: ShellConfig = Field(default_factory=ShellConfig)
 
     def resolve_paths(self, config_file_path: str) -> None:
         """Resolve workspace relative paths against the directory containing the config file.
@@ -70,6 +96,8 @@ class KesokuConfig(BaseModel):
             self.workspace.db_path = os.path.join(base_dir, self.workspace.db_path)
         if not os.path.isabs(self.workspace.skills_dir):
             self.workspace.skills_dir = os.path.join(base_dir, self.workspace.skills_dir)
+        if not os.path.isabs(self.workspace.sessions_dir):
+            self.workspace.sessions_dir = os.path.join(base_dir, self.workspace.sessions_dir)
 
 
 _global_config: KesokuConfig | None = None
@@ -134,6 +162,8 @@ def save_config(cfg: KesokuConfig, config_path: str) -> None:
         data["workspace"]["db_path"] = os.path.basename(data["workspace"]["db_path"])
     if os.path.isabs(data["workspace"]["skills_dir"]):
         data["workspace"]["skills_dir"] = os.path.basename(data["workspace"]["skills_dir"])
+    if os.path.isabs(data["workspace"]["sessions_dir"]):
+        data["workspace"]["sessions_dir"] = os.path.basename(data["workspace"]["sessions_dir"])
 
     try:
         with open(config_path, "wb") as f:
