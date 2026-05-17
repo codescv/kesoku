@@ -37,7 +37,7 @@ class Message(BaseModel):
         description="Extensible metadata for platform-specific attributes (e.g., attachments, guild_id)",
     )
     timestamp: float = Field(default_factory=time.time, description="Unix timestamp of when the message was created")
-    status: Literal["pending", "processing", "completed", "interrupted", "pending_agent", "responded"] = Field(
+    status: Literal["pending", "processing", "processed", "completed", "interrupted", "pending_agent", "responded"] = Field(
         default=STATUS_PENDING, description="Current lifecycle status of the message"
     )
     parent_id: str | None = Field(default=None, description="Links tool results or followups to specific message/call")

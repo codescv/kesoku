@@ -33,6 +33,7 @@ class ToolCallRequest(BaseModel):
 
     name: str
     arguments: dict[str, Any]
+    thought_signature: str | None = None
 
 
 class LLMResponse(BaseModel):
@@ -139,6 +140,9 @@ class GeminiLLM(BaseLLM):
                         tool_name = msg.metadata.get("tool_name", "unknown_tool")
                         args = msg.metadata.get("tool_arguments", {})
                         part = types.Part.from_function_call(name=tool_name, args=args)
+                        ts_hex = msg.metadata.get("thought_signature")
+                        if ts_hex:
+                            part.thought_signature = bytes.fromhex(ts_hex)
                     elif msg.type == TYPE_TOOL_RESULT:
                         role = "tool"
                         tool_name = msg.metadata.get("tool_name", "unknown_tool")
@@ -187,13 +191,22 @@ class GeminiLLM(BaseLLM):
 
         try:
             res = await asyncio.to_thread(_call)
-            text_content = res.text if res.text else ""
             tool_calls = []
+            text_parts = []
 
-            if res.function_calls:
-                for call in res.function_calls:
-                    args_dict = dict(call.args) if call.args else {}
-                    tool_calls.append(ToolCallRequest(name=call.name, arguments=args_dict))
+            if res.parts:
+                for part in res.parts:
+                    if isinstance(part.text, str) and not part.thought:
+                        text_parts.append(part.text)
+                    if part.function_call:
+                        call = part.function_call
+                        args_dict = dict(call.args) if call.args else {}
+                        ts = part.thought_signature.hex() if part.thought_signature else None
+                        tool_calls.append(
+                            ToolCallRequest(name=call.name, arguments=args_dict, thought_signature=ts)
+                        )
+
+            text_content = "".join(text_parts)
 
             return LLMResponse(content=text_content, tool_calls=tool_calls)
         except Exception as e:

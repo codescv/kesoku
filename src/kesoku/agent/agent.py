@@ -179,7 +179,11 @@ class SessionWorker:
                         content=f"Calling tool `{call.name}` with arguments:\n```json\n{call_args_json}\n```",
                         status=STATUS_RESPONDED,
                         parent_id=current_msg.id,
-                        metadata={"tool_name": call.name, "tool_arguments": call.arguments},
+                        metadata={
+                            "tool_name": call.name,
+                            "tool_arguments": call.arguments,
+                            "thought_signature": call.thought_signature,
+                        },
                     )
                     await self.gateway.post(tool_call_msg)
 
