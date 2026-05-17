@@ -180,7 +180,8 @@ class SessionWorker:
 
             # Check if LLM requested tool calls
             if res.tool_calls:
-                if res.content:
+                thought_text = res.thought or res.content
+                if thought_text:
                     thought_msg = Message(
                         session_id=self.session_id,
                         chatbot_id=chatbot_id,
@@ -188,7 +189,7 @@ class SessionWorker:
                         sender="Kesoku",
                         role=ROLE_ASSISTANT,
                         type=TYPE_THOUGHT,
-                        content=res.content,
+                        content=thought_text,
                         status=STATUS_RESPONDED,
                         parent_id=current_msg.id,
                     )
@@ -259,6 +260,20 @@ class SessionWorker:
 
                 continue
             else:
+                if res.thought:
+                    thought_msg = Message(
+                        session_id=self.session_id,
+                        chatbot_id=chatbot_id,
+                        channel_id=channel_id,
+                        sender="Kesoku",
+                        role=ROLE_ASSISTANT,
+                        type=TYPE_THOUGHT,
+                        content=res.thought,
+                        status=STATUS_RESPONDED,
+                        parent_id=current_msg.id,
+                    )
+                    await self.gateway.post(thought_msg)
+
                 final_content = res.content
                 if not final_content:
                     final_content = "Processed request successfully."

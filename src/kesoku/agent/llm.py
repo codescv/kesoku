@@ -19,6 +19,7 @@ from kesoku.constants import (
     ROLE_SYSTEM,
     ROLE_TOOL,
     ROLE_USER,
+    TYPE_THOUGHT,
     TYPE_TOOL_CALL,
     TYPE_TOOL_RESULT,
 )
@@ -40,6 +41,7 @@ class LLMResponse(BaseModel):
     """Standardized response from any LLM provider."""
 
     content: str
+    thought: str | None = None
     tool_calls: list[ToolCallRequest] = Field(default_factory=list)
 
 
@@ -134,6 +136,8 @@ class GeminiLLM(BaseLLM):
                 elif msg.role == ROLE_ASSISTANT:
                     role = "model"
                     part = types.Part.from_text(text=msg.content)
+                    if msg.type == TYPE_THOUGHT:
+                        part.thought = True
                 elif msg.role == ROLE_TOOL:
                     if msg.type == TYPE_TOOL_CALL:
                         role = "model"
@@ -193,11 +197,15 @@ class GeminiLLM(BaseLLM):
             res = await asyncio.to_thread(_call)
             tool_calls = []
             text_parts = []
+            thought_parts = []
 
             if res.parts:
                 for part in res.parts:
-                    if isinstance(part.text, str) and not part.thought:
-                        text_parts.append(part.text)
+                    if isinstance(part.text, str):
+                        if part.thought:
+                            thought_parts.append(part.text)
+                        else:
+                            text_parts.append(part.text)
                     if part.function_call:
                         call = part.function_call
                         args_dict = dict(call.args) if call.args else {}
@@ -207,8 +215,9 @@ class GeminiLLM(BaseLLM):
                         )
 
             text_content = "".join(text_parts)
+            thought_content = "".join(thought_parts) if thought_parts else None
 
-            return LLMResponse(content=text_content, tool_calls=tool_calls)
+            return LLMResponse(content=text_content, thought=thought_content, tool_calls=tool_calls)
         except Exception as e:
             logger.error(f"GeminiLLM generation failed: {e}")
             raise
