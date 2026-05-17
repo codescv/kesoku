@@ -89,24 +89,41 @@ class SessionWorker:
         if self.task and not self.task.done():
             self.task.cancel()
 
+    async def _drain_queue_and_pivot(self, current_msg: Message) -> Message:
+        """Drain pending messages from the queue and pivot to the latest one.
+
+        Marks earlier messages in the queue as interrupted.
+
+        Args:
+            current_msg: The message currently being processed.
+
+        Returns:
+            The latest message to process.
+        """
+        if self.queue.empty():
+            return current_msg
+
+        new_msgs = []
+        while True:
+            try:
+                new_msgs.append(self.queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+
+        for m in new_msgs[:-1]:
+            await self.gateway.update_message_status(m.id, STATUS_INTERRUPTED)
+        await self.gateway.update_message_status(current_msg.id, STATUS_INTERRUPTED)
+        latest_msg = new_msgs[-1]
+        await self.gateway.update_message_status(latest_msg.id, STATUS_PROCESSING)
+        logger.info(f"Thought interruption detected in session {self.session_id}! Pivoting to {latest_msg.id}")
+        return latest_msg
+
     async def _worker_loop(self) -> None:
         while self.running:
             try:
-                # 1. Pull: Get latest user message(s) from queue
                 msg = await self.queue.get()
-                user_messages = [msg]
-                while not self.queue.empty():
-                    user_messages.append(self.queue.get_nowait())
-
-                # Update status to processing / interrupted
-                for m in user_messages[:-1]:
-                    await self.gateway.update_message_status(m.id, STATUS_INTERRUPTED)
-                current_msg = user_messages[-1]
-                await self.gateway.update_message_status(current_msg.id, STATUS_PROCESSING)
-
-                # Process turn
-                await self._process_turn(current_msg)
-
+                await self.gateway.update_message_status(msg.id, STATUS_PROCESSING)
+                await self._process_turn(msg)
             except asyncio.CancelledError:
                 self.running = False
                 break
@@ -120,18 +137,11 @@ class SessionWorker:
         original_user_msg = current_msg
 
         while self.running:
-            # 3. Check-in before atomic action (Thought Interruption)
-            if not self.queue.empty():
-                new_msgs = []
-                while not self.queue.empty():
-                    new_msgs.append(self.queue.get_nowait())
-                for m in new_msgs[:-1]:
-                    await self.gateway.update_message_status(m.id, STATUS_INTERRUPTED)
-                await self.gateway.update_message_status(original_user_msg.id, STATUS_INTERRUPTED)
-                current_msg = new_msgs[-1]
-                original_user_msg = current_msg
-                await self.gateway.update_message_status(current_msg.id, STATUS_PROCESSING)
-                logger.info(f"Thought interruption detected in session {self.session_id}! Pivoting to {current_msg.id}")
+            # Check-in before atomic action (Thought Interruption)
+            latest_msg = await self._drain_queue_and_pivot(original_user_msg)
+            if latest_msg != original_user_msg:
+                original_user_msg = latest_msg
+                current_msg = latest_msg
 
             # Retrieve recent history from DB
             history = await self.gateway.get_session_history(self.session_id, limit=20)
@@ -228,16 +238,7 @@ class SessionWorker:
 
                 # Check-in: check queue after tool execution
                 if not self.queue.empty():
-                    new_msgs = []
-                    while not self.queue.empty():
-                        new_msgs.append(self.queue.get_nowait())
-                    for m in new_msgs[:-1]:
-                        await self.gateway.update_message_status(m.id, STATUS_INTERRUPTED)
-                    await self.gateway.update_message_status(original_user_msg.id, STATUS_INTERRUPTED)
-                    current_msg = new_msgs[-1]
-                    original_user_msg = current_msg
-                    await self.gateway.update_message_status(current_msg.id, STATUS_PROCESSING)
-                    logger.info(f"Interruption after tool execution! Pivoting to new message {current_msg.id}")
+                    logger.info("Interruption after tool execution! Pivoting to new message.")
                     continue
 
                 # Formulate followup prompt for LLM to generate final response

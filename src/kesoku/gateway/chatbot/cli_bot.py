@@ -22,7 +22,7 @@ class CLIChatbot(Chatbot):
             gateway: Reference to the Kesoku Gateway.
         """
         super().__init__(chatbot_id, gateway)
-        self.response_event = asyncio.Event()
+        self.final_response_event = asyncio.Event()
         self.final_response: str | None = None
 
     async def handle_message(self, message: Message) -> None:
@@ -35,5 +35,5 @@ class CLIChatbot(Chatbot):
             # Intermediate tool calls, tool results, or thoughts can be logged or ignored for final CLI completion
             return
         self.final_response = message.content
-        self.response_event.set()
+        self.final_response_event.set()
         logger.debug(f"CLIChatbot received final response for channel {message.channel_id}")

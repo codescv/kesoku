@@ -192,7 +192,7 @@ async def run_cli_chat_async(
     # Await response with spinner
     try:
         with console.status("[bold cyan]Kesoku Agent is thinking..."):
-            await cli_bot.response_event.wait()
+            await cli_bot.final_response_event.wait()
 
         if cli_bot.final_response:
             console.print(

@@ -61,7 +61,7 @@ def test_cli_init_force_backup(tmp_path: Any) -> None:
     assert len(backups) == 1
 
 
-@patch("kesoku.agent.llm.GeminiLLM", return_value=MockLLM())
+@patch("kesoku.agent.agent.GeminiLLM", return_value=MockLLM())
 def test_cli_chat_workflow(mock_gemini: Any, tmp_path: Any) -> None:
     """Test complete chat session workflow using Typer runner with MockLLM patch."""
     config_path = tmp_path / "config.toml"
