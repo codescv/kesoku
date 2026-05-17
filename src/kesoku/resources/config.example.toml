@@ -1,0 +1,15 @@
+[workspace]
+db_path = "kesoku.db"
+skills_dir = "skills"
+
+[gemini]
+# https://ai.google.dev/gemini-api/docs/models
+model_name = "gemini-3-flash-preview"
+auth_mode = "vertex"
+project_id = "your-gcp-project"
+location = "global"
+
+[discord]
+enabled = false
+bot_token = "your-discord-bot-token"
+chatbot_id = "discord_primary"

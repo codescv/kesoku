@@ -1,0 +1,83 @@
+"""Unit tests for Kesoku Agent, LLM mocking, and Tools."""
+
+import asyncio
+from typing import Any
+
+import pytest
+
+from kesoku.agent.agent import Agent
+from kesoku.agent.llm import MockLLM
+from kesoku.agent.tools import ToolRegistry, calculator
+from kesoku.config import WorkspaceConfig
+from kesoku.db import DatabaseManager, Message
+from kesoku.gateway.gateway import Gateway
+
+
+def test_tool_registry() -> None:
+    """Test tool registration and lookup."""
+    reg = ToolRegistry()
+
+    @reg.register
+    def add_nums(x: int, y: int) -> int:
+        return x + y
+
+    assert len(reg.get_tools_list()) == 1
+    func = reg.get_tool("add_nums")
+    assert func(5, 10) == 15
+
+    with pytest.raises(KeyError):
+        reg.get_tool("non_existent")
+
+
+def test_calculator_tool() -> None:
+    """Test mathematical calculator tool."""
+    res = calculator("50 * 2 + 15")
+    assert "115.0" in res
+
+    # Test error handling on illegal expressions
+    err = calculator("import os; os.system('echo hello')")
+    assert "Error" in err
+
+
+@pytest.fixture
+def temp_db(tmp_path: Any) -> str:
+    return str(tmp_path / "test_agent.db")
+
+
+@pytest.mark.asyncio
+async def test_agent_execution_loop(temp_db: str) -> None:
+    """Test agent processing a message using MockLLM and tool calling."""
+    DatabaseManager(temp_db).init_tables()
+    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    reg = ToolRegistry()
+    reg.register(calculator)
+
+    # Ingest a math question
+    await gw.post(
+        Message(
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="ch1",
+            sender="u1",
+            role="user",
+            type="text",
+            content="Please calculate 25 + 10",
+            status="pending_agent",
+        )
+    )
+
+    llm = MockLLM()
+    agent = Agent(gw, llm, reg)
+
+    # Start agent loop in background
+    agent_task = asyncio.create_task(agent.start())
+
+    # Let it process for a moment
+    await asyncio.sleep(0.5)
+    agent.stop()
+    await asyncio.gather(agent_task, return_exceptions=True)
+
+    # Verify message status was marked as responded
+    history = await gw.get_session_history("sess1")
+    assert len(history) >= 1
+    assert history[0].status == "responded"

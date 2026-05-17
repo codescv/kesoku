@@ -1,0 +1,68 @@
+[project]
+name = "kesoku"
+version = "0.1.0"
+description = "Kesoku - A readable AI Agent implementation"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.0.0",
+    "google-genai>=0.3.0",
+    "discord-py>=2.3.0",
+    "typer>=0.12.0",
+    "tomli-w>=1.0.0",
+    "pyopenssl>=24.0.0",
+]
+
+[project.scripts]
+kesoku = "kesoku.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kesoku"]
+include = ["src/kesoku/**/*.py", "src/kesoku/**/*.toml"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.9.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "D",     # pydocstyle
+    "UP",    # pyupgrade
+    "ASYNC", # flake8-async
+]
+ignore = [
+    "D100", # Missing docstring in public module
+    "D104", # Missing docstring in public package
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D", "F841"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
