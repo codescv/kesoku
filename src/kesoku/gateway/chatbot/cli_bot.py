@@ -11,6 +11,7 @@ from kesoku.constants import (
     ROLE_TOOL,
     STATUS_COMPLETED,
     TYPE_TEXT,
+    TYPE_THOUGHT,
     TYPE_TOOL_CALL,
     TYPE_TOOL_RESULT,
 )
@@ -76,10 +77,28 @@ class CLIChatbot(Chatbot):
                 )
             return
 
-        if message.role != ROLE_ASSISTANT or message.type != TYPE_TEXT:
-            # Intermediate thoughts or other messages can be ignored for final CLI completion
-            return
-        self.final_response = message.content
-        await self.gateway.update_message_status(message.id, STATUS_COMPLETED)
-        self.final_response_event.set()
-        logger.debug(f"CLIChatbot received final response for channel {message.channel_id}")
+        if message.role == ROLE_ASSISTANT and self.console:
+            if message.type == TYPE_THOUGHT:
+                self.console.print(
+                    Panel(
+                        Markdown(message.content),
+                        title=f"[bold cyan]💭 Thought ({message.sender})[/bold cyan]",
+                        title_align="left",
+                        border_style="cyan",
+                    )
+                )
+                return
+            elif message.type == TYPE_TEXT:
+                self.final_response = message.content
+                self.console.print(
+                    Panel(
+                        Markdown(message.content),
+                        title=f"[bold blue]{message.sender}[/bold blue]",
+                        title_align="left",
+                        border_style="blue",
+                    )
+                )
+                await self.gateway.update_message_status(message.id, STATUS_COMPLETED)
+                self.final_response_event.set()
+                logger.debug(f"CLIChatbot received final response for channel {message.channel_id}")
+                return

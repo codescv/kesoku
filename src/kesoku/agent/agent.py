@@ -202,7 +202,7 @@ class SessionWorker:
                         break
 
                     logger.info(f"Executing requested tool call: '{call.name}' with args {call.arguments}")
-                    call_args_json = json.dumps(call.arguments, indent=2)
+                    call_args_json = json.dumps(call.arguments, indent=2, ensure_ascii=False)
                     tool_call_msg = Message(
                         session_id=self.session_id,
                         chatbot_id=chatbot_id,

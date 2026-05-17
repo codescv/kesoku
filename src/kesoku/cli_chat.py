@@ -16,6 +16,7 @@ from kesoku.constants import (
     ROLE_USER,
     STATUS_PENDING_AGENT,
     TYPE_TEXT,
+    TYPE_THOUGHT,
     TYPE_TOOL_CALL,
 )
 from kesoku.db import Message
@@ -57,14 +58,24 @@ def _render_message(console: Console, msg: Message) -> None:
                 )
             )
     elif msg.role == ROLE_ASSISTANT:
-        console.print(
-            Panel(
-                Markdown(msg.content),
-                title=f"[bold blue]{msg.sender}[/bold blue]",
-                title_align="left",
-                border_style="blue",
+        if msg.type == TYPE_THOUGHT:
+            console.print(
+                Panel(
+                    Markdown(msg.content),
+                    title=f"[bold cyan]💭 Thought ({msg.sender})[/bold cyan]",
+                    title_align="left",
+                    border_style="cyan",
+                )
             )
-        )
+        else:
+            console.print(
+                Panel(
+                    Markdown(msg.content),
+                    title=f"[bold blue]{msg.sender}[/bold blue]",
+                    title_align="left",
+                    border_style="blue",
+                )
+            )
     elif msg.role == ROLE_SYSTEM:
         console.print(
             Panel(
@@ -219,15 +230,6 @@ async def run_cli_chat_async(
         with console.status("[bold cyan]Kesoku Agent is thinking..."):
             await cli_bot.final_response_event.wait()
 
-        if cli_bot.final_response:
-            console.print(
-                Panel(
-                    Markdown(cli_bot.final_response),
-                    title="[bold blue]Kesoku Agent[/bold blue]",
-                    title_align="left",
-                    border_style="blue",
-                )
-            )
     finally:
         cli_bot.stop()
         agent.stop()
