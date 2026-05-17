@@ -1,6 +1,6 @@
-"""Logging configuration and ANSI colored formatting for Kesoku.
+"""Logging configuration and Rich console loggers for Kesoku.
 
-Provides standardized colored console loggers with filename and line numbers.
+Provides standardized Rich console loggers with tracebacks, timestamps, and levels.
 """
 
 import logging
@@ -9,58 +9,6 @@ from rich.logging import RichHandler
 
 # Global shared console used for both status spinners and Rich logging
 console = Console()
-
-
-class ColorFormatter(logging.Formatter):
-    """ANSI colored logging formatter displaying timestamps, process, thread, filename, line numbers, and levels."""
-
-    BOLD = "\033[1m"
-    RESET = "\033[0m"
-    CYAN = "\033[36m"
-    COLORS = {
-        logging.DEBUG: "\033[34m",  # Blue
-        logging.INFO: "\033[32m",  # Green
-        logging.WARNING: "\033[33m",  # Yellow
-        logging.ERROR: "\033[31m",  # Red
-        logging.CRITICAL: "\033[35m",  # Magenta
-    }
-
-    def __init__(self) -> None:
-        """Initialize the ColorFormatter with format string including filename and lineno."""
-        super().__init__(
-            "%(asctime)s - [PID:%(process)d|T:%(thread)d] - %(filename)s:%(lineno)d - %(levelname)s - %(message)s"
-        )
-
-    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
-        """Format timestamp with bold cyan styling.
-
-        Args:
-            record: LogRecord instance.
-            datefmt: Optional format string.
-
-        Returns:
-            Colored timestamp string.
-        """
-        time_str = super().formatTime(record, datefmt)
-        return f"{self.BOLD}{self.CYAN}{time_str}{self.RESET}"
-
-    def format(self, record: logging.LogRecord) -> str:
-        """Format log record levelname with corresponding ANSI color.
-
-        Args:
-            record: LogRecord instance.
-
-        Returns:
-            Fully formatted log string.
-        """
-        orig_levelname = record.levelname
-        level_color = self.COLORS.get(record.levelno, self.RESET)
-        record.levelname = f"{self.BOLD}{level_color}{orig_levelname}{self.RESET}"
-
-        result = super().format(record)
-
-        record.levelname = orig_levelname
-        return result
 
 
 def configure_logging(level: int = logging.INFO) -> None:
