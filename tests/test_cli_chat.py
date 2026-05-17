@@ -9,14 +9,15 @@ from kesoku.db import Session
 
 
 @pytest.mark.asyncio
-async def test_list_chat_sessions_empty() -> None:
+@patch("kesoku.cli_chat.logger.info")
+async def test_list_chat_sessions_empty(mock_info: MagicMock) -> None:
     """Test listing chat sessions when none exist."""
     gw = MagicMock()
     gw.list_sessions = AsyncMock(return_value=[])
     console = MagicMock(spec=Console)
 
     await _list_chat_sessions(gw, console)
-    console.print.assert_called_once_with("[yellow]No chat sessions found.[/yellow]")
+    mock_info.assert_called_once_with("No chat sessions found.")
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,59 @@ from kesoku.constants import (
 from kesoku.db import Message
 from kesoku.gateway.chatbot.cli_bot import CLIChatbot
 from kesoku.gateway.gateway import Gateway
+from kesoku.logger import console, setup_logger
+
+logger = setup_logger(__name__)
+
+
+def _render_message(console: Console, msg: Message) -> None:
+    """Render a single conversational message as a formatted Rich panel.
+
+    Args:
+        console: Rich console instance.
+        msg: Message instance.
+    """
+    if msg.role == ROLE_USER:
+        console.print(
+            Panel(msg.content, title=f"[bold green]{msg.sender}[/bold green]", title_align="left", border_style="green")
+        )
+    elif msg.role == ROLE_TOOL:
+        if msg.type == TYPE_TOOL_CALL:
+            console.print(
+                Panel(
+                    Markdown(msg.content),
+                    title=f"[bold yellow]🛠️ Tool Call ({msg.sender})[/bold yellow]",
+                    title_align="left",
+                    border_style="yellow",
+                )
+            )
+        else:
+            console.print(
+                Panel(
+                    Markdown(msg.content),
+                    title=f"[bold magenta]📥 Tool Output ({msg.sender})[/bold magenta]",
+                    title_align="left",
+                    border_style="magenta",
+                )
+            )
+    elif msg.role == ROLE_ASSISTANT:
+        console.print(
+            Panel(
+                Markdown(msg.content),
+                title=f"[bold blue]{msg.sender}[/bold blue]",
+                title_align="left",
+                border_style="blue",
+            )
+        )
+    elif msg.role == ROLE_SYSTEM:
+        console.print(
+            Panel(
+                Markdown(msg.content),
+                title=f"[bold dim]{msg.sender}[/bold dim]",
+                title_align="left",
+                border_style="dim",
+            )
+        )
 
 
 async def _list_chat_sessions(gateway: Gateway, console: Console) -> None:
@@ -32,7 +85,7 @@ async def _list_chat_sessions(gateway: Gateway, console: Console) -> None:
     """
     sessions = await gateway.list_sessions()
     if not sessions:
-        console.print("[yellow]No chat sessions found.[/yellow]")
+        logger.info("No chat sessions found.")
         return
     table = Table(title="Kesoku Chat Sessions", show_header=True, header_style="bold cyan")
     table.add_column("Session ID", style="bold green")
@@ -56,55 +109,15 @@ async def _show_session_history(gateway: Gateway, console: Console, session_id: 
     """
     session = await gateway.get_session(session_id)
     if not session:
-        console.print(f"[bold red]Error: Session '{session_id}' not found.[/bold red]")
+        logger.error(f"Session '{session_id}' not found.")
         sys.exit(1)
     history = await gateway.get_session_history(session_id=session_id, limit=100)
     if not history:
-        console.print(f"[yellow]Session '{session_id}' has no recorded messages.[/yellow]")
+        logger.warning(f"Session '{session_id}' has no recorded messages.")
         return
-    console.print(f"\n[bold cyan]Chat History for Session '{session_id}' ({session.title})[/bold cyan]\n")
+    logger.info(f"Chat History for Session '{session_id}' ({session.title}):")
     for msg in history:
-        if msg.role == ROLE_USER:
-            console.print(
-                Panel(msg.content, title=f"[bold green]{msg.sender}[/bold green]", title_align="left", border_style="green")
-            )
-        elif msg.role == ROLE_TOOL:
-            if msg.type == TYPE_TOOL_CALL:
-                console.print(
-                    Panel(
-                        Markdown(msg.content),
-                        title=f"[bold yellow]🛠️ Tool Call ({msg.sender})[/bold yellow]",
-                        title_align="left",
-                        border_style="yellow",
-                    )
-                )
-            else:
-                console.print(
-                    Panel(
-                        Markdown(msg.content),
-                        title=f"[bold magenta]📥 Tool Output ({msg.sender})[/bold magenta]",
-                        title_align="left",
-                        border_style="magenta",
-                    )
-                )
-        elif msg.role == ROLE_ASSISTANT:
-            console.print(
-                Panel(
-                    Markdown(msg.content),
-                    title=f"[bold blue]{msg.sender}[/bold blue]",
-                    title_align="left",
-                    border_style="blue",
-                )
-            )
-        elif msg.role == ROLE_SYSTEM:
-            console.print(
-                Panel(
-                    Markdown(msg.content),
-                    title=f"[bold dim]{msg.sender}[/bold dim]",
-                    title_align="left",
-                    border_style="dim",
-                )
-            )
+        _render_message(console, msg)
 
 
 async def run_cli_chat_async(
@@ -123,7 +136,6 @@ async def run_cli_chat_async(
         resume_latest: True if resuming latest session.
         show_history: Session ID string to view history or None.
     """
-    console = Console()
     gateway = Gateway()
 
     if list_sessions:
@@ -135,43 +147,56 @@ async def run_cli_chat_async(
         return
 
     if not message:
-        console.print(
-            "[bold red]Error: Please provide a message, or use -l to list sessions "
-            "or --show-history to view history.[/bold red]"
+        logger.error(
+            "Please provide a message, or use -l to list sessions or --show-history to view history."
         )
         sys.exit(1)
 
     # Handle session identification for sending a message
+    is_resumed = False
     if resume:
         session_id = resume
         session = await gateway.get_session(session_id)
         if not session:
-            console.print(
-                f"[bold red]Error: Session '{session_id}' not found. Use -l to list available sessions.[/bold red]"
+            logger.error(
+                f"Session '{session_id}' not found. Use -l to list available sessions."
             )
             sys.exit(1)
         await gateway.update_session_updated_at(session_id)
+        is_resumed = True
     elif resume_latest:
         latest = await gateway.get_latest_session()
         if not latest:
-            console.print("[yellow]No existing sessions found. Starting a new session.[/yellow]")
+            logger.info("No existing sessions found. Starting a new session.")
             title = message[:40] + ("..." if len(message) > 40 else "")
             sess = await gateway.create_session(title=title)
             session_id = sess.id
         else:
             session_id = latest.id
-            console.print(f"[dim]Resuming latest session: '{session_id}' ({latest.title})[/dim]")
+            logger.info(f"Resuming latest session: '{session_id}' ({latest.title})")
             await gateway.update_session_updated_at(session_id)
+            is_resumed = True
     else:
         title = message[:40] + ("..." if len(message) > 40 else "")
         sess = await gateway.create_session(title=title)
         session_id = sess.id
-        console.print(f"[dim]Started new session: '{session_id}'[/dim]")
+        logger.info(f"Started new session: '{session_id}'")
 
-    cli_bot = CLIChatbot(chatbot_id="cli", gateway=gateway)
+    cli_bot = CLIChatbot(chatbot_id="cli", gateway=gateway, session_id=session_id, console=console)
     bot_task = asyncio.create_task(cli_bot.start())
     agent = Agent(gateway=gateway)
     agent_task = asyncio.create_task(agent.start())
+
+    history = await gateway.get_session_history(session_id, limit=100)
+    if is_resumed:
+        logger.info(f"Resuming Session '{session_id}' History:")
+        for m in history:
+            _render_message(console, m)
+    else:
+        for m in history:
+            if m.role == ROLE_SYSTEM:
+                _render_message(console, m)
+                break
 
     # Ingest user message
     msg = Message(

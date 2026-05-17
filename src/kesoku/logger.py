@@ -4,6 +4,11 @@ Provides standardized colored console loggers with filename and line numbers.
 """
 
 import logging
+from rich.console import Console
+from rich.logging import RichHandler
+
+# Global shared console used for both status spinners and Rich logging
+console = Console()
 
 
 class ColorFormatter(logging.Formatter):
@@ -59,7 +64,7 @@ class ColorFormatter(logging.Formatter):
 
 
 def configure_logging(level: int = logging.INFO) -> None:
-    """Configure the root logger to apply ColorFormatter to all logging output across Kesoku.
+    """Configure the root logger to apply RichHandler to all logging output across Kesoku.
 
     Args:
         level: Logging severity level threshold.
@@ -71,13 +76,12 @@ def configure_logging(level: int = logging.INFO) -> None:
     for handler in list(root_logger.handlers):
         root_logger.removeHandler(handler)
 
-    handler = logging.StreamHandler()
-    handler.setFormatter(ColorFormatter())
+    handler = RichHandler(console=console, rich_tracebacks=True, markup=False)
     root_logger.addHandler(handler)
 
 
 def setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
-    """Set up and return an individual logger with ColorFormatter.
+    """Set up and return an individual logger with RichHandler.
 
     Args:
         name: Module logger name.
@@ -86,8 +90,7 @@ def setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     Returns:
         Configured logging.Logger instance.
     """
-    handler = logging.StreamHandler()
-    handler.setFormatter(ColorFormatter())
+    handler = RichHandler(console=console, rich_tracebacks=True, markup=False)
     logger = logging.getLogger(name)
     logger.setLevel(level)
     if not logger.handlers:
