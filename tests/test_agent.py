@@ -172,3 +172,28 @@ async def test_agent_parallel_tool_calls(temp_db: str) -> None:
     tr_indices = [history.index(m) for m in tr_msgs]
     assert max(tc_indices) < min(tr_indices)
 
+
+def test_gemini_llm_thinking_level() -> None:
+    """Test that GeminiLLM correctly configures thinking_level in GenerateContentConfig."""
+    from kesoku.config import GeminiConfig
+    from google.genai import types
+
+    cfg = GeminiConfig(thinking_level="low", auth_mode="api_key", api_key="dummy")
+    llm = GeminiLLM(config=cfg)
+
+    with patch("google.genai.Client") as mock_client_cls:
+        mock_client_inst = MagicMock()
+        mock_client_cls.return_value = mock_client_inst
+        mock_client_inst.models.generate_content.return_value = MagicMock(parts=[])
+
+        asyncio.run(llm.generate(prompt="Test"))
+
+        mock_client_inst.models.generate_content.assert_called_once()
+        _, kwargs = mock_client_inst.models.generate_content.call_args
+        assert "config" in kwargs
+        gen_cfg = kwargs["config"]
+        assert isinstance(gen_cfg, types.GenerateContentConfig)
+        assert gen_cfg.thinking_config is not None
+        assert gen_cfg.thinking_config.thinking_level == types.ThinkingLevel.LOW
+        assert gen_cfg.thinking_config.include_thoughts is True
+

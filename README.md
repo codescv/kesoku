@@ -41,6 +41,7 @@ llm = "gemini"
 model_name = "gemini-2.5-flash"
 auth_mode = "api_key" # Use "vertex" for Google Cloud Vertex AI
 api_key = "your_api_key"
+thinking_level = "high"
 
 [discord]
 enabled = false

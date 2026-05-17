@@ -175,6 +175,11 @@ class GeminiLLM(BaseLLM):
         if tools:
             config.tools = tools  # type: ignore
             config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
+        if self.config.thinking_level is not None:
+            config.thinking_config = types.ThinkingConfig(
+                thinking_level=self.config.thinking_level,
+                include_thoughts=True,
+            )
 
         def _call() -> Any:
             if self.config.auth_mode == "vertex":

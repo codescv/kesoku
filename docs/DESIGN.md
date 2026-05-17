@@ -88,6 +88,7 @@ auth_mode = "api_key" # or "vertex"
 api_key = "your-api-key" # optional if GEMINI_API_KEY env var is set
 project_id = "gcp-project-id" # for vertex mode
 location = "us-central1" # for vertex mode
+thinking_level = "high" # thinking level for reasoning ('minimal', 'low', 'medium', 'high')
 
 [discord]
 enabled = false

@@ -42,6 +42,9 @@ class GeminiConfig(BaseModel):
         default="gtech-ads-localizer-external", description="GCP Project ID (for Vertex AI mode)"
     )
     location: str | None = Field(default="global", description="GCP Region/Location (for Vertex AI mode)")
+    thinking_level: Literal["minimal", "low", "medium", "high"] | None = Field(
+        default="high", description="Thinking level allocated for reasoning ('minimal', 'low', 'medium', 'high', or None to use model default)"
+    )
 
 
 class DiscordConfig(BaseModel):
