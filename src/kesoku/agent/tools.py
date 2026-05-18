@@ -14,6 +14,7 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
+from kesoku.agent.skills import SkillManager
 from kesoku.config import get_config
 from kesoku.logger import setup_logger
 
@@ -203,13 +204,14 @@ def run_shell_command(command: str, context: ToolContext | None = None) -> str:
     """Execute a CLI shell command within a dedicated per-session staging directory.
 
     The command is executed inside an isolated staging directory specific to the current session
-    (e.g., sessions/<YYMMDD-HH-MM>_<session_id>). All temporary scripts, data files, or build artifacts
+    (e.g., sessions/<YYMMDD-HH-MM>_<session_title>_<session_id>). All temporary scripts, data files, or build artifacts
     must be created within this directory.
     If a user task requires executing commands in another location (such as the project root repository),
     you must explicitly chain a 'cd' command (e.g., 'cd /path/to/repo && git status').
 
     Args:
         command: The command string to execute (e.g., 'uv run pytest' or 'echo hello').
+        context: Optional tool execution context.
 
     Returns:
         Command execution stdout and stderr, or a file reference if output exceeds 1000 characters.
@@ -234,7 +236,10 @@ def run_shell_command(command: str, context: ToolContext | None = None) -> str:
             return "Execution denied: command does not match any permitted allowlist pattern."
 
     if not context:
-        return "Execution denied: ToolContext is missing. Shell commands must be executed within an active session context."
+        return (
+            "Execution denied: ToolContext is missing. "
+            "Shell commands must be executed within an active session context."
+        )
 
     # Resolve session staging directory
     folder_name = context.session_workspace
@@ -292,8 +297,10 @@ def run_shell_command(command: str, context: ToolContext | None = None) -> str:
                 f.write(out_str)
             preview_len = MAX_OUTPUT_LENGTH // 2
             return (
-                f"Output truncated (total length {len(out_str)} bytes). Full output saved to session workspace file: `{output_filepath}`.\n"
-                f"You can use tool `run_shell_command` (e.g., `cat {output_filename}`) on this path to examine the full output.\n\n"
+                f"Output truncated (total length {len(out_str)} bytes). "
+                f"Full output saved to session workspace file: `{output_filepath}`.\n"
+                f"You can use tool `run_shell_command` (e.g., `cat {output_filename}`) "
+                f"on this path to examine the full output.\n\n"
                 f"Preview:\n{out_str[:preview_len]}...\n{out_str[-preview_len:]}"
             )
         except Exception as ex:
@@ -301,3 +308,43 @@ def run_shell_command(command: str, context: ToolContext | None = None) -> str:
             return f"Output truncated (total length {len(out_str)} bytes). Preview:\n{out_str[:MAX_OUTPUT_LENGTH]}"
 
     return out_str
+
+
+skill_manager = SkillManager()
+
+
+@default_registry.register
+def list_skills(context: ToolContext | None = None) -> str:
+    """List all valid skills in skills_dir supported on the current host operating system.
+
+    Args:
+        context: Optional tool execution context.
+
+    Returns:
+        Formatted summary of available skills.
+    """
+    skills = skill_manager.list_skills()
+    if not skills:
+        return "No skills available or supported on this platform."
+    lines = ["=== Available Skills ==="]
+    for s in skills:
+        lines.append(f"- {s['name']} (v{s['version']}): {s['description']}")
+    return "\n".join(lines)
+
+
+@default_registry.register
+def use_skill(skill_name: str, context: ToolContext | None = None) -> str:
+    """Retrieve the complete instructions and absolute directory path for a specific skill.
+
+    Args:
+        skill_name: Name of the skill.
+        context: Optional tool execution context.
+
+    Returns:
+        Complete markdown instructions and absolute path header for the skill.
+    """
+    try:
+        _, content = skill_manager.get_skill(skill_name)
+        return content
+    except Exception as e:
+        return f"Failed to load skill '{skill_name}': {e}"

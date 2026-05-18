@@ -111,3 +111,26 @@ mode = "blocklist"
 allowlist_patterns = ["^(echo|ls|pwd|cat|git|uv|grep|find|python|sed|awk)(\\s|$)"]
 blocklist_patterns = ["(\\b|^)(rm|sudo|shutdown|reboot|mkfs|dd|chmod|chown)(\\b|\\s|$)"]
 ```
+
+## Autonomous Skill System
+Kesoku features an autonomous skill system that allows agents to dynamically discover and adopt specialized domain capabilities and prompt instructions during conversational sessions.
+
+### Skill Architecture & Self-Contained Manifests
+Skills are organized in subdirectories inside the configured `workspace.skills_dir` (default `skills/`). A skill is entirely defined by a self-contained `SKILL.md` file (or any `.md` file in the skill's root folder) containing YAML frontmatter enclosed in `---`.
+
+```yaml
+---
+name: ai-image
+description: AI image generation and editing.
+metadata:
+  tags: [aigc, gcp]
+  platforms: [linux, darwin]
+---
+```
+
+- **Platform Filtering**: If `platforms` is specified under `metadata`, `list_skills` evaluates the host OS (`platform.system().lower()`). If the current platform is not in the list, the skill is excluded. If `platforms` is omitted (`None`), the skill is treated as cross-platform and listed on all operating systems. If explicitly defined as empty (`[]`), the skill is excluded from all platforms.
+
+### Native Tool Integration & Script Robustness
+The skill manager exposes two native tools to the LLM:
+1. `list_skills()`: Scans `skills_dir`, parses YAML frontmatter, filters by OS platform, and returns a summary of available skills.
+2. `use_skill(skill_name: str)`: Returns the complete markdown instructions from the skill's `SKILL.md`. To ensure robust execution when a skill includes scripts or tools (e.g., `uv run scripts/script.py`), `use_skill` automatically prepends a prominent header with the exact absolute path to the skill directory, instructing the LLM to use absolute paths for all CLI command invocations.

@@ -14,7 +14,7 @@ from rich.console import Console
 
 from kesoku.agent.agent import Agent
 from kesoku.cli_chat import run_cli_chat_async
-from kesoku.config import get_config, init_config, load_config
+from kesoku.config import get_config, init_config, init_skills, load_config
 from kesoku.db import DatabaseManager
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import configure_logging, setup_logger
@@ -52,7 +52,7 @@ def init_cmd(
 
     cfg = load_config(target_config_path)
     DatabaseManager(cfg.workspace.db_path).init_tables()
-    os.makedirs(cfg.workspace.skills_dir, exist_ok=True)
+    init_skills(cfg.workspace.skills_dir, force=force)
     logger.info(f"Workspace initialized successfully at {workspace_path}")
 
 

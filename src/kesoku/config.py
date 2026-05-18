@@ -211,3 +211,30 @@ def init_config(config_path: str, force: bool = False) -> None:
     except Exception as e:
         logger.error(f"Failed to copy configuration template to {config_path}: {e}")
         raise
+
+
+def init_skills(skills_dir: str, force: bool = False) -> None:
+    """Copy default resource skills from kesoku.resources to workspace skills_dir when initializing.
+
+    Args:
+        skills_dir: Target path for workspace skills directory.
+        force: Whether to overwrite existing skills in target directory.
+    """
+    os.makedirs(skills_dir, exist_ok=True)
+    try:
+        ref = importlib.resources.files("kesoku.resources") / "skills"
+        with importlib.resources.as_file(ref) as source_dir:
+            if source_dir.exists() and source_dir.is_dir():
+                for item in source_dir.iterdir():
+                    if item.is_dir():
+                        dest = os.path.join(skills_dir, item.name)
+                        if os.path.exists(dest):
+                            if not force:
+                                logger.debug(f"Skill {item.name} already exists at {dest}. Skipping.")
+                                continue
+                            shutil.rmtree(dest)
+                        shutil.copytree(item, dest)
+                        logger.info(f"Copied resource skill {item.name} to {dest}")
+    except Exception as e:
+        logger.error(f"Failed to copy resource skills to {skills_dir}: {e}")
+

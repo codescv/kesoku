@@ -6,13 +6,13 @@
 # Tools
 - [x] Run shell command
 - [x] Search tool
-- [ ] Use skills
+- [x] Use skills
 
 # Sub Agent
 - [ ] Support sub agent
 
 # Discord
-- [ ] Basic Messages
+- [x] Basic Messages
 - [ ] Attachments (Outgoing)
 - [ ] Attachments (Incoming)
 - [ ] Multi choice UI
