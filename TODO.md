@@ -13,6 +13,6 @@
 
 # Discord
 - [x] Basic Messages
-- [ ] Attachments (Outgoing)
+- [x] Attachments (Outgoing)
 - [ ] Attachments (Incoming)
 - [ ] Multi choice UI
