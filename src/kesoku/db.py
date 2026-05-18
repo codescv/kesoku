@@ -399,11 +399,18 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def get_messages_by_filters(self, filters: dict[str, Any]) -> list[Message]:
-        """Retrieve messages matching specific key-value filters.
+    def get_messages_by_filters(
+        self,
+        filters: dict[str, Any],
+        exclude_statuses: list[str] | None = None,
+        exclude_roles: list[str] | None = None,
+    ) -> list[Message]:
+        """Retrieve messages matching specific key-value filters and excluding specified statuses or roles.
 
         Args:
             filters: Dictionary of column=value criteria.
+            exclude_statuses: Optional list of status strings to exclude.
+            exclude_roles: Optional list of role strings to exclude.
 
         Returns:
             List of matching Message objects.
@@ -411,12 +418,21 @@ class DatabaseManager:
         conn = self._get_connection()
         try:
             query = "SELECT * FROM messages"
-            params = []
+            params: list[Any] = []
+            clauses = []
             if filters:
-                clauses = []
                 for k, v in filters.items():
                     clauses.append(f"{k} = ?")
                     params.append(v)
+            if exclude_statuses:
+                placeholders = ", ".join("?" for _ in exclude_statuses)
+                clauses.append(f"status NOT IN ({placeholders})")
+                params.extend(exclude_statuses)
+            if exclude_roles:
+                placeholders = ", ".join("?" for _ in exclude_roles)
+                clauses.append(f"role NOT IN ({placeholders})")
+                params.extend(exclude_roles)
+            if clauses:
                 query += " WHERE " + " AND ".join(clauses)
             query += " ORDER BY timestamp ASC"
 

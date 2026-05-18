@@ -158,16 +158,27 @@ class Gateway:
 
         return message
 
-    async def listen(self, **filters: Any) -> AsyncGenerator[Message, None]:
+    async def listen(
+        self,
+        exclude_statuses: list[str] | None = None,
+        exclude_roles: list[str] | None = None,
+        **filters: Any,
+    ) -> AsyncGenerator[Message, None]:
         """Subscribe to messages matching specified filter criteria.
 
         Yields messages from storage (offline recovery / initial pending) and incoming real-time posts.
 
         Args:
+            exclude_statuses: Optional list of message lifecycle statuses to ignore.
+            exclude_roles: Optional list of message roles to ignore.
             filters: Key-value attribute matches (e.g. role='user', status='pending').
         """
 
         def filter_func(msg: Message) -> bool:
+            if exclude_statuses and msg.status in exclude_statuses:
+                return False
+            if exclude_roles and msg.role in exclude_roles:
+                return False
             for k, v in filters.items():
                 if getattr(msg, k, None) != v:
                     return False
@@ -178,7 +189,9 @@ class Gateway:
         seen_ids = set()
 
         # Offline recovery / initial pending fetch
-        pending_messages = await asyncio.to_thread(self.db.get_messages_by_filters, filters)
+        pending_messages = await asyncio.to_thread(
+            self.db.get_messages_by_filters, filters, exclude_statuses, exclude_roles
+        )
         for msg in pending_messages:
             await listener.queue.put(msg)
 

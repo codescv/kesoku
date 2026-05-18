@@ -41,9 +41,9 @@ class Chatbot(ABC):
             filters["chatbot_id"] = self.chatbot_id
 
         try:
-            async for msg in self.gateway.listen(**filters):
-                if msg.role == ROLE_USER or msg.status == STATUS_DELIVERED:
-                    continue
+            async for msg in self.gateway.listen(
+                exclude_statuses=[STATUS_DELIVERED], exclude_roles=[ROLE_USER], **filters
+            ):
                 await self.handle_message(msg)
         except asyncio.CancelledError:
             logger.debug(f"Chatbot '{self.chatbot_id}' listener cancelled.")
