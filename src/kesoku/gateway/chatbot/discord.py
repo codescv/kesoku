@@ -552,6 +552,51 @@ class DiscordChatbot(Chatbot):
         finally:
             self._typing_tasks.pop(str(channel.id), None)
 
+    async def _get_tool_arguments_suffix(self, message: Message) -> str:
+        """Format and retrieve the tool arguments suffix for Discord status display.
+
+        Args:
+            message: The tool call or tool result Message.
+
+        Returns:
+            Formatted suffix string (e.g., ': `arg_value`'), or empty string if none.
+        """
+        # Retrieve the tool arguments from metadata
+        tool_args = message.metadata.get("tool_arguments")
+        if not tool_args and message.parent_id:
+            # If it's a tool result message, fetch the parent tool call message to retrieve its arguments
+            try:
+                parent_msgs = await asyncio.to_thread(
+                    self.gateway.db.get_messages_by_filters,
+                    filters={"id": message.parent_id}
+                )
+                if parent_msgs:
+                    tool_args = parent_msgs[0].metadata.get("tool_arguments")
+            except Exception as e:
+                logger.warning(f"Failed to fetch parent message {message.parent_id} for tool arguments: {e}")
+
+        # Format tool arguments display string according to the rules
+        arg_str = ""
+        if isinstance(tool_args, dict):
+            # Exclude framework/context arguments
+            filtered_args = {k: v for k, v in tool_args.items() if k != "context"}
+            if len(filtered_args) == 1:
+                # Exactly one argument: show the argument value
+                val = next(iter(filtered_args.values()))
+                arg_str = str(val)
+            elif len(filtered_args) > 1:
+                # Multiple arguments: show comma-separated name-value pairs
+                arg_str = ", ".join(f"{k}: {v}" for k, v in filtered_args.items())
+
+        if arg_str:
+            # Keep display clean by replacing newlines with spaces
+            arg_str = arg_str.replace("\n", " ")
+            # Truncate to maximum of 80 characters
+            if len(arg_str) > 80:
+                arg_str = arg_str[:80] + "..."
+
+        return f": `{arg_str}`" if arg_str else ""
+
 
     async def on_ready(self) -> None:
         """Callback invoked when Discord bot successfully connects and logs in."""
@@ -692,19 +737,21 @@ class DiscordChatbot(Chatbot):
                 is_special_message = True
                 first_line = message.content.split("\n")[0].strip()
                 hidden_chars = len(message.content) - len(first_line)
-                output_text = f"💭 *Thought Process:* {first_line} ... *(+{hidden_chars} chars)*"
+                output_text = f"💭 {first_line} ... *(+{hidden_chars} chars)*"
             else:
                 output_text = message.content
         elif message.role == ROLE_TOOL:
             is_special_message = True
             tool_name = message.metadata.get("tool_name") or message.sender or "unknown_tool"
+            arg_suffix = await self._get_tool_arguments_suffix(message)
+
             if message.type == TYPE_TOOL_CALL:
-                output_text = f"🛠️ **{tool_name}** ⏳"
+                output_text = f"🛠️ **{tool_name}**{arg_suffix} ⏳"
             else:
                 if message.metadata.get("tool_error"):
-                    output_text = f"📥 **{tool_name}** ❌"
+                    output_text = f"📥 **{tool_name}**{arg_suffix} ❌"
                 else:
-                    output_text = f"📥 **{tool_name}** ✅"
+                    output_text = f"📥 **{tool_name}**{arg_suffix} ✅"
         elif message.role == ROLE_SYSTEM:
             is_special_message = True
             first_line = message.content.split("\n")[0].strip()

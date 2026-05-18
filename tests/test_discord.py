@@ -485,3 +485,193 @@ async def test_typing_status_cleanup_on_stop(mock_config: KesokuConfig, mock_gat
             mock_task.cancel.assert_called_once()
             assert len(bot._typing_tasks) == 0
 
+
+@pytest.mark.asyncio
+async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test refined tool display formatting with arguments in DiscordChatbot."""
+    from kesoku.constants import ROLE_TOOL, TYPE_TOOL_CALL
+
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.Thread)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+
+            # Case 1: Tool call with zero arguments
+            msg_no_args = Message(
+                id="msg1",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_TOOL,
+                type=TYPE_TOOL_CALL,
+                content="Calling tool...",
+                metadata={"tool_name": "my_tool", "tool_arguments": {}},
+            )
+            await bot.handle_message(msg_no_args)
+            mock_channel.send.assert_any_call("🛠️ **my_tool** ⏳")
+
+            # Case 2: Tool call with exactly one argument
+            msg_one_arg = Message(
+                id="msg2",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_TOOL,
+                type=TYPE_TOOL_CALL,
+                content="Calling tool...",
+                metadata={"tool_name": "my_tool", "tool_arguments": {"query": "hello world"}},
+            )
+            await bot.handle_message(msg_one_arg)
+            mock_channel.send.assert_any_call("🛠️ **my_tool**: `hello world` ⏳")
+
+            # Case 3: Tool call with exactly one argument and context
+            msg_context_arg = Message(
+                id="msg3",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_TOOL,
+                type=TYPE_TOOL_CALL,
+                content="Calling tool...",
+                metadata={"tool_name": "my_tool", "tool_arguments": {"query": "hello", "context": "ignored"}},
+            )
+            await bot.handle_message(msg_context_arg)
+            mock_channel.send.assert_any_call("🛠️ **my_tool**: `hello` ⏳")
+
+            # Case 4: Tool call with long single argument (truncation)
+            long_arg = "A" * 100
+            msg_long_arg = Message(
+                id="msg4",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_TOOL,
+                type=TYPE_TOOL_CALL,
+                content="Calling tool...",
+                metadata={"tool_name": "my_tool", "tool_arguments": {"query": long_arg}},
+            )
+            await bot.handle_message(msg_long_arg)
+            expected_long = "A" * 80 + "..."
+            mock_channel.send.assert_any_call(f"🛠️ **my_tool**: `{expected_long}` ⏳")
+
+            # Case 5: Tool call with multiple arguments
+            msg_multiple_args = Message(
+                id="msg5",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_TOOL,
+                type=TYPE_TOOL_CALL,
+                content="Calling tool...",
+                metadata={"tool_name": "my_tool", "tool_arguments": {"arg1": "val1", "arg2": "val2"}},
+            )
+            await bot.handle_message(msg_multiple_args)
+            mock_channel.send.assert_any_call("🛠️ **my_tool**: `arg1: val1, arg2: val2` ⏳")
+
+
+@pytest.mark.asyncio
+async def test_handle_message_tool_result_displays_parent_arguments(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test tool result formatting retrieves and displays parent arguments using message.parent_id."""
+    from kesoku.constants import ROLE_TOOL, TYPE_TOOL_CALL, TYPE_TOOL_RESULT
+
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.Thread)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+
+            # Mock parent message to return when get_messages_by_filters is called
+            parent_msg = Message(
+                id="parent123",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_TOOL,
+                type=TYPE_TOOL_CALL,
+                content="Calling tool...",
+                metadata={"tool_name": "my_tool", "tool_arguments": {"query": "parent_query"}},
+            )
+            mock_gateway.db = MagicMock()
+            mock_gateway.db.get_messages_by_filters = MagicMock(return_value=[parent_msg])
+
+            result_msg = Message(
+                id="result123",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="my_tool",
+                role=ROLE_TOOL,
+                type=TYPE_TOOL_RESULT,
+                content="Result...",
+                parent_id="parent123",
+            )
+
+            # Test successful tool result display formatting
+            await bot.handle_message(result_msg)
+            mock_channel.send.assert_any_call("📥 **my_tool**: `parent_query` ✅")
+
+            # Test failed tool result display formatting
+            result_msg.metadata["tool_error"] = "some_error"
+            await bot.handle_message(result_msg)
+            mock_channel.send.assert_any_call("📥 **my_tool**: `parent_query` ❌")
+
+
+@pytest.mark.asyncio
+async def test_handle_message_tool_result_in_place_edit(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test that a tool result edits the original tool call message in-place on Discord."""
+    from kesoku.constants import ROLE_TOOL, TYPE_TOOL_CALL, TYPE_TOOL_RESULT
+
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.Thread)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+
+            # Mock the sent tool call message in cache
+            mock_discord_msg = AsyncMock(spec=discord.Message)
+            bot._sent_tool_calls["parent123"] = mock_discord_msg
+
+            # Mock parent message retrieval
+            parent_msg = Message(
+                id="parent123",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_TOOL,
+                type=TYPE_TOOL_CALL,
+                content="Calling...",
+                metadata={"tool_name": "my_tool", "tool_arguments": {"query": "edit_query"}},
+            )
+            mock_gateway.db = MagicMock()
+            mock_gateway.db.get_messages_by_filters = MagicMock(return_value=[parent_msg])
+
+            result_msg = Message(
+                id="result123",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="my_tool",
+                role=ROLE_TOOL,
+                type=TYPE_TOOL_RESULT,
+                content="Result...",
+                parent_id="parent123",
+            )
+
+            await bot.handle_message(result_msg)
+
+            # Verify that edit was called with the formatted content on the discord message object
+            mock_discord_msg.edit.assert_called_once_with(content="📥 **my_tool**: `edit_query` ✅")
+            # The cache should be cleaned up
+            assert "parent123" not in bot._sent_tool_calls
+
