@@ -272,7 +272,7 @@ class SkillManager:
             f"# Skill: {manifest.name} (v{manifest.version})\n"
             f"**Skill Directory (Absolute Path)**: `{abs_dir}`\n\n"
             "> [!IMPORTANT]\n"
-            "> When executing scripts or CLI commands associated with this skill via `run_shell_command`,\n"
+            "> When executing scripts or locating files associated with this skill via `run_shell_command`,\n"
             "> always use the absolute path above.\n"
             f"> Example: `uv run {abs_dir}/scripts/script_name.py ...`\n\n"
             "---\n\n"
