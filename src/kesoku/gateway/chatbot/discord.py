@@ -516,6 +516,7 @@ class DiscordChatbot(Chatbot):
         self._subscriber_task: asyncio.Task[None] | None = None
         self._sent_tool_calls: dict[str, discord.Message] = {}
         self._turns_with_header: set[str] = set()
+        self._typing_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def start(self) -> None:
         """Start the Discord bot and Gateway listener subscriber background loop."""
@@ -528,8 +529,29 @@ class DiscordChatbot(Chatbot):
         if self._subscriber_task and not self._subscriber_task.done():
             self._subscriber_task.cancel()
         super().stop()
+        for task in self._typing_tasks.values():
+            task.cancel()
+        self._typing_tasks.clear()
         if not self.bot.is_closed():
             asyncio.create_task(self.bot.close())
+
+    async def _keep_typing(
+        self, channel: discord.Thread | discord.DMChannel | discord.GroupChannel | discord.TextChannel
+    ) -> None:
+        """Keep sending typing status to Discord channel/thread in a loop.
+
+        Automatically times out after 10 minutes to prevent infinite typing.
+        """
+        try:
+            async with channel.typing():
+                await asyncio.sleep(600)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to send typing status in channel {channel.id}: {e}")
+        finally:
+            self._typing_tasks.pop(str(channel.id), None)
+
 
     async def on_ready(self) -> None:
         """Callback invoked when Discord bot successfully connects and logs in."""
@@ -636,6 +658,11 @@ class DiscordChatbot(Chatbot):
             metadata={"discord_message_id": str(message.id), "discord_author_id": str(message.author.id)},
         )
         await self.gateway.post(msg)
+
+        # Trigger typing status for the thread/channel while agent is thinking
+        if channel_id not in self._typing_tasks:
+            self._typing_tasks[channel_id] = asyncio.create_task(self._keep_typing(thread))
+
 
     async def handle_message(self, message: Message) -> None:
         """Process outgoing message from Gateway and send to target Discord thread.
@@ -759,3 +786,10 @@ class DiscordChatbot(Chatbot):
                         await channel.send(f"⚠️ Failed to send file {file_path}: {e}")
 
         await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+
+        # Stop typing status when the final assistant response is successfully delivered
+        if message.role == ROLE_ASSISTANT and message.type == TYPE_TEXT:
+            task = self._typing_tasks.pop(message.channel_id, None)
+            if task:
+                task.cancel()
+

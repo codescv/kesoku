@@ -386,3 +386,102 @@ def test_build_discord_sys_prompt_thread_with_topic() -> None:
     assert "Response Format" in prompt
 
 
+@pytest.mark.asyncio
+async def test_typing_status_lifecycle(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test typing status is started on message receive and stopped on final response delivery."""
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+
+            # Mock channel / thread
+            mock_thread = AsyncMock(spec=discord.Thread)
+            mock_thread.id = 12345
+            mock_thread.name = "thread_name"
+            mock_thread.guild = MagicMock(spec=discord.Guild)
+            mock_thread.guild.name = "GuildName"
+            mock_thread.guild.members = []
+            mock_thread.join = AsyncMock()
+
+            # Mock typing context manager
+            mock_typing = MagicMock()
+            mock_typing.__aenter__ = AsyncMock()
+            mock_typing.__aexit__ = AsyncMock()
+            mock_thread.typing.return_value = mock_typing
+
+            bot.bot.get_channel = MagicMock(return_value=mock_thread)
+
+            # Verify initially empty
+            assert "12345" not in bot._typing_tasks
+
+            # Simulate incoming message to trigger typing task
+            msg = MagicMock(spec=discord.Message)
+            allowed_author = MagicMock(spec=discord.Member, id=222, display_name="Allowed")
+            allowed_author.name = "allowed_user"
+            msg.author = allowed_author
+            msg.mentions = []
+            msg.channel = mock_thread
+            msg.content = "Trigger typing"
+            msg.id = 888
+            msg.created_at = datetime.datetime.now(datetime.timezone.utc)
+
+            await bot.on_message(msg)
+
+            # The typing task should be created and stored
+            assert "12345" in bot._typing_tasks
+            task = bot._typing_tasks["12345"]
+            assert not task.done()
+
+            # Wait a tiny bit to let the task run and enter the typing context
+            await asyncio.sleep(0.01)
+            mock_thread.typing.assert_called_once()
+            mock_typing.__aenter__.assert_called_once()
+
+            # Simulate receiving the final assistant response to cancel typing
+            final_msg = Message(
+                id="msg123",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_ASSISTANT,
+                type=TYPE_TEXT,
+                content="Final reply",
+            )
+
+            await bot.handle_message(final_msg)
+
+            # Wait a tiny bit for task cancellation to propagate
+            await asyncio.sleep(0.01)
+
+            # The typing task should be popped and cancelled
+            assert "12345" not in bot._typing_tasks
+            assert task.cancelled() or task.done()
+
+
+            # Ensure typing context was exited
+            await asyncio.sleep(0.01)
+            mock_typing.__aexit__.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_typing_status_cleanup_on_stop(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test that all active typing tasks are cancelled when the bot is stopped."""
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+
+            # Manually inject a mock task
+            mock_task = MagicMock(spec=asyncio.Task)
+            bot._typing_tasks["555"] = mock_task
+
+            # Patch bot.close to prevent actual connection closure issues in tests
+            bot.bot.close = AsyncMock()
+            bot.bot.is_closed = MagicMock(return_value=True)
+
+            bot.stop()
+
+            mock_task.cancel.assert_called_once()
+            assert len(bot._typing_tasks) == 0
+
