@@ -1,5 +1,11 @@
 """System prompt construction and management utilities for Kesoku AI Agent."""
 
+import os
+from kesoku.config import get_config
+from kesoku.logger import setup_logger
+
+logger = setup_logger(__name__)
+
 PREAMBLE = """You are Kesoku Agent, a helpful, highly capable autonomous AI assistant."""
 
 SKILLS_INSTRUCTIONS = """
@@ -32,11 +38,39 @@ def build_sys_prompt(custom_prompt: str | None = None) -> str:
     Returns:
         A complete, modularly constructed system prompt string.
     """
+    cfg = get_config()
+    working_dir_info = f"""
+# Agent Working Directory (AWD)
+The absolute path of your agent working directory is: {cfg.agent_working_dir}.
+If you need to locate a file, search from this directory first.
+Unless the user explicitly instructs otherwise, do not refer to any file outside this directory.
+    """
+
+    user_prompts_sections = []
+    # Process and load user_prompts files
+    for p_path in cfg.agent.user_prompts:
+        resolved_path = p_path
+        if not os.path.isabs(resolved_path) and cfg.agent_working_dir:
+            resolved_path = os.path.join(cfg.agent_working_dir, resolved_path)
+        resolved_path = os.path.abspath(resolved_path)
+
+        with open(resolved_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        base_name = os.path.basename(resolved_path)
+        user_prompts_sections.append(
+            f"=== BEGIN {base_name} ===\n"
+            f"{content.strip()}\n"
+            f"=== END {base_name} ==="
+        )
+
     sections = [
         PREAMBLE.strip(),
+        working_dir_info.strip(),
         SKILLS_INSTRUCTIONS.strip(),
         FILE_SENDING_INSTRUCTIONS.strip(),
     ]
+
+    sections.extend(user_prompts_sections)
 
     if custom_prompt:
         sections.append(custom_prompt.strip())

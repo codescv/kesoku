@@ -14,6 +14,20 @@ from kesoku.cli import app
 runner = CliRunner()
 
 
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from the given text.
+
+    Args:
+        text: The input string containing potential ANSI escape sequences.
+
+    Returns:
+        The input string with all ANSI escape sequences stripped out.
+    """
+    ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+    return ansi_escape.sub("", text)
+
+
+
 def test_cli_init(tmp_path: Any) -> None:
     """Test 'kesoku init' subcommand using Typer runner."""
     config_path = tmp_path / "config.toml"
@@ -128,20 +142,22 @@ def test_cli_chat_workflow(mock_gemini: Any, tmp_path: Any) -> None:
     # 3. Start a new chat session with patched backend
     res_chat1 = runner.invoke(app, ["-c", str(config_path), "chat", "Calculate 10 + 20"])
     assert res_chat1.exit_code == 0
-    assert "Started new session" in res_chat1.stdout
-    assert "You" in res_chat1.stdout
-    assert "Kesoku Agent" in res_chat1.stdout
+    plain_chat1 = strip_ansi(res_chat1.stdout)
+    assert "Started new session" in plain_chat1
+    assert "You" in plain_chat1
+    assert "Kesoku Agent" in plain_chat1
 
     # Extract session ID from output
-    match = re.search(r"Started new session: '([a-f0-9]+)'", res_chat1.stdout)
+    match = re.search(r"Started new session: '([a-f0-9]+)'", plain_chat1)
     assert match is not None
     session_id = match.group(1)
 
     # 4. Check session list contains the new session
     res_list = runner.invoke(app, ["-c", str(config_path), "chat", "-l"])
     assert res_list.exit_code == 0
-    assert session_id in res_list.stdout
-    assert "Calculate 10 + 20" in res_list.stdout
+    plain_list = strip_ansi(res_list.stdout)
+    assert session_id in plain_list
+    assert "Calculate 10 + 20" in plain_list
 
     # 5. Resume specific session
     res_resume = runner.invoke(app, ["-c", str(config_path), "chat", "-r", session_id, "And multiply by 2"])
@@ -150,20 +166,22 @@ def test_cli_chat_workflow(mock_gemini: Any, tmp_path: Any) -> None:
     # 6. Resume latest session
     res_latest = runner.invoke(app, ["-c", str(config_path), "chat", "-z", "And add 5"])
     assert res_latest.exit_code == 0
-    assert f"Resuming latest session: '{session_id}'" in res_latest.stdout
+    assert f"Resuming latest session: '{session_id}'" in strip_ansi(res_latest.stdout)
 
     # 7. Show history (--show-history)
     res_history = runner.invoke(app, ["-c", str(config_path), "chat", "--show-history", session_id])
     assert res_history.exit_code == 0
-    assert f"Chat History for Session '{session_id}'" in res_history.stdout
-    assert "Calculate 10 + 20" in res_history.stdout
-    assert "And multiply by 2" in res_history.stdout
-    assert "And add 5" in res_history.stdout
+    plain_history = strip_ansi(res_history.stdout)
+    assert f"Chat History for Session '{session_id}'" in plain_history
+    assert "Calculate 10 + 20" in plain_history
+    assert "And multiply by 2" in plain_history
+    assert "And add 5" in plain_history
 
     # 8. Show history (-s short flag)
     res_history_short = runner.invoke(app, ["-c", str(config_path), "chat", "-s", session_id])
     assert res_history_short.exit_code == 0
-    assert f"Chat History for Session '{session_id}'" in res_history_short.stdout
+    assert f"Chat History for Session '{session_id}'" in strip_ansi(res_history_short.stdout)
+
 
 
 def test_cli_service_non_linux() -> None:

@@ -30,6 +30,10 @@ class AgentConfig(BaseModel):
     """Agent-level configuration settings."""
 
     llm: str = Field(default="gemini", description="LLM provider identifier (e.g., gemini, mock)")
+    user_prompts: list[str] = Field(
+        default_factory=list,
+        description="List of custom user prompt file paths relative to agent working directory",
+    )
 
 
 class GeminiConfig(BaseModel):
@@ -90,6 +94,9 @@ class KesokuConfig(BaseModel):
     gemini: GeminiConfig = Field(default_factory=GeminiConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
     shell: ShellConfig = Field(default_factory=ShellConfig)
+    agent_working_dir: str | None = Field(
+        default=None, exclude=True, description="Absolute path of the directory containing the config file"
+    )
 
     def resolve_paths(self, config_file_path: str) -> None:
         """Resolve workspace relative paths against the directory containing the config file.
@@ -98,6 +105,7 @@ class KesokuConfig(BaseModel):
             config_file_path: Path to the loaded or target config.toml.
         """
         base_dir = os.path.dirname(os.path.abspath(config_file_path))
+        self.agent_working_dir = base_dir
         if not os.path.isabs(self.workspace.db_path):
             self.workspace.db_path = os.path.join(base_dir, self.workspace.db_path)
         if not os.path.isabs(self.workspace.skills_dir):

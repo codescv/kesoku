@@ -36,8 +36,9 @@ async def test_list_chat_sessions_with_data() -> None:
 
 
 @pytest.mark.asyncio
+@patch("kesoku.cli_chat.Gateway")
 @patch("kesoku.cli_chat._list_chat_sessions", new_callable=AsyncMock)
-async def test_run_cli_chat_async_list(mock_list: AsyncMock) -> None:
+async def test_run_cli_chat_async_list(mock_list: AsyncMock, mock_gateway: MagicMock) -> None:
     """Test run_cli_chat_async delegates to list sessions."""
     await run_cli_chat_async(message=None, list_sessions=True, resume=None, resume_latest=False, show_history=None)
     mock_list.assert_called_once()
