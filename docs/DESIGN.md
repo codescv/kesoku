@@ -15,7 +15,7 @@ Kesoku is a lightweight, highly readable, and robust autonomous AI agent framewo
               | (`kesoku start`)                        | (`kesoku chat`)
               v                                         v
 +------------------------------------+    +------------------------------------+
-|   Daemon Service Mode (Start)      |    |    Session CLI Mode (Chat)         |
+|  Foreground Service Mode (Start)   |    |    Session CLI Mode (Chat)         |
 | - Launches all background bots     |    | - Launches local CLIChatbot        |
 |   (Discord, etc.) from config      |    | - Buffers one-shot session events  |
 +------------------------------------+    +------------------------------------+
@@ -70,6 +70,14 @@ All message ingestion and routing is unified through `Gateway.post()`. Every mes
 - **Native Function Calling, Thought Signatures & Parallel Batching**: Tool requests and execution results store structured dictionaries in message `metadata` (`{"tool_name": ..., "tool_arguments": ..., "thought_signature": ...}`). To strictly comply with the Gemini API specification for parallel function calling, all `tool_call` messages for a given model turn are batched and posted before executing the tools concurrently. Their corresponding `tool_result` messages are then posted together, guaranteeing that multiple parallel calls and responses are grouped correctly into consecutive parts without interleaving.
 
 
+## Discord Chatbot Adapter Architecture
+Kesoku includes a fully functional Discord chatbot adapter (`DiscordChatbot`) connecting external Discord servers with the internal Gateway broker:
+- **Allowlist Filtering**: Configured via `user_allowlist`. If populated, unlisted users only receive replies if explicitly mentioning the bot. Messages explicitly mentioning third parties are ignored.
+- **Thread-Based Context Separation**: To prevent multi-user context collisions, conversations are isolated inside Discord threads (where thread ID maps directly to Kesoku's internal `session_id`). If multiple bots run in the same channel, thread creation race conditions (`discord.HTTPException`) are gracefully handled by discovering and joining the thread created by peer bots.
+- **Special Context Prompts**: Server and channel metadata, along with active member lists and Discord user IDs, are dynamically injected into the session's system prompt.
+- **Newline Chunking & Full Message Display**: The bot renders all assistant responses, thoughts (`💭`), tool calls (`🛠️`), and tool results (`📥`) to Discord. Output exceeding Discord's 2000-character limit is cleanly chunked at newline boundaries.
+
+
 ## Configuration Schema (`config.toml`)
 Kesoku is centrally configured via a structured TOML file managed by Pydantic models in `src/kesoku/config.py`. Once loaded at CLI startup, the configuration acts as a global singleton accessible from any module via `get_config()`, avoiding the need to pass configuration objects across components.
 
@@ -93,7 +101,8 @@ thinking_level = "high" # thinking level for reasoning ('minimal', 'low', 'mediu
 [discord]
 enabled = false
 bot_token = "discord-bot-token"
-chatbot_id = "discord_primary"
+chatbot_id = "discord"
+user_allowlist = ["allowed_username"]
 
 [shell]
 enabled = true

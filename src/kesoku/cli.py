@@ -12,9 +12,11 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
+from kesoku.agent.agent import Agent
 from kesoku.cli_chat import run_cli_chat_async
-from kesoku.config import init_config, load_config
+from kesoku.config import get_config, init_config, load_config
 from kesoku.db import DatabaseManager
+from kesoku.gateway.gateway import Gateway
 from kesoku.logger import configure_logging, setup_logger
 
 # Setup global colored logging configuration
@@ -87,6 +89,42 @@ def chat_cmd(
         console.print(f"[bold red]Error during Kesoku chat session: {e}[/bold red]")
         logger.error(f"Error during Kesoku chat session: {e}", exc_info=True)
         sys.exit(1)
+
+
+@app.command("start")
+def start_cmd() -> None:
+    """Start Kesoku background bots and agent dispatcher in indefinite foreground service mode."""
+    cfg = get_config()
+
+    if not cfg.discord.enabled:
+        console = Console()
+        console.print("[bold red]Error: No chatbots are enabled in the configuration.[/bold red]")
+        sys.exit(1)
+
+    gateway = Gateway()
+    agent = Agent(gateway=gateway)
+    bot_tasks = []
+
+    if cfg.discord.enabled and cfg.discord.bot_token:
+        from kesoku.gateway.chatbot.discord import DiscordChatbot
+
+        discord_bot = DiscordChatbot(chatbot_id=cfg.discord.chatbot_id, gateway=gateway)
+        bot_tasks.append(discord_bot.start())
+    elif cfg.discord.enabled and not cfg.discord.bot_token:
+        console = Console()
+        console.print("[bold red]Error: Discord is enabled but bot_token is not configured.[/bold red]")
+        sys.exit(1)
+
+    async def _service_runner() -> None:
+        agent_task = asyncio.create_task(agent.start())
+        chatbot_tasks = [asyncio.create_task(bt) for bt in bot_tasks]
+        logger.info("Kesoku service started in foreground mode. Press Ctrl+C to stop.")
+        await asyncio.gather(agent_task, *chatbot_tasks)
+
+    try:
+        asyncio.run(_service_runner())
+    except KeyboardInterrupt:
+        logger.info("Kesoku service stopped by user.")
 
 
 if __name__ == "__main__":

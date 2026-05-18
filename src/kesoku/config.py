@@ -52,7 +52,10 @@ class DiscordConfig(BaseModel):
 
     enabled: bool = Field(default=False, description="Whether to launch the Discord chatbot in daemon mode")
     bot_token: str | None = Field(default=None, description="Discord bot token")
-    chatbot_id: str = Field(default="discord_primary", description="Unique chatbot identifier")
+    chatbot_id: str = Field(default="discord", description="Unique chatbot identifier")
+    user_allowlist: list[str] = Field(
+        default_factory=list, description="List of allowed Discord user IDs or usernames"
+    )
 
 
 class ShellConfig(BaseModel):
