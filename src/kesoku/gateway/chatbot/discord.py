@@ -5,8 +5,10 @@ Connects Discord channels and threads with Kesoku Gateway using Pub/Sub.
 
 import asyncio
 import datetime
-import logging
+import html
+import io
 import os
+
 import discord
 import tzlocal
 
@@ -27,7 +29,6 @@ from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot, parse_message_content
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
-
 
 logger = setup_logger(__name__)
 
@@ -102,12 +103,15 @@ The time is very important to prevent your hallucination about the world status.
 
     mention_section = ""
     if not is_dm:
-        mention_section = "\n## Mentioning Users\nWhen mentioning or referring to a user, use Discord tag syntax <@USER_ID>.\n"
+        mention_section = (
+            "\n## Mentioning Users\n"
+            "When mentioning or referring to a user, use Discord tag syntax <@USER_ID>.\n"
+        )
 
     format_section = """
 ## Response Format
 This format requirement only applies for your response in discord (not for writing files etc).
-- Discord doesn't support latex syntax for math, so use plain text or emojis when you want to 
+- Discord doesn't support latex syntax for math, so use plain text or emojis when you want to
 show math. e.g. use "exp(x)" instead of "$e^x$", use "∞" instead of "$\\inf$".
 - Discord doesn't support level 4+ headings, so use level 3 headings at most (Start with level 1 heading).
     """
@@ -122,6 +126,367 @@ show math. e.g. use "exp(x)" instead of "$e^x$", use "∞" instead of "$\\inf$".
 {format_section}
     """
     return build_sys_prompt(discord_prompt)
+
+
+class MessageHeaderView(discord.ui.View):
+    """Persistent Discord view representing the conversation header with interactive trajectory viewer."""
+
+    def __init__(self, gateway: Gateway, session_id: str) -> None:
+        """Initialize the MessageHeaderView.
+
+        Args:
+            gateway: The Kesoku Gateway instance.
+            session_id: Session ID of the conversation.
+        """
+        super().__init__(timeout=None)
+        self.gateway = gateway
+        self.session_id = session_id
+
+    @discord.ui.button(
+        label="View Trajectory",
+        style=discord.ButtonStyle.secondary,
+        emoji="📜",
+        custom_id="btn_view_trajectory",
+    )
+    async def view_trajectory(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        """Callback triggered when 'View Trajectory' button is clicked."""
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            # Fetch entire historical context up to 200 messages in grouped user-facing order
+            history = await self.gateway.get_session_history(self.session_id, limit=200, order="grouped")
+
+            # Generate beautiful HTML trajectory content
+            html_content = self._generate_html_trajectory(history)
+
+            # Stream in-memory buffer to Discord as a file attachment
+            file_data = io.BytesIO(html_content.encode("utf-8"))
+            discord_file = discord.File(fp=file_data, filename="trajectory.html")
+
+            await interaction.followup.send(
+                content="Here is the complete interactive trace of the conversation turn:",
+                file=discord_file,
+                ephemeral=True,
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate trajectory for session {self.session_id}: {e}", exc_info=True)
+            await interaction.followup.send(
+                content=f"⚠️ Failed to generate trajectory: {e}",
+                ephemeral=True,
+            )
+
+    def _generate_html_trajectory(self, history: list[Message]) -> str:
+        """Generate an interactive dark-mode HTML document visualizing the agent trajectory."""
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        timeline_items = []
+        for msg in history:
+            role_class = "system"
+            badge_class = "system"
+            emoji_icon = "⚙️"
+            label = "System"
+
+            if msg.role == ROLE_USER:
+                role_class = "user"
+                badge_class = "user"
+                emoji_icon = "👤"
+                label = "User"
+            elif msg.role == ROLE_ASSISTANT:
+                if msg.type == TYPE_THOUGHT:
+                    role_class = "thought"
+                    badge_class = "thought"
+                    emoji_icon = "💭"
+                    label = "Thought"
+                else:
+                    role_class = "assistant"
+                    badge_class = "assistant"
+                    emoji_icon = "🤖"
+                    label = "Assistant"
+            elif msg.role == ROLE_TOOL:
+                if msg.type == TYPE_TOOL_CALL:
+                    role_class = "tool-call"
+                    badge_class = "tool"
+                    emoji_icon = "🛠️"
+                    label = "Tool Call"
+                else:
+                    if msg.metadata.get("tool_error"):
+                        role_class = "tool-error"
+                        badge_class = "tool"
+                        emoji_icon = "📥"
+                        label = "Tool Error"
+                    else:
+                        role_class = "tool-success"
+                        badge_class = "tool"
+                        emoji_icon = "📥"
+                        label = "Tool Result"
+
+            msg_time = datetime.datetime.fromtimestamp(msg.timestamp).strftime("%Y-%m-%d %H:%M:%S")
+            escaped_content = html.escape(msg.content)
+
+            is_multiline = "\n" in msg.content or len(msg.content) > 80
+            if is_multiline:
+                first_line = html.escape(msg.content.splitlines()[0])
+                content_html = (
+                    f'\n                <div class="entry-summary">{first_line} ...</div>\n'
+                    f'                <button class="details-toggle" id="btn-{msg.id}" '
+                    f'onclick="toggleContent(\'{msg.id}\')">Expand details</button>\n'
+                    f'                <div class="collapsed-content" id="{msg.id}">\n'
+                    f'                    <pre><code>{escaped_content}</code></pre>\n'
+                    f'                </div>\n'
+                )
+            else:
+                content_html = f'<div class="entry-content">{escaped_content}</div>'
+
+            item_html = f"""
+            <div class="entry {role_class}">
+                <div class="entry-marker">{emoji_icon}</div>
+                <div class="entry-header">
+                    <div class="entry-title">
+                        <span class="badge {badge_class}">{label}</span>
+                        <strong>{html.escape(msg.sender)}</strong>
+                    </div>
+                    <div class="entry-time">{msg_time}</div>
+                </div>
+                {content_html}
+            </div>
+            """
+            timeline_items.append(item_html)
+
+        timeline_html = "\n".join(timeline_items)
+
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Trajectory Viewer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?\
+family=Fira+Code:wght@400;500&amp;family=Inter:wght@400;500;600;700&amp;display=swap" \
+rel="stylesheet">
+    <style>
+        :root {{
+            --bg-dark: #0f172a;
+            --bg-card: #1e293b;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --border-color: #334155;
+            --accent-thought: #a78bfa;
+            --accent-tool-call: #fbbf24;
+            --accent-tool-success: #34d399;
+            --accent-tool-error: #f87171;
+            --accent-system: #64748b;
+            --accent-user: #38bdf8;
+            --accent-assistant: #ec4899;
+        }}
+
+        body {{
+            background-color: var(--bg-dark);
+            color: var(--text-primary);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            margin: 0;
+            padding: 24px;
+            line-height: 1.5;
+        }}
+
+        .container {{
+            max-width: 900px;
+            margin: 0 auto;
+        }}
+
+        header {{
+            margin-bottom: 32px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 16px;
+        }}
+
+        h1 {{
+            font-size: 28px;
+            font-weight: 700;
+            margin: 0 0 8px 0;
+            background: linear-gradient(135deg, #38bdf8, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }}
+
+        .subtitle {{
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin: 0;
+        }}
+
+        .timeline {{
+            position: relative;
+            padding-left: 20px;
+            border-left: 2px solid var(--border-color);
+        }}
+
+        .entry {{
+            position: relative;
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }}
+
+        .entry:hover {{
+            transform: translateY(-2px);
+            border-color: #475569;
+        }}
+
+        .entry-marker {{
+            position: absolute;
+            left: -31px;
+            top: 20px;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background-color: var(--bg-dark);
+            border: 3px solid var(--accent-system);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+            font-size: 12px;
+        }}
+
+        .entry.thought {{ border-left: 4px solid var(--accent-thought); }}
+        .entry.thought .entry-marker {{ border-color: var(--accent-thought); }}
+
+        .entry.tool-call {{ border-left: 4px solid var(--accent-tool-call); }}
+        .entry.tool-call .entry-marker {{ border-color: var(--accent-tool-call); }}
+
+        .entry.tool-success {{ border-left: 4px solid var(--accent-tool-success); }}
+        .entry.tool-success .entry-marker {{ border-color: var(--accent-tool-success); }}
+
+        .entry.tool-error {{ border-left: 4px solid var(--accent-tool-error); }}
+        .entry.tool-error .entry-marker {{ border-color: var(--accent-tool-error); }}
+
+        .entry.system {{ border-left: 4px solid var(--accent-system); }}
+        .entry.system .entry-marker {{ border-color: var(--accent-system); }}
+
+        .entry.user {{ border-left: 4px solid var(--accent-user); }}
+        .entry.user .entry-marker {{ border-color: var(--accent-user); }}
+
+        .entry.assistant {{ border-left: 4px solid var(--accent-assistant); }}
+        .entry.assistant .entry-marker {{ border-color: var(--accent-assistant); }}
+
+        .entry-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }}
+
+        .entry-title {{
+            font-weight: 600;
+            font-size: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }}
+
+        .entry-time {{
+            color: var(--text-secondary);
+            font-size: 12px;
+        }}
+
+        .entry-summary {{
+            font-size: 14px;
+            color: var(--text-secondary);
+            font-style: italic;
+        }}
+
+        .entry-content {{
+            font-size: 14px;
+            color: #e2e8f0;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }}
+
+        pre {{
+            background-color: #090d16;
+            padding: 16px;
+            border-radius: 8px;
+            overflow-x: auto;
+            border: 1px solid #1e293b;
+            font-family: 'Fira Code', monospace;
+            font-size: 13px;
+            margin-top: 8px;
+            margin-bottom: 8px;
+        }}
+
+        code {{
+            font-family: 'Fira Code', monospace;
+            font-size: 13px;
+        }}
+
+        .details-toggle {{
+            cursor: pointer;
+            background: none;
+            border: none;
+            color: #38bdf8;
+            font-size: 13px;
+            font-weight: 500;
+            padding: 4px 8px;
+            border-radius: 4px;
+            transition: background-color 0.2s;
+            margin-top: 8px;
+        }}
+
+        .details-toggle:hover {{
+            background-color: rgba(56, 189, 248, 0.1);
+        }}
+
+        .collapsed-content {{
+            display: none;
+        }}
+
+        .badge {{
+            font-size: 11px;
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 4px;
+            text-transform: uppercase;
+        }}
+
+        .badge.thought {{ background-color: rgba(167, 139, 250, 0.2); color: var(--accent-thought); }}
+        .badge.tool {{ background-color: rgba(251, 191, 36, 0.2); color: var(--accent-tool-call); }}
+        .badge.system {{ background-color: rgba(100, 116, 139, 0.2); color: var(--accent-system); }}
+        .badge.user {{ background-color: rgba(56, 189, 248, 0.2); color: var(--accent-user); }}
+        .badge.assistant {{ background-color: rgba(236, 72, 153, 0.2); color: var(--accent-assistant); }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Agent Session Trajectory</h1>
+            <p class="subtitle">Session ID: {self.session_id} | Generated at {now_str}</p>
+        </header>
+
+        <div class="timeline">
+            {timeline_html}
+        </div>
+    </div>
+    <script>
+        function toggleContent(id) {{
+            const el = document.getElementById(id);
+            const btn = document.getElementById('btn-' + id);
+            if (el.style.display === 'block') {{
+                el.style.display = 'none';
+                btn.textContent = 'Expand details';
+            }} else {{
+                el.style.display = 'block';
+                btn.textContent = 'Collapse details';
+            }}
+        }}
+    </script>
+</body>
+</html>"""
 
 
 class DiscordChatbot(Chatbot):
@@ -149,6 +514,8 @@ class DiscordChatbot(Chatbot):
         self.bot.event(self.on_ready)
         self.bot.event(self.on_message)
         self._subscriber_task: asyncio.Task[None] | None = None
+        self._sent_tool_calls: dict[str, discord.Message] = {}
+        self._turns_with_header: set[str] = set()
 
     async def start(self) -> None:
         """Start the Discord bot and Gateway listener subscriber background loop."""
@@ -290,22 +657,63 @@ class DiscordChatbot(Chatbot):
                 logger.error(f"Failed to fetch Discord channel {target_id}: {fe}")
                 return
 
+        is_special_message = False
         output_text = ""
+
         if message.role == ROLE_ASSISTANT:
             if message.type == TYPE_THOUGHT:
-                output_text = f"💭 {message.content}"
+                is_special_message = True
+                first_line = message.content.split("\n")[0].strip()
+                hidden_chars = len(message.content) - len(first_line)
+                output_text = f"💭 *Thought Process:* {first_line} ... *(+{hidden_chars} chars)*"
             else:
                 output_text = message.content
         elif message.role == ROLE_TOOL:
+            is_special_message = True
+            tool_name = message.metadata.get("tool_name") or message.sender or "unknown_tool"
             if message.type == TYPE_TOOL_CALL:
-                output_text = f"🛠️ {message.content}"
+                output_text = f"🛠️ **{tool_name}** ⏳"
             else:
-                output_text = f"📥 {message.content}"
+                if message.metadata.get("tool_error"):
+                    output_text = f"📥 **{tool_name}** ❌"
+                else:
+                    output_text = f"📥 **{tool_name}** ✅"
         elif message.role == ROLE_SYSTEM:
-            output_text = f"⚙️ {message.content}"
+            is_special_message = True
+            first_line = message.content.split("\n")[0].strip()
+            hidden_chars = len(message.content) - len(first_line)
+            output_text = f"⚙️ *System Message:* {first_line} ... *(+{hidden_chars} chars)*"
+        else:
+            output_text = message.content
 
         if not output_text:
             output_text = message.content
+
+        # Try in-place editing if it is a tool result
+        if message.role == ROLE_TOOL and message.type != TYPE_TOOL_CALL:
+            tool_call_msg_id = message.parent_id
+            if tool_call_msg_id and tool_call_msg_id in self._sent_tool_calls:
+                discord_msg = self._sent_tool_calls.pop(tool_call_msg_id)
+                try:
+                    await discord_msg.edit(content=output_text)
+                    await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+                    return
+                except Exception as ee:
+                    logger.warning(
+                        f"Failed to edit tool call message in-place: {ee}. "
+                        "Falling back to sending new message."
+                    )
+
+        # Send the MessageHeaderView at the start of the turn if it's a special message
+        if is_special_message:
+            turn_id = message.parent_id or message.session_id
+            if turn_id not in self._turns_with_header:
+                try:
+                    header_view = MessageHeaderView(self.gateway, message.session_id)
+                    await channel.send(view=header_view)
+                    self._turns_with_header.add(turn_id)
+                except Exception as he:
+                    logger.warning(f"Failed to send message header: {he}")
 
         # Parse output text into segments (handling [file: <path>] blocks)
         segments = parse_message_content(output_text)
@@ -321,21 +729,25 @@ class DiscordChatbot(Chatbot):
                     for line in lines:
                         if len(line) > 2000:
                             if current_chunk:
-                                await channel.send(current_chunk)
+                                sent_msg = await channel.send(current_chunk)
                                 current_chunk = ""
                             for i in range(0, len(line), 2000):
-                                await channel.send(line[i : i + 2000])
+                                sent_msg = await channel.send(line[i : i + 2000])
                         elif len(current_chunk) + len(line) > 2000:
-                            await channel.send(current_chunk)
+                            sent_msg = await channel.send(current_chunk)
                             current_chunk = line
                         else:
                             current_chunk += line
 
                     if current_chunk and current_chunk.strip():
-                        await channel.send(current_chunk)
+                        sent_msg = await channel.send(current_chunk)
+
+                        # Cache the sent message object if it's a tool call for future editing
+                        if message.role == ROLE_TOOL and message.type == TYPE_TOOL_CALL:
+                            self._sent_tool_calls[message.id] = sent_msg
             elif segment["type"] == "file":
                 file_path = segment["path"]
-                if not os.path.exists(file_path):
+                if not os.path.exists(file_path):  # noqa: ASYNC240
                     logger.error(f"File not found: {file_path}")
                     await channel.send(f"⚠️ File not found: {file_path}")
                 else:

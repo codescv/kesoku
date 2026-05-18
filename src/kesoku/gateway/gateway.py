@@ -224,14 +224,15 @@ class Gateway:
         await asyncio.to_thread(self.db.update_message_status, message_id, status)
         logger.debug(f"Message {message_id} status updated to {status}.")
 
-    async def get_session_history(self, session_id: str, limit: int = 20) -> list[Message]:
+    async def get_session_history(self, session_id: str, limit: int = 20, order: str = "phased") -> list[Message]:
         """Retrieve historical messages for a specific internal session.
 
         Args:
             session_id: Internal session identifier.
             limit: Maximum number of recent messages to fetch.
+            order: The sorting order ("phased" or "grouped").
 
         Returns:
-            A list of Message objects ordered by timestamp.
+            A list of Message objects ordered by the sorting mechanism.
         """
-        return await asyncio.to_thread(self.db.get_session_history, session_id, limit)
+        return await asyncio.to_thread(self.db.get_session_history, session_id, limit, order)

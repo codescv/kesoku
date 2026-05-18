@@ -16,7 +16,6 @@ from kesoku.agent.llm import BaseLLM, get_llm
 from kesoku.agent.tools import ToolContext, ToolRegistry, default_registry
 from kesoku.constants import (
     ROLE_ASSISTANT,
-    ROLE_SYSTEM,
     ROLE_TOOL,
     ROLE_USER,
     STATUS_ERROR,
@@ -247,7 +246,7 @@ class SessionWorker:
                             type=TYPE_TOOL_RESULT,
                             content=f"Tool `{call.name}` returned:\n```\n{result}\n```",
                             status=STATUS_RESPONDED,
-                            parent_id=current_msg.id,
+                            parent_id=tc_msg.id,
                             metadata={"tool_name": call.name, "tool_result": str(result)},
                         )
                     except Exception as te:
@@ -261,7 +260,7 @@ class SessionWorker:
                             type=TYPE_TOOL_RESULT,
                             content=f"Tool `{call.name}` error:\n```\n{te}\n```",
                             status=STATUS_RESPONDED,
-                            parent_id=current_msg.id,
+                            parent_id=tc_msg.id,
                             metadata={"tool_name": call.name, "tool_error": str(te)},
                         )
 

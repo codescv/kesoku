@@ -12,9 +12,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from kesoku.constants import (
+    ROLE_ASSISTANT,
+    ROLE_TOOL,
     ROLE_USER,
     STATUS_PENDING,
     TYPE_TEXT,
+    TYPE_THOUGHT,
+    TYPE_TOOL_CALL,
+    TYPE_TOOL_RESULT,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,7 +33,9 @@ class Message(BaseModel):
     chatbot_id: str = Field(..., description="Unique identifier of the chatbot platform/instance (e.g., 'cli')")
     channel_id: str = Field(..., description="External platform-specific channel or room identifier")
     sender: str = Field(..., description="Sender identifier or username")
-    role: Literal["user", "assistant", "tool", "system"] = Field(default=ROLE_USER, description="Role of the message sender")
+    role: Literal["user", "assistant", "tool", "system"] = Field(
+        default=ROLE_USER, description="Role of the message sender"
+    )
     type: Literal["text", "thought", "tool_call", "tool_result"] = Field(
         default=TYPE_TEXT, description="Type of message content or action"
     )
@@ -362,15 +369,18 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def get_session_history(self, session_id: str, limit: int = 20) -> list[Message]:
+    def get_session_history(
+        self, session_id: str, limit: int = 20, order: Literal["phased", "grouped"] = "phased"
+    ) -> list[Message]:
         """Retrieve historical messages for a specific session ordered by logical conversational turn.
 
         Args:
             session_id: Session ID to query.
             limit: Max messages count.
+            order: The sorting order. "phased" (default for Gemini) or "grouped" (for human displays).
 
         Returns:
-            List of Message objects ordered by turn timestamp and individual timestamp.
+            List of Message objects ordered by the requested sorting mechanism.
         """
         conn = self._get_connection()
         try:
@@ -405,12 +415,40 @@ class DatabaseManager:
             msg_map = {m.id: m for m in all_msgs}
 
             def get_root_timestamp(m: Message) -> float:
+                curr = m
+                while curr.parent_id and curr.parent_id in msg_map:
+                    curr = msg_map[curr.parent_id]
+                return curr.timestamp
+
+            def get_sorting_phase(m: Message) -> int:
+                if m.role == ROLE_TOOL and m.type == TYPE_TOOL_CALL:
+                    return 1
+                elif m.role == ROLE_TOOL and m.type == TYPE_TOOL_RESULT:
+                    return 2
+                elif m.role == ROLE_ASSISTANT and m.type != TYPE_THOUGHT:
+                    return 3
+                return 0
+
+            def get_tool_group_timestamp(m: Message) -> float:
                 if m.parent_id and m.parent_id in msg_map:
-                    return msg_map[m.parent_id].timestamp
+                    parent_msg = msg_map[m.parent_id]
+                    if parent_msg.role == ROLE_TOOL and parent_msg.type == TYPE_TOOL_CALL:
+                        return parent_msg.timestamp
                 return m.timestamp
 
-            # Sort logically by turn root timestamp, then by message timestamp
-            all_msgs.sort(key=lambda m: (get_root_timestamp(m), m.timestamp))
+            # Sort logically by turn root timestamp, then by the requested ordering
+            if order == "phased":
+                all_msgs.sort(
+                    key=lambda m: (
+                        get_root_timestamp(m),
+                        get_sorting_phase(m),
+                        get_tool_group_timestamp(m),
+                        m.timestamp,
+                    )
+                )
+            else:
+                all_msgs.sort(key=lambda m: (get_root_timestamp(m), get_tool_group_timestamp(m), m.timestamp))
+
             return all_msgs[-limit:] if limit else all_msgs
         finally:
             conn.close()

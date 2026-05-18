@@ -3,6 +3,7 @@
 import asyncio
 import sys
 import time
+
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -122,7 +123,7 @@ async def _show_session_history(gateway: Gateway, console: Console, session_id: 
     if not session:
         logger.error(f"Session '{session_id}' not found.")
         sys.exit(1)
-    history = await gateway.get_session_history(session_id=session_id, limit=100)
+    history = await gateway.get_session_history(session_id=session_id, limit=100, order="grouped")
     if not history:
         logger.warning(f"Session '{session_id}' has no recorded messages.")
         return
@@ -198,7 +199,7 @@ async def run_cli_chat_async(
     agent = Agent(gateway=gateway)
     agent_task = asyncio.create_task(agent.start())
 
-    history = await gateway.get_session_history(session_id, limit=100)
+    history = await gateway.get_session_history(session_id, limit=100, order="grouped")
     if is_resumed:
         logger.info(f"Resuming Session '{session_id}' History:")
         for m in history:
