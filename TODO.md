@@ -16,3 +16,6 @@
 - [x] Attachments (Outgoing)
 - [ ] Attachments (Incoming)
 - [ ] Multi choice UI
+
+# Bug fix
+- [ ] cleanup the config not found defensive code.

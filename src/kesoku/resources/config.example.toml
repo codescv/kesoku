@@ -5,6 +5,9 @@ sessions_dir = "sessions"
 
 [agent]
 llm = "gemini"
+# Optional: List of custom system prompt file paths relative to agent working directory
+# user_prompts = ["memory/USER.md"]
+
 
 [gemini]
 # https://ai.google.dev/gemini-api/docs/models

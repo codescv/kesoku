@@ -5,7 +5,7 @@ metadata:
   tags: [aigc, gcp]
 ---
 
-tldr: Run `uv run scripts/generate_image.py` Image Generation.
+tldr: Run `uv run ${SKILL_DIR}/scripts/generate_image.py` Image Generation.
 
 # Maintaining Character Consistency
 When generating images for a specific persona or character:
@@ -13,7 +13,7 @@ When generating images for a specific persona or character:
 - **Prompt Strategy**: In the `--prompt`, focus on describing the *new* environment, lighting, pose, and clothing. The model will use the reference image to maintain the facial features and identity.
 
 # Examples
-Below are the most common use cases. For full parameters information, run `uv run scripts/generate_image.py --help`.
+Below are the most common use cases. For full parameters information, run `uv run ${SKILL_DIR}/scripts/generate_image.py --help`.
 
 Text-to-Image:
 `--prompt "A hyperrealistic render of a neon jellyfish floating in a cyber forest" --output "neon_jellyfish.png" --aspect-ratio "9:16"`

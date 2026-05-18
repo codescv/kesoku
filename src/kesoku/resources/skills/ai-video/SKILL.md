@@ -10,8 +10,8 @@ This skill is for video generation and editing. Every section is optional; use o
 
 # Video Generation
 
-Run `uv run scripts/generate_video.py` for Video Generation.
-For full usage, run `uv run scripts/generate_video.py --help`.
+Run `uv run ${SKILL_DIR}/scripts/generate_video.py` for Video Generation.
+For full usage, run `uv run ${SKILL_DIR}/scripts/generate_video.py --help`.
 
 ## Examples Usage
 Generate text-to-video: 

@@ -6,11 +6,11 @@ metadata:
   platforms: [linux]
 ---
 
-tldr: Use `uv run scripts/generate_voice.py` to generate speech audio with voice clone.
+tldr: Use `uv run ${SKILL_DIR}/scripts/generate_voice.py` to generate speech audio with voice clone.
 
 # Example Usage
 ```bash
-uv run scripts/generate_voice.py --text "the text you want to synthesize" --ref-audio "/abs/path/to/ref/audio.wav" --ref-text "Ref Audio Transcript" --output "output.wav"
+--text "the text you want to synthesize" --ref-audio "/abs/path/to/ref/audio.wav" --ref-text "Ref Audio Transcript" --output "output.wav"
 ```
 
 # Tips

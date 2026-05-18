@@ -267,15 +267,11 @@ class SkillManager:
         self._check_permissions(manifest)
 
         # Format absolute path header to solve script location errors
-        abs_dir = os.path.realpath(skill_dir)
-        header = (
-            f"# Skill: {manifest.name} (v{manifest.version})\n"
-            f"**Skill Directory (Absolute Path)**: `{abs_dir}`\n\n"
-            "> [!IMPORTANT]\n"
-            "> When executing scripts or locating files associated with this skill via `run_shell_command`,\n"
-            "> always use the absolute path above.\n"
-            f"> Example: `uv run {abs_dir}/scripts/script_name.py ...`\n\n"
-            "---\n\n"
-        )
+        abs_skill_dir = os.path.realpath(skill_dir)
+        header = f"""
+# Skill: {manifest.name} (v{manifest.version})
+> [!IMPORTANT]
+> SKILL_DIR='{abs_skill_dir}'
+        """
 
         return manifest, f"{header}{raw_body}"
