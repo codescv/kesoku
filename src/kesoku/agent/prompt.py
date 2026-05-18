@@ -1,10 +1,18 @@
 """System prompt construction and management utilities for Kesoku AI Agent."""
 
-DEFAULT_SYSTEM_PROMPT = """You are Kesoku Agent, a helpful, highly capable autonomous AI assistant.
-You can use available tools to calculate equations, search information, and answer user questions precisely."""
+PREAMBLE = """You are Kesoku Agent, a helpful, highly capable autonomous AI assistant."""
 
-FILE_SENDING_INSTRUCTIONS = """# Sending Files to the User
-You have the capability to send files (such as generated images, photos, audios, videos, report documents, or scripts) directly to the user's conversation thread.
+SKILLS_INSTRUCTIONS = """
+# Skills
+You have access to on demand tools (aka skills) to help with various tasks.
+- To list available skills, use the "list_skills" tool.
+- To know how to use the skill, use the "use_skill" tool.
+"""
+
+FILE_SENDING_INSTRUCTIONS = """
+# Sending Files to the User
+You have the capability to send files (such as generated images, photos, audios, videos,
+report documents, or scripts) directly to the user's conversation thread.
 To transmit a file, you MUST include the following exact syntax in your final textual response to the user:
 [file: /abs/path/to/file]
 Example: 'Here is the requested cat picture: [file: /home/user/Downloads/cat.png]'
@@ -25,7 +33,8 @@ def build_sys_prompt(custom_prompt: str | None = None) -> str:
         A complete, modularly constructed system prompt string.
     """
     sections = [
-        DEFAULT_SYSTEM_PROMPT.strip(),
+        PREAMBLE.strip(),
+        SKILLS_INSTRUCTIONS.strip(),
         FILE_SENDING_INSTRUCTIONS.strip(),
     ]
 

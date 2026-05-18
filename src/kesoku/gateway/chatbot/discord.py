@@ -4,9 +4,11 @@ Connects Discord channels and threads with Kesoku Gateway using Pub/Sub.
 """
 
 import asyncio
+import datetime
 import logging
 import os
 import discord
+import tzlocal
 
 from kesoku.agent.prompt import build_sys_prompt
 from kesoku.config import get_config
@@ -26,7 +28,100 @@ from kesoku.gateway.chatbot.base import Chatbot, parse_message_content
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 
+
 logger = setup_logger(__name__)
+
+
+def _get_local_timezone_name() -> str:
+    """Retrieve the local system timezone name (e.g., 'Asia/Shanghai')."""
+    try:
+        return tzlocal.get_localzone().key or "UTC"
+    except Exception:
+        return datetime.datetime.now().astimezone().tzname() or "UTC"
+
+
+def _build_discord_sys_prompt(
+    channel: discord.Thread | discord.DMChannel | discord.GroupChannel | discord.TextChannel,
+    author: discord.User | discord.Member,
+) -> str:
+    """Build the default system prompt for a Discord thread session.
+
+    Args:
+        channel: The Discord channel or thread instance.
+        author: The author of the initiating message.
+
+    Returns:
+        The built system prompt string.
+    """
+    is_dm = getattr(channel, "guild", None) is None
+
+    # Build user member lines (only for group chats/servers, not DMs)
+    members_section = ""
+    if not is_dm:
+        member_lines = []
+        if hasattr(channel, "guild") and channel.guild and hasattr(channel.guild, "members"):
+            for m in channel.guild.members:
+                if not m.bot:
+                    member_lines.append(f"- {m.display_name} (ID: {m.id})")
+        if not member_lines:
+            member_lines.append(f"- {author.display_name} (ID: {author.id})")
+        members_str = "\n".join(member_lines)
+        members_section = f"\n## Users on the server\n\n{members_str}\n"
+
+    time_section = """\n## Time
+The user message contains their user id and the **real** time that the message is sent.
+The time is very important to prevent your hallucination about the world status.\n"""
+
+    # Build location instruction and channel topic
+    if is_dm:
+        location_instruction = "You are talking to the user via discord."
+        topic_section = ""
+    else:
+        guild_name = channel.guild.name if channel.guild else "Unknown Server"
+        if isinstance(channel, discord.Thread):
+            thread_name = channel.name
+            thread_id = channel.id
+            parent = channel.parent
+            channel_name = parent.name if parent else "unknown-channel"
+            channel_id = parent.id if parent else "unknown"
+            topic = getattr(parent, "topic", None) or ""
+            location_instruction = (
+                f"You are currently chatting in a Discord thread named \"#{thread_name}\" (ID: {thread_id}) "
+                f"under channel \"#{channel_name}\" (ID: {channel_id}) on the server '{guild_name}'."
+            )
+        else:
+            channel_name = channel.name
+            channel_id = channel.id
+            topic = getattr(channel, "topic", None) or ""
+            location_instruction = (
+                f"You are currently chatting in a Discord channel named \"#{channel_name}\" (ID: {channel_id}) "
+                f"on the server '{guild_name}'."
+            )
+
+        topic_section = f"## Channel Topic\n{topic}" if topic else ""
+
+    mention_section = ""
+    if not is_dm:
+        mention_section = "\n## Mentioning Users\nWhen mentioning or referring to a user, use Discord tag syntax <@USER_ID>.\n"
+
+    format_section = """
+## Response Format
+This format requirement only applies for your response in discord (not for writing files etc).
+- Discord doesn't support latex syntax for math, so use plain text or emojis when you want to 
+show math. e.g. use "exp(x)" instead of "$e^x$", use "∞" instead of "$\\inf$".
+- Discord doesn't support level 4+ headings, so use level 3 headings at most (Start with level 1 heading).
+    """
+
+    discord_prompt = f"""
+# Discord Instructions
+{location_instruction}
+{members_section}
+{mention_section}
+{time_section}
+{topic_section}
+{format_section}
+    """
+    return build_sys_prompt(discord_prompt)
 
 
 class DiscordChatbot(Chatbot):
@@ -143,22 +238,7 @@ class DiscordChatbot(Chatbot):
         session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
 
         if not session:
-            guild_name = thread.guild.name if hasattr(thread, "guild") and thread.guild else "Direct"
-            member_lines = []
-            if hasattr(thread, "guild") and thread.guild and hasattr(thread.guild, "members"):
-                for m in thread.guild.members:
-                    if not m.bot:
-                        member_lines.append(f"- {m.display_name} (ID: {m.id})")
-            if not member_lines:
-                member_lines.append(f"- {message.author.display_name} (ID: {message.author.id})")
-            members_str = "\n".join(member_lines)
-
-            special_prompt = (
-                f"You are Kesoku, a helpful AI assistant interacting in Discord thread #{thread.name} on server '{guild_name}'.\n"
-                f"Users present:\n{members_str}\n"
-                "When mentioning or referring to a user, use Discord tag syntax <@USER_ID>."
-            )
-            sys_prompt = build_sys_prompt(special_prompt)
+            sys_prompt = _build_discord_sys_prompt(thread, message.author)
             session = await self.gateway.create_session(
                 title=thread.name,
                 system_prompt=sys_prompt,
@@ -170,6 +250,12 @@ class DiscordChatbot(Chatbot):
             await self.gateway.update_session_updated_at(session_id)
 
         # Ingest user message into Gateway
+        tz_name = _get_local_timezone_name()
+        discord_msg_content = (
+            f"`{message.author.display_name}` <@{message.author.id}> "
+            f"at `{message.created_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')} {tz_name}`:\n"
+            f"{message.content}"
+        )
         msg = Message(
             session_id=session_id,
             chatbot_id=self.chatbot_id,
@@ -177,7 +263,7 @@ class DiscordChatbot(Chatbot):
             sender=message.author.display_name,
             role=ROLE_USER,
             type=TYPE_TEXT,
-            content=message.content,
+            content=discord_msg_content,
             timestamp=message.created_at.timestamp(),
             status=STATUS_PENDING_AGENT,
             metadata={"discord_message_id": str(message.id), "discord_author_id": str(message.author.id)},

@@ -1,6 +1,7 @@
 """Unit tests for Kesoku Discord chatbot adapter."""
 
 import asyncio
+import datetime
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 import discord
 import pytest
@@ -294,4 +295,94 @@ async def test_handle_message_with_empty_whitespace_guards(mock_config: KesokuCo
                     # channel.send should be called exactly once (only for the file attachment)
                     assert mock_channel.send.call_count == 1
                     mock_channel.send.assert_called_once_with(file=mock_file)
+
+
+@pytest.mark.asyncio
+async def test_on_message_timestamp_formatting(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test that incoming Discord messages have timestamps formatted in readable local time."""
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+
+            mock_thread = AsyncMock(spec=discord.Thread)
+            mock_thread.id = 12345
+            mock_thread.name = "thread_name"
+            mock_thread.guild = MagicMock(spec=discord.Guild)
+            mock_thread.guild.name = "GuildName"
+            mock_thread.guild.members = []
+            mock_thread.join = AsyncMock()
+
+            msg = MagicMock(spec=discord.Message)
+            msg.author = MagicMock(spec=discord.Member, id=222, display_name="Allowed")
+            msg.author.name = "allowed_user"
+            msg.mentions = []
+            msg.channel = mock_thread
+            msg.content = "Hello test"
+            msg.id = 888
+
+            # Create a mock datetime object for created_at
+            tz_utc = datetime.timezone.utc
+            dt = datetime.datetime(2026, 5, 18, 15, 21, 48, tzinfo=tz_utc)
+            msg.created_at = dt
+
+            await bot.on_message(msg)
+
+            # Verify post was called with the formatted readable local time timestamp
+            mock_gateway.post.assert_called_once()
+            posted_msg = mock_gateway.post.call_args[0][0]
+
+            from kesoku.gateway.chatbot.discord import _get_local_timezone_name
+            tz_name = _get_local_timezone_name()
+            local_time_str = dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            expected_content = f"`Allowed` <@222> at `{local_time_str} {tz_name}`:\nHello test"
+            assert posted_msg.content == expected_content
+
+
+def test_build_discord_sys_prompt_dm() -> None:
+    """Test prompt construction for Direct Messages."""
+    from kesoku.gateway.chatbot.discord import _build_discord_sys_prompt
+
+    mock_dm = MagicMock(spec=discord.DMChannel)
+    mock_dm.guild = None
+    mock_dm.id = 98765
+
+    mock_user = MagicMock(spec=discord.User, id=12345, display_name="TestUser")
+
+    prompt = _build_discord_sys_prompt(mock_dm, mock_user)
+
+    assert "You are talking to the user via discord." in prompt
+    assert "Users" not in prompt
+    assert "TestUser" not in prompt
+    assert "Mentioning Users" not in prompt
+    assert "Channel Topic" not in prompt
+    assert "Response Format" in prompt
+
+
+def test_build_discord_sys_prompt_thread_with_topic() -> None:
+    """Test prompt construction for a thread with a parent channel topic."""
+    from kesoku.gateway.chatbot.discord import _build_discord_sys_prompt
+
+    mock_parent = MagicMock(spec=discord.TextChannel)
+    mock_parent.name = "general"
+    mock_parent.id = 444
+    mock_parent.topic = "This is the general channel topic."
+
+    mock_thread = MagicMock(spec=discord.Thread)
+    mock_thread.name = "help-thread"
+    mock_thread.id = 555
+    mock_thread.parent = mock_parent
+    mock_thread.guild = MagicMock(spec=discord.Guild)
+    mock_thread.guild.name = "AwesomeServer"
+    mock_thread.guild.members = []
+
+    mock_user = MagicMock(spec=discord.User, id=12345, display_name="TestUser")
+
+    prompt = _build_discord_sys_prompt(mock_thread, mock_user)
+
+    assert "You are currently chatting in a Discord thread named \"#help-thread\" (ID: 555)" in prompt
+    assert "under channel \"#general\" (ID: 444) on the server 'AwesomeServer'." in prompt
+    assert "## Channel Topic\nThis is the general channel topic." in prompt
+    assert "Response Format" in prompt
+
 
