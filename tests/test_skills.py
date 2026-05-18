@@ -131,6 +131,6 @@ def test_skill_tool_wrappers(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyP
 
     res_use = use_skill("demo-skill")
     assert "# Skill: demo-skill" in res_use
-    assert "**Skill Directory (Absolute Path)**" in res_use
+    assert "SKILL_DIR=" in res_use
     assert str(s1) in res_use
     assert "# Step 1\nTest CLI." in res_use

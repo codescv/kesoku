@@ -261,6 +261,13 @@ def run_shell_command(
     if config.shell.env:
         env.update(config.shell.env)
 
+    # Inject AWD and STAGING_DIR environment variables
+    env["AWD"] = os.path.realpath(config.agent_working_dir or os.getcwd())
+    if context and context.session_workspace:
+        env["STAGING_DIR"] = os.path.realpath(
+            os.path.join(config.workspace.sessions_dir, context.session_workspace)
+        )
+
     logger.info(f"Executing shell command in '{exec_dir}': {command}")
 
     try:

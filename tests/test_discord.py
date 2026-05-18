@@ -339,9 +339,9 @@ async def test_on_message_timestamp_formatting(mock_config: KesokuConfig, mock_g
             assert posted_msg.content == expected_content
 
 
-def test_build_discord_sys_prompt_dm() -> None:
+def test_build_discord_custom_prompt_dm() -> None:
     """Test prompt construction for Direct Messages."""
-    from kesoku.gateway.chatbot.discord import _build_discord_sys_prompt
+    from kesoku.gateway.chatbot.discord import _build_discord_custom_prompt
 
     mock_dm = MagicMock(spec=discord.DMChannel)
     mock_dm.guild = None
@@ -349,7 +349,7 @@ def test_build_discord_sys_prompt_dm() -> None:
 
     mock_user = MagicMock(spec=discord.User, id=12345, display_name="TestUser")
 
-    prompt = _build_discord_sys_prompt(mock_dm, mock_user)
+    prompt = _build_discord_custom_prompt(mock_dm, mock_user)
 
     assert "You are talking to the user via discord." in prompt
     assert "Users" not in prompt
@@ -359,9 +359,9 @@ def test_build_discord_sys_prompt_dm() -> None:
     assert "Response Format" in prompt
 
 
-def test_build_discord_sys_prompt_thread_with_topic() -> None:
+def test_build_discord_custom_prompt_thread_with_topic() -> None:
     """Test prompt construction for a thread with a parent channel topic."""
-    from kesoku.gateway.chatbot.discord import _build_discord_sys_prompt
+    from kesoku.gateway.chatbot.discord import _build_discord_custom_prompt
 
     mock_parent = MagicMock(spec=discord.TextChannel)
     mock_parent.name = "general"
@@ -378,7 +378,7 @@ def test_build_discord_sys_prompt_thread_with_topic() -> None:
 
     mock_user = MagicMock(spec=discord.User, id=12345, display_name="TestUser")
 
-    prompt = _build_discord_sys_prompt(mock_thread, mock_user)
+    prompt = _build_discord_custom_prompt(mock_thread, mock_user)
 
     assert "You are currently chatting in a Discord thread named \"#help-thread\" (ID: 555)" in prompt
     assert "under channel \"#general\" (ID: 444) on the server 'AwesomeServer'." in prompt

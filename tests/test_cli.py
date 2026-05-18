@@ -196,6 +196,7 @@ def test_cli_service_dry_run() -> None:
     """Verify service command dry-run generated systemd unit content."""
     with (
         patch("sys.platform", "linux"),
+        patch("kesoku.cli.load_config"),
         patch(
             "os.path.abspath",
             side_effect=lambda p: "/mock/workspace/config.toml"
@@ -247,6 +248,7 @@ def test_cli_service_install_user() -> None:
 
     with (
         patch("sys.platform", "linux"),
+        patch("kesoku.cli.load_config"),
         patch(
             "os.path.abspath",
             side_effect=lambda p: "/mock/workspace/config.toml"
@@ -283,6 +285,7 @@ def test_cli_service_permission_error() -> None:
 
     with (
         patch("sys.platform", "linux"),
+        patch("kesoku.cli.load_config"),
         patch(
             "os.path.abspath",
             side_effect=lambda p: "/mock/workspace/config.toml"
@@ -302,6 +305,7 @@ def test_cli_service_uninstall() -> None:
     """Verify successful service uninstallation."""
     with (
         patch("sys.platform", "linux"),
+        patch("kesoku.cli.load_config"),
         patch("os.path.exists", return_value=True),
         patch("os.remove") as mock_remove,
         patch("subprocess.run") as mock_run,

@@ -103,3 +103,28 @@ def test_run_shell_command_custom_cwd(tmp_path) -> None:
         assert str(another_folder) in res_abs
     finally:
         kesoku.config._global_config = original_config
+
+
+def test_run_shell_command_env_variables(tmp_path) -> None:
+    """Test that run_shell_command injects AWD and STAGING_DIR environment variables."""
+    import os
+    import kesoku.config
+    from kesoku.config import load_config
+
+    original_config = kesoku.config._global_config
+    try:
+        config_path = tmp_path / "config.toml"
+        cfg = load_config(str(config_path))
+        cfg.agent_working_dir = str(tmp_path)
+
+        ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
+
+        # Execute command to print env variables
+        res = run_shell_command("echo $AWD && echo $STAGING_DIR", context=ctx)
+
+        assert "=== STDOUT ===" in res
+        assert str(tmp_path) in res
+        expected_staging = os.path.realpath(os.path.join(cfg.workspace.sessions_dir, "test_ws"))
+        assert expected_staging in res
+    finally:
+        kesoku.config._global_config = original_config
