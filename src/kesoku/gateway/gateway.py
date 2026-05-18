@@ -55,6 +55,7 @@ class Gateway:
         session_id: str | None = None,
         title: str = "New Session",
         system_prompt: str | None = None,
+        custom_prompt: str | None = None,
         created_at: float | None = None,
     ) -> Session:
         """Create a new chat session record in SQLite and initialize system instructions.
@@ -62,7 +63,8 @@ class Gateway:
         Args:
             session_id: Optional unique identifier. If None, a random 8-char hex is generated.
             title: Summary title or first message snippet for the session.
-            system_prompt: Optional defining system prompt instructions.
+            system_prompt: Optional defining system prompt instructions (pre-built).
+            custom_prompt: Optional custom instructions to include in the built system prompt.
             created_at: Optional initial creation timestamp float.
 
         Returns:
@@ -82,7 +84,7 @@ class Gateway:
             sender="System",
             role=ROLE_SYSTEM,
             type=TYPE_TEXT,
-            content=system_prompt or build_sys_prompt(),
+            content=system_prompt or build_sys_prompt(custom_prompt=custom_prompt, session=sess),
             status=STATUS_RESPONDED,
             # Use a timestamp slightly in the past to ensure system message always comes first
             timestamp=now - 0.01,

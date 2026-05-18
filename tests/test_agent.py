@@ -7,7 +7,7 @@ import pytest
 
 from unittest.mock import MagicMock, patch
 
-from kesoku.agent.agent import Agent, _escape_session_title
+from kesoku.agent.agent import Agent
 from kesoku.agent.llm import GeminiLLM, MockLLM, ToolCallRequest, get_llm
 from kesoku.agent.tools import ToolContext, ToolRegistry, run_shell_command
 from kesoku.config import KesokuConfig, WorkspaceConfig
@@ -117,12 +117,22 @@ def test_run_shell_command(tmp_path: Any) -> None:
         assert "test_allow" in run_shell_command("echo test_allow", context=ctx)
 
 
-def test_escape_session_title() -> None:
-    """Test session title escaping and truncation."""
-    assert _escape_session_title("Math Session") == "Math_Session"
-    assert _escape_session_title("Hello/World*?!") == "Hello_World"
-    assert _escape_session_title("a" * 30) == "a" * 20
-    assert _escape_session_title("___") == "session"
+def test_workspace_name() -> None:
+    """Test Session.workspace_name escaping, truncation, and prefix."""
+    from kesoku.db import Session
+    import time
+    sess1 = Session(id="12345", title="Math Session", created_at=1779264000.0)
+    ts_str = time.strftime("%y%m%d-%H-%M", time.localtime(sess1.created_at))
+    assert sess1.workspace_name == f"{ts_str}_Math_Session_12345"
+
+    sess2 = Session(id="54321", title="Hello/World*?!", created_at=1779264000.0)
+    assert sess2.workspace_name == f"{ts_str}_Hello_World_54321"
+
+    sess3 = Session(id="67890", title="a" * 30, created_at=1779264000.0)
+    assert sess3.workspace_name == f"{ts_str}_{'a'*20}_67890"
+
+    sess4 = Session(id="99999", title="___", created_at=1779264000.0)
+    assert sess4.workspace_name == f"{ts_str}_session_99999"
 
 
 @pytest.mark.asyncio

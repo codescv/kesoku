@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import time
@@ -58,6 +59,22 @@ class Session(BaseModel):
     title: str = Field(..., description="Summary title or first message snippet")
     created_at: float = Field(default_factory=time.time, description="Creation unix timestamp")
     updated_at: float = Field(default_factory=time.time, description="Last updated unix timestamp")
+
+    @property
+    def workspace_name(self) -> str:
+        """Generate a unique, escaped folder name for the session workspace.
+
+        Returns:
+            An escaped folder name string.
+        """
+        escaped = re.sub(r"[^\w\-]", "_", self.title)
+        escaped = re.sub(r"_+", "_", escaped)
+        escaped = escaped.strip("_")
+        if not escaped:
+            escaped = "session"
+        title_escaped = escaped[:20].strip("_")
+        ts_str = time.strftime("%y%m%d-%H-%M", time.localtime(self.created_at))
+        return f"{ts_str}_{title_escaped}_{self.id}"
 
 
 class DatabaseManager:

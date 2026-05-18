@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock
 import pytest
 
-from kesoku.agent.tools import ToolContext, WebSearchTool, web_search
+from kesoku.agent.tools import ToolContext, WebSearchTool, web_search, run_shell_command
 
 
 def test_web_search_tool_success() -> None:
@@ -48,3 +48,58 @@ def test_web_search_tool_api_failure() -> None:
     result = tool.web_search("Test query", None)
 
     assert "Web search failed: API Quota Exceeded" in result
+
+
+def test_run_shell_command_default_cwd(tmp_path) -> None:
+    """Test that run_shell_command defaults to executing inside the AWD."""
+    import kesoku.config
+    from kesoku.config import load_config
+
+    original_config = kesoku.config._global_config
+    try:
+        config_path = tmp_path / "config.toml"
+        cfg = load_config(str(config_path))
+        # Set AWD
+        cfg.agent_working_dir = str(tmp_path)
+
+        ctx = ToolContext(session_id="test_sess", session_workspace="test_workspace")
+
+        # Execute pwd command
+        res = run_shell_command("pwd", context=ctx)
+
+        assert "=== STDOUT ===" in res
+        # Output of pwd should match the AWD (tmp_path)
+        assert str(tmp_path) in res
+    finally:
+        kesoku.config._global_config = original_config
+
+
+def test_run_shell_command_custom_cwd(tmp_path) -> None:
+    """Test that run_shell_command executes in custom cwd if supplied."""
+    import kesoku.config
+    from kesoku.config import load_config
+
+    original_config = kesoku.config._global_config
+    try:
+        config_path = tmp_path / "config.toml"
+        cfg = load_config(str(config_path))
+        cfg.agent_working_dir = str(tmp_path)
+
+        # Create a subfolder to run command in
+        subfolder = tmp_path / "subfolder"
+        subfolder.mkdir()
+
+        ctx = ToolContext(session_id="test_sess", session_workspace="test_workspace")
+
+        # Execute pwd command inside custom cwd (relative)
+        res = run_shell_command("pwd", cwd="subfolder", context=ctx)
+        assert "=== STDOUT ===" in res
+        assert str(subfolder) in res
+
+        # Execute pwd command inside custom cwd (absolute)
+        another_folder = tmp_path / "another"
+        another_folder.mkdir()
+        res_abs = run_shell_command("pwd", cwd=str(another_folder), context=ctx)
+        assert str(another_folder) in res_abs
+    finally:
+        kesoku.config._global_config = original_config

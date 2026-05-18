@@ -200,17 +200,20 @@ def web_search(query: str, context: ToolContext | None = None) -> str:
 
 
 @default_registry.register
-def run_shell_command(command: str, context: ToolContext | None = None) -> str:
-    """Execute a CLI shell command within a dedicated per-session staging directory.
+def run_shell_command(
+    command: str,
+    cwd: str | None = None,
+    context: ToolContext | None = None,
+) -> str:
+    """Execute a CLI shell command within a target directory, defaulting to the AWD (Agent Working Directory).
 
-    The command is executed inside an isolated staging directory specific to the current session
-    (e.g., sessions/<YYMMDD-HH-MM>_<session_title>_<session_id>). All temporary scripts, data files, or build artifacts
-    must be created within this directory.
-    If a user task requires executing commands in another location (such as the project root repository),
-    you must explicitly chain a 'cd' command (e.g., 'cd /path/to/repo && git status').
+    The command is executed within the specified `cwd` directory. If `cwd` is not provided or is empty,
+    it defaults to the Agent Working Directory (AWD). If `cwd` is a relative path, it is resolved relative to the AWD.
+    All temporary scripts, data files, or build artifacts should be created in the session staging directory (which can be found in the system prompt STAGING_DIR instructions).
 
     Args:
         command: The command string to execute (e.g., 'uv run pytest' or 'echo hello').
+        cwd: Optional target working directory for executing the command. If relative, it's relative to AWD. Defaults to AWD.
         context: Optional tool execution context.
 
     Returns:
@@ -241,24 +244,31 @@ def run_shell_command(command: str, context: ToolContext | None = None) -> str:
             "Shell commands must be executed within an active session context."
         )
 
-    # Resolve session staging directory
-    folder_name = context.session_workspace
-    session_staging_dir = os.path.realpath(os.path.join(config.workspace.sessions_dir, folder_name))
-    os.makedirs(session_staging_dir, exist_ok=True)
+    # Resolve target working directory
+    if cwd:
+        if os.path.isabs(cwd):
+            exec_dir = os.path.realpath(cwd)
+        else:
+            awd = config.agent_working_dir or os.getcwd()
+            exec_dir = os.path.realpath(os.path.join(awd, cwd))
+    else:
+        exec_dir = os.path.realpath(config.agent_working_dir or os.getcwd())
+
+    os.makedirs(exec_dir, exist_ok=True)
 
     # Prepare environment variables
     env = os.environ.copy()
     if config.shell.env:
         env.update(config.shell.env)
 
-    logger.info(f"Executing shell command in '{session_staging_dir}': {command}")
+    logger.info(f"Executing shell command in '{exec_dir}': {command}")
 
     try:
         if config.shell.use_shell:
             res = subprocess.run(
                 command,
                 shell=True,
-                cwd=session_staging_dir,
+                cwd=exec_dir,
                 env=env,
                 capture_output=True,
                 text=True,
@@ -269,7 +279,7 @@ def run_shell_command(command: str, context: ToolContext | None = None) -> str:
             res = subprocess.run(
                 tokens,
                 shell=False,
-                cwd=session_staging_dir,
+                cwd=exec_dir,
                 env=env,
                 capture_output=True,
                 text=True,
@@ -291,6 +301,9 @@ def run_shell_command(command: str, context: ToolContext | None = None) -> str:
     if len(out_str) > MAX_OUTPUT_LENGTH:
         timestamp = int(time.time())
         output_filename = f"cmd_output_{timestamp}.txt"
+        folder_name = context.session_workspace
+        session_staging_dir = os.path.realpath(os.path.join(config.workspace.sessions_dir, folder_name))
+        os.makedirs(session_staging_dir, exist_ok=True)
         output_filepath = os.path.join(session_staging_dir, output_filename)
         try:
             with open(output_filepath, "w", encoding="utf-8") as f:

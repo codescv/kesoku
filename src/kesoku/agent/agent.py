@@ -36,22 +36,7 @@ from kesoku.logger import setup_logger
 logger = setup_logger(__name__)
 
 
-def _escape_session_title(title: str, max_length: int = 20) -> str:
-    """Escape session title for use in filesystem directory name.
 
-    Args:
-        title: Raw session title string.
-        max_length: Maximum character length for escaped title.
-
-    Returns:
-        Escaped and truncated title string.
-    """
-    escaped = re.sub(r"[^\w\-]", "_", title)
-    escaped = re.sub(r"_+", "_", escaped)
-    escaped = escaped.strip("_")
-    if not escaped:
-        escaped = "session"
-    return escaped[:max_length].strip("_")
 
 
 class SessionWorker:
@@ -155,9 +140,7 @@ class SessionWorker:
             await self.gateway.update_message_status(current_msg.id, STATUS_ERROR)
             return
 
-        ts_str = time.strftime("%y%m%d-%H-%M", time.localtime(session.created_at))
-        title_escaped = _escape_session_title(session.title, max_length=20)
-        folder_name = f"{ts_str}_{title_escaped}_{self.session_id}"
+        folder_name = session.workspace_name
         tool_context = ToolContext(session_id=self.session_id, session_workspace=folder_name)
 
         while self.running:

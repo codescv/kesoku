@@ -8,11 +8,9 @@ import datetime
 import html
 import io
 import os
-
 import discord
 import tzlocal
 
-from kesoku.agent.prompt import build_sys_prompt
 from kesoku.config import get_config
 from kesoku.constants import (
     ROLE_ASSISTANT,
@@ -41,7 +39,7 @@ def _get_local_timezone_name() -> str:
         return datetime.datetime.now().astimezone().tzname() or "UTC"
 
 
-def _build_discord_sys_prompt(
+def _build_discord_custom_prompt(
     channel: discord.Thread | discord.DMChannel | discord.GroupChannel | discord.TextChannel,
     author: discord.User | discord.Member,
 ) -> str:
@@ -125,7 +123,7 @@ show math. e.g. use "exp(x)" instead of "$e^x$", use "∞" instead of "$\\inf$".
 {topic_section}
 {format_section}
     """
-    return build_sys_prompt(discord_prompt)
+    return discord_prompt
 
 
 class MessageHeaderView(discord.ui.View):
@@ -672,10 +670,10 @@ class DiscordChatbot(Chatbot):
         session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
 
         if not session:
-            sys_prompt = _build_discord_sys_prompt(thread, message.author)
+            custom_prompt = _build_discord_custom_prompt(thread, message.author)
             session = await self.gateway.create_session(
                 title=thread.name,
-                system_prompt=sys_prompt,
+                custom_prompt=custom_prompt,
                 created_at=message.created_at.timestamp(),
             )
             session_id = session.id

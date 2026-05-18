@@ -30,17 +30,17 @@ def test_build_sys_prompt_with_working_directory() -> None:
     """Verify build_sys_prompt includes agent working directory when config is loaded."""
     import kesoku.config
     from kesoku.config import load_config
-    
+
     original_config = kesoku.config._global_config
     try:
         # Load a dummy configuration path
         cfg = load_config("test_workspace/config.toml")
-        
+
         prompt = build_sys_prompt()
-        
+
         # Check that Agent Working Directory header and path are included
-        assert "# Agent Working Directory (AWD)" in prompt
-        assert "The absolute path of your agent working directory is:" in prompt
+        assert "# Agent Working Directory" in prompt
+        assert "AWD=" in prompt
         assert cfg.agent_working_dir in prompt
     finally:
         kesoku.config._global_config = original_config
@@ -78,5 +78,26 @@ def test_build_sys_prompt_with_user_prompts(tmp_path) -> None:
         assert "=== BEGIN prompt_b.md ===" in prompt
         assert "Instruction B from markdown." in prompt
         assert "=== END prompt_b.md ===" in prompt
+    finally:
+        kesoku.config._global_config = original_config
+
+
+def test_build_sys_prompt_with_session() -> None:
+    """Verify build_sys_prompt includes session staging directory when session is provided."""
+    import kesoku.config
+    from kesoku.config import load_config
+    from kesoku.db import Session
+
+    original_config = kesoku.config._global_config
+    try:
+        cfg = load_config("test_workspace/config.toml")
+        sess = Session(id="sessionid", title="title", created_at=1779264000.0)
+
+        prompt = build_sys_prompt(session=sess)
+
+        # Check that Session Staging Directory instruction is included
+        assert "# Session Staging Directory" in prompt
+        assert "STAGING_DIR=" in prompt
+        assert sess.workspace_name in prompt
     finally:
         kesoku.config._global_config = original_config
