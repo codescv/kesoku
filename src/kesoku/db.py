@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import shutil
 import sqlite3
 import time
 import uuid
@@ -111,8 +112,23 @@ class DatabaseManager:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def init_tables(self) -> None:
-        """Initialize SQLite database tables and indices."""
+    def init_tables(self, overwrite: bool = False) -> None:
+        """Initialize SQLite database tables and indices.
+
+        Args:
+            overwrite: Whether to overwrite the existing database file (creates backup).
+        """
+        if overwrite and os.path.exists(self.db_path):
+            backup_path = f"{self.db_path}.bak.{int(time.time())}"
+            try:
+                shutil.copy(self.db_path, backup_path)
+                logger.info(f"Created backup of existing database at {backup_path}")
+                os.remove(self.db_path)
+                logger.info(f"Removed existing database file {self.db_path}")
+            except Exception as e:
+                logger.error(f"Failed to backup/overwrite existing database {self.db_path}: {e}")
+                raise
+
         conn = self._get_connection()
         try:
             with conn:

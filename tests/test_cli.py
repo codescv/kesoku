@@ -2,6 +2,7 @@
 
 import os
 import re
+import sqlite3
 from typing import Any
 from unittest.mock import patch
 
@@ -40,25 +41,72 @@ def test_cli_chat_before_init(tmp_path: Any) -> None:
     assert "Please run 'kesoku init' first" in result.output
 
 
-def test_cli_init_force_backup(tmp_path: Any) -> None:
-    """Verify init --force creates backup of existing config."""
+def test_cli_init_overwrite_options(tmp_path: Any) -> None:
+    """Verify init overwrite options work as expected."""
     config_path = tmp_path / "config.toml"
+    db_path = tmp_path / "kesoku.db"
+    skills_dir = tmp_path / "skills"
+
     runner.invoke(app, ["init", "-w", str(tmp_path)])
     assert os.path.exists(config_path)
+    assert os.path.exists(db_path)
+    assert os.path.exists(skills_dir)
 
-    # Write custom content
+    # 1. Test config overwrite
     with open(config_path, "w") as f:
         f.write("# custom config")
 
-    # Init without force should skip
+    # Init without overwrite-config should preserve custom config
     runner.invoke(app, ["init", "-w", str(tmp_path)])
     with open(config_path) as f:
         assert "# custom config" in f.read()
 
-    # Init with --force should backup and overwrite
-    runner.invoke(app, ["init", "-w", str(tmp_path), "--force"])
-    backups = [f for f in os.listdir(tmp_path) if "config.toml.bak" in f]
-    assert len(backups) == 1
+    # Init with --overwrite-config should backup and overwrite
+    runner.invoke(app, ["init", "-w", str(tmp_path), "--overwrite-config"])
+    with open(config_path) as f:
+        assert "# custom config" not in f.read()
+    config_backups = [f for f in os.listdir(tmp_path) if "config.toml.bak" in f]
+    assert len(config_backups) == 1
+
+    # 2. Test db overwrite
+    # Create dummy data in a table to verify DB overwrite
+    conn = sqlite3.connect(db_path)
+    conn.execute("INSERT INTO sessions (id, title, created_at, updated_at) VALUES ('t1', 'title', 1.0, 1.0)")
+    conn.commit()
+    conn.close()
+
+    # Re-init without --overwrite-db should preserve DB data
+    runner.invoke(app, ["init", "-w", str(tmp_path)])
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM sessions")
+    assert cursor.fetchone()[0] == 1
+    conn.close()
+
+    # Re-init with --overwrite-db should backup and clear/re-init DB
+    runner.invoke(app, ["init", "-w", str(tmp_path), "--overwrite-db"])
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM sessions")
+    assert cursor.fetchone()[0] == 0
+    conn.close()
+    db_backups = [f for f in os.listdir(tmp_path) if "kesoku.db.bak" in f]
+    assert len(db_backups) == 1
+
+    # 3. Test skills overwrite
+    # Add a dummy skill file in a custom skill folder
+    custom_skill_file = skills_dir / "ai-image" / "custom.py"
+    os.makedirs(os.path.dirname(custom_skill_file), exist_ok=True)
+    with open(custom_skill_file, "w") as f:
+        f.write("# custom skill modification")
+
+    # Init without --overwrite-skills should preserve custom skill file
+    runner.invoke(app, ["init", "-w", str(tmp_path)])
+    assert os.path.exists(custom_skill_file)
+
+    # Init with --overwrite-skills should clean and overwrite
+    runner.invoke(app, ["init", "-w", str(tmp_path), "--overwrite-skills"])
+    assert not os.path.exists(custom_skill_file)
 
 
 @patch("kesoku.agent.agent.get_llm", return_value=MockLLM())

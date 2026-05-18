@@ -180,18 +180,18 @@ def save_config(cfg: KesokuConfig, config_path: str) -> None:
         raise
 
 
-def init_config(config_path: str, force: bool = False) -> None:
+def init_config(config_path: str, overwrite: bool = False) -> None:
     """Copy config.example.toml template to config_path when initializing workspace.
 
     Args:
         config_path: Target path for config.toml.
-        force: Whether to overwrite existing config (creating a backup).
+        overwrite: Whether to overwrite existing config (creating a backup).
     """
     if os.path.exists(config_path):
-        if not force:
+        if not overwrite:
             logger.info(
                 f"Configuration file already exists at {config_path}. "
-                "Skipping default config creation. Use --force to overwrite."
+                "Skipping default config creation. Use --overwrite-config to overwrite."
             )
             return
         backup_path = f"{config_path}.bak.{int(time.time())}"
@@ -213,12 +213,12 @@ def init_config(config_path: str, force: bool = False) -> None:
         raise
 
 
-def init_skills(skills_dir: str, force: bool = False) -> None:
+def init_skills(skills_dir: str, overwrite: bool = False) -> None:
     """Copy default resource skills from kesoku.resources to workspace skills_dir when initializing.
 
     Args:
         skills_dir: Target path for workspace skills directory.
-        force: Whether to overwrite existing skills in target directory.
+        overwrite: Whether to overwrite existing skills in target directory.
     """
     os.makedirs(skills_dir, exist_ok=True)
     try:
@@ -229,7 +229,7 @@ def init_skills(skills_dir: str, force: bool = False) -> None:
                     if item.is_dir():
                         dest = os.path.join(skills_dir, item.name)
                         if os.path.exists(dest):
-                            if not force:
+                            if not overwrite:
                                 logger.debug(f"Skill {item.name} already exists at {dest}. Skipping.")
                                 continue
                             shutil.rmtree(dest)
@@ -237,4 +237,5 @@ def init_skills(skills_dir: str, force: bool = False) -> None:
                         logger.info(f"Copied resource skill {item.name} to {dest}")
     except Exception as e:
         logger.error(f"Failed to copy resource skills to {skills_dir}: {e}")
+
 

@@ -39,20 +39,35 @@ def init_cmd(
     workspace_path: Annotated[
         str | None, typer.Option("-w", "--workspace-path", help="Workspace directory to initialize")
     ] = None,
-    force: Annotated[bool, typer.Option("--force", help="Overwrite existing config file (creates backup)")] = False,
+    overwrite_config: Annotated[
+        bool, typer.Option("--overwrite-config", help="Overwrite existing config file (creates backup)")
+    ] = False,
+    overwrite_skills: Annotated[
+        bool, typer.Option("--overwrite-skills", help="Overwrite existing resource skills")
+    ] = False,
+    overwrite_db: Annotated[
+        bool, typer.Option("--overwrite-db", help="Overwrite existing database file (creates backup)")
+    ] = False,
 ) -> None:
-    """Initialize Kesoku workspace and generate config.toml from template."""
+    """Initialize Kesoku workspace and generate config.toml from template.
+
+    Args:
+        workspace_path: Path to workspace directory to initialize.
+        overwrite_config: Whether to overwrite existing config.toml.
+        overwrite_skills: Whether to overwrite existing skills in skills dir.
+        overwrite_db: Whether to overwrite existing SQLite database file.
+    """
     if workspace_path is None:
         workspace_path = "."
     workspace_path = os.path.abspath(workspace_path)
     target_config_path = os.path.join(workspace_path, "config.toml")
 
     logger.info(f"Initializing Kesoku workspace at {workspace_path} (config: {target_config_path})...")
-    init_config(target_config_path, force=force)
+    init_config(target_config_path, overwrite=overwrite_config)
 
     cfg = load_config(target_config_path)
-    DatabaseManager(cfg.workspace.db_path).init_tables()
-    init_skills(cfg.workspace.skills_dir, force=force)
+    DatabaseManager(cfg.workspace.db_path).init_tables(overwrite=overwrite_db)
+    init_skills(cfg.workspace.skills_dir, overwrite=overwrite_skills)
     logger.info(f"Workspace initialized successfully at {workspace_path}")
 
 
