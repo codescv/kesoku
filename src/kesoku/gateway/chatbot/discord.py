@@ -14,7 +14,7 @@ from kesoku.constants import (
     ROLE_SYSTEM,
     ROLE_TOOL,
     ROLE_USER,
-    STATUS_COMPLETED,
+    STATUS_DELIVERED,
     STATUS_PENDING_AGENT,
     TYPE_TEXT,
     TYPE_THOUGHT,
@@ -239,4 +239,4 @@ class DiscordChatbot(Chatbot):
         if current_chunk:
             await channel.send(current_chunk)
 
-        await self.gateway.update_message_status(message.id, STATUS_COMPLETED)
+        await self.gateway.update_message_status(message.id, STATUS_DELIVERED)

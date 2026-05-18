@@ -11,6 +11,7 @@ from kesoku.constants import (
     ROLE_ASSISTANT,
     ROLE_SYSTEM,
     ROLE_USER,
+    STATUS_DELIVERED,
     STATUS_PENDING,
     STATUS_RESPONDED,
     TYPE_TEXT,
@@ -29,7 +30,7 @@ class DummyChatbot(Chatbot):
 
     async def handle_message(self, message: Message) -> None:
         self.sent_messages.append((message.channel_id, message.content))
-        await self.gateway.update_message_status(message.id, STATUS_COMPLETED)
+        await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
 
 
 @pytest.fixture
@@ -224,3 +225,34 @@ async def test_gateway_create_session_created_at(temp_db: str) -> None:
     assert history[0].role == ROLE_SYSTEM
     assert history[1].role == ROLE_USER
     assert history[0].timestamp < history[1].timestamp
+
+
+@pytest.mark.asyncio
+async def test_chatbot_ignore_completed_messages(temp_db: str) -> None:
+    """Test that Chatbot.start() ignores messages already marked as STATUS_DELIVERED."""
+    DatabaseManager(temp_db).init_tables()
+    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+
+    # Post a message that is already completed
+    await gw.post(
+        Message(
+            session_id="sess_1",
+            chatbot_id="dummy_bot",
+            channel_id="chan_1",
+            sender="Kesoku",
+            role=ROLE_ASSISTANT,
+            type=TYPE_TEXT,
+            content="Completed message",
+            status=STATUS_DELIVERED,
+        )
+    )
+
+    bot = DummyChatbot("dummy_bot", gw)
+    bot_task = asyncio.create_task(bot.start())
+    await asyncio.sleep(0.05)
+    bot_task.cancel()
+    await asyncio.gather(bot_task, return_exceptions=True)
+
+    # The bot should NOT have handled the completed message
+    assert len(bot.sent_messages) == 0
+

@@ -3,7 +3,7 @@
 import asyncio
 from abc import ABC, abstractmethod
 
-from kesoku.constants import ROLE_USER
+from kesoku.constants import ROLE_USER, STATUS_DELIVERED
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
@@ -42,7 +42,7 @@ class Chatbot(ABC):
 
         try:
             async for msg in self.gateway.listen(**filters):
-                if msg.role == ROLE_USER:
+                if msg.role == ROLE_USER or msg.status == STATUS_DELIVERED:
                     continue
                 await self.handle_message(msg)
         except asyncio.CancelledError:

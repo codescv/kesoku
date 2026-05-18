@@ -6,7 +6,7 @@ import discord
 import pytest
 
 from kesoku.config import DiscordConfig, KesokuConfig
-from kesoku.constants import ROLE_ASSISTANT, STATUS_COMPLETED, STATUS_PENDING_AGENT, TYPE_TEXT, TYPE_THOUGHT
+from kesoku.constants import ROLE_ASSISTANT, STATUS_DELIVERED, STATUS_PENDING_AGENT, TYPE_TEXT, TYPE_THOUGHT
 from kesoku.db import Message, Session
 from kesoku.gateway.chatbot.discord import DiscordChatbot
 from kesoku.gateway.gateway import Gateway
@@ -186,4 +186,4 @@ async def test_handle_message_chunking(mock_config: KesokuConfig, mock_gateway: 
             await bot.handle_message(msg)
             # Chunk 1 should contain line1 + line2 (1802 chars). Chunk 2 should contain line3 (901 chars).
             assert mock_channel.send.call_count == 2
-            mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_COMPLETED)
+            mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)

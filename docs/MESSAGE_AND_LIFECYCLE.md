@@ -27,7 +27,7 @@ Tracks the operational state of the message within the asynchronous processing p
 - `pending_agent`: Newly ingested user message queued in SQLite awaiting pickup by a session worker.
 - `processing`: Actively being evaluated by an agent session worker or mid-execution within a tool call.
 - `pending`: An outgoing assistant text response that has been generated but is awaiting final transmission by a chatbot adapter.
-- `completed`: Successfully delivered final response on the external chat platform.
+- `delivered`: Successfully delivered final response on the external chat platform.
 - `responded`: Successfully processed intermediate message (such as tool calls, tool outputs, thoughts, or system followups) that does not require further action.
 - `interrupted`: Message processing halted or pivoted because the user submitted a newer prompt mid-turn.
 
@@ -53,7 +53,7 @@ Tracks the operational state of the message within the asynchronous processing p
 [Tool Executes -> Output]                        [Chatbot Adapter Broadcasts]
 (status: responded)                                        │
            │                                               ▼
-           └────────► (Loops back to LLM generation)    (status: completed)
+           └────────► (Loops back to LLM generation)    (status: delivered)
 ```
 
 ---
@@ -151,4 +151,4 @@ The worker invokes the LLM once more, providing the native tool execution histor
 - **Update**: Original user message (`msg_001`) status changes from `processing` ──► `responded`.
 
 Because `msg_005` is posted with `status = "pending"`, the registered `CLIChatbot` listener detects it, prints the beautiful rich markdown panel to the terminal, and updates the DB status upon delivery:
-- **Update**: `msg_005` status changes from `pending` ──► `completed`.
+- **Update**: `msg_005` status changes from `pending` ──► `delivered`.

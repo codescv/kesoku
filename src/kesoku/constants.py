@@ -36,7 +36,7 @@ STATUS_ERROR = "error"
 # Outgoing assistant text response awaiting transmission by a chatbot adapter.
 STATUS_PENDING = "pending"
 # Successfully delivered final assistant text response on the external chat platform.
-STATUS_COMPLETED = "completed"
+STATUS_DELIVERED = "delivered"
 # Successfully processed internal message (system instructions, thoughts, tool calls, tool outputs).
 STATUS_RESPONDED = "responded"
 

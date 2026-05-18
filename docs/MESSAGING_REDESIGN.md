@@ -26,7 +26,7 @@ Each worker processes its queue **one step at a time**:
 - **Thought Interruption**: If the Agent is in a long "Thinking/Chain of Thought" loop, it can be interrupted between LLM calls.
 
 ## 4. Message Schema Updates
-- `status`: `pending`, `processing`, `completed`, `interrupted`.
+- `status`: `pending`, `processing`, `delivered`, `interrupted`.
 - Use `parent_id` to link tool results to specific tool calls, allowing the Agent to "re-align" after an interruption.
 
 ## 5. Verification Criteria

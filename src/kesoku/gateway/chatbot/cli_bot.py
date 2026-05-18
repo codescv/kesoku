@@ -9,7 +9,7 @@ from rich.panel import Panel
 from kesoku.constants import (
     ROLE_ASSISTANT,
     ROLE_TOOL,
-    STATUS_COMPLETED,
+    STATUS_DELIVERED,
     TYPE_TEXT,
     TYPE_THOUGHT,
     TYPE_TOOL_CALL,
@@ -98,7 +98,7 @@ class CLIChatbot(Chatbot):
                         border_style="blue",
                     )
                 )
-                await self.gateway.update_message_status(message.id, STATUS_COMPLETED)
+                await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
                 self.final_response_event.set()
                 logger.debug(f"CLIChatbot received final response for channel {message.channel_id}")
                 return

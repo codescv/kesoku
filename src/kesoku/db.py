@@ -38,7 +38,7 @@ class Message(BaseModel):
     )
     timestamp: float = Field(default_factory=time.time, description="Unix timestamp of when the message was created")
     status: Literal[
-        "pending", "processing", "processed", "completed", "interrupted", "pending_agent", "responded", "error"
+        "pending", "processing", "processed", "delivered", "interrupted", "pending_agent", "responded", "error"
     ] = Field(default=STATUS_PENDING, description="Current lifecycle status of the message")
     parent_id: str | None = Field(default=None, description="Links tool results or followups to specific message/call")
 
