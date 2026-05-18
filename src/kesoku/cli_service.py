@@ -1,0 +1,318 @@
+"""Typer sub-commands for managing Kesoku as a systemd service.
+
+Provides commands: install, uninstall, start, stop, restart.
+"""
+
+import os
+import sys
+import shutil
+import subprocess
+from typing import Annotated, Any
+import typer
+from rich.console import Console
+
+from kesoku.logger import setup_logger
+
+logger = setup_logger(__name__)
+
+# Setup Sub-Typer app for services
+service_app = typer.Typer(help="Manage Kesoku AI Agent as a systemd background service.")
+
+
+def _verify_linux_platform(console: Console) -> None:
+    """Verify that the host platform is Linux.
+
+    Args:
+        console: Console to output error message.
+
+    Raises:
+        typer.Exit: If platform is not Linux.
+    """
+    if sys.platform != "linux":
+        console.print(
+            "[bold red]Error: systemd services are only supported on Linux platforms.[/bold red]"
+        )
+        raise typer.Exit(code=1)
+
+
+def _get_service_params(user: bool) -> tuple[str, list[str], str]:
+    """Determine target path, systemctl reload command, and user flags based on execution level.
+
+    Args:
+        user: True for user-level installation, False for system-level.
+
+    Returns:
+        A tuple of (service_file_path, reload_cmd_list, user_flag_string)
+    """
+    if user:
+        target_path = os.path.expanduser("~/.config/systemd/user/kesoku.service")
+        systemctl_reload = ["systemctl", "--user", "daemon-reload"]
+        user_flag = "--user "
+    else:
+        target_path = "/etc/systemd/system/kesoku.service"
+        systemctl_reload = ["sudo", "systemctl", "daemon-reload"]
+        user_flag = ""
+    return target_path, systemctl_reload, user_flag
+
+
+@service_app.command("install")
+def install_cmd(
+    config_path: Annotated[
+        str,
+        typer.Option(
+            "-c",
+            "--config",
+            help="Path to the config.toml file for the service to run with",
+        ),
+    ] = "config.toml",
+    env: Annotated[
+        list[str] | None,
+        typer.Option(
+            "-e",
+            "--env",
+            help="Environment variables to set in KEY=VALUE format (can be specified multiple times)",
+        ),
+    ] = None,
+    user: Annotated[
+        bool,
+        typer.Option(
+            "--user/--system",
+            help="Install as a user-level systemd service (default) or system-level service",
+        ),
+    ] = True,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Only print the systemd service file to stdout without installing",
+        ),
+    ] = False,
+) -> None:
+    """Install Kesoku as a systemd background service on Linux."""
+    console = Console()
+    _verify_linux_platform(console)
+
+    # Resolve the absolute path of the configuration file
+    config_abs_path = os.path.abspath(config_path)
+    working_dir = os.path.dirname(config_abs_path)
+
+    # Detect absolute path of the kesoku executable
+    executable_dir = os.path.dirname(sys.executable)
+    kesoku_path = os.path.join(executable_dir, "kesoku")
+    if not os.path.exists(kesoku_path):
+        kesoku_path = shutil.which("kesoku") or "kesoku"
+    else:
+        kesoku_path = os.path.abspath(kesoku_path)
+
+    # Construct Environment lines for systemd unit file
+    env_lines = []
+    if env:
+        for item in env:
+            if "=" not in item:
+                logger.warning(
+                    f"Skipping invalid environment variable format: '{item}'. Expected KEY=VALUE."
+                )
+                continue
+            env_lines.append(f'Environment="{item}"')
+    environment_block = "\n".join(env_lines)
+
+    target_path, systemctl_reload, user_flag = _get_service_params(user)
+    wanted_by = "default.target" if user else "multi-user.target"
+
+    # Generate Systemd unit file content
+    unit_content = f"""[Unit]
+Description=Kesoku AI Agent Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory={working_dir}
+ExecStart={kesoku_path} -c {config_abs_path} start
+Restart=on-failure
+{environment_block}
+
+[Install]
+WantedBy={wanted_by}
+"""
+
+    if dry_run:
+        console.print(f"[bold green]# Generated systemd service unit path: {target_path}[/bold green]")
+        console.print(unit_content)
+        return
+
+    # Write the service file to the target path
+    try:
+        if user:
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+
+        with open(target_path, "w") as f:
+            f.write(unit_content)
+        logger.info(f"Systemd service file written to: {target_path}")
+
+    except PermissionError:
+        console.print(
+            f"[bold red]Error: Permission denied when writing to '{target_path}'.[/bold red]"
+        )
+        if not user:
+            console.print(
+                "[bold yellow]Hint: Installing as a system service requires root/sudo permissions. Try running with 'sudo' or use '--user' instead.[/bold yellow]"
+            )
+        raise typer.Exit(code=1)
+    except Exception as e:
+        console.print(f"[bold red]Error writing systemd service file: {e}[/bold red]")
+        raise typer.Exit(code=1)
+
+    # Reload the systemd daemon configurations
+    logger.info(f"Reloading systemd daemon via: {' '.join(systemctl_reload)}...")
+    try:
+        subprocess.run(systemctl_reload, check=True, capture_output=True, text=True)
+        logger.info("Systemd daemon reloaded successfully.")
+    except subprocess.CalledProcessError as e:
+        logger.warning(
+            f"Could not reload systemd daemon automatically: {e.stderr.strip() or e}"
+        )
+        console.print(
+            "[bold yellow]Warning: Please reload systemd manually by running 'systemctl daemon-reload'.[/bold yellow]"
+        )
+
+    console.print("\n[bold green]Kesoku service installed successfully![/bold green]")
+    console.print("You can control the service using the following commands:")
+    console.print(f"  [bold cyan]kesoku service start {user_flag.strip()}[/bold cyan]   - Start the service")
+    console.print(f"  [bold cyan]kesoku service stop {user_flag.strip()}[/bold cyan]    - Stop the service")
+    console.print(f"  [bold cyan]kesoku service status {user_flag.strip()}[/bold cyan]  - Check service status (via systemctl)")
+
+
+@service_app.command("uninstall")
+def uninstall_cmd(
+    user: Annotated[
+        bool,
+        typer.Option(
+            "--user/--system",
+            help="Uninstall as a user-level systemd service (default) or system-level service",
+        ),
+    ] = True,
+) -> None:
+    """Stop, disable, and uninstall Kesoku systemd service."""
+    console = Console()
+    _verify_linux_platform(console)
+
+    target_path, systemctl_reload, user_flag = _get_service_params(user)
+
+    # 1. Stop the service
+    logger.info("Stopping the background service...")
+    stop_cmd_list = ["systemctl"] + user_flag.split() + ["stop", "kesoku"]
+    if not user:
+        stop_cmd_list = ["sudo"] + stop_cmd_list
+    subprocess.run(stop_cmd_list, capture_output=True)
+
+    # 2. Disable the service
+    logger.info("Disabling the background service...")
+    disable_cmd_list = ["systemctl"] + user_flag.split() + ["disable", "kesoku"]
+    if not user:
+        disable_cmd_list = ["sudo"] + disable_cmd_list
+    subprocess.run(disable_cmd_list, capture_output=True)
+
+    # 3. Remove the service file from disk
+    if os.path.exists(target_path):
+        try:
+            if not user:
+                # System-level removal might require sudo privileges if we can't write
+                subprocess.run(["sudo", "rm", "-f", target_path], check=True)
+            else:
+                os.remove(target_path)
+            logger.info(f"Removed service file: {target_path}")
+        except PermissionError:
+            console.print(
+                f"[bold red]Error: Permission denied when deleting '{target_path}'. Try running with 'sudo'.[/bold red]"
+            )
+            raise typer.Exit(code=1)
+        except Exception as e:
+            console.print(f"[bold red]Error removing service file: {e}[/bold red]")
+            raise typer.Exit(code=1)
+    else:
+        logger.info(f"Service file '{target_path}' did not exist.")
+
+    # 4. Reload the systemd configurations
+    logger.info(f"Reloading systemd daemon via: {' '.join(systemctl_reload)}...")
+    try:
+        subprocess.run(systemctl_reload, check=True, capture_output=True, text=True)
+        logger.info("Systemd daemon reloaded successfully.")
+    except subprocess.CalledProcessError as e:
+        logger.warning(
+            f"Could not reload systemd daemon automatically: {e.stderr.strip() or e}"
+        )
+
+    console.print("[bold green]Kesoku service has been uninstalled successfully![/bold green]")
+
+
+def _run_systemctl_action(action: str, user: bool, console: Console) -> None:
+    """Internal helper to run systemctl command for start/stop/restart.
+
+    Args:
+        action: The systemctl command verb (e.g., 'start', 'stop', 'restart').
+        user: True for user service scope, False for system.
+        console: Rich Console instance.
+    """
+    _verify_linux_platform(console)
+    _, _, user_flag = _get_service_params(user)
+
+    cmd_list = ["systemctl"] + user_flag.split() + [action, "kesoku"]
+    if not user:
+        cmd_list = ["sudo"] + cmd_list
+
+    logger.info(f"Running: {' '.join(cmd_list)}...")
+    try:
+        subprocess.run(cmd_list, check=True, capture_output=True, text=True)
+        console.print(
+            f"[bold green]Successfully executed service {action}![/bold green]"
+        )
+    except subprocess.CalledProcessError as e:
+        console.print(
+            f"[bold red]Error executing service {action}: {e.stderr.strip() or e}[/bold red]"
+        )
+        raise typer.Exit(code=1)
+
+
+@service_app.command("start")
+def start_cmd(
+    user: Annotated[
+        bool,
+        typer.Option(
+            "--user/--system",
+            help="Start as a user-level systemd service (default) or system-level service",
+        ),
+    ] = True,
+) -> None:
+    """Start the Kesoku background service."""
+    console = Console()
+    _run_systemctl_action("start", user, console)
+
+
+@service_app.command("stop")
+def stop_cmd(
+    user: Annotated[
+        bool,
+        typer.Option(
+            "--user/--system",
+            help="Stop as a user-level systemd service (default) or system-level service",
+        ),
+    ] = True,
+) -> None:
+    """Stop the Kesoku background service."""
+    console = Console()
+    _run_systemctl_action("stop", user, console)
+
+
+@service_app.command("restart")
+def restart_cmd(
+    user: Annotated[
+        bool,
+        typer.Option(
+            "--user/--system",
+            help="Restart as a user-level systemd service (default) or system-level service",
+        ),
+    ] = True,
+) -> None:
+    """Restart the Kesoku background service."""
+    console = Console()
+    _run_systemctl_action("restart", user, console)

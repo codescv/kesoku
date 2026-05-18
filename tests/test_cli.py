@@ -4,7 +4,7 @@ import os
 import re
 import sqlite3
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, mock_open, patch
 
 from typer.testing import CliRunner
 
@@ -164,3 +164,184 @@ def test_cli_chat_workflow(mock_gemini: Any, tmp_path: Any) -> None:
     res_history_short = runner.invoke(app, ["-c", str(config_path), "chat", "-s", session_id])
     assert res_history_short.exit_code == 0
     assert f"Chat History for Session '{session_id}'" in res_history_short.stdout
+
+
+def test_cli_service_non_linux() -> None:
+    """Verify service command fails on non-Linux systems."""
+    with patch("sys.platform", "darwin"):
+        result = runner.invoke(app, ["service", "install"])
+        assert result.exit_code == 1
+        assert "only supported on Linux" in result.stdout
+
+
+def test_cli_service_dry_run() -> None:
+    """Verify service command dry-run generated systemd unit content."""
+    with (
+        patch("sys.platform", "linux"),
+        patch(
+            "os.path.abspath",
+            side_effect=lambda p: "/mock/workspace/config.toml"
+            if "config.toml" in p
+            else f"/mock/bin/{os.path.basename(p)}",
+        ),
+        patch("os.path.exists", return_value=True),
+    ):
+        # Test basic user dry-run
+        result = runner.invoke(app, ["service", "install", "--dry-run"])
+        assert result.exit_code == 0
+        assert "WorkingDirectory=/mock/workspace" in result.stdout
+        assert "ExecStart=" in result.stdout
+        assert "/mock/bin/kesoku -c /mock/workspace/config.toml start" in result.stdout
+        assert "WantedBy=default.target" in result.stdout
+
+        # Test system dry-run with environment variables and -c flag
+        result_system = runner.invoke(
+            app,
+            [
+                "service",
+                "install",
+                "--dry-run",
+                "--system",
+                "-c",
+                "/mock/workspace/config.toml",
+                "-e",
+                "GEMINI_API_KEY=secret_key",
+                "-e",
+                "DISCORD_BOT_TOKEN=discord_token",
+            ],
+        )
+        assert result_system.exit_code == 0
+        assert "WorkingDirectory=/mock/workspace" in result_system.stdout
+        assert "WantedBy=multi-user.target" in result_system.stdout
+        assert 'Environment="GEMINI_API_KEY=secret_key"' in result_system.stdout
+        assert 'Environment="DISCORD_BOT_TOKEN=discord_token"' in result_system.stdout
+
+
+def test_cli_service_install_user() -> None:
+    """Verify successful user-level installation of the service."""
+    m_open = mock_open()
+    original_open = open
+
+    def selective_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if "kesoku.service" in str(file):
+            return m_open(file, *args, **kwargs)
+        return original_open(file, *args, **kwargs)
+
+    with (
+        patch("sys.platform", "linux"),
+        patch(
+            "os.path.abspath",
+            side_effect=lambda p: "/mock/workspace/config.toml"
+            if "config.toml" in p
+            else f"/mock/bin/{os.path.basename(p)}",
+        ),
+        patch("os.path.exists", return_value=True),
+        patch("os.makedirs") as mock_makedirs,
+        patch("builtins.open", side_effect=selective_open),
+        patch("subprocess.run") as mock_run,
+    ):
+        result = runner.invoke(app, ["service", "install", "-c", "config.toml"])
+        assert result.exit_code == 0
+        assert "service installed successfully" in result.stdout.lower()
+        mock_makedirs.assert_called_once()
+        m_open.assert_called_once()
+        # Verify daemon-reload was run
+        mock_run.assert_called_once_with(
+            ["systemctl", "--user", "daemon-reload"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
+def test_cli_service_permission_error() -> None:
+    """Verify service command exits gracefully on write permission issues."""
+    original_open = open
+
+    def selective_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if "kesoku.service" in str(file):
+            raise PermissionError("Permission Denied")
+        return original_open(file, *args, **kwargs)
+
+    with (
+        patch("sys.platform", "linux"),
+        patch(
+            "os.path.abspath",
+            side_effect=lambda p: "/mock/workspace/config.toml"
+            if "config.toml" in p
+            else f"/mock/bin/{os.path.basename(p)}",
+        ),
+        patch("os.path.exists", return_value=True),
+        patch("os.makedirs"),
+        patch("builtins.open", side_effect=selective_open),
+    ):
+        result = runner.invoke(app, ["service", "install", "--system"])
+        assert result.exit_code == 1
+        assert "Permission denied" in result.stdout
+
+
+def test_cli_service_uninstall() -> None:
+    """Verify successful service uninstallation."""
+    with (
+        patch("sys.platform", "linux"),
+        patch("os.path.exists", return_value=True),
+        patch("os.remove") as mock_remove,
+        patch("subprocess.run") as mock_run,
+    ):
+        # Test user uninstall
+        result = runner.invoke(app, ["service", "uninstall"])
+        assert result.exit_code == 0
+        assert "uninstalled successfully" in result.stdout.lower()
+        mock_remove.assert_called_once()
+
+        # Verify systemctl stop, disable and daemon-reload were run
+        stop_call = mock_run.mock_calls[0]
+        disable_call = mock_run.mock_calls[1]
+        reload_call = mock_run.mock_calls[2]
+
+        assert "stop" in stop_call[1][0]
+        assert "disable" in disable_call[1][0]
+        assert "daemon-reload" in reload_call[1][0]
+
+
+def test_cli_service_start_stop_restart() -> None:
+    """Verify start, stop, and restart service wrapper command invocations."""
+    with (
+        patch("sys.platform", "linux"),
+        patch("subprocess.run") as mock_run,
+    ):
+        # 1. Start User Service
+        res_start = runner.invoke(app, ["service", "start"])
+        assert res_start.exit_code == 0
+        assert "executed service start" in res_start.stdout.lower()
+        mock_run.assert_any_call(
+            ["systemctl", "--user", "start", "kesoku"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        # 2. Stop System Service
+        res_stop = runner.invoke(app, ["service", "stop", "--system"])
+        assert res_stop.exit_code == 0
+        assert "executed service stop" in res_stop.stdout.lower()
+        mock_run.assert_any_call(
+            ["sudo", "systemctl", "stop", "kesoku"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        # 3. Restart User Service
+        res_restart = runner.invoke(app, ["service", "restart"])
+        assert res_restart.exit_code == 0
+        assert "executed service restart" in res_restart.stdout.lower()
+        mock_run.assert_any_call(
+            ["systemctl", "--user", "restart", "kesoku"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
+

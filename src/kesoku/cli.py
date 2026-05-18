@@ -25,6 +25,11 @@ logger = setup_logger(__name__)
 
 app = typer.Typer(help="Kesoku AI Agent CLI manager.")
 
+from kesoku.cli_service import service_app
+
+app.add_typer(service_app, name="service")
+
+
 
 @app.callback()
 def main_callback(

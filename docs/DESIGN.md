@@ -79,6 +79,25 @@ Kesoku includes a fully functional Discord chatbot adapter (`DiscordChatbot`) co
 - **Asynchronous Typing Status Indicator**: While the agent is thinking, running tools, or generating responses, `DiscordChatbot` continuously displays a typing status in the corresponding thread or channel. The typing indicator starts when an incoming user message is received, and is gracefully cancelled upon successful delivery of the final assistant text response. To prevent infinite typing during an unexpected error or network drop, each typing task is guarded by a robust 10-minute safety timeout.
 
 
+## Systemd Service Integration
+To support running Kesoku as a continuous background daemon in production environments on Linux, the CLI provides a `service` command group implemented modularly inside `src/kesoku/cli_service.py`. This command group automates generating, registering, running, and removing the systemd unit file (`kesoku.service`).
+
+### Service Subcommands Design
+- **Main Command**: `kesoku service` (mounted as a sub-Typer application group)
+- **Subcommands**:
+  - `install`: Generates and writes the systemd unit file, then runs systemd `daemon-reload`.
+    - Options:
+      - `-c / --config <path>`: Custom configuration file path (default: `config.toml`). Resolves to an absolute path and sets `WorkingDirectory` and `ExecStart` automatically.
+      - `-e / --env KEY=VALUE`: Environment variables injected into the systemd unit definition (can be specified multiple times).
+      - `--user / --system`: Configures as a user-level unit (default, target path: `~/.config/systemd/user/kesoku.service`) or system-level unit (target path: `/etc/systemd/system/kesoku.service`).
+      - `--dry-run`: Prints the generated service unit file directly to stdout without writing.
+  - `uninstall`: Stops and disables the service, removes the unit file from disk, and reloads systemd daemon.
+  - `start`: Starts the background systemd service via `systemctl [--user] start kesoku`.
+  - `stop`: Stops the background systemd service via `systemctl [--user] stop kesoku`.
+  - `restart`: Restarts the background systemd service via `systemctl [--user] restart kesoku`.
+
+
+
 ## Configuration Schema (`config.toml`)
 Kesoku is centrally configured via a structured TOML file managed by Pydantic models in `src/kesoku/config.py`. Once loaded at CLI startup, the configuration acts as a global singleton accessible from any module via `get_config()`, avoiding the need to pass configuration objects across components.
 

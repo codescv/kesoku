@@ -83,3 +83,56 @@ Run background daemons (Discord bot):
 ```bash
 uv run kesoku -c private/config.toml start
 ```
+
+### Running as a Systemd Service (Linux)
+
+To run Kesoku as a persistent background service using systemd on Linux, use the `service` command group:
+
+#### 1. Install the Service
+Generates and installs the systemd unit file.
+
+- **User-Level Service (Default, recommended - no root required)**:
+  ```bash
+  uv run kesoku service install -c private/config.toml -e GEMINI_API_KEY=your-api-key
+  ```
+- **System-Level Service (Global, requires root)**:
+  ```bash
+  sudo uv run kesoku service install --system -c private/config.toml -e GEMINI_API_KEY=your-api-key
+  ```
+- **Dry-Run (prints service file to stdout)**:
+  ```bash
+  uv run kesoku service install --dry-run -c private/config.toml -e GEMINI_API_KEY=your-api-key
+  ```
+
+#### 2. Manage the Service
+You can start, stop, restart, and uninstall the service using `kesoku service` subcommand wrappers:
+
+- **Start the service**:
+  ```bash
+  uv run kesoku service start
+  ```
+- **Stop the service**:
+  ```bash
+  uv run kesoku service stop
+  ```
+- **Restart the service**:
+  ```bash
+  uv run kesoku service restart
+  ```
+- **Uninstall the service** (stops, disables, and deletes unit file):
+  ```bash
+  uv run kesoku service uninstall
+  ```
+
+*Note: Add the `--system` flag to any of the management subcommands if you installed the service in system-level mode (e.g. `uv run kesoku service start --system`).*
+
+#### 3. Check Status and Logs
+- **Check service status**:
+  ```bash
+  systemctl --user status kesoku
+  ```
+- **Follow real-time background logs**:
+  ```bash
+  journalctl --user -u kesoku -f
+  ```
+
