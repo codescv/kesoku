@@ -138,8 +138,8 @@ class DiscordChatbot(Chatbot):
             except Exception as je:
                 logger.debug(f"Already joined or error joining thread {thread.id}: {je}")
 
-        session_id = str(thread.id)
-        session = await self.gateway.get_session(session_id)
+        channel_id = str(thread.id)
+        session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
 
         if not session:
             guild_name = thread.guild.name if hasattr(thread, "guild") and thread.guild else "Direct"
@@ -158,15 +158,21 @@ class DiscordChatbot(Chatbot):
                 "When mentioning or referring to a user, use Discord tag syntax <@USER_ID>."
             )
             sys_prompt = DEFAULT_SYSTEM_PROMPT + special_prompt
-            await self.gateway.create_session(session_id=session_id, title=thread.name, system_prompt=sys_prompt)
+            session = await self.gateway.create_session(
+                title=thread.name,
+                system_prompt=sys_prompt,
+                created_at=message.created_at.timestamp(),
+            )
+            session_id = session.id
         else:
+            session_id = session.id
             await self.gateway.update_session_updated_at(session_id)
 
         # Ingest user message into Gateway
         msg = Message(
             session_id=session_id,
             chatbot_id=self.chatbot_id,
-            channel_id=str(thread.id),
+            channel_id=channel_id,
             sender=message.author.display_name,
             role=ROLE_USER,
             type=TYPE_TEXT,

@@ -55,6 +55,7 @@ class Gateway:
         session_id: str | None = None,
         title: str = "New Session",
         system_prompt: str | None = None,
+        created_at: float | None = None,
     ) -> Session:
         """Create a new chat session record in SQLite and initialize system instructions.
 
@@ -62,13 +63,14 @@ class Gateway:
             session_id: Optional unique identifier. If None, a random 8-char hex is generated.
             title: Summary title or first message snippet for the session.
             system_prompt: Optional defining system prompt instructions.
+            created_at: Optional initial creation timestamp float.
 
         Returns:
             The created Session instance.
         """
         if session_id is None:
             session_id = uuid.uuid4().hex[:8]
-        now = time.time()
+        now = created_at if created_at is not None else time.time()
         sess = Session(id=session_id, title=title, created_at=now, updated_at=now)
         await asyncio.to_thread(self.db.create_session, sess)
 
@@ -99,6 +101,18 @@ class Gateway:
             Session object if found, None otherwise.
         """
         return await asyncio.to_thread(self.db.get_session, session_id)
+
+    async def get_session_by_channel(self, chatbot_id: str, channel_id: str) -> Session | None:
+        """Retrieve the chat session associated with a specific chatbot channel.
+
+        Args:
+            chatbot_id: Chatbot identifier.
+            channel_id: Channel identifier.
+
+        Returns:
+            The Session object if found, None otherwise.
+        """
+        return await asyncio.to_thread(self.db.get_session_by_channel, chatbot_id, channel_id)
 
     async def update_session_updated_at(self, session_id: str) -> None:
         """Update the updated_at timestamp for a session.

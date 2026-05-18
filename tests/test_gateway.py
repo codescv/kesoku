@@ -9,6 +9,7 @@ import pytest
 from kesoku.config import WorkspaceConfig
 from kesoku.constants import (
     ROLE_ASSISTANT,
+    ROLE_SYSTEM,
     ROLE_USER,
     STATUS_PENDING,
     STATUS_RESPONDED,
@@ -163,3 +164,63 @@ async def test_gateway_sessions(temp_db: str) -> None:
     sessions = await gw.list_sessions()
     assert len(sessions) == 2
     assert sessions[0].id == "s1"
+
+
+@pytest.mark.asyncio
+async def test_gateway_get_session_by_channel(temp_db: str) -> None:
+    """Test retrieving session by chatbot and channel identifier."""
+    DatabaseManager(temp_db).init_tables()
+    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+
+    session = await gw.create_session("sess_chan_1", "Chan Session")
+    await gw.post(
+        Message(
+            session_id="sess_chan_1",
+            chatbot_id="discord_bot",
+            channel_id="thread_777",
+            sender="User",
+            role=ROLE_USER,
+            type=TYPE_TEXT,
+            content="Hello",
+            status=STATUS_RESPONDED,
+        )
+    )
+
+    fetched = await gw.get_session_by_channel("discord_bot", "thread_777")
+    assert fetched is not None
+    assert fetched.id == "sess_chan_1"
+
+    not_found = await gw.get_session_by_channel("discord_bot", "thread_999")
+    assert not_found is None
+
+
+@pytest.mark.asyncio
+async def test_gateway_create_session_created_at(temp_db: str) -> None:
+    """Test creating a session with explicit created_at ensures correct system prompt ordering."""
+    DatabaseManager(temp_db).init_tables()
+    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+
+    hist_timestamp = 1500000000.0
+    session = await gw.create_session(title="Historical", created_at=hist_timestamp)
+
+    # Post a user message with the same timestamp
+    await gw.post(
+        Message(
+            session_id=session.id,
+            chatbot_id="discord_bot",
+            channel_id="123",
+            sender="User",
+            role=ROLE_USER,
+            type=TYPE_TEXT,
+            content="First msg",
+            timestamp=hist_timestamp,
+            status=STATUS_RESPONDED,
+        )
+    )
+
+    history = await gw.get_session_history(session.id)
+    assert len(history) == 2
+    # System message should come first because its timestamp is hist_timestamp - 0.01
+    assert history[0].role == ROLE_SYSTEM
+    assert history[1].role == ROLE_USER
+    assert history[0].timestamp < history[1].timestamp

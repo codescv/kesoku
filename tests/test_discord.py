@@ -27,6 +27,7 @@ def mock_gateway() -> MagicMock:
     """Provide a mock Gateway instance."""
     gw = MagicMock(spec=Gateway)
     gw.get_session = AsyncMock(return_value=None)
+    gw.get_session_by_channel = AsyncMock(return_value=None)
     gw.create_session = AsyncMock(return_value=Session(id="thread123", title="Test Session"))
     gw.update_session_updated_at = AsyncMock()
     gw.post = AsyncMock()

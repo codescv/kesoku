@@ -261,6 +261,40 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def get_session_by_channel(self, chatbot_id: str, channel_id: str) -> Session | None:
+        """Retrieve the chat session associated with a specific chatbot channel.
+
+        Args:
+            chatbot_id: Unique identifier of the chatbot.
+            channel_id: Channel or room identifier.
+
+        Returns:
+            The Session object if found, None otherwise.
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT s.* FROM sessions s
+                JOIN messages m ON s.id = m.session_id
+                WHERE m.chatbot_id = ? AND m.channel_id = ?
+                ORDER BY m.timestamp DESC LIMIT 1
+                """,
+                (chatbot_id, channel_id),
+            )
+            row = cursor.fetchone()
+            if row:
+                return Session(
+                    id=row["id"],
+                    title=row["title"],
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
+                )
+            return None
+        finally:
+            conn.close()
+
     # Message CRUD
     def save_message(self, msg: Message) -> None:
         """Persist a new conversational message record.
