@@ -40,8 +40,4 @@ STATUS_DELIVERED = "delivered"
 # Successfully processed internal message (system instructions, thoughts, tool calls, tool outputs).
 STATUS_RESPONDED = "responded"
 
-# --- System Defaults ---
-# Default defining instructions for the autonomous agent loop.
-DEFAULT_SYSTEM_PROMPT = """You are Kesoku Agent, a helpful, highly capable autonomous AI assistant.
-You can use available tools to calculate equations, search information, and answer user questions precisely.
-"""
+

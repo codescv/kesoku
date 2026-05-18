@@ -10,9 +10,9 @@ import uuid
 from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
+from kesoku.agent.prompt import build_sys_prompt
 from kesoku.config import WorkspaceConfig, get_config
 from kesoku.constants import (
-    DEFAULT_SYSTEM_PROMPT,
     ROLE_SYSTEM,
     STATUS_PROCESSED,
     STATUS_RESPONDED,
@@ -82,7 +82,7 @@ class Gateway:
             sender="System",
             role=ROLE_SYSTEM,
             type=TYPE_TEXT,
-            content=system_prompt or DEFAULT_SYSTEM_PROMPT,
+            content=system_prompt or build_sys_prompt(),
             status=STATUS_RESPONDED,
             # Use a timestamp slightly in the past to ensure system message always comes first
             timestamp=now - 0.01,

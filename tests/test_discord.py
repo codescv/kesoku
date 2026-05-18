@@ -187,3 +187,111 @@ async def test_handle_message_chunking(mock_config: KesokuConfig, mock_gateway: 
             # Chunk 1 should contain line1 + line2 (1802 chars). Chunk 2 should contain line3 (901 chars).
             assert mock_channel.send.call_count == 2
             mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+
+
+@pytest.mark.asyncio
+async def test_handle_message_with_files_split_and_upload(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test that messages containing valid file blocks are split and uploaded correctly."""
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.Thread)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+
+            # Setup message with text before, file, and text after
+            content = "Hello [file: /tmp/test_image.png] how are you?"
+            msg = Message(
+                id="msg123",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_ASSISTANT,
+                type=TYPE_TEXT,
+                content=content,
+            )
+
+            mock_file = MagicMock(spec=discord.File)
+            with patch("os.path.exists", return_value=True) as mock_exists:
+                with patch("discord.File", return_value=mock_file) as mock_file_class:
+                    await bot.handle_message(msg)
+                    
+                    # Verify path existence was checked
+                    mock_exists.assert_called_once_with("/tmp/test_image.png")
+                    # Verify discord.File was instantiated with path
+                    mock_file_class.assert_called_once_with("/tmp/test_image.png")
+                    
+                    # channel.send should be called 3 times: "Hello ", file=mock_file, and " how are you?"
+                    assert mock_channel.send.call_count == 3
+                    mock_channel.send.assert_any_call("Hello ")
+                    mock_channel.send.assert_any_call(file=mock_file)
+                    mock_channel.send.assert_any_call(" how are you?")
+                    
+                    mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+
+
+@pytest.mark.asyncio
+async def test_handle_message_with_non_existent_file(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test that missing files trigger a user-facing warning message."""
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.Thread)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+
+            content = "See this: [file: /tmp/ghost.png]"
+            msg = Message(
+                id="msg123",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_ASSISTANT,
+                type=TYPE_TEXT,
+                content=content,
+            )
+
+            with patch("os.path.exists", return_value=False) as mock_exists:
+                await bot.handle_message(msg)
+                mock_exists.assert_called_once_with("/tmp/ghost.png")
+                
+                # channel.send should be called 2 times: text segment and warning segment
+                assert mock_channel.send.call_count == 2
+                mock_channel.send.assert_any_call("See this: ")
+                mock_channel.send.assert_any_call("⚠️ File not found: /tmp/ghost.png")
+
+
+@pytest.mark.asyncio
+async def test_handle_message_with_empty_whitespace_guards(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test that empty or whitespace-only text segments are guarded and not sent."""
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.Thread)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+
+            # Setup content with only whitespace surrounding a file block
+            content = "   [file: /tmp/only_file.zip]    "
+            msg = Message(
+                id="msg123",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_ASSISTANT,
+                type=TYPE_TEXT,
+                content=content,
+            )
+
+            mock_file = MagicMock(spec=discord.File)
+            with patch("os.path.exists", return_value=True):
+                with patch("discord.File", return_value=mock_file):
+                    await bot.handle_message(msg)
+                    
+                    # channel.send should be called exactly once (only for the file attachment)
+                    assert mock_channel.send.call_count == 1
+                    mock_channel.send.assert_called_once_with(file=mock_file)
+

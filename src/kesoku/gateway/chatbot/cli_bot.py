@@ -16,7 +16,7 @@ from kesoku.constants import (
     TYPE_TOOL_RESULT,
 )
 from kesoku.db import Message
-from kesoku.gateway.chatbot.base import Chatbot
+from kesoku.gateway.chatbot.base import Chatbot, parse_message_content
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 
@@ -90,14 +90,29 @@ class CLIChatbot(Chatbot):
                 return
             elif message.type == TYPE_TEXT:
                 self.final_response = message.content
-                self.console.print(
-                    Panel(
-                        Markdown(message.content),
-                        title=f"[bold blue]{message.sender}[/bold blue]",
-                        title_align="left",
-                        border_style="blue",
-                    )
-                )
+                segments = parse_message_content(message.content)
+                for segment in segments:
+                    if segment["type"] == "text":
+                        text_content = segment["content"]
+                        if text_content.strip():
+                            self.console.print(
+                                Panel(
+                                    Markdown(text_content),
+                                    title=f"[bold blue]{message.sender}[/bold blue]",
+                                    title_align="left",
+                                    border_style="blue",
+                                )
+                            )
+                    elif segment["type"] == "file":
+                        file_path = segment["path"]
+                        self.console.print(
+                            Panel(
+                                f"📎 [bold cyan]File Attachment:[/bold cyan] [underline]{file_path}[/underline]",
+                                title=f"[bold blue]{message.sender} (Attachment)[/bold blue]",
+                                title_align="left",
+                                border_style="cyan",
+                            )
+                        )
                 await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
                 self.final_response_event.set()
                 logger.debug(f"CLIChatbot received final response for channel {message.channel_id}")

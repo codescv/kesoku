@@ -1,6 +1,7 @@
 """Base class for Kesoku chatbot adapters."""
 
 import asyncio
+import re
 from abc import ABC, abstractmethod
 
 from kesoku.constants import ROLE_USER, STATUS_DELIVERED
@@ -9,6 +10,38 @@ from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+
+def parse_message_content(content: str) -> list[dict[str, str]]:
+    """Parse message content to extract zero or more `[file: /path/to/file]` blocks.
+
+    Args:
+        content: Raw message text content to parse.
+
+    Returns:
+        A list of segment dictionaries. Text segments have format:
+        {"type": "text", "content": "..."}, and file segments have format:
+        {"type": "file", "path": "..."}.
+    """
+    # Regex matches [file: <path>] where <path> contains any character except closed bracket
+    pattern = re.compile(r"\[file:\s*([^\]]+)\s*\]")
+    segments: list[dict[str, str]] = []
+    last_idx = 0
+
+    for match in pattern.finditer(content):
+        text_before = content[last_idx : match.start()]
+        if text_before:
+            segments.append({"type": "text", "content": text_before})
+        
+        file_path = match.group(1).strip()
+        segments.append({"type": "file", "path": file_path})
+        last_idx = match.end()
+
+    text_after = content[last_idx:]
+    if text_after:
+        segments.append({"type": "text", "content": text_after})
+
+    return segments
 
 
 class Chatbot(ABC):

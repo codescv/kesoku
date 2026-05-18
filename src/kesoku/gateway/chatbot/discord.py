@@ -5,11 +5,12 @@ Connects Discord channels and threads with Kesoku Gateway using Pub/Sub.
 
 import asyncio
 import logging
+import os
 import discord
 
+from kesoku.agent.prompt import build_sys_prompt
 from kesoku.config import get_config
 from kesoku.constants import (
-    DEFAULT_SYSTEM_PROMPT,
     ROLE_ASSISTANT,
     ROLE_SYSTEM,
     ROLE_TOOL,
@@ -21,7 +22,7 @@ from kesoku.constants import (
     TYPE_TOOL_CALL,
 )
 from kesoku.db import Message
-from kesoku.gateway.chatbot.base import Chatbot
+from kesoku.gateway.chatbot.base import Chatbot, parse_message_content
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 
@@ -153,11 +154,11 @@ class DiscordChatbot(Chatbot):
             members_str = "\n".join(member_lines)
 
             special_prompt = (
-                f"\n\nYou are Kesoku, a helpful AI assistant interacting in Discord thread #{thread.name} on server '{guild_name}'.\n"
+                f"You are Kesoku, a helpful AI assistant interacting in Discord thread #{thread.name} on server '{guild_name}'.\n"
                 f"Users present:\n{members_str}\n"
                 "When mentioning or referring to a user, use Discord tag syntax <@USER_ID>."
             )
-            sys_prompt = DEFAULT_SYSTEM_PROMPT + special_prompt
+            sys_prompt = build_sys_prompt(special_prompt)
             session = await self.gateway.create_session(
                 title=thread.name,
                 system_prompt=sys_prompt,
@@ -206,37 +207,57 @@ class DiscordChatbot(Chatbot):
         output_text = ""
         if message.role == ROLE_ASSISTANT:
             if message.type == TYPE_THOUGHT:
-                output_text = f"💭 Thought:\n{message.content}"
+                output_text = f"💭 {message.content}"
             else:
                 output_text = message.content
         elif message.role == ROLE_TOOL:
             if message.type == TYPE_TOOL_CALL:
-                output_text = f"🛠️ Tool Call ({message.sender}):\n```\n{message.content}\n```"
+                output_text = f"🛠️ {message.content}"
             else:
-                output_text = f"📥 Tool Output ({message.sender}):\n```\n{message.content}\n```"
+                output_text = f"📥 {message.content}"
         elif message.role == ROLE_SYSTEM:
-            output_text = f"⚙️ System:\n{message.content}"
+            output_text = f"⚙️ {message.content}"
 
         if not output_text:
             output_text = message.content
 
-        # Newline Chunking (<= 2000 chars)
-        lines = output_text.splitlines(keepends=True)
-        current_chunk = ""
-        for line in lines:
-            if len(line) > 2000:
-                if current_chunk:
-                    await channel.send(current_chunk)
-                    current_chunk = ""
-                for i in range(0, len(line), 2000):
-                    await channel.send(line[i : i + 2000])
-            elif len(current_chunk) + len(line) > 2000:
-                await channel.send(current_chunk)
-                current_chunk = line
-            else:
-                current_chunk += line
+        # Parse output text into segments (handling [file: <path>] blocks)
+        segments = parse_message_content(output_text)
 
-        if current_chunk:
-            await channel.send(current_chunk)
+        for segment in segments:
+            if segment["type"] == "text":
+                text_content = segment["content"]
+                # Only send if the text chunk is not empty and contains non-whitespace characters
+                if text_content.strip():
+                    # Newline Chunking (<= 2000 chars) for Discord compatibility
+                    lines = text_content.splitlines(keepends=True)
+                    current_chunk = ""
+                    for line in lines:
+                        if len(line) > 2000:
+                            if current_chunk:
+                                await channel.send(current_chunk)
+                                current_chunk = ""
+                            for i in range(0, len(line), 2000):
+                                await channel.send(line[i : i + 2000])
+                        elif len(current_chunk) + len(line) > 2000:
+                            await channel.send(current_chunk)
+                            current_chunk = line
+                        else:
+                            current_chunk += line
+
+                    if current_chunk and current_chunk.strip():
+                        await channel.send(current_chunk)
+            elif segment["type"] == "file":
+                file_path = segment["path"]
+                if not os.path.exists(file_path):
+                    logger.error(f"File not found: {file_path}")
+                    await channel.send(f"⚠️ File not found: {file_path}")
+                else:
+                    try:
+                        discord_file = discord.File(file_path)
+                        await channel.send(file=discord_file)
+                    except Exception as e:
+                        logger.error(f"Failed to send file {file_path} to Discord: {e}", exc_info=True)
+                        await channel.send(f"⚠️ Failed to send file {file_path}: {e}")
 
         await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
