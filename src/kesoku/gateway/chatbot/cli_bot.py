@@ -114,6 +114,16 @@ class CLIChatbot(Chatbot):
                                 border_style="cyan",
                             )
                         )
+                    elif segment["type"] == "voice":
+                        file_path = segment["path"]
+                        self.console.print(
+                            Panel(
+                                f"🎙️ [bold green]Voice Message:[/bold green] [underline]{file_path}[/underline]",
+                                title=f"[bold blue]{message.sender} (Voice)[/bold blue]",
+                                title_align="left",
+                                border_style="green",
+                            )
+                        )
                 await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
                 self.final_response_event.set()
                 logger.debug(f"CLIChatbot received final response for channel {message.channel_id}")

@@ -62,3 +62,37 @@ def test_parse_whitespace_and_formatting() -> None:
         {"type": "text", "content": "Check this out: "},
         {"type": "file", "path": "/path/to/some_file.zip"},
     ]
+
+
+def test_parse_voice_blocks() -> None:
+    """Verify that a voice block is correctly parsed and recognized."""
+    content = "Listen: [voice: /path/to/audio.ogg] thanks!"
+    segments = parse_message_content(content)
+    assert segments == [
+        {"type": "text", "content": "Listen: "},
+        {"type": "voice", "path": "/path/to/audio.ogg"},
+        {"type": "text", "content": " thanks!"},
+    ]
+
+
+def test_parse_mixed_file_and_voice_blocks() -> None:
+    """Verify that mixed file and voice blocks are parsed in the correct order."""
+    content = "Here is a doc [file: /doc.txt] and voice [voice: /speech.ogg] end."
+    segments = parse_message_content(content)
+    assert segments == [
+        {"type": "text", "content": "Here is a doc "},
+        {"type": "file", "path": "/doc.txt"},
+        {"type": "text", "content": " and voice "},
+        {"type": "voice", "path": "/speech.ogg"},
+        {"type": "text", "content": " end."},
+    ]
+
+
+def test_parse_voice_whitespace_and_formatting() -> None:
+    """Verify that voice paths are correctly trimmed of leading/trailing whitespace."""
+    content = "Listen: [voice:    /path/voice.wav     ]"
+    segments = parse_message_content(content)
+    assert segments == [
+        {"type": "text", "content": "Listen: "},
+        {"type": "voice", "path": "/path/voice.wav"},
+    ]

@@ -18,17 +18,25 @@ You have access to on demand tools (aka skills) to help with various tasks.
 """
 
 FILE_SENDING_INSTRUCTIONS = """
-# Sending Files to the User
+# Sending Files and Voice Messages to the User
 You have the capability to send files (such as generated images, photos, audios, videos,
-report documents, or scripts) directly to the user's conversation thread.
+report documents, or scripts) and voice messages directly to the user's conversation thread.
+
 To transmit a file, you MUST include the following exact syntax in your final textual response to the user:
 [file: /abs/path/to/file]
 Example: 'Here is the requested cat picture: [file: /home/user/Downloads/cat.png]'
 
+To transmit a voice message (speech), you MUST include the following exact syntax:
+[voice: /abs/path/to/audio]
+Example: 'Here is my verbal response: [voice: /home/user/Downloads/reply.ogg]'
+
 Rules for file sending:
-1. The file must physically exist on the local disk before you output the syntax.
-2. Do not guess or output fictional/placeholder file paths.
-3. Always ensure that the path inside `[file: <path>]` is a fully resolved absolute path."""
+1. For speech (voice messages), ALWAYS use the `[voice: /abs/path/to/audio]` block.
+2. For all other types of audio (e.g. music, sound effects, environmental recordings)
+   and general files, use the `[file: /abs/path/to/file]` block.
+3. The file must physically exist on the local disk before you output either syntax.
+4. Do not guess or output fictional/placeholder file paths.
+5. Always ensure that the path inside `[file: <path>]` or `[voice: <path>]` is a fully resolved absolute path."""
 
 
 def build_sys_prompt(

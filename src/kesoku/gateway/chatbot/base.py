@@ -13,18 +13,19 @@ logger = setup_logger(__name__)
 
 
 def parse_message_content(content: str) -> list[dict[str, str]]:
-    """Parse message content to extract zero or more `[file: /path/to/file]` blocks.
+    """Parse message content to extract zero or more `[file: /path/to/file]` or `[voice: /path/to/file]` blocks.
 
     Args:
         content: Raw message text content to parse.
 
     Returns:
         A list of segment dictionaries. Text segments have format:
-        {"type": "text", "content": "..."}, and file segments have format:
-        {"type": "file", "path": "..."}.
+        {"type": "text", "content": "..."}, file segments have format:
+        {"type": "file", "path": "..."}, and voice segments have format:
+        {"type": "voice", "path": "..."}.
     """
-    # Regex matches [file: <path>] where <path> contains any character except closed bracket
-    pattern = re.compile(r"\[file:\s*([^\]]+)\s*\]")
+    # Regex matches [file: <path>] or [voice: <path>] where <path> contains any character except closed bracket
+    pattern = re.compile(r"\[(file|voice):\s*([^\]]+)\s*\]")
     segments: list[dict[str, str]] = []
     last_idx = 0
 
@@ -33,8 +34,9 @@ def parse_message_content(content: str) -> list[dict[str, str]]:
         if text_before:
             segments.append({"type": "text", "content": text_before})
 
-        file_path = match.group(1).strip()
-        segments.append({"type": "file", "path": file_path})
+        block_type = match.group(1)
+        file_path = match.group(2).strip()
+        segments.append({"type": block_type, "path": file_path})
         last_idx = match.end()
 
     text_after = content[last_idx:]

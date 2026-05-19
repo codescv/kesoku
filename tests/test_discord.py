@@ -677,3 +677,158 @@ async def test_handle_message_tool_result_in_place_edit(mock_config: KesokuConfi
             mock_discord_msg.edit.assert_called_once_with(content="📥 **my_tool**: `edit_query` ✅")
             # The cache should be cleaned up
             assert "parent123" not in bot._sent_tool_calls
+
+
+@pytest.mark.asyncio
+async def test_handle_message_with_voice_success(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test that a voice block successfully sends a native voice message via Discord API."""
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.Thread)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+
+            # Mock internal channel state/http to allow low-level call to succeed
+            mock_channel._state = MagicMock()
+            mock_channel._state.http = AsyncMock()
+            mock_channel._state.create_message = MagicMock()
+
+            content = "Listen here: [voice: /tmp/voice.ogg]"
+            msg = Message(
+                id="msg123",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_ASSISTANT,
+                type=TYPE_TEXT,
+                content=content,
+            )
+
+            original_file_class = discord.File
+            with patch("os.path.exists", return_value=True) as mock_exists:
+                with patch("os.unlink") as mock_unlink:
+                    with patch("subprocess.run") as mock_run:
+                        with patch("discord.File") as mock_file_class:
+                            # Configure mock file instance to serialize properly
+                            mock_file_instance = MagicMock(spec=original_file_class)
+                            mock_file_instance.to_dict.return_value = {"id": 0, "filename": "voice.ogg"}
+                            mock_file_class.return_value = mock_file_instance
+
+                            # Configure mock run to return a valid duration for ffprobe call
+                            mock_proc = MagicMock()
+                            mock_proc.stdout = "3.5\n"
+                            mock_run.return_value = mock_proc
+
+                            await bot.handle_message(msg)
+
+                            mock_exists.assert_any_call("/tmp/voice.ogg")
+                            assert mock_run.call_count == 2
+                            mock_unlink.assert_called_once()
+                            # Verifies channel.send is called for text before
+                            mock_channel.send.assert_any_call("Listen here: ")
+                            # Verifies low-level HTTP send_message was called for the voice attachment
+                            mock_channel._state.http.send_message.assert_called_once()
+
+                            # Verify message status was updated to delivered
+                            mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+
+
+@pytest.mark.asyncio
+async def test_handle_message_with_voice_fallback(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test that a voice block falls back to standard file attachment if native sending fails."""
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.Thread)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+
+            content = "Listen here: [voice: /tmp/voice.ogg]"
+            msg = Message(
+                id="msg123",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_ASSISTANT,
+                type=TYPE_TEXT,
+                content=content,
+            )
+
+            # Force native voice message sending to raise an Exception
+            bot._send_voice_message = AsyncMock(side_effect=Exception("API Error"))
+
+            mock_file = MagicMock(spec=discord.File)
+            with patch("os.path.exists", return_value=True) as mock_exists:
+                with patch("discord.File", return_value=mock_file) as mock_file_class:
+                    await bot.handle_message(msg)
+
+                    mock_exists.assert_called_once_with("/tmp/voice.ogg")
+                    # Should have fallen back to sending standard file attachment
+                    mock_channel.send.assert_any_call("Listen here: ")
+                    mock_channel.send.assert_any_call(file=mock_file)
+
+                    # Verify message status was updated to delivered
+                    mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+
+
+def test_voice_file_to_dict() -> None:
+    """Test that VoiceFile correctly serializes voice message metadata."""
+    from kesoku.gateway.chatbot.discord import VoiceFile
+    import io
+
+    fp = io.BytesIO(b"dummy audio content")
+    voice_file = VoiceFile(
+        fp,
+        filename="voice.ogg",
+        duration_secs=3.14,
+        waveform="abcde12345",
+    )
+
+    serialized = voice_file.to_dict(0)
+    assert serialized["id"] == 0
+    assert serialized["filename"] == "voice.ogg"
+    assert serialized["duration_secs"] == 3.14
+    assert serialized["waveform"] == "abcde12345"
+
+
+def test_generate_pseudo_waveform() -> None:
+    """Test that pseudo waveform generator returns a valid base64 string of 256 bytes."""
+    from kesoku.gateway.chatbot.discord import _generate_pseudo_waveform
+    import base64
+
+    encoded = _generate_pseudo_waveform()
+    assert isinstance(encoded, str)
+    # Decode it and ensure it is exactly 256 bytes
+    decoded = base64.b64decode(encoded.encode("utf-8"))
+    assert len(decoded) == 256
+    # Verify all values are in the uint8 range (0-255)
+    for val in decoded:
+        assert 0 <= val <= 255
+
+
+@pytest.mark.asyncio
+async def test_get_audio_duration_success() -> None:
+    """Test that _get_audio_duration successfully extracts float duration from ffprobe output."""
+    from kesoku.gateway.chatbot.discord import _get_audio_duration
+
+    mock_proc = MagicMock()
+    mock_proc.stdout = "  45.67 \n"
+
+    with patch("subprocess.run", return_value=mock_proc) as mock_run:
+        duration = await _get_audio_duration("/tmp/test.ogg")
+        assert duration == 45.67
+        mock_run.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_get_audio_duration_failure() -> None:
+    """Test that _get_audio_duration gracefully returns 0.0 on subprocess error."""
+    from kesoku.gateway.chatbot.discord import _get_audio_duration
+
+    with patch("subprocess.run", side_effect=Exception("ffprobe failed")) as mock_run:
+        duration = await _get_audio_duration("/tmp/test.ogg")
+        assert duration == 0.0
+        mock_run.assert_called_once()

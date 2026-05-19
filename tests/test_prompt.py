@@ -10,9 +10,10 @@ def test_build_sys_prompt_default() -> None:
     # Check default system prompt is included
     assert PREAMBLE.strip() in prompt
 
-    # Check file instructions header and syntax are included
-    assert "# Sending Files to the User" in prompt
+    # Check file/voice instructions header and syntax are included
+    assert "# Sending Files and Voice Messages to the User" in prompt
     assert "[file: /abs/path/to/file]" in prompt
+    assert "[voice: /abs/path/to/audio]" in prompt
     assert "Rules for file sending:" in prompt
 
 
@@ -22,7 +23,7 @@ def test_build_sys_prompt_with_custom_context() -> None:
     prompt = build_sys_prompt(custom_prompt=custom_context)
 
     assert PREAMBLE.strip() in prompt
-    assert "# Sending Files to the User" in prompt
+    assert "# Sending Files and Voice Messages to the User" in prompt
     assert custom_context in prompt
 
 
