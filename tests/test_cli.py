@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from kesoku.agent.llm import MockLLM
 from kesoku.cli import app
+from kesoku.config import KesokuConfig
 
 runner = CliRunner()
 
@@ -194,7 +195,7 @@ def test_cli_service_dry_run() -> None:
     """Verify service command dry-run generated systemd unit content."""
     with (
         patch("sys.platform", "linux"),
-        patch("kesoku.cli.load_config"),
+        patch("kesoku.cli_service.load_config", return_value=KesokuConfig()),
         patch(
             "os.path.abspath",
             side_effect=lambda p: (
@@ -234,6 +235,154 @@ def test_cli_service_dry_run() -> None:
         assert 'Environment="DISCORD_BOT_TOKEN=discord_token"' in result_system.stdout
 
 
+def test_cli_service_inherited_envs() -> None:
+    """Verify service install automatically inherits matching environment variables and allows overrides."""
+    mock_env = {
+        "PATH": "/custom/bin",
+        "HTTP_PROXY": "http://proxy.local",
+        "GOOGLE_API_KEY": "ai_key_123",
+        "DISCORD_TOKEN": "discord_token_123",
+        "SOME_OTHER_VAR": "not_inherited",
+    }
+    with (
+        patch("sys.platform", "linux"),
+        patch("kesoku.cli_service.load_config", return_value=KesokuConfig()),
+        patch(
+            "os.path.abspath",
+            side_effect=lambda p: (
+                "/mock/workspace/config.toml" if "config.toml" in p else f"/mock/bin/{os.path.basename(p)}"
+            ),
+        ),
+        patch("os.path.exists", return_value=True),
+        patch.dict("os.environ", mock_env, clear=True),
+    ):
+        # 1. Test basic dry-run with inherited variables
+        result = runner.invoke(app, ["service", "install", "--dry-run"])
+        assert result.exit_code == 0
+        assert 'Environment="PATH=/custom/bin"' in result.stdout
+        assert 'Environment="HTTP_PROXY=http://proxy.local"' in result.stdout
+        assert 'Environment="GOOGLE_API_KEY=ai_key_123"' in result.stdout
+        assert 'Environment="DISCORD_TOKEN=discord_token_123"' in result.stdout
+        assert "SOME_OTHER_VAR" not in result.stdout
+
+        # 2. Test dry-run where one inherited default is overridden via command line option
+        result_override = runner.invoke(
+            app,
+            [
+                "service",
+                "install",
+                "--dry-run",
+                "-e",
+                "DISCORD_TOKEN=overridden_discord_token",
+                "-e",
+                "CUSTOM_VAR=custom_value",
+            ],
+        )
+        assert result_override.exit_code == 0
+        assert 'Environment="PATH=/custom/bin"' in result_override.stdout
+        assert 'Environment="DISCORD_TOKEN=overridden_discord_token"' in result_override.stdout
+        assert 'Environment="CUSTOM_VAR=custom_value"' in result_override.stdout
+        assert "discord_token_123" not in result_override.stdout
+
+
+def test_cli_service_install_discord_validation() -> None:
+    """Verify service install refuses to proceed if Discord is enabled but no token is provided."""
+    # Case 1: Discord enabled, but NO token is configured in config, shell, or options -> Refuse
+    cfg_no_token = KesokuConfig()
+    cfg_no_token.discord.enabled = True
+    cfg_no_token.discord.bot_token = None
+
+    with (
+        patch("sys.platform", "linux"),
+        patch("kesoku.cli_service.load_config", return_value=cfg_no_token),
+        patch(
+            "os.path.abspath",
+            side_effect=lambda p: (
+                "/mock/workspace/config.toml" if "config.toml" in p else f"/mock/bin/{os.path.basename(p)}"
+            ),
+        ),
+        patch("os.path.exists", return_value=True),
+        patch.dict("os.environ", {}, clear=True),
+    ):
+        result = runner.invoke(app, ["service", "install", "--dry-run"])
+        assert result.exit_code == 1
+        assert "Discord chatbot is enabled in the configuration" in result.stdout
+
+    # Case 2: Discord enabled, token is set in config -> Success
+    cfg_config_token = KesokuConfig()
+    cfg_config_token.discord.enabled = True
+    cfg_config_token.discord.bot_token = "my_config_token"
+
+    with (
+        patch("sys.platform", "linux"),
+        patch("kesoku.cli_service.load_config", return_value=cfg_config_token),
+        patch(
+            "os.path.abspath",
+            side_effect=lambda p: (
+                "/mock/workspace/config.toml" if "config.toml" in p else f"/mock/bin/{os.path.basename(p)}"
+            ),
+        ),
+        patch("os.path.exists", return_value=True),
+        patch.dict("os.environ", {}, clear=True),
+    ):
+        result = runner.invoke(app, ["service", "install", "--dry-run"])
+        assert result.exit_code == 0
+
+    # Case 3: Discord enabled, token is set in shell environment -> Success
+    with (
+        patch("sys.platform", "linux"),
+        patch("kesoku.cli_service.load_config", return_value=cfg_no_token),
+        patch(
+            "os.path.abspath",
+            side_effect=lambda p: (
+                "/mock/workspace/config.toml" if "config.toml" in p else f"/mock/bin/{os.path.basename(p)}"
+            ),
+        ),
+        patch("os.path.exists", return_value=True),
+        patch.dict("os.environ", {"DISCORD_TOKEN": "my_env_token"}, clear=True),
+    ):
+        result = runner.invoke(app, ["service", "install", "--dry-run"])
+        assert result.exit_code == 0
+        assert 'Environment="DISCORD_TOKEN=my_env_token"' in result.stdout
+
+    # Case 4: Discord enabled, token is passed as command line option -> Success
+    with (
+        patch("sys.platform", "linux"),
+        patch("kesoku.cli_service.load_config", return_value=cfg_no_token),
+        patch(
+            "os.path.abspath",
+            side_effect=lambda p: (
+                "/mock/workspace/config.toml" if "config.toml" in p else f"/mock/bin/{os.path.basename(p)}"
+            ),
+        ),
+        patch("os.path.exists", return_value=True),
+        patch.dict("os.environ", {}, clear=True),
+    ):
+        result = runner.invoke(app, ["service", "install", "--dry-run", "-e", "DISCORD_TOKEN=my_option_token"])
+        assert result.exit_code == 0
+        assert 'Environment="DISCORD_TOKEN=my_option_token"' in result.stdout
+
+    # Case 5: Discord is disabled, token is missing -> Success
+    cfg_disabled = KesokuConfig()
+    cfg_disabled.discord.enabled = False
+    cfg_disabled.discord.bot_token = None
+
+    with (
+        patch("sys.platform", "linux"),
+        patch("kesoku.cli_service.load_config", return_value=cfg_disabled),
+        patch(
+            "os.path.abspath",
+            side_effect=lambda p: (
+                "/mock/workspace/config.toml" if "config.toml" in p else f"/mock/bin/{os.path.basename(p)}"
+            ),
+        ),
+        patch("os.path.exists", return_value=True),
+        patch.dict("os.environ", {}, clear=True),
+    ):
+        result = runner.invoke(app, ["service", "install", "--dry-run"])
+        assert result.exit_code == 0
+
+
 def test_cli_service_install_user() -> None:
     """Verify successful user-level installation of the service."""
     m_open = mock_open()
@@ -246,7 +395,7 @@ def test_cli_service_install_user() -> None:
 
     with (
         patch("sys.platform", "linux"),
-        patch("kesoku.cli.load_config"),
+        patch("kesoku.cli_service.load_config", return_value=KesokuConfig()),
         patch(
             "os.path.abspath",
             side_effect=lambda p: (
@@ -290,7 +439,7 @@ def test_cli_service_permission_error() -> None:
 
     with (
         patch("sys.platform", "linux"),
-        patch("kesoku.cli.load_config"),
+        patch("kesoku.cli_service.load_config", return_value=KesokuConfig()),
         patch(
             "os.path.abspath",
             side_effect=lambda p: (

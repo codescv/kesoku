@@ -124,12 +124,13 @@ def start_cmd(
     agent = Agent(gateway=gateway)
     bot_tasks = []
 
-    if cfg.discord.enabled and cfg.discord.bot_token:
+    discord_token = cfg.discord.bot_token or os.environ.get("DISCORD_TOKEN")
+    if cfg.discord.enabled and discord_token:
         from kesoku.gateway.chatbot.discord import DiscordChatbot
 
         discord_bot = DiscordChatbot(chatbot_id=cfg.discord.chatbot_id, gateway=gateway)
         bot_tasks.append(discord_bot.start())
-    elif cfg.discord.enabled and not cfg.discord.bot_token:
+    elif cfg.discord.enabled and not discord_token:
         console = Console()
         console.print("[bold red]Error: Discord is enabled but bot_token is not configured.[/bold red]")
         sys.exit(1)

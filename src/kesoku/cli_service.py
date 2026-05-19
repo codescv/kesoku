@@ -12,9 +12,21 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
+from kesoku.config import load_config
 from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+DEFAULT_INHERITED_ENVS = [
+    "PATH",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
+    "GOOGLE_GENAI_USE_VERTEXAI",
+    "DISCORD_TOKEN",
+]
 
 # Setup Sub-Typer app for services
 service_app = typer.Typer(help="Manage Kesoku AI Agent as a systemd background service.")
@@ -91,8 +103,16 @@ def install_cmd(
     console = Console()
     _verify_linux_platform(console)
 
-    # Resolve the absolute path of the configuration file
+    # Resolve the absolute path of the configuration file and load it
     config_abs_path = os.path.abspath(config_path)
+    if not os.path.exists(config_abs_path):
+        console.print(
+            f"[bold red]Error: Configuration file not found at '{config_abs_path}'. "
+            "Please run 'kesoku init' first.[/bold red]"
+        )
+        raise typer.Exit(code=1)
+
+    cfg = load_config(config_abs_path)
     working_dir = os.path.dirname(config_abs_path)
 
     # Detect absolute path of the kesoku executable
@@ -104,13 +124,31 @@ def install_cmd(
         kesoku_path = os.path.abspath(kesoku_path)
 
     # Construct Environment lines for systemd unit file
-    env_lines = []
+    env_dict = {}
+    for key in DEFAULT_INHERITED_ENVS:
+        if key in os.environ:
+            env_dict[key] = os.environ[key]
+
     if env:
         for item in env:
             if "=" not in item:
                 logger.warning(f"Skipping invalid environment variable format: '{item}'. Expected KEY=VALUE.")
                 continue
-            env_lines.append(f'Environment="{item}"')
+            key, val = item.split("=", 1)
+            env_dict[key] = val
+
+    # Early validation of Discord chatbot token configuration
+    if cfg.discord.enabled:
+        discord_token = cfg.discord.bot_token or env_dict.get("DISCORD_TOKEN")
+        if not discord_token:
+            console.print(
+                "[bold red]Error: Discord chatbot is enabled in the configuration, but no bot token "
+                "was configured in either config.toml or inherited/passed environment variables. "
+                "Please configure the bot token or specify it via '-e DISCORD_TOKEN=value'.[/bold red]"
+            )
+            raise typer.Exit(code=1)
+
+    env_lines = [f'Environment="{k}={v}"' for k, v in env_dict.items()]
     environment_block = "\n".join(env_lines)
 
     target_path, systemctl_reload, user_flag = _get_service_params(user)

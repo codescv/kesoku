@@ -49,6 +49,20 @@ async def test_init_missing_token() -> None:
 
 
 @pytest.mark.asyncio
+async def test_init_with_env_token() -> None:
+    """Test initialization with DISCORD_TOKEN environment variable fallback."""
+    cfg = KesokuConfig()
+    cfg.discord = DiscordConfig(enabled=True, bot_token=None, chatbot_id="discord")
+    with (
+        patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg),
+        patch.dict("os.environ", {"DISCORD_TOKEN": "env_token_value"}),
+    ):
+        gw = MagicMock(spec=Gateway)
+        bot = DiscordChatbot(chatbot_id="discord", gateway=gw)
+        assert bot.bot_token == "env_token_value"
+
+
+@pytest.mark.asyncio
 async def test_on_message_ignore_self(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test bot ignores its own messages."""
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):

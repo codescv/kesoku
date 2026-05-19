@@ -140,7 +140,7 @@ class DiscordChatbot(Chatbot):
         """
         super().__init__(chatbot_id, gateway)
         self.config = get_config()
-        self.bot_token = bot_token or self.config.discord.bot_token
+        self.bot_token = bot_token or self.config.discord.bot_token or os.environ.get("DISCORD_TOKEN")
         if not self.bot_token:
             raise ValueError("Discord bot token is required but not configured.")
 

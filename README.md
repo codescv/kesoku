@@ -45,7 +45,7 @@ thinking_level = "high"
 
 [discord]
 enabled = false
-bot_token = "your_discord_bot_token"
+bot_token = "your_discord_bot_token" # Optional if DISCORD_TOKEN environment variable is set
 ```
 
 ## Usage 🚀
@@ -89,7 +89,7 @@ uv run kesoku start -c private/config.toml
 To run Kesoku as a persistent background service using systemd on Linux, use the `service` command group:
 
 #### 1. Install the Service
-Generates and installs the systemd unit file.
+Generates and installs the systemd unit file. By default, the installation automatically inherits environment variables matching `PATH`, `HTTP_PROXY`, `HTTPS_PROXY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, and `DISCORD_TOKEN` from the current shell. You can override or add custom environment variables using the `-e` / `--env` options.
 
 - **User-Level Service (Default, recommended - no root required)**:
   ```bash
