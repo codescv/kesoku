@@ -8,6 +8,10 @@ llm = "gemini"
 # Optional: List of custom system prompt file paths relative to agent working directory
 # user_prompts = ["memory/USER.md"]
 
+[agent.history]
+max_turns = 30
+pin_initial_turns = 3
+pin_recent_turns = 10
 
 [gemini]
 # https://ai.google.dev/gemini-api/docs/models

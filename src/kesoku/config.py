@@ -26,6 +26,14 @@ class WorkspaceConfig(BaseModel):
     sessions_dir: str = Field(default="sessions", description="Path to session staging directory")
 
 
+class AgentHistoryConfig(BaseModel):
+    """Context history building and sliding window settings."""
+
+    max_turns: int = Field(default=30, description="Maximum logical turns in context history")
+    pin_initial_turns: int = Field(default=3, description="Number of initial conversational turns to pin")
+    pin_recent_turns: int = Field(default=10, description="Number of recent turns to keep in full detail")
+
+
 class AgentConfig(BaseModel):
     """Agent-level configuration settings."""
 
@@ -34,6 +42,7 @@ class AgentConfig(BaseModel):
         default_factory=list,
         description="List of custom user prompt file paths relative to agent working directory",
     )
+    history: AgentHistoryConfig = Field(default_factory=AgentHistoryConfig)
 
 
 class GeminiConfig(BaseModel):
@@ -127,12 +136,13 @@ _global_config: KesokuConfig | None = None
 def get_config() -> KesokuConfig:
     """Get the global KesokuConfig instance.
 
-    Raises:
-        RuntimeError: If configuration has not been loaded yet.
+    If configuration has not been explicitly loaded yet, lazily initializes and returns
+    a default KesokuConfig instance to ensure calls never fail.
     """
     global _global_config
     if _global_config is None:
-        raise RuntimeError("Configuration has not been loaded. Call load_config() first.")
+        logger.debug("Global configuration not loaded yet. Initializing defaults.")
+        _global_config = KesokuConfig()
     return _global_config
 
 

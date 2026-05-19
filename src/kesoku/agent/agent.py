@@ -12,8 +12,10 @@ from typing import Any
 
 from kesoku.agent.llm import BaseLLM, get_llm
 from kesoku.agent.tools import ToolContext, ToolRegistry, default_registry
+from kesoku.config import get_config
 from kesoku.constants import (
     ROLE_ASSISTANT,
+    ROLE_SYSTEM,
     ROLE_TOOL,
     ROLE_USER,
     STATUS_ERROR,
@@ -144,8 +146,8 @@ class SessionWorker:
             if latest_msg != current_msg:
                 current_msg = latest_msg
 
-            # Retrieve recent history from DB (which includes current_msg and any tool turns)
-            history = await self.gateway.get_session_history(self.session_id, limit=50)
+            # Retrieve and build the cleaned, prioritized, and aligned session history
+            history = await self._build_clean_history()
 
             tools_list = self.tool_registry.get_tools_list()
 
@@ -286,6 +288,188 @@ class SessionWorker:
                 await self.gateway.post(final_msg)
                 await self.gateway.mark_message_processed(current_msg.id)
                 break
+
+    async def _build_clean_history(
+        self,
+        max_turns: int | None = None,
+        pin_initial_turns: int | None = None,
+        pin_recent_turns: int | None = None,
+    ) -> list[Message]:
+        """Retrieve, clean up, and format the conversational history for the LLM.
+
+        Resolves orphaned tool calls, handles initial turns pinning, applies priority-based turn dropping,
+        recovers loaded skills, and slides the turn window.
+
+        Example Turn-Based Truncation for 100 Turns (max_turns=30, pin_initial_turns=3, pin_recent_turns=10):
+        - System Prompt (kept at history[0])
+        - Pinned initial Turns 1, 2, and 3 (retained in full)
+        - Pinned recovered skill Turns (e.g., Turn 5 that loaded 'role-playing', recovered in full)
+        - Candidate Turns 74 to 90 (stripped of thoughts and resolved tools, keeping user prompts and assistant responses only)
+        - Candidate Turns 91 to 100 (kept in 100% full execution detail: prompts, thoughts, tool calls/results)
+
+        Args:
+            max_turns: Maximum logical turns allowed in context history. If None, uses config setting.
+            pin_initial_turns: Number of initial turns to pin at the start. If None, uses config setting.
+            pin_recent_turns: Number of latest turns to keep in full detail. If None, uses config setting.
+
+        Returns:
+            A list of cleanly structured, prioritized, and aligned Message objects for the LLM.
+        """
+        cfg = get_config().agent.history
+
+        if max_turns is None:
+            max_turns = cfg.max_turns
+        if pin_initial_turns is None:
+            pin_initial_turns = cfg.pin_initial_turns
+        if pin_recent_turns is None:
+            pin_recent_turns = cfg.pin_recent_turns
+
+        # 1. Detects and heals orphaned tool calls by posting a synthesized interruption result.
+        raw_history = await self.gateway.get_session_history(self.session_id, limit=0)
+        tool_calls = [m for m in raw_history if m.type == TYPE_TOOL_CALL]
+        tool_results_parent_ids = {
+            m.parent_id for m in raw_history if m.type == TYPE_TOOL_RESULT and m.parent_id
+        }
+
+        healed = False
+        for tc in tool_calls:
+            if tc.id not in tool_results_parent_ids:
+                logger.warning(
+                    f"Found orphaned tool call {tc.id} (tool: {tc.metadata.get('tool_name')}). "
+                    "Synthesizing interruption response."
+                )
+                tool_name = tc.metadata.get("tool_name", "unknown_tool")
+                interrupted_msg = Message(
+                    session_id=self.session_id,
+                    chatbot_id=tc.chatbot_id,
+                    channel_id=tc.channel_id,
+                    sender=tool_name,
+                    role=ROLE_TOOL,
+                    type=TYPE_TOOL_RESULT,
+                    content=f"Tool `{tool_name}` execution was interrupted due to service restart.",
+                    status=STATUS_RESPONDED,
+                    parent_id=tc.id,
+                    metadata={
+                        "tool_name": tool_name,
+                        "tool_error": "Tool execution was interrupted due to service restart.",
+                    },
+                )
+                await self.gateway.post(interrupted_msg)
+                healed = True
+
+        if healed:
+            raw_history = await self.gateway.get_session_history(self.session_id, limit=0)
+
+        # 2. Always preserves the initial system message(s) at the start.
+        system_msg = None
+        for m in raw_history:
+            if m.role == ROLE_SYSTEM:
+                system_msg = m
+                break
+
+        conv_msgs = [
+            m for m in raw_history if (not system_msg or m.id != system_msg.id) and m.role != ROLE_SYSTEM
+        ]
+
+        # 3. Groups messages into complete logical turns (User prompt -> ... -> before next user prompt).
+        turns: list[list[Message]] = []
+        current_turn: list[Message] = []
+        for m in conv_msgs:
+            if m.role == ROLE_USER:
+                if current_turn:
+                    turns.append(current_turn)
+                current_turn = [m]
+            else:
+                if current_turn:
+                    current_turn.append(m)
+                else:
+                    current_turn = [m]
+        if current_turn:
+            turns.append(current_turn)
+
+        # 4. Pins the first K turns immediately following the system message.
+        pinned_turns = turns[:pin_initial_turns]
+        candidate_turns = turns[pin_initial_turns:]
+
+        # 5. Drops thoughts and intermediate tool turns for older turns, treating parallel batches atomically.
+        cutoff_idx = max(0, len(candidate_turns) - pin_recent_turns)
+        older_candidate_turns = candidate_turns[:cutoff_idx]
+        recent_candidate_turns = candidate_turns[cutoff_idx:]
+
+        tc_to_tr = {}
+        for m in raw_history:
+            if m.type == TYPE_TOOL_RESULT and m.parent_id:
+                tc_to_tr[m.parent_id] = m
+
+        turn_to_tcs = {}
+        for m in raw_history:
+            if m.type == TYPE_TOOL_CALL and m.parent_id:
+                turn_to_tcs.setdefault(m.parent_id, []).append(m)
+
+        resolved_turns_without_skill = set()
+        for user_msg_id, tcs in turn_to_tcs.items():
+            is_resolved = all(tc.id in tc_to_tr for tc in tcs)
+            has_skill = any(tc.metadata.get("tool_name") == "use_skill" for tc in tcs)
+            if is_resolved and not has_skill:
+                resolved_turns_without_skill.add(user_msg_id)
+
+        clean_older_candidate_turns = []
+        for turn in older_candidate_turns:
+            dropped_ids = set()
+            user_prompt = next((m for m in turn if m.role == ROLE_USER), None)
+            user_prompt_id = user_prompt.id if user_prompt else None
+
+            for m in turn:
+                if m.role == ROLE_ASSISTANT and m.type == TYPE_THOUGHT:
+                    dropped_ids.add(m.id)
+                    continue
+                if m.type == TYPE_TOOL_CALL and user_prompt_id and user_prompt_id in resolved_turns_without_skill:
+                    dropped_ids.add(m.id)
+                    continue
+                if m.type == TYPE_TOOL_RESULT and m.parent_id:
+                    parent_tc = next((tc for tcs in turn_to_tcs.values() for tc in tcs if tc.id == m.parent_id), None)
+                    if parent_tc and parent_tc.parent_id in resolved_turns_without_skill:
+                        dropped_ids.add(m.id)
+                        continue
+
+            clean_turn = [m for m in turn if m.id not in dropped_ids]
+            clean_older_candidate_turns.append(clean_turn)
+
+        clean_candidate_turns = clean_older_candidate_turns + recent_candidate_turns
+
+        # 6. Trims/aligns history strictly by turn count, naturally preserving user-message start.
+        allowed_turns = max_turns - pin_initial_turns
+        if allowed_turns <= 0:
+            suffix_turns = []
+            discarded_candidate_turns = clean_candidate_turns
+        else:
+            suffix_idx = max(0, len(clean_candidate_turns) - allowed_turns)
+            suffix_turns = clean_candidate_turns[suffix_idx:]
+            discarded_candidate_turns = clean_candidate_turns[:suffix_idx]
+
+        # 7. Recovers any pinned skill use (use_skill) turns completely and atomically.
+        recovered_turns = []
+        for turn in discarded_candidate_turns:
+            has_completed_skill = False
+            for m in turn:
+                if m.type == TYPE_TOOL_RESULT and m.metadata.get("tool_name") == "use_skill" and "tool_error" not in m.metadata:
+                    has_completed_skill = True
+                    break
+            if has_completed_skill:
+                recovered_turns.append(turn)
+
+        # 8. Flatten turns and construct the final chronological context history.
+        final_history = []
+        if system_msg:
+            final_history.append(system_msg)
+        for turn in pinned_turns:
+            final_history.extend(turn)
+        for turn in recovered_turns:
+            final_history.extend(turn)
+        for turn in suffix_turns:
+            final_history.extend(turn)
+
+        return final_history
 
 
 class Agent:
