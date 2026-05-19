@@ -237,6 +237,19 @@ def init_config(config_path: str, overwrite: bool = False) -> None:
         logger.error(f"Failed to copy configuration template to {config_path}: {e}")
         raise
 
+    # Copy cronjob.example.toml to cronjob.toml if not exists
+    cron_toml_path = os.path.join(base_dir, "cronjob.toml")
+    if not os.path.exists(cron_toml_path):
+        try:
+            cron_ref = importlib.resources.files("kesoku.resources") / "cronjob.example.toml"
+            cron_bytes = cron_ref.read_bytes()
+            with open(cron_toml_path, "wb") as f:
+                f.write(cron_bytes)
+            logger.info(f"Cronjob template copied successfully to {cron_toml_path}")
+        except Exception as e:
+            logger.error(f"Failed to copy cronjob template to {cron_toml_path}: {e}")
+
+
 
 def init_skills(skills_dir: str, overwrite: bool = False) -> None:
     """Copy default resource skills from kesoku.resources to workspace skills_dir when initializing.

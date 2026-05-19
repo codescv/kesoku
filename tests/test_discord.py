@@ -936,3 +936,63 @@ async def test_handle_message_intermediate_special_messages_deletion(
 
             # Intermediate messages list should be cleared/removed for the channel
             assert "12345" not in bot._intermediate_messages
+
+
+@pytest.mark.asyncio
+async def test_trigger_cronjob_auto_thread(mock_gateway: MagicMock) -> None:
+    """Test trigger_cronjob automatically creates a thread in an auto-thread channel."""
+    cfg = KesokuConfig()
+    cfg.discord = DiscordConfig(
+        enabled=True,
+        bot_token="test_token",
+        chatbot_id="discord_test",
+        no_auto_thread_channels=["no-thread-channel"],
+    )
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+
+            # Set bot is_ready to True
+            bot.bot.is_ready = MagicMock(return_value=True)
+
+            # Mock the text channel
+            mock_text_channel = AsyncMock(spec=discord.TextChannel)
+            mock_text_channel.id = 11111
+            mock_text_channel.name = "auto-thread-channel"
+
+            # Mock the starter message
+            mock_starter_msg = AsyncMock(spec=discord.Message)
+            mock_text_channel.send.return_value = mock_starter_msg
+
+            # Mock the created thread
+            mock_thread = AsyncMock(spec=discord.Thread)
+            mock_thread.id = 22222
+            mock_thread.name = "thread-name"
+            mock_thread.join = AsyncMock()
+            mock_starter_msg.create_thread.return_value = mock_thread
+
+            # Setup fetch channel and typing mocks
+            bot.bot.get_channel = MagicMock(return_value=mock_text_channel)
+            bot._typing_tasks = {}
+
+            # Run trigger_cronjob
+            await bot.trigger_cronjob(
+                channel_id="11111",
+                prompt_content="Run scheduled prompt",
+                mention_user_id="55555",
+            )
+
+            # Verify starter message was sent with user mention
+            mock_text_channel.send.assert_called_once_with("<@55555> Scheduled job initiated.")
+            # Verify thread was created on that starter message
+            mock_starter_msg.create_thread.assert_called_once()
+            # Verify thread was joined
+            mock_thread.join.assert_called_once()
+
+            # Verify Gateway post was called with thread's ID ("22222")
+            mock_gateway.post.assert_called_once()
+            posted_msg = mock_gateway.post.call_args[0][0]
+            assert posted_msg.channel_id == "22222"
+            assert "Run scheduled prompt" in posted_msg.content
+            assert posted_msg.metadata.get("is_cronjob") is True

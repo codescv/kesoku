@@ -1,0 +1,23 @@
+# Kesoku Cronjob Configuration
+
+# [[job]]
+# # The standard 5-field cron schedule: minute hour day-of-month month day-of-week.
+# # This example matches every 13 minutes between 10:00 and 22:00.
+# schedule = "*/13 10-22 * * *"
+#
+# # Path to the prompt file, relative to the directory containing this config file.
+# prompt = "cronjobs/cron_prompt.md"
+#
+# # Optional: Discord User ID to mention / notify when the job triggers.
+# mention_user_id = "123"
+#
+# # Discord Channel ID where the message should be sent.
+# channel_id = "456"
+#
+# # The chatbot adapter ID configured in config.toml.
+# chatbot_id = "discord"
+#
+# # Optional: Trigger probability (between 0.0 and 1.0).
+# # If set to 0.02, the job will run with a 2% chance on scheduled ticks.
+# # Omit this option to always run the job on schedule.
+# probability = 0.02

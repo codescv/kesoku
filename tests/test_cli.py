@@ -34,6 +34,7 @@ def test_cli_init(tmp_path: Any) -> None:
     result = runner.invoke(app, ["init", "-w", str(tmp_path)])
     assert result.exit_code == 0
     assert os.path.exists(config_path)
+    assert os.path.exists(tmp_path / "cronjob.toml")
     assert os.path.exists(tmp_path / "kesoku.db")
     assert os.path.exists(tmp_path / "skills")
 

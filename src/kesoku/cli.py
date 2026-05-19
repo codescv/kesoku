@@ -123,6 +123,7 @@ def start_cmd(
     gateway = Gateway()
     agent = Agent(gateway=gateway)
     bot_tasks = []
+    bots = []
 
     discord_token = cfg.discord.bot_token or os.environ.get("DISCORD_TOKEN")
     if cfg.discord.enabled and discord_token:
@@ -130,16 +131,33 @@ def start_cmd(
 
         discord_bot = DiscordChatbot(chatbot_id=cfg.discord.chatbot_id, gateway=gateway)
         bot_tasks.append(discord_bot.start())
+        bots.append(discord_bot)
     elif cfg.discord.enabled and not discord_token:
         console = Console()
         console.print("[bold red]Error: Discord is enabled but bot_token is not configured.[/bold red]")
         sys.exit(1)
 
+    cron_manager = None
+    config_dir = cfg.agent_working_dir
+    if config_dir:
+        cron_toml_path = os.path.join(config_dir, "cronjob.toml")
+        if os.path.exists(cron_toml_path):
+            from kesoku.cron import CronManager
+
+            cron_manager = CronManager(chatbots=bots, config_dir=config_dir)
+            logger.info(f"Loaded cronjobs configuration from {cron_toml_path}")
+
     async def _service_runner() -> None:
         agent_task = asyncio.create_task(agent.start())
         chatbot_tasks = [asyncio.create_task(bt) for bt in bot_tasks]
+        tasks = [agent_task] + chatbot_tasks
+
+        if cron_manager:
+            cron_task = asyncio.create_task(cron_manager.start())
+            tasks.append(cron_task)
+
         logger.info("Kesoku service started in foreground mode. Press Ctrl+C to stop.")
-        await asyncio.gather(agent_task, *chatbot_tasks)
+        await asyncio.gather(*tasks)
 
     try:
         asyncio.run(_service_runner())

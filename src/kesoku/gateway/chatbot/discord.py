@@ -510,3 +510,108 @@ class DiscordChatbot(Chatbot):
                         logger.warning(
                             f"Failed to delete intermediate message {msg.id} in channel {message.channel_id}: {de}"
                         )
+
+    async def trigger_cronjob(
+        self,
+        channel_id: str,
+        prompt_content: str,
+        mention_user_id: str | None = None,
+    ) -> None:
+        """Trigger a scheduled cronjob in the specified channel/thread.
+
+        Args:
+            channel_id: Discord channel or thread identifier.
+            prompt_content: The prompt message content to run.
+            mention_user_id: Optional Discord user ID to mention.
+        """
+        if not self.bot.is_ready():
+            logger.info("Discord bot is not ready yet. Waiting for connection...")
+            try:
+                await self.bot.wait_until_ready()
+            except Exception as e:
+                logger.error(f"Failed waiting for Discord bot to be ready: {e}")
+                return
+
+        try:
+            target_id = int(channel_id)
+        except ValueError:
+            logger.error(f"Invalid Discord channel_id for cronjob: {channel_id}")
+            return
+
+        channel = self.bot.get_channel(target_id)
+        if not channel:
+            try:
+                channel = await self.bot.fetch_channel(target_id)  # type: ignore
+            except Exception as fe:
+                logger.error(f"Failed to fetch Discord channel {target_id} for cronjob: {fe}")
+                return
+
+        # Determine if this is an auto-thread channel
+        is_thread = isinstance(channel, discord.Thread)
+        no_thread_channels = self.config.discord.no_auto_thread_channels
+        channel_name = getattr(channel, "name", "")
+        is_no_thread = str(channel.id) in no_thread_channels or channel_name in no_thread_channels
+
+        target_channel = channel
+        if not is_thread and not is_no_thread and hasattr(channel, "create_thread"):
+            try:
+                mention_str = f"<@{mention_user_id}> " if mention_user_id else ""
+                starter_text = f"{mention_str}Scheduled job initiated."
+                starter_msg = await channel.send(starter_text)
+
+                # Create thread named after the job/date
+                thread_title = f"Scheduled Job - {datetime.date.today().isoformat()}"
+                thread = await starter_msg.create_thread(name=thread_title)
+                await thread.join()
+                target_channel = thread
+            except Exception as e:
+                logger.error(f"Failed to auto-create thread for cronjob in channel {channel.id}: {e}", exc_info=True)
+        elif target_channel == channel and mention_user_id:
+            # Send mention starter to direct channel/thread if not auto-threading
+            try:
+                await channel.send(f"<@{mention_user_id}> Scheduled job starting.")
+            except Exception as e:
+                logger.warning(f"Failed to send mention in channel {channel.id}: {e}")
+
+        target_channel_id_str = str(target_channel.id)
+        session = await self.gateway.get_session_by_channel(self.chatbot_id, target_channel_id_str)
+
+        if not session:
+            custom_prompt = _build_discord_custom_prompt(target_channel, self.bot.user)
+            session_title = getattr(target_channel, "name", None) or f"Scheduled Job {target_channel_id_str}"
+            session = await self.gateway.create_session(
+                title=session_title,
+                custom_prompt=custom_prompt,
+            )
+            session_id = session.id
+        else:
+            session_id = session.id
+            await self.gateway.update_session_updated_at(session_id)
+
+        tz_name = _get_local_timezone_name()
+        now_dt = datetime.datetime.now()
+        now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+        discord_msg_content = (
+            f"`System` at `{now_str} {tz_name}`:\n"
+            f"{prompt_content}"
+        )
+
+        msg = Message(
+            session_id=session_id,
+            chatbot_id=self.chatbot_id,
+            channel_id=target_channel_id_str,
+            sender="System",
+            role=ROLE_USER,
+            type=TYPE_TEXT,
+            content=discord_msg_content,
+            timestamp=now_dt.timestamp(),
+            status=STATUS_PENDING_AGENT,
+            metadata={"is_cronjob": True},
+        )
+        await self.gateway.post(msg)
+
+        # Trigger typing status for the thread/channel while agent is thinking
+        if target_channel_id_str not in self._typing_tasks:
+            self._typing_tasks[target_channel_id_str] = asyncio.create_task(self._keep_typing(target_channel))
+
