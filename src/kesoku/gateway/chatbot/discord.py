@@ -266,48 +266,62 @@ class DiscordChatbot(Chatbot):
             return
 
         # Thread-based context separation
-        thread: discord.Thread | None = None
+        target_channel: discord.Thread | discord.DMChannel | discord.GroupChannel | discord.TextChannel | None = None
         if isinstance(message.channel, discord.Thread):
-            thread = message.channel
+            target_channel = message.channel
         else:
-            # In regular channel; find or create a thread
-            if hasattr(message.channel, "guild") and message.channel.guild:
-                thread = message.channel.guild.get_thread(message.id)
-            if not thread and hasattr(message, "thread") and message.thread:
-                thread = message.thread
+            # In regular channel; check if this channel is in no_auto_thread_channels
+            no_thread_channels = self.config.discord.no_auto_thread_channels
+            channel_name = getattr(message.channel, "name", "")
+            is_no_thread = (
+                str(message.channel.id) in no_thread_channels
+                or channel_name in no_thread_channels
+            )
 
-            if not thread:
+            if is_no_thread:
+                target_channel = message.channel
+            else:
+                # In regular channel; find or create a thread
+                thread: discord.Thread | None = None
+                if hasattr(message.channel, "guild") and message.channel.guild:
+                    thread = message.channel.guild.get_thread(message.id)
+                if not thread and hasattr(message, "thread") and message.thread:
+                    thread = message.thread
+
+                if not thread:
+                    try:
+                        title = message.content[:30] + ("..." if len(message.content) > 30 else "")
+                        if not title.strip():
+                            title = f"Chat with {message.author.display_name}"
+                        thread = await message.create_thread(name=title)
+                    except discord.HTTPException as e:
+                        logger.warning(f"Failed to create thread on message {message.id} (concurrent bot creation?): {e}")
+                        await asyncio.sleep(0.5)
+                        if hasattr(message.channel, "guild") and message.channel.guild:
+                            thread = message.channel.guild.get_thread(message.id)
+                        if not thread and hasattr(message.channel, "archived_threads"):
+                            async for t in message.channel.archived_threads(limit=10):
+                                if t.id == message.id:
+                                    thread = t
+                                    break
+                if not thread:
+                    logger.error(f"Could not create or retrieve thread for message {message.id}")
+                    return
+
                 try:
-                    title = message.content[:30] + ("..." if len(message.content) > 30 else "")
-                    if not title.strip():
-                        title = f"Chat with {message.author.display_name}"
-                    thread = await message.create_thread(name=title)
-                except discord.HTTPException as e:
-                    logger.warning(f"Failed to create thread on message {message.id} (concurrent bot creation?): {e}")
-                    await asyncio.sleep(0.5)
-                    if hasattr(message.channel, "guild") and message.channel.guild:
-                        thread = message.channel.guild.get_thread(message.id)
-                    if not thread and hasattr(message.channel, "archived_threads"):
-                        async for t in message.channel.archived_threads(limit=10):
-                            if t.id == message.id:
-                                thread = t
-                                break
-            if not thread:
-                logger.error(f"Could not create or retrieve thread for message {message.id}")
-                return
+                    await thread.join()
+                except Exception as je:
+                    logger.debug(f"Already joined or error joining thread {thread.id}: {je}")
+                target_channel = thread
 
-            try:
-                await thread.join()
-            except Exception as je:
-                logger.debug(f"Already joined or error joining thread {thread.id}: {je}")
-
-        channel_id = str(thread.id)
+        channel_id = str(target_channel.id)
         session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
 
         if not session:
-            custom_prompt = _build_discord_custom_prompt(thread, message.author)
+            custom_prompt = _build_discord_custom_prompt(target_channel, message.author)
+            session_title = getattr(target_channel, "name", None) or f"Chat with {message.author.display_name}"
             session = await self.gateway.create_session(
-                title=thread.name,
+                title=session_title,
                 custom_prompt=custom_prompt,
                 created_at=message.created_at.timestamp(),
             )
@@ -339,7 +353,7 @@ class DiscordChatbot(Chatbot):
 
         # Trigger typing status for the thread/channel while agent is thinking
         if channel_id not in self._typing_tasks:
-            self._typing_tasks[channel_id] = asyncio.create_task(self._keep_typing(thread))
+            self._typing_tasks[channel_id] = asyncio.create_task(self._keep_typing(target_channel))
 
     async def handle_message(self, message: Message) -> None:
         """Process outgoing message from Gateway and send to target Discord thread.

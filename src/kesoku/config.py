@@ -61,6 +61,10 @@ class DiscordConfig(BaseModel):
     bot_token: str | None = Field(default=None, description="Discord bot token")
     chatbot_id: str = Field(default="discord", description="Unique chatbot identifier")
     user_allowlist: list[str] = Field(default_factory=list, description="List of allowed Discord user IDs or usernames")
+    no_auto_thread_channels: list[str] = Field(
+        default_factory=list,
+        description="List of Discord channel IDs or names where threads should not be automatically created",
+    )
 
 
 class ShellConfig(BaseModel):

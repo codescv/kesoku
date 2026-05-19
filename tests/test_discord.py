@@ -743,3 +743,134 @@ async def test_handle_message_with_voice_fallback(mock_config: KesokuConfig, moc
                         mock_channel.send.assert_any_call("Listen here: ")
                         mock_channel.send.assert_any_call(file=mock_file)
                         mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+
+
+@pytest.mark.asyncio
+async def test_on_message_no_auto_thread_by_channel_id(mock_gateway: MagicMock) -> None:
+    """Test that if incoming message channel ID is in no_auto_thread_channels, no thread is created."""
+    cfg = KesokuConfig()
+    cfg.discord = DiscordConfig(
+        enabled=True,
+        bot_token="test_token",
+        chatbot_id="discord_test",
+        no_auto_thread_channels=["999888"],
+    )
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+
+            mock_text_channel = MagicMock(spec=discord.TextChannel)
+            mock_text_channel.id = 999888
+            mock_text_channel.name = "no-thread-channel"
+            mock_text_channel.typing.return_value = MagicMock(__aenter__=AsyncMock(), __aexit__=AsyncMock())
+
+            msg = MagicMock(spec=discord.Message)
+            msg.author = MagicMock(spec=discord.Member, id=222, display_name="Allowed")
+            msg.author.name = "allowed_user"
+            msg.mentions = []
+            msg.channel = mock_text_channel
+            msg.content = "Hello direct channel"
+            msg.id = 888
+            msg.created_at = datetime.datetime.now(datetime.UTC)
+
+            # Mock message's thread creation just in case (to verify it is NOT called)
+            msg.create_thread = AsyncMock()
+
+            await bot.on_message(msg)
+
+            # Verify no thread was created
+            msg.create_thread.assert_not_called()
+
+            # Verify post was called with TextChannel's ID ("999888")
+            mock_gateway.post.assert_called_once()
+            posted_msg = mock_gateway.post.call_args[0][0]
+            assert posted_msg.channel_id == "999888"
+
+
+@pytest.mark.asyncio
+async def test_on_message_no_auto_thread_by_channel_name(mock_gateway: MagicMock) -> None:
+    """Test that if incoming message channel name is in no_auto_thread_channels, no thread is created."""
+    cfg = KesokuConfig()
+    cfg.discord = DiscordConfig(
+        enabled=True,
+        bot_token="test_token",
+        chatbot_id="discord_test",
+        no_auto_thread_channels=["no-thread-channel"],
+    )
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+
+            mock_text_channel = MagicMock(spec=discord.TextChannel)
+            mock_text_channel.id = 123456
+            mock_text_channel.name = "no-thread-channel"
+            mock_text_channel.typing.return_value = MagicMock(__aenter__=AsyncMock(), __aexit__=AsyncMock())
+
+            msg = MagicMock(spec=discord.Message)
+            msg.author = MagicMock(spec=discord.Member, id=222, display_name="Allowed")
+            msg.author.name = "allowed_user"
+            msg.mentions = []
+            msg.channel = mock_text_channel
+            msg.content = "Hello direct channel"
+            msg.id = 888
+            msg.created_at = datetime.datetime.now(datetime.UTC)
+
+            msg.create_thread = AsyncMock()
+
+            await bot.on_message(msg)
+
+            # Verify no thread was created
+            msg.create_thread.assert_not_called()
+
+            # Verify post was called with TextChannel's ID ("123456")
+            mock_gateway.post.assert_called_once()
+            posted_msg = mock_gateway.post.call_args[0][0]
+            assert posted_msg.channel_id == "123456"
+
+
+@pytest.mark.asyncio
+async def test_on_message_in_existing_thread_inside_no_thread_channel(mock_gateway: MagicMock) -> None:
+    """Test that if incoming message is already inside a Thread, it uses the Thread, even if the channel matches."""
+    cfg = KesokuConfig()
+    cfg.discord = DiscordConfig(
+        enabled=True,
+        bot_token="test_token",
+        chatbot_id="discord_test",
+        no_auto_thread_channels=["no-thread-channel"],
+    )
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+
+            mock_parent_channel = MagicMock(spec=discord.TextChannel)
+            mock_parent_channel.id = 123456
+            mock_parent_channel.name = "no-thread-channel"
+
+            mock_thread = AsyncMock(spec=discord.Thread)
+            mock_thread.id = 777777
+            mock_thread.name = "some-existing-thread"
+            mock_thread.parent = mock_parent_channel
+            mock_thread.guild = MagicMock(spec=discord.Guild)
+            mock_thread.guild.name = "GuildName"
+            mock_thread.guild.members = []
+            mock_thread.join = AsyncMock()
+            mock_thread.typing.return_value = MagicMock(__aenter__=AsyncMock(), __aexit__=AsyncMock())
+
+            msg = MagicMock(spec=discord.Message)
+            msg.author = MagicMock(spec=discord.Member, id=222, display_name="Allowed")
+            msg.author.name = "allowed_user"
+            msg.mentions = []
+            msg.channel = mock_thread  # message is in the thread!
+            msg.content = "Hello inside thread"
+            msg.id = 888
+            msg.created_at = datetime.datetime.now(datetime.UTC)
+
+            await bot.on_message(msg)
+
+            # Verify post was called with the thread's ID ("777777")
+            mock_gateway.post.assert_called_once()
+            posted_msg = mock_gateway.post.call_args[0][0]
+            assert posted_msg.channel_id == "777777"
