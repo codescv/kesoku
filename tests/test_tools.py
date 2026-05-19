@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock
 
-from kesoku.agent.tools import ToolContext, WebSearchTool, run_shell_command
+from kesoku.agent.tools import ShellCommandError, ToolContext, WebSearchTool, run_shell_command
 
 
 def test_web_search_tool_success() -> None:
@@ -128,3 +128,126 @@ def test_run_shell_command_env_variables(tmp_path) -> None:
         assert expected_staging in res
     finally:
         kesoku.config._global_config = original_config
+
+
+def test_run_shell_command_failure(tmp_path) -> None:
+    """Test that run_shell_command raises ShellCommandError on non-zero exit code."""
+    import pytest
+
+    import kesoku.config
+    from kesoku.config import load_config
+
+    original_config = kesoku.config._global_config
+    try:
+        config_path = tmp_path / "config.toml"
+        cfg = load_config(str(config_path))
+        cfg.agent_working_dir = str(tmp_path)
+
+        ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
+
+        with pytest.raises(ShellCommandError) as exc_info:
+            run_shell_command("echo 'error occurred' >&2 && exit 5", context=ctx)
+
+        assert "Command failed with exit code 5" in str(exc_info.value)
+        assert "error occurred" in str(exc_info.value)
+    finally:
+        kesoku.config._global_config = original_config
+
+
+def test_run_shell_command_timeout(tmp_path) -> None:
+    """Test that run_shell_command raises ShellCommandError on timeout."""
+    import subprocess
+    from unittest.mock import patch
+
+    import pytest
+
+    import kesoku.config
+    from kesoku.config import load_config
+
+    original_config = kesoku.config._global_config
+    try:
+        config_path = tmp_path / "config.toml"
+        cfg = load_config(str(config_path))
+        cfg.agent_working_dir = str(tmp_path)
+
+        ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired(
+                cmd="sleep 10", timeout=5, output=b"stdout data", stderr=b"stderr data"
+            )
+            with pytest.raises(ShellCommandError) as exc_info:
+                run_shell_command("sleep 10", context=ctx)
+
+            assert "Command timed out after" in str(exc_info.value)
+            assert "stdout data" in str(exc_info.value)
+            assert "stderr data" in str(exc_info.value)
+    finally:
+        kesoku.config._global_config = original_config
+
+
+def test_run_shell_command_start_failure(tmp_path) -> None:
+    """Test that run_shell_command raises ShellCommandError on starting non-existent command."""
+    import pytest
+
+    import kesoku.config
+    from kesoku.config import load_config
+
+    original_config = kesoku.config._global_config
+    try:
+        config_path = tmp_path / "config.toml"
+        cfg = load_config(str(config_path))
+        cfg.agent_working_dir = str(tmp_path)
+        # Disable shell mode to allow shlex splitting and triggering FileNotFoundError for non-existent executable
+        cfg.shell.use_shell = False
+
+        ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
+
+        with pytest.raises(ShellCommandError) as exc_info:
+            run_shell_command("non_existent_command_xyz", context=ctx)
+
+        assert "Error executing command" in str(exc_info.value)
+    finally:
+        kesoku.config._global_config = original_config
+
+
+def test_run_shell_command_failure_truncation(tmp_path) -> None:
+    """Test that run_shell_command truncates extremely long failed outputs and saves to a file."""
+    import os
+
+    import pytest
+
+    import kesoku.config
+    from kesoku.config import load_config
+
+    original_config = kesoku.config._global_config
+    try:
+        config_path = tmp_path / "config.toml"
+        cfg = load_config(str(config_path))
+        cfg.agent_working_dir = str(tmp_path)
+
+        ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
+
+        # Generate extremely long output (more than 1000 characters)
+        long_cmd = "python3 -c 'print(\"a\" * 2000); exit(1)'"
+        with pytest.raises(ShellCommandError) as exc_info:
+            run_shell_command(long_cmd, context=ctx)
+
+        err_msg = str(exc_info.value)
+        assert "Command failed with exit code 1" in err_msg
+        assert "Output truncated" in err_msg
+        assert "Full output saved to session workspace file:" in err_msg
+
+        # Extract output file path from message to verify it was written
+        import re
+
+        match = re.search(r"Full output saved to session workspace file: `([^`]+)`", err_msg)
+        assert match is not None
+        filepath = match.group(1)
+        assert os.path.exists(filepath)
+        with open(filepath, encoding="utf-8") as f:
+            content = f.read()
+            assert "a" * 2000 in content
+    finally:
+        kesoku.config._global_config = original_config
+

@@ -197,6 +197,12 @@ def web_search(query: str, context: ToolContext | None = None) -> str:
     return web_search_tool.web_search(query, context)
 
 
+class ShellCommandError(RuntimeError):
+    """Raised when a shell command execution fails or times out."""
+
+    pass
+
+
 @default_registry.register
 def run_shell_command(
     command: str,
@@ -297,12 +303,17 @@ def run_shell_command(
             if getattr(e, "stderr", None) and isinstance(e.stderr, bytes)
             else (getattr(e, "stderr", None) or "")
         )
-        return f"Command timed out after {TIMEOUT_SECONDS} seconds.\nSTDOUT:\n{out}\nSTDERR:\n{err}"
+        raise ShellCommandError(
+            f"Command timed out after {TIMEOUT_SECONDS} seconds.\n=== STDOUT ===\n{out}\n=== STDERR ===\n{err}"
+        ) from e
     except Exception as ex:
         logger.error(f"Failed to execute command '{command}': {ex}")
-        return f"Error executing command: {ex}"
+        raise ShellCommandError(f"Error executing command: {ex}") from ex
 
     out_str = f"=== STDOUT ===\n{res.stdout}\n=== STDERR ===\n{res.stderr}"
+
+    # Unified truncation logic
+    final_output = out_str
     if len(out_str) > MAX_OUTPUT_LENGTH:
         timestamp = int(time.time())
         output_filename = f"cmd_output_{timestamp}.txt"
@@ -314,7 +325,7 @@ def run_shell_command(
             with open(output_filepath, "w", encoding="utf-8") as f:
                 f.write(out_str)
             preview_len = MAX_OUTPUT_LENGTH // 2
-            return (
+            final_output = (
                 f"Output truncated (total length {len(out_str)} bytes). "
                 f"Full output saved to session workspace file: `{output_filepath}`.\n"
                 f"You can use tool `run_shell_command` (e.g., `cat {output_filename}`) "
@@ -323,9 +334,15 @@ def run_shell_command(
             )
         except Exception as ex:
             logger.error(f"Failed to save truncated output to '{output_filepath}': {ex}")
-            return f"Output truncated (total length {len(out_str)} bytes). Preview:\n{out_str[:MAX_OUTPUT_LENGTH]}"
+            final_output = (
+                f"Output truncated (total length {len(out_str)} bytes). "
+                f"Preview:\n{out_str[:MAX_OUTPUT_LENGTH]}"
+            )
 
-    return out_str
+    if res.returncode != 0:
+        raise ShellCommandError(f"Command failed with exit code {res.returncode}.\n{final_output}")
+
+    return final_output
 
 
 skill_manager = SkillManager()
