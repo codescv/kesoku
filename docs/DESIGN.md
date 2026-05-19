@@ -85,16 +85,26 @@ To support running Kesoku as a continuous background daemon in production enviro
 ### Service Subcommands Design
 - **Main Command**: `kesoku service` (mounted as a sub-Typer application group)
 - **Subcommands**:
-  - `install`: Generates and writes the systemd unit file, then runs systemd `daemon-reload`.
+  - `install`: Generates and writes the systemd unit file, runs systemd `daemon-reload`, and automatically enables (`systemctl enable`) the service to configure boot-time auto-start (without starting the active service process immediately).
     - Options:
       - `-c / --config <path>`: Custom configuration file path (default: `config.toml`). Resolves to an absolute path and sets `WorkingDirectory` and `ExecStart` automatically.
       - `-e / --env KEY=VALUE`: Environment variables injected into the systemd unit definition (can be specified multiple times).
       - `--user / --system`: Configures as a user-level unit (default, target path: `~/.config/systemd/user/kesoku.service`) or system-level unit (target path: `/etc/systemd/system/kesoku.service`).
       - `--dry-run`: Prints the generated service unit file directly to stdout without writing.
+    - Service Unit Optimizations:
+      - `Restart=always`: Ensures the background daemon is always restarted by systemd upon clean exits, unclean crashes, or signal termination.
+      - `RestartSec=5`: Introduces a safe 5-second restart delay to prevent tight crash loops.
+      - `TimeoutStopSec=210`: Provides a generous 3.5-minute shutdown grace period, giving the autonomous agent ample time to complete active LLM iterations or atomic tool executions cleanly and persist its state.
+      - `StandardOutput=journal` and `StandardError=journal`: Forces all stdout/stderr log streams to standard systemd `journald` infrastructure.
   - `uninstall`: Stops and disables the service, removes the unit file from disk, and reloads systemd daemon.
   - `start`: Starts the background systemd service via `systemctl [--user] start kesoku`.
   - `stop`: Stops the background systemd service via `systemctl [--user] stop kesoku`.
   - `restart`: Restarts the background systemd service via `systemctl [--user] restart kesoku`.
+  - `status`: Queries and displays the active runtime status of the background service via `systemctl [--user] status kesoku`.
+  - `logs`: Displays or streams log output directly from `journald` using `journalctl`.
+    - Options:
+      - `-f / --follow`: Stream/follow live log output.
+      - `-n / --lines <int>`: Show specified number of recent log lines (default: 50).
 
 
 

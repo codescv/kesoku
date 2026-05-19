@@ -116,7 +116,7 @@ def install_cmd(
     target_path, systemctl_reload, user_flag = _get_service_params(user)
     wanted_by = "default.target" if user else "multi-user.target"
 
-    # Generate Systemd unit file content
+    # Generate Systemd unit file content with journal logging and improved recovery/lifecycle options
     unit_content = f"""[Unit]
 Description=Kesoku AI Agent Service
 After=network.target
@@ -124,8 +124,12 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory={working_dir}
-ExecStart={kesoku_path} -c {config_abs_path} start
-Restart=on-failure
+ExecStart={kesoku_path} start -c {config_abs_path}
+Restart=always
+RestartSec=5
+TimeoutStopSec=210
+StandardOutput=journal
+StandardError=journal
 {environment_block}
 
 [Install]
@@ -169,6 +173,21 @@ WantedBy={wanted_by}
             "[bold yellow]Warning: Please reload systemd manually by running 'systemctl daemon-reload'.[/bold yellow]"
         )
 
+    # Always automatically enable the service to register boot-time auto-start
+    enable_cmd = ["systemctl"] + user_flag.split() + ["enable", "kesoku"]
+    if not user:
+        enable_cmd = ["sudo"] + enable_cmd
+
+    logger.info(f"Enabling service via: {' '.join(enable_cmd)}...")
+    try:
+        subprocess.run(enable_cmd, check=True, capture_output=True, text=True)
+        logger.info("Service enabled successfully.")
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"Could not enable service automatically: {e.stderr.strip() or e}")
+        console.print(
+            f"[bold yellow]Warning: Please enable the service manually: {' '.join(enable_cmd)}[/bold yellow]"
+        )
+
     console.print("\n[bold green]Kesoku service installed successfully![/bold green]")
     console.print("You can control the service using the following commands:")
     console.print(f"  [bold cyan]kesoku service start {user_flag.strip()}[/bold cyan]   - Start the service")
@@ -176,6 +195,7 @@ WantedBy={wanted_by}
     console.print(
         f"  [bold cyan]kesoku service status {user_flag.strip()}[/bold cyan]  - Check service status (via systemctl)"
     )
+    console.print(f"  [bold cyan]kesoku service logs {user_flag.strip()}[/bold cyan]    - View service logs")
 
 
 @service_app.command("uninstall")
@@ -306,3 +326,79 @@ def restart_cmd(
     """Restart the Kesoku background service."""
     console = Console()
     _run_systemctl_action("restart", user, console)
+
+
+@service_app.command("logs")
+def logs_cmd(
+    user: Annotated[
+        bool,
+        typer.Option(
+            "--user/--system",
+            help="Show logs for user-level systemd service (default) or system-level service",
+        ),
+    ] = True,
+    follow: Annotated[
+        bool,
+        typer.Option(
+            "-f",
+            "--follow",
+            help="Follow log output (like tail -f)",
+        ),
+    ] = False,
+    lines: Annotated[
+        int,
+        typer.Option(
+            "-n",
+            "--lines",
+            help="Number of journal entries to show",
+        ),
+    ] = 50,
+) -> None:
+    """Show logs from journald for the Kesoku background service."""
+    console = Console()
+    _verify_linux_platform(console)
+    _, _, user_flag = _get_service_params(user)
+
+    cmd_list = ["journalctl"]
+    if user:
+        cmd_list += ["--user"]
+    cmd_list += ["-u", "kesoku"]
+
+    if follow:
+        cmd_list += ["-f"]
+    if lines > 0:
+        cmd_list += ["-n", str(lines)]
+
+    logger.info(f"Viewing logs via: {' '.join(cmd_list)}...")
+    try:
+        subprocess.run(cmd_list, check=True)
+    except KeyboardInterrupt:
+        pass
+    except subprocess.CalledProcessError as e:
+        console.print(f"[bold red]Error retrieving logs: {e}[/bold red]")
+        raise typer.Exit(code=1)
+
+
+@service_app.command("status")
+def status_cmd(
+    user: Annotated[
+        bool,
+        typer.Option(
+            "--user/--system",
+            help="Check status of user-level systemd service (default) or system-level service",
+        ),
+    ] = True,
+) -> None:
+    """Check the status of the Kesoku background service."""
+    console = Console()
+    _verify_linux_platform(console)
+    _, _, user_flag = _get_service_params(user)
+
+    cmd_list = ["systemctl"] + user_flag.split() + ["status", "kesoku"]
+    if not user:
+        cmd_list = ["sudo"] + cmd_list
+
+    logger.info(f"Checking status via: {' '.join(cmd_list)}...")
+    subprocess.run(cmd_list)
+
+
