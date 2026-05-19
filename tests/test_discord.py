@@ -578,60 +578,9 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
 
 
 @pytest.mark.asyncio
-async def test_handle_message_tool_result_displays_parent_arguments(
-    mock_config: KesokuConfig, mock_gateway: MagicMock
-) -> None:
-    """Test tool result formatting retrieves and displays parent arguments using message.parent_id."""
-    from kesoku.constants import ROLE_TOOL, TYPE_TOOL_CALL, TYPE_TOOL_RESULT
-
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
-        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
-        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
-            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
-            mock_channel = AsyncMock(spec=discord.Thread)
-            bot.bot.get_channel = MagicMock(return_value=mock_channel)
-
-            # Mock parent message to return when get_messages_by_filters is called
-            parent_msg = Message(
-                id="parent123",
-                session_id="thread123",
-                chatbot_id="discord_test",
-                channel_id="12345",
-                sender="Kesoku",
-                role=ROLE_TOOL,
-                type=TYPE_TOOL_CALL,
-                content="Calling tool...",
-                metadata={"tool_name": "my_tool", "tool_arguments": {"query": "parent_query"}},
-            )
-            mock_gateway.db = MagicMock()
-            mock_gateway.db.get_messages_by_filters = MagicMock(return_value=[parent_msg])
-
-            result_msg = Message(
-                id="result123",
-                session_id="thread123",
-                chatbot_id="discord_test",
-                channel_id="12345",
-                sender="my_tool",
-                role=ROLE_TOOL,
-                type=TYPE_TOOL_RESULT,
-                content="Result...",
-                parent_id="parent123",
-            )
-
-            # Test successful tool result display formatting
-            await bot.handle_message(result_msg)
-            mock_channel.send.assert_any_call("📥 **my_tool**: `parent_query` ✅")
-
-            # Test failed tool result display formatting
-            result_msg.metadata["tool_error"] = "some_error"
-            await bot.handle_message(result_msg)
-            mock_channel.send.assert_any_call("📥 **my_tool**: `parent_query` ❌")
-
-
-@pytest.mark.asyncio
 async def test_handle_message_tool_result_in_place_edit(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test that a tool result edits the original tool call message in-place on Discord."""
-    from kesoku.constants import ROLE_TOOL, TYPE_TOOL_CALL, TYPE_TOOL_RESULT
+    from kesoku.constants import ROLE_TOOL, TYPE_TOOL_RESULT
 
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
@@ -642,22 +591,12 @@ async def test_handle_message_tool_result_in_place_edit(mock_config: KesokuConfi
 
             # Mock the sent tool call message in cache
             mock_discord_msg = AsyncMock(spec=discord.Message)
+            mock_discord_msg.content = "🛠️ **my_tool**: `edit_query` ⏳"
             bot._sent_tool_calls["parent123"] = mock_discord_msg
 
-            # Mock parent message retrieval
-            parent_msg = Message(
-                id="parent123",
-                session_id="thread123",
-                chatbot_id="discord_test",
-                channel_id="12345",
-                sender="Kesoku",
-                role=ROLE_TOOL,
-                type=TYPE_TOOL_CALL,
-                content="Calling...",
-                metadata={"tool_name": "my_tool", "tool_arguments": {"query": "edit_query"}},
-            )
+            # Mock parent message retrieval (to verify it is NOT called)
             mock_gateway.db = MagicMock()
-            mock_gateway.db.get_messages_by_filters = MagicMock(return_value=[parent_msg])
+            mock_gateway.db.get_messages_by_filters = MagicMock()
 
             result_msg = Message(
                 id="result123",
@@ -674,9 +613,11 @@ async def test_handle_message_tool_result_in_place_edit(mock_config: KesokuConfi
             await bot.handle_message(result_msg)
 
             # Verify that edit was called with the formatted content on the discord message object
-            mock_discord_msg.edit.assert_called_once_with(content="📥 **my_tool**: `edit_query` ✅")
+            mock_discord_msg.edit.assert_called_once_with(content="🛠️ **my_tool**: `edit_query` ✅")
             # The cache should be cleaned up
             assert "parent123" not in bot._sent_tool_calls
+            # Verify DB parent lookup was bypassed
+            mock_gateway.db.get_messages_by_filters.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -874,3 +815,110 @@ async def test_on_message_in_existing_thread_inside_no_thread_channel(mock_gatew
             mock_gateway.post.assert_called_once()
             posted_msg = mock_gateway.post.call_args[0][0]
             assert posted_msg.channel_id == "777777"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_intermediate_special_messages_tracking(
+    mock_config: KesokuConfig, mock_gateway: MagicMock
+) -> None:
+    """Test that intermediate special messages (thoughts, tool calls, system) are tracked."""
+    from kesoku.constants import ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_TOOL, TYPE_THOUGHT, TYPE_TOOL_CALL
+
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.Thread)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+
+            # Mock send to return mock message objects
+            header_msg = AsyncMock(spec=discord.Message)
+            msg1 = AsyncMock(spec=discord.Message)
+            msg2 = AsyncMock(spec=discord.Message)
+            msg3 = AsyncMock(spec=discord.Message)
+            mock_channel.send.side_effect = [header_msg, msg1, msg2, msg3]
+
+            # 1. Thought message (special)
+            thought_msg = Message(
+                id="t1",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_ASSISTANT,
+                type=TYPE_THOUGHT,
+                content="Thinking hard...",
+            )
+            await bot.handle_message(thought_msg)
+            assert "12345" in bot._intermediate_messages
+            assert len(bot._intermediate_messages["12345"]) == 1
+            assert bot._intermediate_messages["12345"][0] == msg1
+
+            # 2. Tool call message (special)
+            tool_call = Message(
+                id="tc1",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_TOOL,
+                type=TYPE_TOOL_CALL,
+                content="Calling tool...",
+                metadata={"tool_name": "my_tool", "tool_arguments": {}},
+            )
+            await bot.handle_message(tool_call)
+            assert len(bot._intermediate_messages["12345"]) == 2
+            assert bot._intermediate_messages["12345"][1] == msg2
+
+            # 3. System message (special)
+            sys_msg = Message(
+                id="s1",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="System",
+                role=ROLE_SYSTEM,
+                type=TYPE_TEXT,
+                content="System event...",
+            )
+            await bot.handle_message(sys_msg)
+            assert len(bot._intermediate_messages["12345"]) == 3
+            assert bot._intermediate_messages["12345"][2] == msg3
+
+
+@pytest.mark.asyncio
+async def test_handle_message_intermediate_special_messages_deletion(
+    mock_config: KesokuConfig, mock_gateway: MagicMock
+) -> None:
+    """Test that intermediate special messages are deleted when final assistant response is reached."""
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.Thread)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+
+            # Setup mocked intermediate messages
+            msg1 = AsyncMock(spec=discord.Message)
+            msg2 = AsyncMock(spec=discord.Message)
+            bot._intermediate_messages["12345"] = [msg1, msg2]
+
+            # Send final assistant response
+            final_msg = Message(
+                id="final1",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_ASSISTANT,
+                type=TYPE_TEXT,
+                content="Here is the final answer.",
+            )
+            await bot.handle_message(final_msg)
+
+            # Verify both intermediate messages were deleted
+            msg1.delete.assert_called_once()
+            msg2.delete.assert_called_once()
+
+            # Intermediate messages list should be cleared/removed for the channel
+            assert "12345" not in bot._intermediate_messages

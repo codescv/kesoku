@@ -6,6 +6,7 @@ Connects Discord channels and threads with Kesoku Gateway using Pub/Sub.
 import asyncio
 import datetime
 import os
+from collections import defaultdict
 
 import discord
 import tzlocal
@@ -154,6 +155,7 @@ class DiscordChatbot(Chatbot):
         self._sent_tool_calls: dict[str, discord.Message] = {}
         self._turns_with_header: set[str] = set()
         self._typing_tasks: dict[str, asyncio.Task[None]] = {}
+        self._intermediate_messages: defaultdict[str, list[discord.Message]] = defaultdict(list)
 
     async def start(self) -> None:
         """Start the Discord bot and Gateway listener subscriber background loop."""
@@ -200,16 +202,6 @@ class DiscordChatbot(Chatbot):
         """
         # Retrieve the tool arguments from metadata
         tool_args = message.metadata.get("tool_arguments")
-        if not tool_args and message.parent_id:
-            # If it's a tool result message, fetch the parent tool call message to retrieve its arguments
-            try:
-                parent_msgs = await asyncio.to_thread(
-                    self.gateway.db.get_messages_by_filters, filters={"id": message.parent_id}
-                )
-                if parent_msgs:
-                    tool_args = parent_msgs[0].metadata.get("tool_arguments")
-            except Exception as e:
-                logger.warning(f"Failed to fetch parent message {message.parent_id} for tool arguments: {e}")
 
         # Format tool arguments display string according to the rules
         arg_str = ""
@@ -374,6 +366,21 @@ class DiscordChatbot(Chatbot):
                 logger.error(f"Failed to fetch Discord channel {target_id}: {fe}")
                 return
 
+        # Try in-place editing if it is a tool result and we have the cached message
+        if message.role == ROLE_TOOL and message.type != TYPE_TOOL_CALL:
+            tool_call_msg_id = message.parent_id
+            if tool_call_msg_id and tool_call_msg_id in self._sent_tool_calls:
+                discord_msg = self._sent_tool_calls.pop(tool_call_msg_id)
+                try:
+                    emoji = "❌" if message.metadata.get("tool_error") else "✅"
+                    content = discord_msg.content.replace("⏳", emoji)
+                    await discord_msg.edit(content=content)
+                except Exception as ee:
+                    logger.warning(f"Failed to edit tool call message in-place: {ee}")
+
+            await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+            return
+
         is_special_message = False
         output_text = ""
 
@@ -386,17 +393,12 @@ class DiscordChatbot(Chatbot):
             else:
                 output_text = message.content
         elif message.role == ROLE_TOOL:
+            # Since tool results/errors are handled and early-returned above,
+            # this block only ever handles TYPE_TOOL_CALL!
             is_special_message = True
             tool_name = message.metadata.get("tool_name") or message.sender or "unknown_tool"
             arg_suffix = await self._get_tool_arguments_suffix(message)
-
-            if message.type == TYPE_TOOL_CALL:
-                output_text = f"🛠️ **{tool_name}**{arg_suffix} ⏳"
-            else:
-                if message.metadata.get("tool_error"):
-                    output_text = f"📥 **{tool_name}**{arg_suffix} ❌"
-                else:
-                    output_text = f"📥 **{tool_name}**{arg_suffix} ✅"
+            output_text = f"🛠️ **{tool_name}**{arg_suffix} ⏳"
         elif message.role == ROLE_SYSTEM:
             is_special_message = True
             first_line = message.content.split("\n")[0].strip()
@@ -407,20 +409,6 @@ class DiscordChatbot(Chatbot):
 
         if not output_text:
             output_text = message.content
-
-        # Try in-place editing if it is a tool result
-        if message.role == ROLE_TOOL and message.type != TYPE_TOOL_CALL:
-            tool_call_msg_id = message.parent_id
-            if tool_call_msg_id and tool_call_msg_id in self._sent_tool_calls:
-                discord_msg = self._sent_tool_calls.pop(tool_call_msg_id)
-                try:
-                    await discord_msg.edit(content=output_text)
-                    await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
-                    return
-                except Exception as ee:
-                    logger.warning(
-                        f"Failed to edit tool call message in-place: {ee}. Falling back to sending new message."
-                    )
 
         # Send the MessageHeaderView at the start of the turn if it's a special message
         if is_special_message:
@@ -448,17 +436,25 @@ class DiscordChatbot(Chatbot):
                         if len(line) > 2000:
                             if current_chunk:
                                 sent_msg = await channel.send(current_chunk)
+                                if is_special_message:
+                                    self._intermediate_messages[message.channel_id].append(sent_msg)
                                 current_chunk = ""
                             for i in range(0, len(line), 2000):
                                 sent_msg = await channel.send(line[i : i + 2000])
+                                if is_special_message:
+                                    self._intermediate_messages[message.channel_id].append(sent_msg)
                         elif len(current_chunk) + len(line) > 2000:
                             sent_msg = await channel.send(current_chunk)
+                            if is_special_message:
+                                self._intermediate_messages[message.channel_id].append(sent_msg)
                             current_chunk = line
                         else:
                             current_chunk += line
 
                     if current_chunk and current_chunk.strip():
                         sent_msg = await channel.send(current_chunk)
+                        if is_special_message:
+                            self._intermediate_messages[message.channel_id].append(sent_msg)
 
                         # Cache the sent message object if it's a tool call for future editing
                         if message.role == ROLE_TOOL and message.type == TYPE_TOOL_CALL:
@@ -497,8 +493,20 @@ class DiscordChatbot(Chatbot):
 
         await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
 
-        # Stop typing status when the final assistant response is successfully delivered
+        # Stop typing status and clean up intermediate special messages
+        # when the final assistant response is successfully delivered
         if message.role == ROLE_ASSISTANT and message.type == TYPE_TEXT:
             task = self._typing_tasks.pop(message.channel_id, None)
             if task:
                 task.cancel()
+
+            # Delete all tracked intermediate special messages for this channel
+            intermediate_msgs = self._intermediate_messages.pop(message.channel_id, [])
+            if intermediate_msgs:
+                for msg in intermediate_msgs:
+                    try:
+                        await msg.delete()
+                    except Exception as de:
+                        logger.warning(
+                            f"Failed to delete intermediate message {msg.id} in channel {message.channel_id}: {de}"
+                        )

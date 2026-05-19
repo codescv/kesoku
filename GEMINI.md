@@ -23,5 +23,8 @@ Run integration tests if there are major feature changes or refactor (>50 lines 
 - After you make the changes, run integration test using the CLI command with real model.
 - Summarize your test result and send it to the user.
 
+## Code Style
+- Run `uv run ruff check` after your changes and make sure there are no lint errors and fix them if there are any.
+
 ## Keep documentation up to date
 - After you make major changes, make sure the documentation under `docs/` are still relevant.
