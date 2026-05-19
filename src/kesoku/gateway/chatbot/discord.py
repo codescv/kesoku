@@ -415,7 +415,13 @@ class DiscordChatbot(Chatbot):
             turn_id = message.parent_id or message.session_id
             if turn_id not in self._turns_with_header:
                 try:
-                    header_view = MessageHeaderView(self.gateway, message.session_id)
+                    is_thread = isinstance(channel, discord.Thread)
+                    header_view = MessageHeaderView(
+                        self.gateway,
+                        message.session_id,
+                        chatbot=self,
+                        is_thread=is_thread,
+                    )
                     await channel.send(view=header_view)
                     self._turns_with_header.add(turn_id)
                 except Exception as he:

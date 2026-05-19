@@ -6,6 +6,7 @@ Provides interactive UI elements such as persistent views and html trajectory vi
 import datetime
 import html
 import io
+from typing import Any
 
 import discord
 
@@ -13,6 +14,7 @@ from kesoku.constants import (
     ROLE_ASSISTANT,
     ROLE_TOOL,
     ROLE_USER,
+    STATUS_INTERRUPTED,
     TYPE_THOUGHT,
     TYPE_TOOL_CALL,
 )
@@ -26,19 +28,26 @@ logger = setup_logger(__name__)
 class MessageHeaderView(discord.ui.View):
     """Persistent Discord view representing the conversation header with interactive trajectory viewer."""
 
-    def __init__(self, gateway: Gateway, session_id: str) -> None:
+    def __init__(self, gateway: Gateway, session_id: str, chatbot: Any = None, is_thread: bool = False) -> None:
         """Initialize the MessageHeaderView.
 
         Args:
             gateway: The Kesoku Gateway instance.
             session_id: Session ID of the conversation.
+            chatbot: Optional reference to the active Discord chatbot.
+            is_thread: True if the current conversation channel is a thread.
         """
         super().__init__(timeout=None)
         self.gateway = gateway
         self.session_id = session_id
+        self.chatbot = chatbot
+        self.is_thread = is_thread
+
+        # Clear session button should not be visible inside thread sessions
+        if is_thread:
+            self.remove_item(self.clear_session)
 
     @discord.ui.button(
-        label="View Trajectory",
         style=discord.ButtonStyle.secondary,
         emoji="📜",
         custom_id="btn_view_trajectory",
@@ -67,6 +76,120 @@ class MessageHeaderView(discord.ui.View):
             logger.error(f"Failed to generate trajectory for session {self.session_id}: {e}", exc_info=True)
             await interaction.followup.send(
                 content=f"⚠️ Failed to generate trajectory: {e}",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(
+        style=discord.ButtonStyle.secondary,
+        emoji="🛑",
+        custom_id="btn_stop_turn",
+    )
+    async def stop_turn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        """Callback triggered when 'Stop' button is clicked.
+
+        Aborts the current active agent turn, cancels the typing spinner, and deletes intermediate messages.
+        """
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            # 1. Locate the active dispatcher agent and session worker, and stop the turn
+            agent = self.gateway.agent
+            if agent:
+                worker = agent.workers.get(self.session_id)
+                if worker:
+                    worker.stop()
+                    # Remove worker reference to allow clean subsequent turns
+                    agent.workers.pop(self.session_id, None)
+
+            # 2. Fetch recent history to find the active user message and update its status
+            history = await self.gateway.get_session_history(self.session_id, limit=20)
+            user_msg = None
+            for msg in reversed(history):
+                if msg.role == ROLE_USER:
+                    user_msg = msg
+                    break
+            if user_msg and user_msg.status in ("pending_agent", "processing"):
+                await self.gateway.update_message_status(user_msg.id, STATUS_INTERRUPTED)
+
+            # 3. Stop typing task and clean up intermediate special messages in Discord UI
+            if self.chatbot:
+                channel_id_str = str(interaction.channel_id)
+                typing_task = self.chatbot._typing_tasks.pop(channel_id_str, None)
+                if typing_task:
+                    typing_task.cancel()
+
+                intermediate_msgs = self.chatbot._intermediate_messages.pop(channel_id_str, [])
+                if intermediate_msgs:
+                    for msg in intermediate_msgs:
+                        try:
+                            await msg.delete()
+                        except Exception as de:
+                            logger.warning(f"Failed to delete intermediate message {msg.id}: {de}")
+
+            await interaction.followup.send(
+                content="🛑 The agent turn was stopped, and intermediate special messages were removed.",
+                ephemeral=True,
+            )
+        except Exception as e:
+            logger.error(f"Failed to stop turn for session {self.session_id}: {e}", exc_info=True)
+            await interaction.followup.send(
+                content=f"⚠️ Failed to stop turn: {e}",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(
+        style=discord.ButtonStyle.secondary,
+        emoji="♻️",
+        custom_id="btn_clear_session",
+    )
+    async def clear_session(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        """Callback triggered when 'Clear Session' button is clicked.
+
+        Aborts any active turn, deletes database records and workspace from disk, and cancels UI elements.
+        """
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            # 1. Locate the active dispatcher agent and session worker, and stop the turn if running
+            agent = self.gateway.agent
+            if agent:
+                worker = agent.workers.get(self.session_id)
+                if worker:
+                    worker.stop()
+                    agent.workers.pop(self.session_id, None)
+
+            # 2. Delete the session and its history/workspace via Gateway
+            await self.gateway.delete_session(self.session_id)
+
+            # 3. Stop typing task and clean up intermediate special messages in Discord UI
+            if self.chatbot:
+                channel_id_str = str(interaction.channel_id)
+                typing_task = self.chatbot._typing_tasks.pop(channel_id_str, None)
+                if typing_task:
+                    typing_task.cancel()
+
+                intermediate_msgs = self.chatbot._intermediate_messages.pop(channel_id_str, [])
+                if intermediate_msgs:
+                    for msg in intermediate_msgs:
+                        try:
+                            await msg.delete()
+                        except Exception as de:
+                            logger.warning(f"Failed to delete intermediate message {msg.id}: {de}")
+
+                # Clear session reference from chatbot's header turns cache
+                self.chatbot._turns_with_header = {
+                    tid for tid in self.chatbot._turns_with_header
+                    if not tid.startswith(self.session_id) and tid != self.session_id
+                }
+
+            await interaction.followup.send(
+                content="♻️ Session successfully cleared. The next message will initiate a new session.",
+                ephemeral=True,
+            )
+        except Exception as e:
+            logger.error(f"Failed to clear session {self.session_id}: {e}", exc_info=True)
+            await interaction.followup.send(
+                content=f"⚠️ Failed to clear session: {e}",
                 ephemeral=True,
             )
 

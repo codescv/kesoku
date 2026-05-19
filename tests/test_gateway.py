@@ -252,3 +252,66 @@ async def test_chatbot_ignore_completed_messages(temp_db: str) -> None:
 
     # The bot should NOT have handled the completed message
     assert len(bot.sent_messages) == 0
+
+
+@pytest.mark.asyncio
+async def test_gateway_delete_session(temp_db: str, tmp_path: Any) -> None:
+    """Test that deleting a session deletes database records and the disk workspace recursively."""
+    DatabaseManager(temp_db).init_tables()
+
+    # Setup paths
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+
+    gw = Gateway(
+        workspace_config=WorkspaceConfig(
+            db_path=temp_db,
+            sessions_dir=str(sessions_dir),
+        )
+    )
+
+    # Create session
+    session = await gw.create_session("del_sess_1", "Delete Session Test")
+
+    # Create workspace folder
+    workspace_folder = sessions_dir / session.workspace_name
+    workspace_folder.mkdir()
+
+    # Create a dummy file in the workspace
+    dummy_file = workspace_folder / "draft.txt"
+    dummy_file.write_text("some content", encoding="utf-8")
+
+    assert workspace_folder.exists()
+    assert dummy_file.exists()
+
+    # Verify session exists in DB
+    assert await gw.get_session("del_sess_1") is not None
+
+    # Post a message
+    await gw.post(
+        Message(
+            session_id="del_sess_1",
+            chatbot_id="discord_bot",
+            channel_id="chan1",
+            sender="User",
+            role=ROLE_USER,
+            type=TYPE_TEXT,
+            content="Message to be deleted",
+            status=STATUS_RESPONDED,
+        )
+    )
+
+    # Verify messages exist
+    history = await gw.get_session_history("del_sess_1")
+    assert len(history) > 0
+
+    # Delete session
+    await gw.delete_session("del_sess_1")
+
+    # Verify DB records deleted
+    assert await gw.get_session("del_sess_1") is None
+    history_after = await gw.get_session_history("del_sess_1")
+    assert len(history_after) == 0
+
+    # Verify workspace deleted from disk
+    assert not workspace_folder.exists()

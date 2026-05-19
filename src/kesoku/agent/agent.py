@@ -499,6 +499,7 @@ class Agent:
         self.workers: dict[str, SessionWorker] = {}
         self._running = False
         self._master_task: asyncio.Task[None] | None = None
+        self.gateway.register_agent(self)
 
     async def start(self) -> None:
         """Start the master listener loop dispatching messages to SessionWorkers."""

@@ -5,6 +5,8 @@ via DatabaseManager using a Pure Broker Pattern.
 """
 
 import asyncio
+import os
+import shutil
 import time
 import uuid
 from collections.abc import AsyncGenerator, Callable
@@ -49,6 +51,15 @@ class Gateway:
         self._listeners: list[Listener] = []
         self.db = DatabaseManager(self.db_path)
         self.db.verify_db()
+        self.agent: Any | None = None
+
+    def register_agent(self, agent: Any) -> None:
+        """Register an active Agent dispatcher instance.
+
+        Args:
+            agent: The active Agent instance.
+        """
+        self.agent = agent
 
     async def create_session(
         self,
@@ -238,3 +249,26 @@ class Gateway:
             A list of Message objects ordered by the sorting mechanism.
         """
         return await asyncio.to_thread(self.db.get_session_history, session_id, limit, order)
+
+    async def delete_session(self, session_id: str) -> None:
+        """Delete a session, its message history from database, and its workspace from disk.
+
+        Args:
+            session_id: The target session ID.
+        """
+        session = await self.get_session(session_id)
+        if session:
+            # Delete the staging session workspace folder from disk
+            workspace_dir = os.path.join(self.workspace_config.sessions_dir, session.workspace_name)
+            # Check existence asynchronously using to_thread
+            if await asyncio.to_thread(os.path.exists, workspace_dir):
+                try:
+                    # Recursively delete directory asynchronously via to_thread
+                    await asyncio.to_thread(shutil.rmtree, workspace_dir)
+                    logger.debug(f"Deleted session workspace directory: {workspace_dir}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete session workspace directory {workspace_dir}: {e}")
+
+            # Delete the SQLite database records
+            await asyncio.to_thread(self.db.delete_session, session_id)
+            logger.info(f"Successfully deleted session {session_id} from database.")

@@ -10,6 +10,7 @@ from kesoku.constants import (
     ROLE_SYSTEM,
     ROLE_TOOL,
     ROLE_USER,
+    STATUS_INTERRUPTED,
     TYPE_TEXT,
     TYPE_THOUGHT,
     TYPE_TOOL_CALL,
@@ -210,3 +211,121 @@ async def test_view_trajectory_callback_failure(mock_gateway: MagicMock) -> None
         content="⚠️ Failed to generate trajectory: Database error",
         ephemeral=True,
     )
+
+
+def test_message_header_view_visibility_channels_vs_threads(mock_gateway: MagicMock) -> None:
+    """Test that clear session button is removed inside threads but visible inside channels."""
+    # Case 1: inside a thread session
+    view_thread = MessageHeaderView(gateway=mock_gateway, session_id="s123", is_thread=True)
+    children_ids_thread = [item.custom_id for item in view_thread.children]
+    assert "btn_view_trajectory" in children_ids_thread
+    assert "btn_stop_turn" in children_ids_thread
+    assert "btn_clear_session" not in children_ids_thread
+
+    # Case 2: inside a regular channel session
+    view_channel = MessageHeaderView(gateway=mock_gateway, session_id="s123", is_thread=False)
+    children_ids_channel = [item.custom_id for item in view_channel.children]
+    assert "btn_view_trajectory" in children_ids_channel
+    assert "btn_stop_turn" in children_ids_channel
+    assert "btn_clear_session" in children_ids_channel
+
+
+@pytest.mark.asyncio
+async def test_stop_turn_callback(mock_gateway: MagicMock) -> None:
+    """Test successful click of the 'Stop' button."""
+    # Mock active agent and session worker
+    mock_worker = MagicMock()
+    mock_agent = MagicMock()
+    mock_agent.workers = {"s123": mock_worker}
+    mock_gateway.agent = mock_agent
+
+    # Mock chatbot
+    mock_chatbot = MagicMock()
+    mock_typing_task = MagicMock()
+    mock_chatbot._typing_tasks = {"chan_abc": mock_typing_task}
+    mock_msg1 = AsyncMock(spec=discord.Message)
+    mock_chatbot._intermediate_messages = {"chan_abc": [mock_msg1]}
+
+    view = MessageHeaderView(gateway=mock_gateway, session_id="s123", chatbot=mock_chatbot)
+
+    mock_interaction = AsyncMock(spec=discord.Interaction)
+    mock_interaction.response = MagicMock()
+    mock_interaction.response.defer = AsyncMock()
+    mock_interaction.followup = AsyncMock()
+    mock_interaction.channel_id = "chan_abc"
+    mock_button = MagicMock(spec=discord.ui.Button)
+
+    # Mock DB user message to stop
+    mock_gateway.get_session_history.return_value = [
+        Message(
+            id="msg_u1",
+            session_id="s123",
+            chatbot_id="discord",
+            channel_id="chan_abc",
+            sender="User",
+            role=ROLE_USER,
+            type=TYPE_TEXT,
+            content="Help me",
+            status="processing",
+        )
+    ]
+
+    await view.stop_turn.callback(mock_interaction)
+
+    # Asserts:
+    mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
+    # Worker stop should be called
+    mock_worker.stop.assert_called_once()
+    # Worker should be removed from agent
+    assert "s123" not in mock_agent.workers
+    # Message status updated to interrupted
+    mock_gateway.update_message_status.assert_called_once_with("msg_u1", STATUS_INTERRUPTED)
+    # Typing task cancelled
+    mock_typing_task.cancel.assert_called_once()
+    # Intermediate message deleted
+    mock_msg1.delete.assert_called_once()
+    # Sent feedback followup
+    mock_interaction.followup.send.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_clear_session_callback(mock_gateway: MagicMock) -> None:
+    """Test successful click of the 'Clear Session' button."""
+    mock_worker = MagicMock()
+    mock_agent = MagicMock()
+    mock_agent.workers = {"s123": mock_worker}
+    mock_gateway.agent = mock_agent
+    mock_gateway.delete_session = AsyncMock()
+
+    mock_chatbot = MagicMock()
+    mock_typing_task = MagicMock()
+    mock_chatbot._typing_tasks = {"chan_abc": mock_typing_task}
+    mock_msg1 = AsyncMock(spec=discord.Message)
+    mock_chatbot._intermediate_messages = {"chan_abc": [mock_msg1]}
+    mock_chatbot._turns_with_header = {"s123", "some_turn"}
+
+    view = MessageHeaderView(gateway=mock_gateway, session_id="s123", chatbot=mock_chatbot)
+
+    mock_interaction = AsyncMock(spec=discord.Interaction)
+    mock_interaction.response = MagicMock()
+    mock_interaction.response.defer = AsyncMock()
+    mock_interaction.followup = AsyncMock()
+    mock_interaction.channel_id = "chan_abc"
+
+    await view.clear_session.callback(mock_interaction)
+
+    # Asserts:
+    mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
+    # Worker stop should be called
+    mock_worker.stop.assert_called_once()
+    # delete_session called on Gateway
+    mock_gateway.delete_session.assert_called_once_with("s123")
+    # Typing task cancelled
+    mock_typing_task.cancel.assert_called_once()
+    # Intermediate message deleted
+    mock_msg1.delete.assert_called_once()
+    # turns_with_header cleaned up
+    assert "s123" not in mock_chatbot._turns_with_header
+    assert "some_turn" in mock_chatbot._turns_with_header
+    # Sent feedback followup
+    mock_interaction.followup.send.assert_called_once()

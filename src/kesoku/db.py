@@ -335,6 +335,22 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def delete_session(self, session_id: str) -> None:
+        """Delete a session and all its associated messages from the database.
+
+        Args:
+            session_id: The unique session identifier to delete.
+        """
+        conn = self._get_connection()
+        try:
+            with conn:
+                # Delete all messages belonging to this session
+                conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+                # Delete the session itself
+                conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        finally:
+            conn.close()
+
     # Message CRUD
     def save_message(self, msg: Message) -> None:
         """Persist a new conversational message record.
