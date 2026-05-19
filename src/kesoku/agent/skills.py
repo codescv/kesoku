@@ -270,8 +270,10 @@ class SkillManager:
         abs_skill_dir = os.path.realpath(skill_dir)
         header = f"""
 # Skill: {manifest.name} (v{manifest.version})
-> [!IMPORTANT]
+> [!IMPORTANT] You must replace the SKILL_DIR or explicitly set it as an env variable 
+> mentioned in the skill instructions with the following value:
 > SKILL_DIR='{abs_skill_dir}'
+> 
         """
 
         return manifest, f"{header}{raw_body}"
