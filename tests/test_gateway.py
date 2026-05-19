@@ -59,9 +59,6 @@ async def test_gateway_init_db(temp_db: str) -> None:
     assert sessions_table[0] == "sessions"
 
 
-
-
-
 @pytest.mark.asyncio
 async def test_gateway_routing(temp_db: str) -> None:
     """Test routing outgoing response back to registered chatbot."""
@@ -255,4 +252,3 @@ async def test_chatbot_ignore_completed_messages(temp_db: str) -> None:
 
     # The bot should NOT have handled the completed message
     assert len(bot.sent_messages) == 0
-

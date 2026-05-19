@@ -39,5 +39,3 @@ STATUS_PENDING = "pending"
 STATUS_DELIVERED = "delivered"
 # Successfully processed internal message (system instructions, thoughts, tool calls, tool outputs).
 STATUS_RESPONDED = "responded"
-
-

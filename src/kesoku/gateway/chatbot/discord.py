@@ -8,6 +8,7 @@ import datetime
 import html
 import io
 import os
+
 import discord
 import tzlocal
 
@@ -85,7 +86,7 @@ The time is very important to prevent your hallucination about the world status.
             channel_id = parent.id if parent else "unknown"
             topic = getattr(parent, "topic", None) or ""
             location_instruction = (
-                f"You are currently chatting in a Discord thread named \"#{thread_name}\" (ID: {thread_id}) "
+                f'You are currently chatting in a Discord thread named "#{thread_name}" (ID: {thread_id}) '
                 f"under channel \"#{channel_name}\" (ID: {channel_id}) on the server '{guild_name}'."
             )
         else:
@@ -93,7 +94,7 @@ The time is very important to prevent your hallucination about the world status.
             channel_id = channel.id
             topic = getattr(channel, "topic", None) or ""
             location_instruction = (
-                f"You are currently chatting in a Discord channel named \"#{channel_name}\" (ID: {channel_id}) "
+                f'You are currently chatting in a Discord channel named "#{channel_name}" (ID: {channel_id}) '
                 f"on the server '{guild_name}'."
             )
 
@@ -102,8 +103,7 @@ The time is very important to prevent your hallucination about the world status.
     mention_section = ""
     if not is_dm:
         mention_section = (
-            "\n## Mentioning Users\n"
-            "When mentioning or referring to a user, use Discord tag syntax <@USER_ID>.\n"
+            "\n## Mentioning Users\nWhen mentioning or referring to a user, use Discord tag syntax <@USER_ID>.\n"
         )
 
     format_section = """
@@ -227,10 +227,10 @@ class MessageHeaderView(discord.ui.View):
                 content_html = (
                     f'\n                <div class="entry-summary">{first_line} ...</div>\n'
                     f'                <button class="details-toggle" id="btn-{msg.id}" '
-                    f'onclick="toggleContent(\'{msg.id}\')">Expand details</button>\n'
+                    f"onclick=\"toggleContent('{msg.id}')\">Expand details</button>\n"
                     f'                <div class="collapsed-content" id="{msg.id}">\n'
-                    f'                    <pre><code>{escaped_content}</code></pre>\n'
-                    f'                </div>\n'
+                    f"                    <pre><code>{escaped_content}</code></pre>\n"
+                    f"                </div>\n"
                 )
             else:
                 content_html = f'<div class="entry-content">{escaped_content}</div>'
@@ -565,8 +565,7 @@ class DiscordChatbot(Chatbot):
             # If it's a tool result message, fetch the parent tool call message to retrieve its arguments
             try:
                 parent_msgs = await asyncio.to_thread(
-                    self.gateway.db.get_messages_by_filters,
-                    filters={"id": message.parent_id}
+                    self.gateway.db.get_messages_by_filters, filters={"id": message.parent_id}
                 )
                 if parent_msgs:
                     tool_args = parent_msgs[0].metadata.get("tool_arguments")
@@ -594,7 +593,6 @@ class DiscordChatbot(Chatbot):
                 arg_str = arg_str[:80] + "..."
 
         return f": `{arg_str}`" if arg_str else ""
-
 
     async def on_ready(self) -> None:
         """Callback invoked when Discord bot successfully connects and logs in."""
@@ -646,9 +644,7 @@ class DiscordChatbot(Chatbot):
                         title = f"Chat with {message.author.display_name}"
                     thread = await message.create_thread(name=title)
                 except discord.HTTPException as e:
-                    logger.warning(
-                        f"Failed to create thread on message {message.id} (concurrent bot creation?): {e}"
-                    )
+                    logger.warning(f"Failed to create thread on message {message.id} (concurrent bot creation?): {e}")
                     await asyncio.sleep(0.5)
                     if hasattr(message.channel, "guild") and message.channel.guild:
                         thread = message.channel.guild.get_thread(message.id)
@@ -705,7 +701,6 @@ class DiscordChatbot(Chatbot):
         # Trigger typing status for the thread/channel while agent is thinking
         if channel_id not in self._typing_tasks:
             self._typing_tasks[channel_id] = asyncio.create_task(self._keep_typing(thread))
-
 
     async def handle_message(self, message: Message) -> None:
         """Process outgoing message from Gateway and send to target Discord thread.
@@ -772,8 +767,7 @@ class DiscordChatbot(Chatbot):
                     return
                 except Exception as ee:
                     logger.warning(
-                        f"Failed to edit tool call message in-place: {ee}. "
-                        "Falling back to sending new message."
+                        f"Failed to edit tool call message in-place: {ee}. Falling back to sending new message."
                     )
 
         # Send the MessageHeaderView at the start of the turn if it's a special message
@@ -837,4 +831,3 @@ class DiscordChatbot(Chatbot):
             task = self._typing_tasks.pop(message.channel_id, None)
             if task:
                 task.cancel()
-

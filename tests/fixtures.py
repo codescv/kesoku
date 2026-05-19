@@ -1,8 +1,9 @@
 """Shared fixtures and configuration for Kesoku unit tests."""
 
 from collections.abc import Generator
-from unittest.mock import patch
+
 import pytest
+
 import kesoku.config
 
 

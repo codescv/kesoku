@@ -47,7 +47,10 @@ class GeminiConfig(BaseModel):
     )
     location: str | None = Field(default="global", description="GCP Region/Location (for Vertex AI mode)")
     thinking_level: Literal["minimal", "low", "medium", "high"] | None = Field(
-        default="high", description="Thinking level allocated for reasoning ('minimal', 'low', 'medium', 'high', or None to use model default)"
+        default="high",
+        description=(
+            "Thinking level allocated for reasoning ('minimal', 'low', 'medium', 'high', or None to use model default)"
+        ),
     )
 
 
@@ -57,9 +60,7 @@ class DiscordConfig(BaseModel):
     enabled: bool = Field(default=False, description="Whether to launch the Discord chatbot in daemon mode")
     bot_token: str | None = Field(default=None, description="Discord bot token")
     chatbot_id: str = Field(default="discord", description="Unique chatbot identifier")
-    user_allowlist: list[str] = Field(
-        default_factory=list, description="List of allowed Discord user IDs or usernames"
-    )
+    user_allowlist: list[str] = Field(default_factory=list, description="List of allowed Discord user IDs or usernames")
 
 
 class ShellConfig(BaseModel):
@@ -71,7 +72,9 @@ class ShellConfig(BaseModel):
     )
     mode: Literal["allowlist", "blocklist"] = Field(
         default="blocklist",
-        description="Filtering mode: 'allowlist' strictly permits matching patterns, 'blocklist' prohibits matching patterns",
+        description=(
+            "Filtering mode: 'allowlist' strictly permits matching patterns, 'blocklist' prohibits matching patterns"
+        ),
     )
     allowlist_patterns: list[str] = Field(
         default_factory=lambda: [r"^(echo|ls|pwd|cat|git|uv|grep|find|python|sed|awk)(\s|$)"],
@@ -245,5 +248,3 @@ def init_skills(skills_dir: str, overwrite: bool = False) -> None:
                         logger.info(f"Copied resource skill {item.name} to {dest}")
     except Exception as e:
         logger.error(f"Failed to copy resource skills to {skills_dir}: {e}")
-
-

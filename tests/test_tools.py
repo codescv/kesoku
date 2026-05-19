@@ -1,9 +1,8 @@
 """Unit tests for Kesoku agent tools and skill registry."""
 
 from unittest.mock import MagicMock
-import pytest
 
-from kesoku.agent.tools import ToolContext, WebSearchTool, web_search, run_shell_command
+from kesoku.agent.tools import ToolContext, WebSearchTool, run_shell_command
 
 
 def test_web_search_tool_success() -> None:
@@ -108,6 +107,7 @@ def test_run_shell_command_custom_cwd(tmp_path) -> None:
 def test_run_shell_command_env_variables(tmp_path) -> None:
     """Test that run_shell_command injects AWD and STAGING_DIR environment variables."""
     import os
+
     import kesoku.config
     from kesoku.config import load_config
 

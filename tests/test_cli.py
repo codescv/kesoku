@@ -4,7 +4,7 @@ import os
 import re
 import sqlite3
 from typing import Any
-from unittest.mock import MagicMock, mock_open, patch
+from unittest.mock import mock_open, patch
 
 from typer.testing import CliRunner
 
@@ -25,7 +25,6 @@ def strip_ansi(text: str) -> str:
     """
     ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
     return ansi_escape.sub("", text)
-
 
 
 def test_cli_init(tmp_path: Any) -> None:
@@ -183,7 +182,6 @@ def test_cli_chat_workflow(mock_gemini: Any, tmp_path: Any) -> None:
     assert f"Chat History for Session '{session_id}'" in strip_ansi(res_history_short.stdout)
 
 
-
 def test_cli_service_non_linux() -> None:
     """Verify service command fails on non-Linux systems."""
     with patch("sys.platform", "darwin"):
@@ -199,9 +197,9 @@ def test_cli_service_dry_run() -> None:
         patch("kesoku.cli.load_config"),
         patch(
             "os.path.abspath",
-            side_effect=lambda p: "/mock/workspace/config.toml"
-            if "config.toml" in p
-            else f"/mock/bin/{os.path.basename(p)}",
+            side_effect=lambda p: (
+                "/mock/workspace/config.toml" if "config.toml" in p else f"/mock/bin/{os.path.basename(p)}"
+            ),
         ),
         patch("os.path.exists", return_value=True),
     ):
@@ -251,9 +249,9 @@ def test_cli_service_install_user() -> None:
         patch("kesoku.cli.load_config"),
         patch(
             "os.path.abspath",
-            side_effect=lambda p: "/mock/workspace/config.toml"
-            if "config.toml" in p
-            else f"/mock/bin/{os.path.basename(p)}",
+            side_effect=lambda p: (
+                "/mock/workspace/config.toml" if "config.toml" in p else f"/mock/bin/{os.path.basename(p)}"
+            ),
         ),
         patch("os.path.exists", return_value=True),
         patch("os.makedirs") as mock_makedirs,
@@ -288,9 +286,9 @@ def test_cli_service_permission_error() -> None:
         patch("kesoku.cli.load_config"),
         patch(
             "os.path.abspath",
-            side_effect=lambda p: "/mock/workspace/config.toml"
-            if "config.toml" in p
-            else f"/mock/bin/{os.path.basename(p)}",
+            side_effect=lambda p: (
+                "/mock/workspace/config.toml" if "config.toml" in p else f"/mock/bin/{os.path.basename(p)}"
+            ),
         ),
         patch("os.path.exists", return_value=True),
         patch("os.makedirs"),
@@ -364,6 +362,3 @@ def test_cli_service_start_stop_restart() -> None:
             capture_output=True,
             text=True,
         )
-
-
-

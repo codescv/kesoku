@@ -4,10 +4,11 @@ Provides commands: install, uninstall, start, stop, restart.
 """
 
 import os
-import sys
 import shutil
 import subprocess
-from typing import Annotated, Any
+import sys
+from typing import Annotated
+
 import typer
 from rich.console import Console
 
@@ -29,9 +30,7 @@ def _verify_linux_platform(console: Console) -> None:
         typer.Exit: If platform is not Linux.
     """
     if sys.platform != "linux":
-        console.print(
-            "[bold red]Error: systemd services are only supported on Linux platforms.[/bold red]"
-        )
+        console.print("[bold red]Error: systemd services are only supported on Linux platforms.[/bold red]")
         raise typer.Exit(code=1)
 
 
@@ -109,9 +108,7 @@ def install_cmd(
     if env:
         for item in env:
             if "=" not in item:
-                logger.warning(
-                    f"Skipping invalid environment variable format: '{item}'. Expected KEY=VALUE."
-                )
+                logger.warning(f"Skipping invalid environment variable format: '{item}'. Expected KEY=VALUE.")
                 continue
             env_lines.append(f'Environment="{item}"')
     environment_block = "\n".join(env_lines)
@@ -150,12 +147,11 @@ WantedBy={wanted_by}
         logger.info(f"Systemd service file written to: {target_path}")
 
     except PermissionError:
-        console.print(
-            f"[bold red]Error: Permission denied when writing to '{target_path}'.[/bold red]"
-        )
+        console.print(f"[bold red]Error: Permission denied when writing to '{target_path}'.[/bold red]")
         if not user:
             console.print(
-                "[bold yellow]Hint: Installing as a system service requires root/sudo permissions. Try running with 'sudo' or use '--user' instead.[/bold yellow]"
+                "[bold yellow]Hint: Installing as a system service requires root/sudo permissions. "
+                "Try running with 'sudo' or use '--user' instead.[/bold yellow]"
             )
         raise typer.Exit(code=1)
     except Exception as e:
@@ -168,9 +164,7 @@ WantedBy={wanted_by}
         subprocess.run(systemctl_reload, check=True, capture_output=True, text=True)
         logger.info("Systemd daemon reloaded successfully.")
     except subprocess.CalledProcessError as e:
-        logger.warning(
-            f"Could not reload systemd daemon automatically: {e.stderr.strip() or e}"
-        )
+        logger.warning(f"Could not reload systemd daemon automatically: {e.stderr.strip() or e}")
         console.print(
             "[bold yellow]Warning: Please reload systemd manually by running 'systemctl daemon-reload'.[/bold yellow]"
         )
@@ -179,7 +173,9 @@ WantedBy={wanted_by}
     console.print("You can control the service using the following commands:")
     console.print(f"  [bold cyan]kesoku service start {user_flag.strip()}[/bold cyan]   - Start the service")
     console.print(f"  [bold cyan]kesoku service stop {user_flag.strip()}[/bold cyan]    - Stop the service")
-    console.print(f"  [bold cyan]kesoku service status {user_flag.strip()}[/bold cyan]  - Check service status (via systemctl)")
+    console.print(
+        f"  [bold cyan]kesoku service status {user_flag.strip()}[/bold cyan]  - Check service status (via systemctl)"
+    )
 
 
 @service_app.command("uninstall")
@@ -238,9 +234,7 @@ def uninstall_cmd(
         subprocess.run(systemctl_reload, check=True, capture_output=True, text=True)
         logger.info("Systemd daemon reloaded successfully.")
     except subprocess.CalledProcessError as e:
-        logger.warning(
-            f"Could not reload systemd daemon automatically: {e.stderr.strip() or e}"
-        )
+        logger.warning(f"Could not reload systemd daemon automatically: {e.stderr.strip() or e}")
 
     console.print("[bold green]Kesoku service has been uninstalled successfully![/bold green]")
 
@@ -263,13 +257,9 @@ def _run_systemctl_action(action: str, user: bool, console: Console) -> None:
     logger.info(f"Running: {' '.join(cmd_list)}...")
     try:
         subprocess.run(cmd_list, check=True, capture_output=True, text=True)
-        console.print(
-            f"[bold green]Successfully executed service {action}![/bold green]"
-        )
+        console.print(f"[bold green]Successfully executed service {action}![/bold green]")
     except subprocess.CalledProcessError as e:
-        console.print(
-            f"[bold red]Error executing service {action}: {e.stderr.strip() or e}[/bold red]"
-        )
+        console.print(f"[bold red]Error executing service {action}: {e.stderr.strip() or e}[/bold red]")
         raise typer.Exit(code=1)
 
 

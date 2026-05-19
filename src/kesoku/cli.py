@@ -14,6 +14,7 @@ from rich.console import Console
 
 from kesoku.agent.agent import Agent
 from kesoku.cli_chat import run_cli_chat_async
+from kesoku.cli_service import service_app
 from kesoku.config import get_config, init_config, init_skills, load_config
 from kesoku.db import DatabaseManager
 from kesoku.gateway.gateway import Gateway
@@ -25,10 +26,7 @@ logger = setup_logger(__name__)
 
 app = typer.Typer(help="Kesoku AI Agent CLI manager.")
 
-from kesoku.cli_service import service_app
-
 app.add_typer(service_app, name="service")
-
 
 
 @app.callback()

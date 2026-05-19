@@ -163,9 +163,7 @@ class SkillManager:
 
         for perm in manifest.required_permissions:
             if perm == "run_shell_command" and not cfg.shell.enabled:
-                raise PermissionError(
-                    f"Skill '{manifest.name}' requires shell execution tool, which is disabled."
-                )
+                raise PermissionError(f"Skill '{manifest.name}' requires shell execution tool, which is disabled.")
 
     def is_platform_supported(self, manifest: SkillManifest, host_platform: str | None = None) -> bool:
         """Check whether the skill is supported on the specified host operating system.
@@ -218,13 +216,15 @@ class SkillManager:
                 logger.debug(f"Skipping skill {manifest.name}: Not supported on host OS ({current_platform}).")
                 continue
 
-            results.append({
-                "name": manifest.name,
-                "description": manifest.description,
-                "version": manifest.version,
-                "tags": manifest.metadata.tags,
-                "platforms": manifest.metadata.platforms,
-            })
+            results.append(
+                {
+                    "name": manifest.name,
+                    "description": manifest.description,
+                    "version": manifest.version,
+                    "tags": manifest.metadata.tags,
+                    "platforms": manifest.metadata.platforms,
+                }
+            )
 
         # Sort alphabetically by name
         results.sort(key=lambda x: x["name"])
@@ -260,9 +260,7 @@ class SkillManager:
 
         current_platform = _get_current_platform()
         if not self.is_platform_supported(manifest, host_platform=current_platform):
-            raise ValueError(
-                f"Skill '{skill_name}' is not supported on current OS ({current_platform})."
-            )
+            raise ValueError(f"Skill '{skill_name}' is not supported on current OS ({current_platform}).")
 
         self._check_permissions(manifest)
 
@@ -270,10 +268,10 @@ class SkillManager:
         abs_skill_dir = os.path.realpath(skill_dir)
         header = f"""
 # Skill: {manifest.name} (v{manifest.version})
-> [!IMPORTANT] You must replace the SKILL_DIR or explicitly set it as an env variable 
+> [!IMPORTANT] You must replace the SKILL_DIR or explicitly set it as an env variable
 > mentioned in the skill instructions with the following value:
 > SKILL_DIR='{abs_skill_dir}'
-> 
+>
         """
 
         return manifest, f"{header}{raw_body}"

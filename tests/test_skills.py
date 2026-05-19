@@ -1,7 +1,7 @@
 """Unit tests for Kesoku Skill System and tool integration."""
 
-import os
 import pathlib
+
 import pytest
 
 from kesoku.agent.skills import SkillManager, parse_skill_markdown
@@ -56,9 +56,7 @@ def test_skill_manager_platform_filtering(tmp_path: pathlib.Path) -> None:
     # Skill 1: Cross-platform (omitted platforms)
     s1 = skills_dir / "skill-all"
     s1.mkdir()
-    (s1 / "SKILL.md").write_text(
-        "---\nname: skill-all\ndescription: All OS\n---\n# Body", encoding="utf-8"
-    )
+    (s1 / "SKILL.md").write_text("---\nname: skill-all\ndescription: All OS\n---\n# Body", encoding="utf-8")
 
     # Skill 2: Explicitly empty platforms (excluded everywhere)
     s2 = skills_dir / "skill-none"

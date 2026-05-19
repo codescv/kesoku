@@ -3,11 +3,12 @@
 import asyncio
 import datetime
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+
 import discord
 import pytest
 
 from kesoku.config import DiscordConfig, KesokuConfig
-from kesoku.constants import ROLE_ASSISTANT, STATUS_DELIVERED, STATUS_PENDING_AGENT, TYPE_TEXT, TYPE_THOUGHT
+from kesoku.constants import ROLE_ASSISTANT, STATUS_DELIVERED, TYPE_TEXT
 from kesoku.db import Message, Session
 from kesoku.gateway.chatbot.discord import DiscordChatbot
 from kesoku.gateway.gateway import Gateway
@@ -217,18 +218,18 @@ async def test_handle_message_with_files_split_and_upload(mock_config: KesokuCon
             with patch("os.path.exists", return_value=True) as mock_exists:
                 with patch("discord.File", return_value=mock_file) as mock_file_class:
                     await bot.handle_message(msg)
-                    
+
                     # Verify path existence was checked
                     mock_exists.assert_called_once_with("/tmp/test_image.png")
                     # Verify discord.File was instantiated with path
                     mock_file_class.assert_called_once_with("/tmp/test_image.png")
-                    
+
                     # channel.send should be called 3 times: "Hello ", file=mock_file, and " how are you?"
                     assert mock_channel.send.call_count == 3
                     mock_channel.send.assert_any_call("Hello ")
                     mock_channel.send.assert_any_call(file=mock_file)
                     mock_channel.send.assert_any_call(" how are you?")
-                    
+
                     mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
 
 
@@ -257,7 +258,7 @@ async def test_handle_message_with_non_existent_file(mock_config: KesokuConfig, 
             with patch("os.path.exists", return_value=False) as mock_exists:
                 await bot.handle_message(msg)
                 mock_exists.assert_called_once_with("/tmp/ghost.png")
-                
+
                 # channel.send should be called 2 times: text segment and warning segment
                 assert mock_channel.send.call_count == 2
                 mock_channel.send.assert_any_call("See this: ")
@@ -291,7 +292,7 @@ async def test_handle_message_with_empty_whitespace_guards(mock_config: KesokuCo
             with patch("os.path.exists", return_value=True):
                 with patch("discord.File", return_value=mock_file):
                     await bot.handle_message(msg)
-                    
+
                     # channel.send should be called exactly once (only for the file attachment)
                     assert mock_channel.send.call_count == 1
                     mock_channel.send.assert_called_once_with(file=mock_file)
@@ -322,7 +323,7 @@ async def test_on_message_timestamp_formatting(mock_config: KesokuConfig, mock_g
             msg.id = 888
 
             # Create a mock datetime object for created_at
-            tz_utc = datetime.timezone.utc
+            tz_utc = datetime.UTC
             dt = datetime.datetime(2026, 5, 18, 15, 21, 48, tzinfo=tz_utc)
             msg.created_at = dt
 
@@ -333,6 +334,7 @@ async def test_on_message_timestamp_formatting(mock_config: KesokuConfig, mock_g
             posted_msg = mock_gateway.post.call_args[0][0]
 
             from kesoku.gateway.chatbot.discord import _get_local_timezone_name
+
             tz_name = _get_local_timezone_name()
             local_time_str = dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
             expected_content = f"`Allowed` <@222> at `{local_time_str} {tz_name}`:\nHello test"
@@ -380,7 +382,7 @@ def test_build_discord_custom_prompt_thread_with_topic() -> None:
 
     prompt = _build_discord_custom_prompt(mock_thread, mock_user)
 
-    assert "You are currently chatting in a Discord thread named \"#help-thread\" (ID: 555)" in prompt
+    assert 'You are currently chatting in a Discord thread named "#help-thread" (ID: 555)' in prompt
     assert "under channel \"#general\" (ID: 444) on the server 'AwesomeServer'." in prompt
     assert "## Channel Topic\nThis is the general channel topic." in prompt
     assert "Response Format" in prompt
@@ -423,7 +425,7 @@ async def test_typing_status_lifecycle(mock_config: KesokuConfig, mock_gateway: 
             msg.channel = mock_thread
             msg.content = "Trigger typing"
             msg.id = 888
-            msg.created_at = datetime.datetime.now(datetime.timezone.utc)
+            msg.created_at = datetime.datetime.now(datetime.UTC)
 
             await bot.on_message(msg)
 
@@ -457,7 +459,6 @@ async def test_typing_status_lifecycle(mock_config: KesokuConfig, mock_gateway: 
             # The typing task should be popped and cancelled
             assert "12345" not in bot._typing_tasks
             assert task.cancelled() or task.done()
-
 
             # Ensure typing context was exited
             await asyncio.sleep(0.01)
@@ -577,7 +578,9 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
 
 
 @pytest.mark.asyncio
-async def test_handle_message_tool_result_displays_parent_arguments(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+async def test_handle_message_tool_result_displays_parent_arguments(
+    mock_config: KesokuConfig, mock_gateway: MagicMock
+) -> None:
     """Test tool result formatting retrieves and displays parent arguments using message.parent_id."""
     from kesoku.constants import ROLE_TOOL, TYPE_TOOL_CALL, TYPE_TOOL_RESULT
 
@@ -674,4 +677,3 @@ async def test_handle_message_tool_result_in_place_edit(mock_config: KesokuConfi
             mock_discord_msg.edit.assert_called_once_with(content="📥 **my_tool**: `edit_query` ✅")
             # The cache should be cleaned up
             assert "parent123" not in bot._sent_tool_calls
-

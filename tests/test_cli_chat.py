@@ -1,10 +1,11 @@
 """Unit tests for Kesoku CLI chat runner module."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 from rich.console import Console
 
-from kesoku.cli_chat import _list_chat_sessions, _show_session_history, run_cli_chat_async
+from kesoku.cli_chat import _list_chat_sessions, run_cli_chat_async
 from kesoku.db import Session
 
 
@@ -25,9 +26,7 @@ async def test_list_chat_sessions_with_data() -> None:
     """Test listing chat sessions with existing sessions."""
     gw = MagicMock()
     gw.list_sessions = AsyncMock(
-        return_value=[
-            Session(id="s1", title="Test Session", created_at=1000.0, updated_at=1000.0)
-        ]
+        return_value=[Session(id="s1", title="Test Session", created_at=1000.0, updated_at=1000.0)]
     )
     console = MagicMock(spec=Console)
 

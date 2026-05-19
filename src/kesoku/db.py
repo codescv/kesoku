@@ -370,8 +370,6 @@ class DatabaseManager:
         finally:
             conn.close()
 
-
-
     def update_message_status(self, message_id: str, status: str) -> None:
         """Update the operational lifecycle status of a message.
 

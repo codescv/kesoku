@@ -32,7 +32,7 @@ def parse_message_content(content: str) -> list[dict[str, str]]:
         text_before = content[last_idx : match.start()]
         if text_before:
             segments.append({"type": "text", "content": text_before})
-        
+
         file_path = match.group(1).strip()
         segments.append({"type": "file", "path": file_path})
         last_idx = match.end()

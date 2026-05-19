@@ -15,7 +15,6 @@ from kesoku.constants import (
     STATUS_INTERRUPTED,
     STATUS_PENDING_AGENT,
     STATUS_PROCESSED,
-    STATUS_RESPONDED,
     TYPE_TEXT,
 )
 from kesoku.db import DatabaseManager, Message
@@ -56,7 +55,9 @@ async def test_pure_broker_pubsub(temp_db: str) -> None:
     await gw.post(msg1)
 
     # Post a model message
-    msg2 = Message(session_id="s1", chatbot_id="cli", channel_id="c1", sender="Agent", role=ROLE_ASSISTANT, content="Resp")
+    msg2 = Message(
+        session_id="s1", chatbot_id="cli", channel_id="c1", sender="Agent", role=ROLE_ASSISTANT, content="Resp"
+    )
     await gw.post(msg2)
 
     await asyncio.gather(user_task, model_task)

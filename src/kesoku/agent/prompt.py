@@ -1,6 +1,7 @@
 """System prompt construction and management utilities for Kesoku AI Agent."""
 
 import os
+
 from kesoku.config import get_config
 from kesoku.db import Session
 from kesoku.logger import setup_logger
@@ -58,7 +59,9 @@ Unless the user explicitly instructs otherwise, do not refer to any file outside
         session_dir_info = f"""
 # Session Staging Directory
 > STAGING_DIR='{staging_path}'
-Unless the user explicitly instructs otherwise, you MUST save all files (such as generated images, photos, audios, videos, report documents, scripts, or other output files) in this session staging directory by default. This is your staging directory for your work in this session.
+Unless the user explicitly instructs otherwise, you MUST save all files (such as generated
+images, photos, audios, videos, report documents, scripts, or other output files) in this
+session staging directory by default. This is your staging directory for your work in this session.
         """
 
     user_prompts_sections = []
@@ -69,14 +72,10 @@ Unless the user explicitly instructs otherwise, you MUST save all files (such as
             resolved_path = os.path.join(cfg.agent_working_dir, resolved_path)
         resolved_path = os.path.abspath(resolved_path)
 
-        with open(resolved_path, "r", encoding="utf-8") as f:
+        with open(resolved_path, encoding="utf-8") as f:
             content = f.read()
         base_name = os.path.basename(resolved_path)
-        user_prompts_sections.append(
-            f"=== BEGIN {base_name} ===\n"
-            f"{content.strip()}\n"
-            f"=== END {base_name} ==="
-        )
+        user_prompts_sections.append(f"=== BEGIN {base_name} ===\n{content.strip()}\n=== END {base_name} ===")
 
     sections = [
         PREAMBLE.strip(),
@@ -85,10 +84,12 @@ Unless the user explicitly instructs otherwise, you MUST save all files (such as
     if session_dir_info:
         sections.append(session_dir_info.strip())
 
-    sections.extend([
-        SKILLS_INSTRUCTIONS.strip(),
-        FILE_SENDING_INSTRUCTIONS.strip(),
-    ])
+    sections.extend(
+        [
+            SKILLS_INSTRUCTIONS.strip(),
+            FILE_SENDING_INSTRUCTIONS.strip(),
+        ]
+    )
 
     sections.extend(user_prompts_sections)
 

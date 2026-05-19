@@ -215,9 +215,7 @@ class GeminiLLM(BaseLLM):
                         call = part.function_call
                         args_dict = dict(call.args) if call.args else {}
                         ts = part.thought_signature.hex() if part.thought_signature else None
-                        tool_calls.append(
-                            ToolCallRequest(name=call.name, arguments=args_dict, thought_signature=ts)
-                        )
+                        tool_calls.append(ToolCallRequest(name=call.name, arguments=args_dict, thought_signature=ts))
 
             text_content = "".join(text_parts)
             thought_content = "".join(thought_parts) if thought_parts else None

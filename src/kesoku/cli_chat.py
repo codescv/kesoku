@@ -159,9 +159,7 @@ async def run_cli_chat_async(
         return
 
     if not message:
-        logger.error(
-            "Please provide a message, or use -l to list sessions or --show-history to view history."
-        )
+        logger.error("Please provide a message, or use -l to list sessions or --show-history to view history.")
         sys.exit(1)
 
     # Handle session identification for sending a message
@@ -170,9 +168,7 @@ async def run_cli_chat_async(
         session_id = resume
         session = await gateway.get_session(session_id)
         if not session:
-            logger.error(
-                f"Session '{session_id}' not found. Use -l to list available sessions."
-            )
+            logger.error(f"Session '{session_id}' not found. Use -l to list available sessions.")
             sys.exit(1)
         await gateway.update_session_updated_at(session_id)
         is_resumed = True

@@ -146,9 +146,7 @@ class WebSearchTool:
             client = self._get_client()
             config = get_config().gemini
 
-            generate_config = types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())]
-            )
+            generate_config = types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())])
 
             res = client.models.generate_content(
                 model=config.model_name,
@@ -209,11 +207,13 @@ def run_shell_command(
 
     The command is executed within the specified `cwd` directory. If `cwd` is not provided or is empty,
     it defaults to the Agent Working Directory (AWD). If `cwd` is a relative path, it is resolved relative to the AWD.
-    All temporary scripts, data files, or build artifacts should be created in the session staging directory (which can be found in the system prompt STAGING_DIR instructions).
+    All temporary scripts, data files, or build artifacts should be created in the session staging directory
+    (which can be found in the system prompt STAGING_DIR instructions).
 
     Args:
         command: The command string to execute (e.g., 'uv run pytest' or 'echo hello').
-        cwd: Optional target working directory for executing the command. If relative, it's relative to AWD. Defaults to AWD.
+        cwd: Optional target working directory for executing the command.
+            If relative, it's relative to AWD. Defaults to AWD.
         context: Optional tool execution context.
 
     Returns:
@@ -264,9 +264,7 @@ def run_shell_command(
     # Inject AWD and STAGING_DIR environment variables
     env["AWD"] = os.path.realpath(config.agent_working_dir or os.getcwd())
     if context and context.session_workspace:
-        env["STAGING_DIR"] = os.path.realpath(
-            os.path.join(config.workspace.sessions_dir, context.session_workspace)
-        )
+        env["STAGING_DIR"] = os.path.realpath(os.path.join(config.workspace.sessions_dir, context.session_workspace))
 
     logger.info(f"Executing shell command in '{exec_dir}': {command}")
 
