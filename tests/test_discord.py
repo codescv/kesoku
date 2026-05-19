@@ -776,8 +776,9 @@ async def test_handle_message_with_voice_fallback(mock_config: KesokuConfig, moc
 
 def test_voice_file_to_dict() -> None:
     """Test that VoiceFile correctly serializes voice message metadata."""
-    from kesoku.gateway.chatbot.discord import VoiceFile
     import io
+
+    from kesoku.gateway.chatbot.discord import VoiceFile
 
     fp = io.BytesIO(b"dummy audio content")
     voice_file = VoiceFile(
@@ -796,8 +797,9 @@ def test_voice_file_to_dict() -> None:
 
 def test_generate_pseudo_waveform() -> None:
     """Test that pseudo waveform generator returns a valid base64 string of 256 bytes."""
-    from kesoku.gateway.chatbot.discord import _generate_pseudo_waveform
     import base64
+
+    from kesoku.gateway.chatbot.discord import _generate_pseudo_waveform
 
     encoded = _generate_pseudo_waveform()
     assert isinstance(encoded, str)

@@ -29,19 +29,14 @@ app = typer.Typer(help="Kesoku AI Agent CLI manager.")
 app.add_typer(service_app, name="service")
 
 
-@app.callback()
-def main_callback(
-    config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
-) -> None:
-    """Global callback option for configuration file location."""
-    load_config(config)
-
-
 @app.command("init")
 def init_cmd(
     workspace_path: Annotated[
         str | None, typer.Option("-w", "--workspace-path", help="Workspace directory to initialize")
     ] = None,
+    config: Annotated[
+        str, typer.Option("-c", "--config", help="Path to save/initialize config.toml")
+    ] = "config.toml",
     overwrite_config: Annotated[
         bool, typer.Option("--overwrite-config", help="Overwrite existing config file (creates backup)")
     ] = False,
@@ -56,14 +51,17 @@ def init_cmd(
 
     Args:
         workspace_path: Path to workspace directory to initialize.
+        config: Path to save/initialize config.toml.
         overwrite_config: Whether to overwrite existing config.toml.
         overwrite_skills: Whether to overwrite existing skills in skills dir.
         overwrite_db: Whether to overwrite existing SQLite database file.
     """
-    if workspace_path is None:
-        workspace_path = "."
-    workspace_path = os.path.abspath(workspace_path)
-    target_config_path = os.path.join(workspace_path, "config.toml")
+    if workspace_path is not None:
+        workspace_path = os.path.abspath(workspace_path)
+        target_config_path = os.path.join(workspace_path, "config.toml")
+    else:
+        target_config_path = os.path.abspath(config)
+        workspace_path = os.path.dirname(target_config_path)
 
     logger.info(f"Initializing Kesoku workspace at {workspace_path} (config: {target_config_path})...")
     init_config(target_config_path, overwrite=overwrite_config)
@@ -77,6 +75,9 @@ def init_cmd(
 @app.command("chat")
 def chat_cmd(
     message: Annotated[str | None, typer.Argument(help="Message to send to the agent")] = None,
+    config: Annotated[
+        str, typer.Option("-c", "--config", help="Path to config.toml")
+    ] = "config.toml",
     list_sessions: Annotated[
         bool, typer.Option("-l", "--list-sessions", help="List all current chat sessions")
     ] = False,
@@ -90,6 +91,7 @@ def chat_cmd(
     ] = None,
 ) -> None:
     """Chat with Kesoku Agent in one-shot session mode."""
+    load_config(config)
     try:
         asyncio.run(
             run_cli_chat_async(
@@ -110,8 +112,13 @@ def chat_cmd(
 
 
 @app.command("start")
-def start_cmd() -> None:
+def start_cmd(
+    config: Annotated[
+        str, typer.Option("-c", "--config", help="Path to config.toml")
+    ] = "config.toml",
+) -> None:
     """Start Kesoku background bots and agent dispatcher in indefinite foreground service mode."""
+    load_config(config)
     cfg = get_config()
 
     if not cfg.discord.enabled:

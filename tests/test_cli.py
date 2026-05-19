@@ -49,7 +49,7 @@ def test_cli_help() -> None:
 def test_cli_chat_before_init(tmp_path: Any) -> None:
     """Verify running chat before init fails safely with clear error."""
     config_path = tmp_path / "nonexistent.toml"
-    result = runner.invoke(app, ["-c", str(config_path), "chat", "Hello"])
+    result = runner.invoke(app, ["chat", "-c", str(config_path), "Hello"])
     assert result.exit_code == 1
     assert "Please run 'kesoku init' first" in result.output
 
@@ -129,17 +129,17 @@ def test_cli_chat_workflow(mock_gemini: Any, tmp_path: Any) -> None:
     runner.invoke(app, ["init", "-w", str(tmp_path)])
 
     # 1. Check empty session list
-    res_list_empty = runner.invoke(app, ["-c", str(config_path), "chat", "-l"])
+    res_list_empty = runner.invoke(app, ["chat", "-c", str(config_path), "-l"])
     assert res_list_empty.exit_code == 0
     assert "No chat sessions found" in res_list_empty.stdout
 
     # 2. No args error
-    res_no_args = runner.invoke(app, ["-c", str(config_path), "chat"])
+    res_no_args = runner.invoke(app, ["chat", "-c", str(config_path)])
     assert res_no_args.exit_code == 1
     assert "Please provide a message" in res_no_args.stdout
 
     # 3. Start a new chat session with patched backend
-    res_chat1 = runner.invoke(app, ["-c", str(config_path), "chat", "Calculate 10 + 20"])
+    res_chat1 = runner.invoke(app, ["chat", "-c", str(config_path), "Calculate 10 + 20"])
     assert res_chat1.exit_code == 0
     plain_chat1 = strip_ansi(res_chat1.stdout)
     assert "Started new session" in plain_chat1
@@ -152,23 +152,23 @@ def test_cli_chat_workflow(mock_gemini: Any, tmp_path: Any) -> None:
     session_id = match.group(1)
 
     # 4. Check session list contains the new session
-    res_list = runner.invoke(app, ["-c", str(config_path), "chat", "-l"])
+    res_list = runner.invoke(app, ["chat", "-c", str(config_path), "-l"])
     assert res_list.exit_code == 0
     plain_list = strip_ansi(res_list.stdout)
     assert session_id in plain_list
     assert "Calculate 10 + 20" in plain_list
 
     # 5. Resume specific session
-    res_resume = runner.invoke(app, ["-c", str(config_path), "chat", "-r", session_id, "And multiply by 2"])
+    res_resume = runner.invoke(app, ["chat", "-c", str(config_path), "-r", session_id, "And multiply by 2"])
     assert res_resume.exit_code == 0
 
     # 6. Resume latest session
-    res_latest = runner.invoke(app, ["-c", str(config_path), "chat", "-z", "And add 5"])
+    res_latest = runner.invoke(app, ["chat", "-c", str(config_path), "-z", "And add 5"])
     assert res_latest.exit_code == 0
     assert f"Resuming latest session: '{session_id}'" in strip_ansi(res_latest.stdout)
 
     # 7. Show history (--show-history)
-    res_history = runner.invoke(app, ["-c", str(config_path), "chat", "--show-history", session_id])
+    res_history = runner.invoke(app, ["chat", "-c", str(config_path), "--show-history", session_id])
     assert res_history.exit_code == 0
     plain_history = strip_ansi(res_history.stdout)
     assert f"Chat History for Session '{session_id}'" in plain_history
@@ -177,7 +177,7 @@ def test_cli_chat_workflow(mock_gemini: Any, tmp_path: Any) -> None:
     assert "And add 5" in plain_history
 
     # 8. Show history (-s short flag)
-    res_history_short = runner.invoke(app, ["-c", str(config_path), "chat", "-s", session_id])
+    res_history_short = runner.invoke(app, ["chat", "-c", str(config_path), "-s", session_id])
     assert res_history_short.exit_code == 0
     assert f"Chat History for Session '{session_id}'" in strip_ansi(res_history_short.stdout)
 

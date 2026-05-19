@@ -24,7 +24,7 @@ uv sync
 
 Initialize a workspace and `config.toml` in any directory (e.g. `private/`):
 ```bash
-uv run kesoku -c private/config.toml init
+uv run kesoku init -c private/config.toml
 ```
 This creates `private/config.toml`, `private/kesoku.db`, and `private/skills/`.
 
@@ -54,34 +54,34 @@ bot_token = "your_discord_bot_token"
 
 Start a new chat session:
 ```bash
-uv run kesoku -c private/config.toml chat "What is 25 + 15?"
+uv run kesoku chat -c private/config.toml "What is 25 + 15?"
 ```
 
 List all current chat sessions:
 ```bash
-uv run kesoku -c private/config.toml chat -l
+uv run kesoku chat -c private/config.toml -l
 ```
 
 Resume a specific chat session by its ID:
 ```bash
-uv run kesoku -c private/config.toml chat -r abc12345 "And multiply that by 2."
+uv run kesoku chat -c private/config.toml -r abc12345 "And multiply that by 2."
 ```
 
 Resume the latest active chat session:
 ```bash
-uv run kesoku -c private/config.toml chat -z "And subtract 10."
+uv run kesoku chat -c private/config.toml -z "And subtract 10."
 ```
 
 Show full formatted chat history of a session:
 ```bash
-uv run kesoku -c private/config.toml chat --show-history abc12345
+uv run kesoku chat -c private/config.toml --show-history abc12345
 ```
 
 ### Daemon Mode (`start`)
 
 Run background daemons (Discord bot):
 ```bash
-uv run kesoku -c private/config.toml start
+uv run kesoku start -c private/config.toml
 ```
 
 ### Running as a Systemd Service (Linux)
