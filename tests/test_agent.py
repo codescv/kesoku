@@ -221,7 +221,17 @@ async def test_orphaned_tool_call_healing(temp_db: str) -> None:
     await gw.create_session("sess_heal", title="Healing Session")
 
     # Post a user message and an orphaned tool call
-    await gw.post(Message(session_id="sess_heal", chatbot_id="cli", channel_id="ch1", sender="u1", role="user", content="Do something", status="processed"))
+    await gw.post(
+        Message(
+            session_id="sess_heal",
+            chatbot_id="cli",
+            channel_id="ch1",
+            sender="u1",
+            role="user",
+            content="Do something",
+            status="processed",
+        )
+    )
 
     tc_msg = Message(
         session_id="sess_heal",
@@ -232,13 +242,16 @@ async def test_orphaned_tool_call_healing(temp_db: str) -> None:
         type="tool_call",
         content="Calling tool...",
         status="responded",
-        metadata={"tool_name": "some_tool"}
+        metadata={"tool_name": "some_tool"},
     )
     await gw.post(tc_msg)
 
     # Create worker and build clean history
     from kesoku.agent.agent import SessionWorker
-    worker = SessionWorker(session_id="sess_heal", gateway=gw, llm=MockLLM(), tool_registry=ToolRegistry(), dispatcher=None)
+
+    worker = SessionWorker(
+        session_id="sess_heal", gateway=gw, llm=MockLLM(), tool_registry=ToolRegistry(), dispatcher=None
+    )
 
     history = await worker._build_clean_history(max_turns=10)
 
@@ -261,11 +274,34 @@ async def test_system_prompt_and_pinned_turns_turn_based(temp_db: str) -> None:
     # system prompt is automatically created as first message in create_session
     # Let's add 6 turns
     for i in range(1, 7):
-        await gw.post(Message(session_id="sess_pin", chatbot_id="cli", channel_id="ch1", sender="u1", role="user", content=f"User Prompt {i}", status="processed"))
-        await gw.post(Message(session_id="sess_pin", chatbot_id="cli", channel_id="ch1", sender="Kesoku", role="assistant", content=f"Response {i}", status="responded"))
+        await gw.post(
+            Message(
+                session_id="sess_pin",
+                chatbot_id="cli",
+                channel_id="ch1",
+                sender="u1",
+                role="user",
+                content=f"User Prompt {i}",
+                status="processed",
+            )
+        )
+        await gw.post(
+            Message(
+                session_id="sess_pin",
+                chatbot_id="cli",
+                channel_id="ch1",
+                sender="Kesoku",
+                role="assistant",
+                content=f"Response {i}",
+                status="responded",
+            )
+        )
 
     from kesoku.agent.agent import SessionWorker
-    worker = SessionWorker(session_id="sess_pin", gateway=gw, llm=MockLLM(), tool_registry=ToolRegistry(), dispatcher=None)
+
+    worker = SessionWorker(
+        session_id="sess_pin", gateway=gw, llm=MockLLM(), tool_registry=ToolRegistry(), dispatcher=None
+    )
 
     # Call build clean history with turn counts that force Turn 3 and Turn 4 to truncate
     history = await worker._build_clean_history(max_turns=4, pin_initial_turns=2, pin_recent_turns=2)
@@ -292,50 +328,139 @@ async def test_skill_pinning_and_parallel_safety_turn_based(temp_db: str) -> Non
     await gw.create_session("sess_skill", title="Skill Session")
 
     # Turn 1 (Pinned)
-    await gw.post(Message(session_id="sess_skill", chatbot_id="cli", channel_id="ch1", sender="u1", role="user", content="Turn 1", status="processed"))
-    await gw.post(Message(session_id="sess_skill", chatbot_id="cli", channel_id="ch1", sender="Kesoku", role="assistant", content="Resp 1", status="responded"))
+    await gw.post(
+        Message(
+            session_id="sess_skill",
+            chatbot_id="cli",
+            channel_id="ch1",
+            sender="u1",
+            role="user",
+            content="Turn 1",
+            status="processed",
+        )
+    )
+    await gw.post(
+        Message(
+            session_id="sess_skill",
+            chatbot_id="cli",
+            channel_id="ch1",
+            sender="Kesoku",
+            role="assistant",
+            content="Resp 1",
+            status="responded",
+        )
+    )
 
     # Turn 2 (Sliding window candidate, will be older and would be truncated)
-    user2 = Message(session_id="sess_skill", chatbot_id="cli", channel_id="ch1", sender="u1", role="user", content="Turn 2", status="processed")
+    user2 = Message(
+        session_id="sess_skill",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        content="Turn 2",
+        status="processed",
+    )
     await gw.post(user2)
 
     # Parallel tool calls inside Turn 2:
     # 1. Pinned skill call: use_skill('role-playing')
     # 2. Standard command call: run_shell_command('ls')
     tc_skill = Message(
-        session_id="sess_skill", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
-        role="tool", type="tool_call", content="Calling use_skill", status="responded",
-        parent_id=user2.id, metadata={"tool_name": "use_skill", "skill_name": "role-playing"}
+        session_id="sess_skill",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role="tool",
+        type="tool_call",
+        content="Calling use_skill",
+        status="responded",
+        parent_id=user2.id,
+        metadata={"tool_name": "use_skill", "skill_name": "role-playing"},
     )
     tc_cmd = Message(
-        session_id="sess_skill", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
-        role="tool", type="tool_call", content="Calling command", status="responded",
-        parent_id=user2.id, metadata={"tool_name": "run_shell_command"}
+        session_id="sess_skill",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role="tool",
+        type="tool_call",
+        content="Calling command",
+        status="responded",
+        parent_id=user2.id,
+        metadata={"tool_name": "run_shell_command"},
     )
     await gw.post(tc_skill)
     await gw.post(tc_cmd)
 
     tr_skill = Message(
-        session_id="sess_skill", chatbot_id="cli", channel_id="ch1", sender="role-playing",
-        role="tool", type="tool_result", content="Skill loaded", status="responded",
-        parent_id=tc_skill.id, metadata={"tool_name": "use_skill", "tool_result": "success"}
+        session_id="sess_skill",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="role-playing",
+        role="tool",
+        type="tool_result",
+        content="Skill loaded",
+        status="responded",
+        parent_id=tc_skill.id,
+        metadata={"tool_name": "use_skill", "tool_result": "success"},
     )
     tr_cmd = Message(
-        session_id="sess_skill", chatbot_id="cli", channel_id="ch1", sender="run_shell_command",
-        role="tool", type="tool_result", content="Command output", status="responded",
-        parent_id=tc_cmd.id, metadata={"tool_name": "run_shell_command", "tool_result": "files"}
+        session_id="sess_skill",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="run_shell_command",
+        role="tool",
+        type="tool_result",
+        content="Command output",
+        status="responded",
+        parent_id=tc_cmd.id,
+        metadata={"tool_name": "run_shell_command", "tool_result": "files"},
     )
     await gw.post(tr_skill)
     await gw.post(tr_cmd)
 
-    await gw.post(Message(session_id="sess_skill", chatbot_id="cli", channel_id="ch1", sender="Kesoku", role="assistant", content="Resp 2", status="responded"))
+    await gw.post(
+        Message(
+            session_id="sess_skill",
+            chatbot_id="cli",
+            channel_id="ch1",
+            sender="Kesoku",
+            role="assistant",
+            content="Resp 2",
+            status="responded",
+        )
+    )
 
     # Turn 3 (Latest turn, stays in sliding window suffix)
-    await gw.post(Message(session_id="sess_skill", chatbot_id="cli", channel_id="ch1", sender="u1", role="user", content="Turn 3", status="processed"))
-    await gw.post(Message(session_id="sess_skill", chatbot_id="cli", channel_id="ch1", sender="Kesoku", role="assistant", content="Resp 3", status="responded"))
+    await gw.post(
+        Message(
+            session_id="sess_skill",
+            chatbot_id="cli",
+            channel_id="ch1",
+            sender="u1",
+            role="user",
+            content="Turn 3",
+            status="processed",
+        )
+    )
+    await gw.post(
+        Message(
+            session_id="sess_skill",
+            chatbot_id="cli",
+            channel_id="ch1",
+            sender="Kesoku",
+            role="assistant",
+            content="Resp 3",
+            status="responded",
+        )
+    )
 
     from kesoku.agent.agent import SessionWorker
-    worker = SessionWorker(session_id="sess_skill", gateway=gw, llm=MockLLM(), tool_registry=ToolRegistry(), dispatcher=None)
+
+    worker = SessionWorker(
+        session_id="sess_skill", gateway=gw, llm=MockLLM(), tool_registry=ToolRegistry(), dispatcher=None
+    )
 
     # Retrieve clean history with limit that forces Turn 2 to truncate
     history = await worker._build_clean_history(max_turns=2, pin_initial_turns=1, pin_recent_turns=1)
@@ -358,41 +483,138 @@ async def test_priority_based_dropping_and_atomic_batches_turn_based(temp_db: st
     await gw.create_session("sess_drop", title="Dropping Session")
 
     # Turn 1 (Will be older, should have thoughts and resolved tool calls dropped)
-    user1 = Message(session_id="sess_drop", chatbot_id="cli", channel_id="ch1", sender="u1", role="user", content="Turn 1", status="processed")
+    user1 = Message(
+        session_id="sess_drop",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        content="Turn 1",
+        status="processed",
+    )
     await gw.post(user1)
 
     # Add a thought message (should be dropped)
-    thought1 = Message(session_id="sess_drop", chatbot_id="cli", channel_id="ch1", sender="Kesoku", role="assistant", type="thought", content="Thinking...", status="responded")
+    thought1 = Message(
+        session_id="sess_drop",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role="assistant",
+        type="thought",
+        content="Thinking...",
+        status="responded",
+    )
     await gw.post(thought1)
 
     # Add a resolved tool turn (should be dropped)
-    tc1 = Message(session_id="sess_drop", chatbot_id="cli", channel_id="ch1", sender="Kesoku", role="tool", type="tool_call", content="Calling tool", status="responded", parent_id=user1.id, metadata={"tool_name": "dummy"})
+    tc1 = Message(
+        session_id="sess_drop",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role="tool",
+        type="tool_call",
+        content="Calling tool",
+        status="responded",
+        parent_id=user1.id,
+        metadata={"tool_name": "dummy"},
+    )
     await gw.post(tc1)
 
-    tr1 = Message(session_id="sess_drop", chatbot_id="cli", channel_id="ch1", sender="dummy", role="tool", type="tool_result", content="Result", status="responded", parent_id=tc1.id, metadata={"tool_name": "dummy", "tool_result": "output"})
+    tr1 = Message(
+        session_id="sess_drop",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="dummy",
+        role="tool",
+        type="tool_result",
+        content="Result",
+        status="responded",
+        parent_id=tc1.id,
+        metadata={"tool_name": "dummy", "tool_result": "output"},
+    )
     await gw.post(tr1)
 
-    resp1 = Message(session_id="sess_drop", chatbot_id="cli", channel_id="ch1", sender="Kesoku", role="assistant", content="Resp 1", status="responded")
+    resp1 = Message(
+        session_id="sess_drop",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role="assistant",
+        content="Resp 1",
+        status="responded",
+    )
     await gw.post(resp1)
 
     # Turn 2 (Will be recent, should keep thoughts and tool calls)
-    user2 = Message(session_id="sess_drop", chatbot_id="cli", channel_id="ch1", sender="u1", role="user", content="Turn 2", status="processed")
+    user2 = Message(
+        session_id="sess_drop",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        content="Turn 2",
+        status="processed",
+    )
     await gw.post(user2)
 
-    thought2 = Message(session_id="sess_drop", chatbot_id="cli", channel_id="ch1", sender="Kesoku", role="assistant", type="thought", content="Thinking 2...", status="responded")
+    thought2 = Message(
+        session_id="sess_drop",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role="assistant",
+        type="thought",
+        content="Thinking 2...",
+        status="responded",
+    )
     await gw.post(thought2)
 
-    tc2 = Message(session_id="sess_drop", chatbot_id="cli", channel_id="ch1", sender="Kesoku", role="tool", type="tool_call", content="Calling tool 2", status="responded", parent_id=user2.id, metadata={"tool_name": "dummy"})
+    tc2 = Message(
+        session_id="sess_drop",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role="tool",
+        type="tool_call",
+        content="Calling tool 2",
+        status="responded",
+        parent_id=user2.id,
+        metadata={"tool_name": "dummy"},
+    )
     await gw.post(tc2)
 
-    tr2 = Message(session_id="sess_drop", chatbot_id="cli", channel_id="ch1", sender="dummy", role="tool", type="tool_result", content="Result 2", status="responded", parent_id=tc2.id, metadata={"tool_name": "dummy", "tool_result": "output 2"})
+    tr2 = Message(
+        session_id="sess_drop",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="dummy",
+        role="tool",
+        type="tool_result",
+        content="Result 2",
+        status="responded",
+        parent_id=tc2.id,
+        metadata={"tool_name": "dummy", "tool_result": "output 2"},
+    )
     await gw.post(tr2)
 
-    resp2 = Message(session_id="sess_drop", chatbot_id="cli", channel_id="ch1", sender="Kesoku", role="assistant", content="Resp 2", status="responded")
+    resp2 = Message(
+        session_id="sess_drop",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role="assistant",
+        content="Resp 2",
+        status="responded",
+    )
     await gw.post(resp2)
 
     from kesoku.agent.agent import SessionWorker
-    worker = SessionWorker(session_id="sess_drop", gateway=gw, llm=MockLLM(), tool_registry=ToolRegistry(), dispatcher=None)
+
+    worker = SessionWorker(
+        session_id="sess_drop", gateway=gw, llm=MockLLM(), tool_registry=ToolRegistry(), dispatcher=None
+    )
 
     # Call history building with max_turns = 10, pin_initial_turns = 0, pin_recent_turns = 1
     history = await worker._build_clean_history(max_turns=10, pin_initial_turns=0, pin_recent_turns=1)
@@ -432,7 +654,9 @@ async def test_clean_history_config_loading(temp_db: str) -> None:
     cfg.agent.history.pin_recent_turns = 13
 
     with patch("kesoku.agent.agent.get_config", return_value=cfg):
-        worker = SessionWorker(session_id="sess_cfg", gateway=gw, llm=MockLLM(), tool_registry=ToolRegistry(), dispatcher=None)
+        worker = SessionWorker(
+            session_id="sess_cfg", gateway=gw, llm=MockLLM(), tool_registry=ToolRegistry(), dispatcher=None
+        )
         history = await worker._build_clean_history()
         assert len(history) == 1
         assert history[0].role == "system"

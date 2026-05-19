@@ -304,7 +304,7 @@ class SessionWorker:
         - System Prompt (kept at history[0])
         - Pinned initial Turns 1, 2, and 3 (retained in full)
         - Pinned recovered skill Turns (e.g., Turn 5 that loaded 'role-playing', recovered in full)
-        - Candidate Turns 74 to 90 (stripped of thoughts and resolved tools, keeping user prompts and assistant responses only)
+        - Candidate Turns 74 to 90 (stripped of thoughts and resolved tools, keeping only user/assistant text)
         - Candidate Turns 91 to 100 (kept in 100% full execution detail: prompts, thoughts, tool calls/results)
 
         Args:
@@ -327,9 +327,7 @@ class SessionWorker:
         # 1. Detects and heals orphaned tool calls by posting a synthesized interruption result.
         raw_history = await self.gateway.get_session_history(self.session_id, limit=0)
         tool_calls = [m for m in raw_history if m.type == TYPE_TOOL_CALL]
-        tool_results_parent_ids = {
-            m.parent_id for m in raw_history if m.type == TYPE_TOOL_RESULT and m.parent_id
-        }
+        tool_results_parent_ids = {m.parent_id for m in raw_history if m.type == TYPE_TOOL_RESULT and m.parent_id}
 
         healed = False
         for tc in tool_calls:
@@ -367,9 +365,7 @@ class SessionWorker:
                 system_msg = m
                 break
 
-        conv_msgs = [
-            m for m in raw_history if (not system_msg or m.id != system_msg.id) and m.role != ROLE_SYSTEM
-        ]
+        conv_msgs = [m for m in raw_history if (not system_msg or m.id != system_msg.id) and m.role != ROLE_SYSTEM]
 
         # 3. Groups messages into complete logical turns (User prompt -> ... -> before next user prompt).
         turns: list[list[Message]] = []
@@ -452,7 +448,11 @@ class SessionWorker:
         for turn in discarded_candidate_turns:
             has_completed_skill = False
             for m in turn:
-                if m.type == TYPE_TOOL_RESULT and m.metadata.get("tool_name") == "use_skill" and "tool_error" not in m.metadata:
+                if (
+                    m.type == TYPE_TOOL_RESULT
+                    and m.metadata.get("tool_name") == "use_skill"
+                    and "tool_error" not in m.metadata
+                ):
                     has_completed_skill = True
                     break
             if has_completed_skill:

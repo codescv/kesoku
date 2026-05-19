@@ -184,9 +184,7 @@ WantedBy={wanted_by}
         logger.info("Service enabled successfully.")
     except subprocess.CalledProcessError as e:
         logger.warning(f"Could not enable service automatically: {e.stderr.strip() or e}")
-        console.print(
-            f"[bold yellow]Warning: Please enable the service manually: {' '.join(enable_cmd)}[/bold yellow]"
-        )
+        console.print(f"[bold yellow]Warning: Please enable the service manually: {' '.join(enable_cmd)}[/bold yellow]")
 
     console.print("\n[bold green]Kesoku service installed successfully![/bold green]")
     console.print("You can control the service using the following commands:")
@@ -400,5 +398,3 @@ def status_cmd(
 
     logger.info(f"Checking status via: {' '.join(cmd_list)}...")
     subprocess.run(cmd_list)
-
-

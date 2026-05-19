@@ -208,7 +208,7 @@ def test_cli_service_dry_run() -> None:
         assert result.exit_code == 0
         assert "WorkingDirectory=/mock/workspace" in result.stdout
         assert "ExecStart=" in result.stdout
-        assert "/mock/bin/kesoku -c /mock/workspace/config.toml start" in result.stdout
+        assert "/mock/bin/kesoku start -c /mock/workspace/config.toml" in result.stdout
         assert "WantedBy=default.target" in result.stdout
 
         # Test system dry-run with environment variables and -c flag
@@ -263,9 +263,16 @@ def test_cli_service_install_user() -> None:
         assert "service installed successfully" in result.stdout.lower()
         mock_makedirs.assert_called_once()
         m_open.assert_called_once()
-        # Verify daemon-reload was run
-        mock_run.assert_called_once_with(
+        # Verify daemon-reload and enable were run
+        assert mock_run.call_count == 2
+        mock_run.assert_any_call(
             ["systemctl", "--user", "daemon-reload"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        mock_run.assert_any_call(
+            ["systemctl", "--user", "enable", "kesoku"],
             check=True,
             capture_output=True,
             text=True,

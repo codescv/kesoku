@@ -273,10 +273,7 @@ class DiscordChatbot(Chatbot):
             # In regular channel; check if this channel is in no_auto_thread_channels
             no_thread_channels = self.config.discord.no_auto_thread_channels
             channel_name = getattr(message.channel, "name", "")
-            is_no_thread = (
-                str(message.channel.id) in no_thread_channels
-                or channel_name in no_thread_channels
-            )
+            is_no_thread = str(message.channel.id) in no_thread_channels or channel_name in no_thread_channels
 
             if is_no_thread:
                 target_channel = message.channel
@@ -295,7 +292,9 @@ class DiscordChatbot(Chatbot):
                             title = f"Chat with {message.author.display_name}"
                         thread = await message.create_thread(name=title)
                     except discord.HTTPException as e:
-                        logger.warning(f"Failed to create thread on message {message.id} (concurrent bot creation?): {e}")
+                        logger.warning(
+                            f"Failed to create thread on message {message.id} (concurrent bot creation?): {e}"
+                        )
                         await asyncio.sleep(0.5)
                         if hasattr(message.channel, "guild") and message.channel.guild:
                             thread = message.channel.guild.get_thread(message.id)
