@@ -996,3 +996,42 @@ async def test_trigger_cronjob_auto_thread(mock_gateway: MagicMock) -> None:
             assert posted_msg.channel_id == "22222"
             assert "Run scheduled prompt" in posted_msg.content
             assert posted_msg.metadata.get("is_cronjob") is True
+
+
+@pytest.mark.asyncio
+async def test_handle_message_removes_stop_button_on_final_response(
+    mock_config: KesokuConfig, mock_gateway: MagicMock
+) -> None:
+    """Test that the stop button is removed from the header view when final response is delivered."""
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.Thread)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+
+            # Setup mocked header message and view
+            mock_header_msg = AsyncMock(spec=discord.Message)
+            mock_header_view = MagicMock()
+            mock_header_view.stop_turn = MagicMock()
+            bot._header_views["thread123"] = (mock_header_msg, mock_header_view)
+
+            final_msg = Message(
+                id="msg123",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_ASSISTANT,
+                type=TYPE_TEXT,
+                content="Final reply",
+            )
+
+            await bot.handle_message(final_msg)
+
+            # Asserts:
+            # remove_item should be called on the header view with the stop_turn button
+            mock_header_view.remove_item.assert_called_once_with(mock_header_view.stop_turn)
+            # The header message should be edited to update the view
+            mock_header_msg.edit.assert_called_once_with(view=mock_header_view)
+            mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)

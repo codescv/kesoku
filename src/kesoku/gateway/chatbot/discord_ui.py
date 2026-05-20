@@ -92,6 +92,10 @@ class MessageHeaderView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
 
         try:
+            # Remove the stop button from the view and edit the message immediately
+            self.remove_item(button)
+            await interaction.message.edit(view=self)
+
             # 1. Locate the active dispatcher agent and session worker, and stop the turn
             agent = self.gateway.agent
             if agent:
@@ -176,9 +180,9 @@ class MessageHeaderView(discord.ui.View):
                         except Exception as de:
                             logger.warning(f"Failed to delete intermediate message {msg.id}: {de}")
 
-                # Clear session reference from chatbot's header turns cache
-                self.chatbot._turns_with_header = {
-                    tid for tid in self.chatbot._turns_with_header
+                # Clear session reference from chatbot's header views cache
+                self.chatbot._header_views = {
+                    tid: val for tid, val in self.chatbot._header_views.items()
                     if not tid.startswith(self.session_id) and tid != self.session_id
                 }
 

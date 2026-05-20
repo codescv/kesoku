@@ -153,7 +153,7 @@ class DiscordChatbot(Chatbot):
         self.bot.event(self.on_message)
         self._subscriber_task: asyncio.Task[None] | None = None
         self._sent_tool_calls: dict[str, discord.Message] = {}
-        self._turns_with_header: set[str] = set()
+        self._header_views: dict[str, tuple[discord.Message, MessageHeaderView]] = {}
         self._typing_tasks: dict[str, asyncio.Task[None]] = {}
         self._intermediate_messages: defaultdict[str, list[discord.Message]] = defaultdict(list)
 
@@ -413,7 +413,7 @@ class DiscordChatbot(Chatbot):
         # Send the MessageHeaderView at the start of the turn if it's a special message
         if is_special_message:
             turn_id = message.parent_id or message.session_id
-            if turn_id not in self._turns_with_header:
+            if turn_id not in self._header_views:
                 try:
                     is_thread = isinstance(channel, discord.Thread)
                     header_view = MessageHeaderView(
@@ -422,8 +422,8 @@ class DiscordChatbot(Chatbot):
                         chatbot=self,
                         is_thread=is_thread,
                     )
-                    await channel.send(view=header_view)
-                    self._turns_with_header.add(turn_id)
+                    header_msg = await channel.send(view=header_view)
+                    self._header_views[turn_id] = (header_msg, header_view)
                 except Exception as he:
                     logger.warning(f"Failed to send message header: {he}")
 
@@ -516,6 +516,16 @@ class DiscordChatbot(Chatbot):
                         logger.warning(
                             f"Failed to delete intermediate message {msg.id} in channel {message.channel_id}: {de}"
                         )
+
+            # Remove stop button from the header view for this turn
+            turn_id = message.parent_id or message.session_id
+            if turn_id in self._header_views:
+                header_msg, header_view = self._header_views[turn_id]
+                try:
+                    header_view.remove_item(header_view.stop_turn)
+                    await header_msg.edit(view=header_view)
+                except Exception as ee:
+                    logger.warning(f"Failed to remove stop button from header view: {ee}")
 
     async def trigger_cronjob(
         self,

@@ -253,6 +253,8 @@ async def test_stop_turn_callback(mock_gateway: MagicMock) -> None:
     mock_interaction.response.defer = AsyncMock()
     mock_interaction.followup = AsyncMock()
     mock_interaction.channel_id = "chan_abc"
+    mock_message = AsyncMock(spec=discord.Message)
+    mock_interaction.message = mock_message
     mock_button = MagicMock(spec=discord.ui.Button)
 
     # Mock DB user message to stop
@@ -274,6 +276,8 @@ async def test_stop_turn_callback(mock_gateway: MagicMock) -> None:
 
     # Asserts:
     mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
+    # Message containing the view should be edited to update the view (hiding stop button)
+    mock_message.edit.assert_called_once_with(view=view)
     # Worker stop should be called
     mock_worker.stop.assert_called_once()
     # Worker should be removed from agent
@@ -302,7 +306,7 @@ async def test_clear_session_callback(mock_gateway: MagicMock) -> None:
     mock_chatbot._typing_tasks = {"chan_abc": mock_typing_task}
     mock_msg1 = AsyncMock(spec=discord.Message)
     mock_chatbot._intermediate_messages = {"chan_abc": [mock_msg1]}
-    mock_chatbot._turns_with_header = {"s123", "some_turn"}
+    mock_chatbot._header_views = {"s123": (MagicMock(), MagicMock()), "some_turn": (MagicMock(), MagicMock())}
 
     view = MessageHeaderView(gateway=mock_gateway, session_id="s123", chatbot=mock_chatbot)
 
@@ -311,6 +315,7 @@ async def test_clear_session_callback(mock_gateway: MagicMock) -> None:
     mock_interaction.response.defer = AsyncMock()
     mock_interaction.followup = AsyncMock()
     mock_interaction.channel_id = "chan_abc"
+    mock_button = MagicMock(spec=discord.ui.Button)
 
     await view.clear_session.callback(mock_interaction)
 
@@ -324,8 +329,8 @@ async def test_clear_session_callback(mock_gateway: MagicMock) -> None:
     mock_typing_task.cancel.assert_called_once()
     # Intermediate message deleted
     mock_msg1.delete.assert_called_once()
-    # turns_with_header cleaned up
-    assert "s123" not in mock_chatbot._turns_with_header
-    assert "some_turn" in mock_chatbot._turns_with_header
+    # header_views cleaned up
+    assert "s123" not in mock_chatbot._header_views
+    assert "some_turn" in mock_chatbot._header_views
     # Sent feedback followup
     mock_interaction.followup.send.assert_called_once()
