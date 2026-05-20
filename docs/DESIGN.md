@@ -81,6 +81,11 @@ Kesoku includes a fully functional Discord chatbot adapter (`DiscordChatbot`) co
   - **View Trajectory (`📜`)**: Streams a custom-generated interactive dark-mode HTML trace file of the conversation turn.
   - **Stop Turn (`🛑`)**: Stops/aborts the active `SessionWorker` turn task, marks the pending user prompt as `interrupted` in the database, and deletes any intermediate special messages (such as thoughts and tool calls) from the Discord UI.
   - **Clear Session (`♻️`)**: Deletes the session and all its messages from the SQLite database, recursively deletes the session workspace folder on disk, and deletes active UI components. This button is only visible inside regular channels and is hidden inside threads.
+- **Slash Commands System (`discord_command.py`)**: The Discord chatbot integrates native slash commands using `discord.app_commands.CommandTree`.
+  - `/restart`: Restarts the Kesoku background service. It sends an ephemeral confirmation message, stops active chatbot listeners cleanly, and executes a non-blocking `kesoku service restart` (supporting both `--user` and `--system` installations) to cleanly recycle the OS process. If those commands are not available or fail, it falls back to an in-place replacement via `os.execv`.
+
+
+
 
 
 ## Systemd Service Integration

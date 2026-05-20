@@ -25,6 +25,7 @@ from kesoku.constants import (
 )
 from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot, parse_message_content
+from kesoku.gateway.chatbot.discord_command import setup_discord_commands
 from kesoku.gateway.chatbot.discord_ui import MessageHeaderView
 from kesoku.gateway.chatbot.discord_voice_message import send_voice_message
 from kesoku.gateway.gateway import Gateway
@@ -151,6 +152,7 @@ class DiscordChatbot(Chatbot):
         self.bot = discord.Client(intents=intents)
         self.bot.event(self.on_ready)
         self.bot.event(self.on_message)
+        setup_discord_commands(self)
         self._subscriber_task: asyncio.Task[None] | None = None
         self._sent_tool_calls: dict[str, discord.Message] = {}
         self._header_views: dict[str, tuple[discord.Message, MessageHeaderView]] = {}
@@ -228,6 +230,13 @@ class DiscordChatbot(Chatbot):
     async def on_ready(self) -> None:
         """Callback invoked when Discord bot successfully connects and logs in."""
         logger.info(f"Discord chatbot '{self.chatbot_id}' successfully logged in as {self.bot.user}")
+        if hasattr(self, "tree"):
+            try:
+                logger.info("Syncing Discord slash commands...")
+                await self.tree.sync()
+                logger.info("Discord slash commands synced successfully.")
+            except Exception as e:
+                logger.error(f"Failed to sync Discord slash commands: {e}", exc_info=True)
 
     async def on_message(self, message: discord.Message) -> None:
         """Process incoming messages from Discord and ingest into Kesoku Gateway.
