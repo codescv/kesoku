@@ -626,6 +626,17 @@ class Agent:
             self._running = False
             self.stop_all_workers()
 
+    async def stop_session_worker(self, session_id: str) -> None:
+        """Stop the active session worker for the given session ID.
+
+        Args:
+            session_id: Unique identifier for the session worker.
+        """
+        worker = self.workers.get(session_id)
+        if worker:
+            worker.stop()
+            self.workers.pop(session_id, None)
+
     def stop_all_workers(self) -> None:
         """Stop all active session workers."""
         for worker in list(self.workers.values()):

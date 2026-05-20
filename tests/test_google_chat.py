@@ -14,6 +14,7 @@ from kesoku.constants import (
     STATUS_DELIVERED,
     STATUS_PENDING_AGENT,
     TYPE_TEXT,
+    TYPE_THOUGHT,
 )
 from kesoku.db import Message, Session
 from kesoku.gateway.chatbot.google_chat import GoogleChatChatbot
@@ -116,10 +117,6 @@ async def test_load_credentials_file(
         mock_load_file.assert_called_once_with("/path/to/key.json", scopes=[
             "https://www.googleapis.com/auth/pubsub",
             "https://www.googleapis.com/auth/chat.bot",
-            "https://www.googleapis.com/auth/chat.messages.readonly",
-            "https://www.googleapis.com/auth/cloud-platform",
-            "https://www.googleapis.com/auth/chat.messages.create",
-            "https://www.googleapis.com/auth/chat.messages",
         ])
 
 
@@ -357,14 +354,14 @@ async def test_handle_card_interaction_choice(
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
 @patch("kesoku.gateway.chatbot.google_chat.build")
-async def test_handle_outgoing_message_delivery_text(
+async def test_handle_outgoing_message_delivery_foldable_ui(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
     mock_auth_default: MagicMock,
     mock_config: KesokuConfig,
     mock_gateway: MagicMock,
 ) -> None:
-    """Test that handle_message successfully constructs text payload and makes Chat API call."""
+    """Test that handle_message successfully constructs the foldable UI card, updates it, and finalizes it."""
     mock_auth_default.return_value = (MagicMock(), "test-project")
 
     # Mock Google Chat client methods
@@ -372,14 +369,52 @@ async def test_handle_outgoing_message_delivery_text(
     mock_build.return_value = mock_chat_client
     mock_messages = MagicMock()
     mock_chat_client.spaces.return_value.messages.return_value = mock_messages
+
     mock_create = MagicMock()
     mock_messages.create = mock_create
-    mock_create.return_value.execute = MagicMock(return_value={"name": "spaces/AAA/messages/111"})
+    # The create call returns a message resource name
+    mock_create.return_value.execute = MagicMock(side_effect=[
+        {"name": "spaces/AAA/messages/foldable_card_123"},
+        {"name": "spaces/AAA/messages/final_reply_456"},
+    ])
+
+    mock_patch = MagicMock()
+    mock_messages.patch = mock_patch
+    mock_patch.return_value.execute = MagicMock(return_value={"name": "spaces/AAA/messages/foldable_card_123"})
 
     with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
 
-        out_msg = Message(
+        # 1. Post an intermediate thought
+        thought_msg = Message(
+            id="thought1",
+            session_id="sess123",
+            chatbot_id="gchat_test",
+            channel_id="spaces/AAA/threads/BBB",
+            sender="Kesoku",
+            role=ROLE_ASSISTANT,
+            type=TYPE_THOUGHT,
+            content="Let me think about it",
+            timestamp=time.time(),
+        )
+        await bot.handle_message(thought_msg)
+
+        # Verify foldable card was created
+        mock_messages.create.assert_called_once()
+        create_args = mock_messages.create.call_args[1]
+        assert create_args["parent"] == "spaces/AAA"
+        assert create_args["messageReplyOption"] == "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+        assert create_args["body"]["thread"]["name"] == "spaces/AAA/threads/BBB"
+        assert "cardsV2" in create_args["body"]
+        card = create_args["body"]["cardsV2"][0]["card"]
+        assert card["header"]["title"] == "Kesoku Agent"
+        assert card["sections"][0]["header"] == "Thoughts & Tools"
+        assert "Thought:" in card["sections"][0]["widgets"][0]["textParagraph"]["text"]
+        # Verify Stop Turn button is present
+        assert card["sections"][1]["widgets"][0]["buttonList"]["buttons"][0]["text"] == "Stop Turn 🛑"
+
+        # 2. Post the final reply
+        final_msg = Message(
             id="msg999",
             session_id="sess123",
             chatbot_id="gchat_test",
@@ -389,24 +424,41 @@ async def test_handle_outgoing_message_delivery_text(
             type=TYPE_TEXT,
             content="Hello world reply",
             timestamp=time.time(),
+            metadata={
+                "turn_metrics": {
+                    "session_turns": 1,
+                    "context_tokens": 12000,
+                    "turn_tool_calls": 0,
+                    "turn_tokens": 500,
+                    "turn_time": 2.5,
+                }
+            }
         )
+        await bot.handle_message(final_msg)
 
-        await bot.handle_message(out_msg)
+        # Verify foldable card was updated (patched) to finished state
+        mock_messages.patch.assert_called_once()
+        patch_args = mock_messages.patch.call_args[1]
+        assert patch_args["name"] == "spaces/AAA/messages/foldable_card_123"
+        assert patch_args["updateMask"] == "cardsV2"
+        patched_card = patch_args["body"]["cardsV2"][0]["card"]
+        # Verify no Stop Turn button is present in the sections anymore (removed)
+        assert len(patched_card["sections"]) == 2
+        # Verify metrics are displayed in the second section
+        metrics_text = patched_card["sections"][1]["widgets"][0]["textParagraph"]["text"]
+        assert "Session:" in metrics_text
+        assert "Context:" in metrics_text
+        assert "Turn:" in metrics_text
 
-        # Verify Chat API create call was structured correctly with thread key
-        mock_messages.create.assert_called_once()
-        parent_arg = mock_messages.create.call_args[1]["parent"]
-        body_arg = mock_messages.create.call_args[1]["body"]
+        # Verify final text message was created
+        assert mock_messages.create.call_count == 2
+        final_create_args = mock_messages.create.call_args_list[1][1]
+        assert final_create_args["body"]["text"] == "Hello world reply"
+        assert final_create_args["body"]["thread"]["name"] == "spaces/AAA/threads/BBB"
 
-        assert parent_arg == "spaces/AAA"
-        assert body_arg["text"] == "Hello world reply"
-        assert body_arg["thread"]["name"] == "spaces/AAA/threads/BBB"
-        # Verify interactive control card was attached
-        assert "cardsV2" in body_arg
-        assert body_arg["cardsV2"][0]["card"]["header"]["title"] == "Kesoku Agent Control Panel"
-
-        # Verify message was marked as delivered
-        mock_gateway.update_message_status.assert_called_once_with("msg999", STATUS_DELIVERED)
+        # Verify delivery statuses were updated
+        mock_gateway.update_message_status.assert_any_call("thought1", STATUS_DELIVERED)
+        mock_gateway.update_message_status.assert_any_call("msg999", STATUS_DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -458,7 +510,7 @@ async def test_handle_outgoing_message_delivery_question(
         # The raw text should be clean (non-whitespace) or omitted since question is structured in card
         assert "cardsV2" in body_arg
         card = body_arg["cardsV2"][0]["card"]
-        assert card["header"]["title"] == "Interactive Choice Question"
+        assert "header" not in card
         assert card["sections"][0]["widgets"][0]["textParagraph"]["text"] == "Do you want to compile?"
 
         # Buttons should exist matching choice inputs

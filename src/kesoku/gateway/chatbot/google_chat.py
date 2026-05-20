@@ -5,6 +5,7 @@ a Google Cloud Pub/Sub Pull Subscription and GCP public APIs.
 """
 
 import asyncio
+import html
 import json
 import time
 from typing import Any
@@ -17,10 +18,15 @@ from googleapiclient.discovery import Resource, build
 from kesoku.config import get_config
 from kesoku.constants import (
     ROLE_ASSISTANT,
+    ROLE_SYSTEM,
+    ROLE_TOOL,
     ROLE_USER,
     STATUS_DELIVERED,
+    STATUS_INTERRUPTED,
     STATUS_PENDING_AGENT,
     TYPE_TEXT,
+    TYPE_THOUGHT,
+    TYPE_TOOL_CALL,
 )
 from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot, parse_message_content
@@ -57,6 +63,7 @@ class GoogleChatChatbot(Chatbot):
 
         self._running = False
         self._pubsub_task: asyncio.Task[None] | None = None
+        self._foldable_ui_messages: dict[str, dict[str, Any]] = {}
 
         # Load credentials and initialize Google APIs
         self._credentials, self._project_id = self._load_credentials()
@@ -233,6 +240,43 @@ class GoogleChatChatbot(Chatbot):
             # Save session metadata
             await self.gateway.update_session_updated_at(session.id)
 
+        # If there is a previous turn still marked as active (running), update it to interrupted before starting new one
+        foldable = self._foldable_ui_messages.pop(session.id, None)
+        if foldable and foldable["name"]:
+            history = await self.gateway.get_session_history(session.id, limit=20)
+            prev_user_msg = None
+            for msg in reversed(history):
+                if msg.role == ROLE_USER:
+                    prev_user_msg = msg
+                    break
+            metrics = prev_user_msg.metadata.get("turn_metrics") if prev_user_msg else None
+
+            body = {
+                "cardsV2": [
+                    self._build_foldable_ui_card(
+                        session.id,
+                        foldable["items"],
+                        status="interrupted",
+                        metrics=metrics,
+                    )
+                ]
+            }
+            if channel_id and "threads" in channel_id:
+                body["thread"] = {"name": channel_id}
+            try:
+                await asyncio.to_thread(
+                    self._chat_service.spaces()
+                    .messages()
+                    .patch(
+                        name=foldable["name"],
+                        body=body,
+                        updateMask="cardsV2",
+                    )
+                    .execute
+                )
+            except Exception as e:
+                logger.error(f"Failed to finalize previous Google Chat foldable UI card on thought interruption: {e}")
+
         # Construct Gateway Message
         user_msg = Message(
             session_id=session.id,
@@ -271,7 +315,100 @@ class GoogleChatChatbot(Chatbot):
                 await self.gateway.agent.stop_session_worker(session_id)
                 logger.info(f"Google Chat requested stop turn for session: {session_id}")
 
+            # Allow the cancelled worker to write the turn metrics to database
+            await asyncio.sleep(0.15)
+
+            # Fetch recent history to find the active user message and update its status
+            history = await self.gateway.get_session_history(session_id, limit=20)
+            user_msg = None
+            for msg in reversed(history):
+                if msg.role == ROLE_USER:
+                    user_msg = msg
+                    break
+
+            metrics = None
+            if user_msg:
+                if user_msg.status in ("pending_agent", "processing"):
+                    await self.gateway.update_message_status(user_msg.id, STATUS_INTERRUPTED)
+                metrics = user_msg.metadata.get("turn_metrics")
+
+            # Reconstruct card update directly from the event's cardsV2 definition
+            message_name = event.get("message", {}).get("name")
+            self._foldable_ui_messages.pop(session_id, None)
+
+            if message_name:
+                msg_obj = event.get("message", {})
+                cards = msg_obj.get("cardsV2", [])
+                if cards:
+                    card_def = cards[0].get("card", {})
+                    sections = card_def.get("sections", [])
+                    # Build new sections removing the stop button
+                    new_sections = []
+                    for section in sections:
+                        has_stop_button = False
+                        widgets = section.get("widgets", [])
+                        for widget in widgets:
+                            buttons = widget.get("buttonList", {}).get("buttons", [])
+                            for btn in buttons:
+                                if btn.get("onClick", {}).get("action", {}).get("function") == "stop_turn":
+                                    has_stop_button = True
+                                    break
+                        if not has_stop_button:
+                            new_sections.append(section)
+
+                    if metrics:
+                        session_turns = metrics.get("session_turns", 0)
+                        context_tokens = metrics.get("context_tokens", 0)
+                        turn_tool_calls = metrics.get("turn_tool_calls", 0)
+                        turn_tokens = metrics.get("turn_tokens", 0)
+                        turn_time = metrics.get("turn_time", 0.0)
+
+                        context_k = f"{round(context_tokens / 1000)}K"
+                        turn_k = f"{round(turn_tokens / 1000)}K"
+
+                        metrics_text = (
+                            f"🛑 <b>Session:</b> {session_turns} turns | "
+                            f"<b>Context:</b> {context_k} tokens (Interrupted)<br>"
+                            f"⏱️ <b>Turn:</b> {turn_tool_calls} tool calls | {turn_k} tokens | {turn_time:.1f}s"
+                        )
+                        new_sections.append({
+                            "widgets": [
+                                {
+                                    "textParagraph": {
+                                        "text": metrics_text
+                                    }
+                                }
+                            ]
+                        })
+
+                    card_def["sections"] = new_sections
+                    card_def["header"] = {
+                        "title": "Kesoku Agent",
+                        "subtitle": "Turn Completed",
+                    }
+                    body = {
+                        "cardsV2": cards
+                    }
+                    if "thread" in msg_obj:
+                        body["thread"] = msg_obj["thread"]
+
+                    try:
+                        await asyncio.to_thread(
+                            self._chat_service.spaces()
+                            .messages()
+                            .patch(
+                                name=message_name,
+                                body=body,
+                                updateMask="cardsV2",
+                            )
+                            .execute
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to patch Google Chat foldable UI card after stop: {e}", exc_info=True)
+
         elif function_name == "clear_session":
+            # Clean up active foldable UI reference
+            self._foldable_ui_messages.pop(session_id, None)
             # Recursively delete session database records and workspace staging directories
             await self.gateway.delete_session(session_id)
             logger.info(f"Google Chat requested clear session for: {session_id}")
@@ -298,6 +435,48 @@ class GoogleChatChatbot(Chatbot):
                     timestamp=time.time(),
                 )
                 await self.gateway.post(choice_msg)
+
+                # Update choice card to disable/replace buttons and prevent "unable to process request" error
+                message_name = event.get("message", {}).get("name")
+                if message_name:
+                    msg_obj = event.get("message", {})
+                    cards = msg_obj.get("cardsV2", [])
+                    if cards:
+                        card_def = cards[0].get("card", {})
+                        sections = card_def.get("sections", [])
+                        if len(sections) > 1:
+                            # Replace choice buttons section with confirmation text
+                            sections[1] = {
+                                "widgets": [
+                                    {
+                                        "textParagraph": {
+                                            "text": f"👤 Selected: <b>{html.escape(choice_val)}</b>"
+                                        }
+                                    }
+                                ]
+                            }
+                        body = {
+                            "cardsV2": cards
+                        }
+                        if "thread" in msg_obj:
+                            body["thread"] = msg_obj["thread"]
+
+                        try:
+                            await asyncio.to_thread(
+                                self._chat_service.spaces()
+                                .messages()
+                                .patch(
+                                    name=message_name,
+                                    body=body,
+                                    updateMask="cardsV2",
+                                )
+                                .execute
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to patch Google Chat question card on choice select: {e}",
+                                exc_info=True,
+                            )
 
     async def _handle_added_to_space(self, event: dict[str, Any]) -> None:
         """Greet the user when the bot is added to a space.
@@ -332,97 +511,316 @@ class GoogleChatChatbot(Chatbot):
 
         logger.debug(f"Google Chat processing outgoing message ID {message.id}")
 
-        # Check if the message contains markdown file patterns or questions
-        segments = parse_message_content(message.content)
-        text_reply = ""
-        choices: list[str] = []
-        question_text = ""
+        session_id = message.session_id
+        is_intermediate = (
+            (message.role == ROLE_ASSISTANT and message.type == TYPE_THOUGHT)
+            or (message.role == ROLE_TOOL)
+            or (message.role == ROLE_SYSTEM)
+        )
 
-        for seg in segments:
-            if seg["type"] == "text":
-                text_reply += seg["content"]
-            elif seg["type"] == "question":
-                question_text = seg["question"]
-                choices = seg["choices"]
+        if is_intermediate:
+            foldable = self._foldable_ui_messages.get(session_id)
+            if not foldable:
+                foldable = {
+                    "name": None,
+                    "items": [],
+                }
+                self._foldable_ui_messages[session_id] = foldable
 
-        # Prepare Google Chat payload
-        body: dict[str, Any] = {}
-        if text_reply.strip():
-            body["text"] = text_reply.strip()
+            items = foldable["items"]
 
-        # Append thread key if replying to a thread channel context
-        if message.channel_id and "threads" in message.channel_id:
-            body["thread"] = {"name": message.channel_id}
+            if message.role == ROLE_ASSISTANT and message.type == TYPE_THOUGHT:
+                items.append({
+                    "type": "thought",
+                    "content": message.content,
+                })
+            elif message.role == ROLE_TOOL and message.type == TYPE_TOOL_CALL:
+                tool_name = message.metadata.get("tool_name") or message.sender or "unknown_tool"
+                arg_suffix = await self._get_tool_arguments_suffix(message)
+                items.append({
+                    "type": "tool_call",
+                    "id": message.id,
+                    "tool_name": tool_name,
+                    "arg_suffix": arg_suffix,
+                    "status": "⏳",
+                })
+            elif message.role == ROLE_TOOL and message.type != TYPE_TOOL_CALL:
+                tool_call_msg_id = message.parent_id
+                found = False
+                if tool_call_msg_id:
+                    for item in items:
+                        if item.get("type") == "tool_call" and item.get("id") == tool_call_msg_id:
+                            if message.metadata.get("tool_error"):
+                                item["status"] = "❌"
+                            else:
+                                item["status"] = "✅"
+                            found = True
+                            break
+                if not found:
+                    for item in reversed(items):
+                        if item.get("type") == "tool_call" and item.get("status") == "⏳":
+                            if message.metadata.get("tool_error"):
+                                item["status"] = "❌"
+                            else:
+                                item["status"] = "✅"
+                            break
+            elif message.role == ROLE_SYSTEM:
+                items.append({
+                    "type": "system",
+                    "content": message.content,
+                })
 
-        # Add Interactive Card UI controls for final text messages
+            # Build the card payload
+            body = {
+                "cardsV2": [self._build_foldable_ui_card(session_id, items, status="running")]
+            }
+            if message.channel_id and "threads" in message.channel_id:
+                body["thread"] = {"name": message.channel_id}
+
+            parent_space = message.channel_id.split("/threads/")[0] if message.channel_id else "spaces/unknown"
+            try:
+                if foldable["name"] is None:
+                    res = await asyncio.to_thread(
+                        self._chat_service.spaces()
+                        .messages()
+                        .create(
+                            parent=parent_space,
+                            body=body,
+                            messageReplyOption="REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD",
+                        )
+                        .execute
+                    )
+                    foldable["name"] = res["name"]
+                else:
+                    await asyncio.to_thread(
+                        self._chat_service.spaces()
+                        .messages()
+                        .patch(
+                            name=foldable["name"],
+                            body=body,
+                            updateMask="cardsV2",
+                        )
+                        .execute
+                    )
+                await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+            except Exception as e:
+                logger.error(f"Failed to send/update Google Chat foldable UI card: {e}", exc_info=True)
+            return
+
+        # Handle final text reply or questions
         if message.role == ROLE_ASSISTANT and message.type == TYPE_TEXT:
+            metrics = message.metadata.get("turn_metrics")
+            foldable = self._foldable_ui_messages.pop(session_id, None)
+            if foldable and foldable["name"]:
+                # Finalize the foldable UI card
+                body = {
+                    "cardsV2": [
+                        self._build_foldable_ui_card(
+                            session_id,
+                            foldable["items"],
+                            status="finished",
+                            metrics=metrics,
+                        )
+                    ]
+                }
+                if message.channel_id and "threads" in message.channel_id:
+                    body["thread"] = {"name": message.channel_id}
+                try:
+                    await asyncio.to_thread(
+                        self._chat_service.spaces()
+                        .messages()
+                        .patch(
+                            name=foldable["name"],
+                            body=body,
+                            updateMask="cardsV2",
+                        )
+                        .execute
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to final patch Google Chat foldable UI card: {e}", exc_info=True)
+
+            # Now parse the final content and send it
+            segments = parse_message_content(message.content)
+            text_reply = ""
+            choices: list[str] = []
+            question_text = ""
+
+            for seg in segments:
+                if seg["type"] == "text":
+                    text_reply += seg["content"]
+                elif seg["type"] == "question":
+                    question_text = seg["question"]
+                    choices = seg["choices"]
+
+            body = {}
+            if text_reply.strip():
+                body["text"] = text_reply.strip()
+
+            if message.channel_id and "threads" in message.channel_id:
+                body["thread"] = {"name": message.channel_id}
+
             if choices:
-                # Format multiple-choice questions as a beautiful interactive card
-                body["cardsV2"] = [self._build_question_card(message.session_id, question_text, choices)]
-            else:
-                # Attach Stop / Clear / Trajectory controls card
-                body["cardsV2"] = [self._build_control_card(message.session_id)]
+                body["cardsV2"] = [self._build_question_card(session_id, question_text, choices)]
 
-        # Send asynchronously inside execution thread pool
-        parent_space = message.channel_id.split("/threads/")[0] if message.channel_id else "spaces/unknown"
-        try:
-            await asyncio.to_thread(
-                self._chat_service.spaces()
-                .messages()
-                .create(parent=parent_space, body=body)
-                .execute
-            )
-            # Update status to delivered
-            await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
-        except Exception as e:
-            logger.error(f"Failed to send outgoing message to Google Chat space: {e}", exc_info=True)
+            parent_space = message.channel_id.split("/threads/")[0] if message.channel_id else "spaces/unknown"
+            try:
+                await asyncio.to_thread(
+                    self._chat_service.spaces()
+                    .messages()
+                    .create(
+                        parent=parent_space,
+                        body=body,
+                        messageReplyOption="REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD",
+                    )
+                    .execute
+                )
+                await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+            except Exception as e:
+                logger.error(f"Failed to send final message to Google Chat space: {e}", exc_info=True)
 
-    def _build_control_card(self, session_id: str) -> dict[str, Any]:
-        """Construct the interactive control panel card.
+    async def _get_tool_arguments_suffix(self, message: Message) -> str:
+        """Format and retrieve the tool arguments suffix for Google Chat card display.
+
+        Args:
+            message: The tool call Message.
+
+        Returns:
+            Formatted suffix string (e.g., ': <code>arg_value</code>'), or empty string if none.
+        """
+        tool_args = message.metadata.get("tool_arguments")
+
+        arg_str = ""
+        if isinstance(tool_args, dict):
+            # Exclude framework/context arguments
+            filtered_args = {k: v for k, v in tool_args.items() if k != "context"}
+            if len(filtered_args) == 1:
+                val = next(iter(filtered_args.values()))
+                arg_str = str(val)
+            elif len(filtered_args) > 1:
+                arg_str = ", ".join(f"{k}: {v}" for k, v in filtered_args.items())
+
+        if arg_str:
+            arg_str = arg_str.replace("\n", " ")
+            if len(arg_str) > 80:
+                arg_str = arg_str[:80] + "..."
+
+        return f": <code>{html.escape(arg_str)}</code>" if arg_str else ""
+
+    def _build_foldable_ui_card(
+        self,
+        session_id: str,
+        items: list[dict[str, Any]],
+        status: str = "running",
+        metrics: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Construct a single foldable UI card for all intermediate thoughts and tools.
 
         Args:
             session_id: Active session ID.
+            items: List of intermediate special messages/thoughts/tools.
+            status: Either 'running', 'finished', or 'interrupted'.
+            metrics: Optional dictionary containing session and turn metrics.
 
         Returns:
             A cardsV2 dictionary structure.
         """
+        widgets = []
+        for item in items:
+            if item["type"] == "thought":
+                content_html = html.escape(item["content"]).replace("\n", "<br>")
+                widgets.append({
+                    "textParagraph": {
+                        "text": f"💭 <b>Thought:</b> {content_html}"
+                    }
+                })
+            elif item["type"] == "tool_call":
+                emoji = item["status"]
+                widgets.append({
+                    "textParagraph": {
+                        "text": f"🛠️ <b>{item['tool_name']}</b>{item['arg_suffix']} {emoji}"
+                    }
+                })
+            elif item["type"] == "system":
+                content_html = html.escape(item["content"]).replace("\n", "<br>")
+                widgets.append({
+                    "textParagraph": {
+                        "text": f"⚙️ <b>System:</b> {content_html}"
+                    }
+                })
+
+        if not widgets:
+            widgets.append({"textParagraph": {"text": "<i>Preparing turn...</i>"}})
+
+        # Collapsible section for Thoughts & Tools
+        thoughts_tools_section = {
+            "header": "Thoughts & Tools",
+            "collapsible": True,
+            "uncollapsibleWidgetsCount": 0,
+            "widgets": widgets,
+        }
+
+        card_sections = [thoughts_tools_section]
+
+        # Control / Metrics section
+        if status == "running":
+            card_sections.append({
+                "widgets": [
+                    {
+                        "buttonList": {
+                            "buttons": [
+                                {
+                                    "text": "Stop Turn 🛑",
+                                    "onClick": {
+                                        "action": {
+                                            "function": "stop_turn",
+                                            "parameters": [{"key": "session_id", "value": session_id}],
+                                        }
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            })
+        elif status in ("finished", "interrupted") and metrics:
+            session_turns = metrics.get("session_turns", 0)
+            context_tokens = metrics.get("context_tokens", 0)
+            turn_tool_calls = metrics.get("turn_tool_calls", 0)
+            turn_tokens = metrics.get("turn_tokens", 0)
+            turn_time = metrics.get("turn_time", 0.0)
+
+            context_k = f"{round(context_tokens / 1000)}K"
+            turn_k = f"{round(turn_tokens / 1000)}K"
+
+            if status == "finished":
+                prefix = "⚡"
+                suffix = ""
+            else:
+                prefix = "🛑"
+                suffix = " (Interrupted)"
+
+            metrics_text = (
+                f"{prefix} <b>Session:</b> {session_turns} turns | <b>Context:</b> {context_k} tokens{suffix}<br>"
+                f"⏱️ <b>Turn:</b> {turn_tool_calls} tool calls | {turn_k} tokens | {turn_time:.1f}s"
+            )
+            card_sections.append({
+                "widgets": [
+                    {
+                        "textParagraph": {
+                            "text": metrics_text
+                        }
+                    }
+                ]
+            })
+
         return {
-            "cardId": f"control_{session_id}",
+            "cardId": f"foldable_ui_{session_id}",
             "card": {
                 "header": {
-                    "title": "Kesoku Agent Control Panel",
-                    "subtitle": "Manage active turn and session",
+                    "title": "Kesoku Agent",
+                    "subtitle": "Active Turn" if status == "running" else "Turn Completed",
                 },
-                "sections": [
-                    {
-                        "widgets": [
-                            {
-                                "buttonList": {
-                                    "buttons": [
-                                        {
-                                            "text": "Stop Turn 🛑",
-                                            "onClick": {
-                                                "action": {
-                                                    "function": "stop_turn",
-                                                    "parameters": [{"key": "session_id", "value": session_id}],
-                                                }
-                                            },
-                                        },
-                                        {
-                                            "text": "Clear Session ♻️",
-                                            "onClick": {
-                                                "action": {
-                                                    "function": "clear_session",
-                                                    "parameters": [{"key": "session_id", "value": session_id}],
-                                                }
-                                            },
-                                        },
-                                    ]
-                                }
-                            }
-                        ]
-                    }
-                ],
+                "sections": card_sections,
             },
         }
 
@@ -457,7 +855,6 @@ class GoogleChatChatbot(Chatbot):
         return {
             "cardId": f"question_{session_id}",
             "card": {
-                "header": {"title": "Interactive Choice Question"},
                 "sections": [
                     {"widgets": [{"textParagraph": {"text": question}}]},
                     {"widgets": [{"buttonList": {"buttons": buttons}}]},
