@@ -210,16 +210,29 @@ class GeminiLLM(BaseLLM):
                     continue
 
                 role = "user"
-                part = None
+                parts = []
 
                 if msg.role == ROLE_USER:
                     role = "user"
-                    part = types.Part.from_text(text=msg.content)
+                    parts.append(types.Part.from_text(text=msg.content))
+                    attachments = msg.metadata.get("attachments", [])
+                    for att in attachments:
+                        path = att.get("path")
+                        mime_type = att.get("mime_type", "application/octet-stream")
+                        if path and os.path.exists(path):  # noqa: ASYNC240
+                            try:
+                                with open(path, "rb") as f:  # noqa: ASYNC230
+                                    file_bytes = f.read()
+                                parts.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
+                                logger.info(f"Loaded native Gemini attachment part: {path} ({mime_type})")
+                            except Exception as ex:
+                                logger.error(f"Failed to load attachment {path} for Gemini: {ex}")
                 elif msg.role == ROLE_ASSISTANT:
                     role = "model"
                     part = types.Part.from_text(text=msg.content)
                     if msg.type == TYPE_THOUGHT:
                         part.thought = True
+                    parts.append(part)
                 elif msg.role == ROLE_TOOL:
                     if msg.type == TYPE_TOOL_CALL:
                         role = "model"
@@ -229,6 +242,7 @@ class GeminiLLM(BaseLLM):
                         ts_hex = msg.metadata.get("thought_signature")
                         if ts_hex:
                             part.thought_signature = bytes.fromhex(ts_hex)
+                        parts.append(part)
                     elif msg.type == TYPE_TOOL_RESULT:
                         role = "tool"
                         tool_name = msg.metadata.get("tool_name", "unknown_tool")
@@ -237,12 +251,13 @@ class GeminiLLM(BaseLLM):
                         else:
                             res_dict = {"result": msg.metadata.get("tool_result", msg.content)}
                         part = types.Part.from_function_response(name=tool_name, response=res_dict)
+                        parts.append(part)
 
-                if part:
+                if parts:
                     if contents and contents[-1].role == role:
-                        contents[-1].parts.append(part)
+                        contents[-1].parts.extend(parts)
                     else:
-                        contents.append(types.Content(role=role, parts=[part]))
+                        contents.append(types.Content(role=role, parts=parts))
 
         if prompt:
             part = types.Part.from_text(text=prompt)
@@ -386,28 +401,63 @@ class ClaudeLLM(BaseLLM):
                     continue
 
                 role = "user"
-                block = None
+                blocks = []
 
                 if msg.role == ROLE_USER:
                     role = "user"
-                    block = {"type": "text", "text": msg.content}
+                    blocks.append({"type": "text", "text": msg.content})
+                    attachments = msg.metadata.get("attachments", [])
+                    for att in attachments:
+                        path = att.get("path")
+                        mime_type = att.get("mime_type", "application/octet-stream")
+                        if path and os.path.exists(path):  # noqa: ASYNC240
+                            try:
+                                import base64
+                                with open(path, "rb") as f:  # noqa: ASYNC230
+                                    file_bytes = f.read()
+                                data_b64 = base64.b64encode(file_bytes).decode("utf-8")
+
+                                if mime_type.startswith("image/"):
+                                    blocks.append({
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": mime_type,
+                                            "data": data_b64,
+                                        },
+                                    })
+                                    logger.info(f"Loaded native Claude image part: {path} ({mime_type})")
+                                elif mime_type == "application/pdf":
+                                    blocks.append({
+                                        "type": "document",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": "application/pdf",
+                                            "data": data_b64,
+                                        },
+                                    })
+                                    logger.info(f"Loaded native Claude document part: {path} ({mime_type})")
+                                else:
+                                    logger.warning(f"Unsupported attachment type for Claude: {mime_type}")
+                            except Exception as ex:
+                                logger.error(f"Failed to load attachment {path} for Claude: {ex}")
                 elif msg.role == ROLE_ASSISTANT:
                     role = "assistant"
                     if msg.type == TYPE_THOUGHT:
-                        block = {"type": "text", "text": f"<thought>\n{msg.content}\n</thought>"}
+                        blocks.append({"type": "text", "text": f"<thought>\n{msg.content}\n</thought>"})
                     else:
-                        block = {"type": "text", "text": msg.content}
+                        blocks.append({"type": "text", "text": msg.content})
                 elif msg.role == ROLE_TOOL:
                     if msg.type == TYPE_TOOL_CALL:
                         role = "assistant"
                         tool_name = msg.metadata.get("tool_name", "unknown_tool")
                         args = msg.metadata.get("tool_arguments", {})
-                        block = {
+                        blocks.append({
                             "type": "tool_use",
                             "id": msg.id,
                             "name": tool_name,
                             "input": args,
-                        }
+                        })
                     elif msg.type == TYPE_TOOL_RESULT:
                         role = "user"
                         tool_name = msg.metadata.get("tool_name", "unknown_tool")
@@ -425,12 +475,13 @@ class ClaudeLLM(BaseLLM):
                         }
                         if is_error:
                             block["is_error"] = True
+                        blocks.append(block)
 
-                if block:
+                if blocks:
                     if merged_messages and merged_messages[-1]["role"] == role:
-                        merged_messages[-1]["content"].append(block)
+                        merged_messages[-1]["content"].extend(blocks)
                     else:
-                        merged_messages.append({"role": role, "content": [block]})
+                        merged_messages.append({"role": role, "content": blocks})
 
             messages = merged_messages
 

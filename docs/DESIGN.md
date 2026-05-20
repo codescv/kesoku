@@ -90,6 +90,13 @@ Kesoku includes a fully functional Discord chatbot adapter (`DiscordChatbot`) co
   - Formatting varies beautifully to denote the final turn state: finished turns are labeled with a `⚡` emoji, while interrupted turns are labeled with a `🛑` emoji and the `(Interrupted)` suffix.
 - **Dynamic Question-Choice Syntax & Button View**: Outgoing messages containing the syntax `[question: <question> | choice1 | choice2 | ...]` are automatically parsed and split. The question text is sent to Discord alongside a dynamic `QuestionView` containing choice buttons. When a button is selected, all buttons are permanently disabled to prevent duplicate submission, the message is edited to show the disabled buttons, a confirmation `<@user> selected: **choice**` is posted, and the exact choice is posted directly to the Kesoku Gateway as a new `ROLE_USER` message (which automatically triggers the chatbot typing spinner).
 
+- **Incoming Attachment Processing**: When the Discord bot receives a message containing file attachments:
+  1. It resolves or creates the corresponding chat session and staging directory path (`sessions/<session_id>`).
+  2. It asynchronously downloads each attachment and saves it into the session staging directory, ensuring filename safety and avoiding collision.
+  3. It populates the message `metadata` with attachment information under the key `"attachments"` as a list of file descriptors: `[{"path": "/absolute/path/to/saved/file", "mime_type": "image/png", "filename": "photo.png"}]`.
+  4. It appends readable references of the saved attachments at the end of the user message content for framework visibility.
+  5. During LLM inference, both the `GeminiLLM` and `ClaudeLLM` backends load these attachments from the staging directory and transmit them natively as multi-part content blocks (`types.Part.from_bytes` for Gemini, and base64-encoded source blocks for Claude) to leverage the models' native multi-modal capabilities.
+
 - **Slash Commands System (`discord_command.py`)**: The Discord chatbot integrates native slash commands using `discord.app_commands.CommandTree`.
   - `/restart`: Restarts the Kesoku background service. It sends an ephemeral confirmation message, stops active chatbot listeners cleanly, and executes a non-blocking `kesoku service restart` (supporting both `--user` and `--system` installations) to cleanly recycle the OS process. If those commands are not available or fail, it falls back to an in-place replacement via `os.execv`.
 

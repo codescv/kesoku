@@ -364,6 +364,37 @@ class DiscordChatbot(Chatbot):
             session_id = session.id
             await self.gateway.update_session_updated_at(session_id)
 
+        # Save any incoming attachments to the session staging directory
+        attachments_metadata = []
+        if message.attachments:
+            session_staging_dir = os.path.realpath(  # noqa: ASYNC240
+                os.path.join(self.config.workspace.sessions_dir, session.workspace_name)
+            )
+            os.makedirs(session_staging_dir, exist_ok=True)
+
+            for attachment in message.attachments:
+                filename = attachment.filename
+                # Sanitize filename to prevent path traversal
+                safe_filename = "".join(c for c in filename if c.isalnum() or c in "._-")
+                if not safe_filename:
+                    safe_filename = f"attachment_{attachment.id}"
+
+                filepath = os.path.join(session_staging_dir, safe_filename)
+                # Avoid file collisions
+                if os.path.exists(filepath):  # noqa: ASYNC240
+                    base, ext = os.path.splitext(safe_filename)
+                    safe_filename = f"{base}_{attachment.id}{ext}"
+                    filepath = os.path.join(session_staging_dir, safe_filename)
+
+                logger.info(f"Saving Discord attachment {filename} to {filepath}")
+                await attachment.save(filepath)
+
+                attachments_metadata.append({
+                    "path": filepath,
+                    "mime_type": attachment.content_type or "application/octet-stream",
+                    "filename": filename,
+                })
+
         # Ingest user message into Gateway
         tz_name = _get_local_timezone_name()
         discord_msg_content = (
@@ -371,6 +402,13 @@ class DiscordChatbot(Chatbot):
             f"at `{message.created_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')} {tz_name}`:\n"
             f"{message.content}"
         )
+        if attachments_metadata:
+            files_str = "\n".join(
+                f"[Attachment: {a['filename']} ({a['mime_type']}) saved at {a['path']}]"
+                for a in attachments_metadata
+            )
+            discord_msg_content += f"\n\nAttachments:\n{files_str}"
+
         # Construct metadata with parent/thread identifiers
         channel_name = getattr(target_channel, "name", "") or ""
         parent_channel_id = ""
@@ -386,6 +424,8 @@ class DiscordChatbot(Chatbot):
             "discord_author_id": str(message.author.id),
             "channel_name": channel_name,
         }
+        if attachments_metadata:
+            msg_metadata["attachments"] = attachments_metadata
         if parent_channel_id:
             msg_metadata["parent_channel_id"] = parent_channel_id
         if parent_channel_name:

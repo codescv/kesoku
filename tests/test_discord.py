@@ -1118,3 +1118,61 @@ async def test_channel_override_auto_thread_matching(mock_gateway: MagicMock) ->
             override = bot._resolve_channel_override("222", "some-thread", "parent-channel-id", "general")
             assert override is not None
             assert override.auto_thread is False
+
+
+@pytest.mark.asyncio
+async def test_on_message_with_attachments(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test that incoming Discord attachments are saved and tracked in metadata."""
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+
+            mock_thread = AsyncMock(spec=discord.Thread)
+            mock_thread.id = 12345
+            mock_thread.name = "thread_name"
+            mock_thread.guild = MagicMock(spec=discord.Guild)
+            mock_thread.guild.name = "GuildName"
+            mock_thread.guild.members = []
+            mock_thread.join = AsyncMock()
+
+            msg = MagicMock(spec=discord.Message)
+            allowed_author = MagicMock(spec=discord.Member, id=222, display_name="Allowed")
+            allowed_author.name = "allowed_user"
+            msg.author = allowed_author
+            msg.mentions = []
+            msg.channel = mock_thread
+            msg.content = "Look at this image"
+            msg.id = 888
+            msg.created_at = datetime.datetime.now(datetime.UTC)
+
+            # Create mock attachment
+            mock_attachment = AsyncMock(spec=discord.Attachment)
+            mock_attachment.id = 123456
+            mock_attachment.filename = "test_image.png"
+            mock_attachment.content_type = "image/png"
+            mock_attachment.save = AsyncMock()
+            msg.attachments = [mock_attachment]
+
+            with patch("os.makedirs") as mock_makedirs, patch("os.path.exists", return_value=False):
+                await bot.on_message(msg)
+
+                # Verify directory creation was triggered
+                mock_makedirs.assert_called_once()
+                # Verify attachment save was called
+                mock_attachment.save.assert_called_once()
+
+                # Verify gateway post was called
+                mock_gateway.post.assert_called_once()
+                posted_msg = mock_gateway.post.call_args[0][0]
+
+                # Verify metadata has attachments details
+                assert "attachments" in posted_msg.metadata
+                attachments = posted_msg.metadata["attachments"]
+                assert len(attachments) == 1
+                assert attachments[0]["filename"] == "test_image.png"
+                assert attachments[0]["mime_type"] == "image/png"
+                assert "test_image.png" in attachments[0]["path"]
+
+                # Verify message content has references
+                assert "[Attachment: test_image.png (image/png)" in posted_msg.content

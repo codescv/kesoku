@@ -14,8 +14,8 @@
 # Discord
 - [x] Basic Messages
 - [x] Attachments (Outgoing)
-- [ ] Attachments (Incoming)
+- [x] Attachments (Incoming)
 - [x] Multi choice UI
 
 # Bug fix
-- [ ] cleanup the config not found defensive code.
+- [x] cleanup the config not found defensive code.

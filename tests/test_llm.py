@@ -161,3 +161,106 @@ async def test_claude_llm_generate_history_conversion() -> None:
             b for m in messages for b in m["content"] if b["type"] == "tool_result"
         )
         assert tool_res_block["content"] == "4"
+
+
+@pytest.mark.asyncio
+async def test_gemini_llm_with_attachments() -> None:
+    """Verify GeminiLLM extracts and formats attachments correctly using types.Part.from_bytes."""
+    msg = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="User",
+        role=ROLE_USER,
+        type=TYPE_TEXT,
+        content="Look at this!",
+        metadata={
+            "attachments": [
+                {
+                    "path": "/tmp/nonexistent_test_image.png",
+                    "mime_type": "image/png",
+                    "filename": "test_image.png",
+                }
+            ]
+        },
+    )
+
+    mock_client = MagicMock()
+    mock_res = MagicMock()
+    mock_res.parts = [MagicMock(text="Beautiful photo!", thought=False, function_call=None)]
+    mock_res.usage_metadata = MagicMock(
+        prompt_token_count=10, candidates_token_count=5, total_token_count=15
+    )
+    mock_client.models.generate_content.return_value = mock_res
+
+    from unittest.mock import mock_open
+    with (
+        patch("google.genai.Client", return_value=mock_client),
+        patch("os.path.exists", return_value=True),
+        patch("builtins.open", mock_open(read_data=b"fake_bytes")),
+    ):
+        gemini = GeminiLLM()
+        response = await gemini.generate(history=[msg])
+
+        assert response.content == "Beautiful photo!"
+
+        called_contents = mock_client.models.generate_content.call_args[1]["contents"]
+        # Verify that user Content has two parts: the text, and the image bytes part
+        assert len(called_contents[0].parts) == 2
+        # Verify the text part
+        assert called_contents[0].parts[0].text == "Look at this!"
+        # Verify the bytes part loaded correctly
+        assert called_contents[0].parts[1].inline_data.data == b"fake_bytes"
+        assert called_contents[0].parts[1].inline_data.mime_type == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_claude_llm_with_attachments() -> None:
+    """Verify ClaudeLLM extracts and formats attachments correctly using base64 source blocks."""
+    msg = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="User",
+        role=ROLE_USER,
+        type=TYPE_TEXT,
+        content="Look at this PDF",
+        metadata={
+            "attachments": [
+                {
+                    "path": "/tmp/nonexistent_test.pdf",
+                    "mime_type": "application/pdf",
+                    "filename": "test.pdf",
+                }
+            ]
+        },
+    )
+
+    mock_client = MagicMock()
+    mock_res = MagicMock()
+    mock_res.content = [MagicMock(type="text", text="Extracted PDF text")]
+    mock_res.usage.input_tokens = 12
+    mock_res.usage.output_tokens = 6
+    mock_client.messages.create.return_value = mock_res
+
+    # Use patches to mock file presence and reading
+    from unittest.mock import mock_open
+    with (
+        patch("anthropic.AnthropicVertex", return_value=mock_client),
+        patch("os.path.exists", return_value=True),
+        patch("builtins.open", mock_open(read_data=b"fake_pdf_bytes")),
+    ):
+        claude = ClaudeLLM()
+        response = await claude.generate(history=[msg])
+
+        assert response.content == "Extracted PDF text"
+
+        called_kwargs = mock_client.messages.create.call_args[1]
+        messages = called_kwargs["messages"]
+
+        # Verify the PDF block was included correctly
+        assert len(messages[0]["content"]) == 2
+        assert messages[0]["content"][0]["type"] == "text"
+        assert messages[0]["content"][1]["type"] == "document"
+        assert messages[0]["content"][1]["source"]["media_type"] == "application/pdf"
+        assert messages[0]["content"][1]["source"]["data"] == "ZmFrZV9wZGZfYnl0ZXM="
