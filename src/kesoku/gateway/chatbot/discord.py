@@ -532,9 +532,32 @@ class DiscordChatbot(Chatbot):
                 header_msg, header_view = self._header_views[turn_id]
                 try:
                     header_view.remove_item(header_view.stop_turn)
-                    await header_msg.edit(view=header_view)
+
+                    header_content = None
+                    metrics = message.metadata.get("turn_metrics")
+                    if metrics:
+                        session_turns = metrics.get("session_turns", 0)
+                        context_tokens = metrics.get("context_tokens", 0)
+                        turn_tool_calls = metrics.get("turn_tool_calls", 0)
+                        turn_tokens = metrics.get("turn_tokens", 0)
+                        turn_time = metrics.get("turn_time", 0.0)
+
+                        context_k = f"{round(context_tokens / 1000)}K"
+                        turn_k = f"{round(turn_tokens / 1000)}K"
+
+                        header_content = (
+                            f"⚡ **Session:** {session_turns} turns | **Context:** {context_k} tokens\n"
+                            f"⏱️ **Turn:** {turn_tool_calls} tool calls | {turn_k} tokens | {turn_time:.1f}s"
+                        )
+
+                    if header_content is not None:
+                        await header_msg.edit(content=header_content, view=header_view)
+                    else:
+                        await header_msg.edit(view=header_view)
                 except Exception as ee:
-                    logger.warning(f"Failed to remove stop button from header view: {ee}")
+                    logger.warning(f"Failed to update header view with metrics: {ee}")
+
+
 
     async def trigger_cronjob(
         self,

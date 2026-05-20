@@ -400,6 +400,21 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def update_message_metadata(self, message_id: str, metadata: dict[str, Any]) -> None:
+        """Update the metadata dictionary of a message.
+
+        Args:
+            message_id: Target message ID.
+            metadata: Dictionary representing the new metadata.
+        """
+        conn = self._get_connection()
+        try:
+            with conn:
+                conn.execute("UPDATE messages SET metadata = ? WHERE id = ?", (json.dumps(metadata), message_id))
+        finally:
+            conn.close()
+
+
     def get_session_history(
         self, session_id: str, limit: int = 20, order: Literal["phased", "grouped"] = "phased"
     ) -> list[Message]:

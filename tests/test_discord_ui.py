@@ -334,3 +334,67 @@ async def test_clear_session_callback(mock_gateway: MagicMock) -> None:
     assert "some_turn" in mock_chatbot._header_views
     # Sent feedback followup
     mock_interaction.followup.send.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_turn_callback_with_metrics(mock_gateway: MagicMock) -> None:
+    """Test click of the 'Stop' button with metrics present in the user message."""
+    # Mock active agent and session worker
+    mock_worker = MagicMock()
+    mock_agent = MagicMock()
+    mock_agent.workers = {"s123": mock_worker}
+    mock_gateway.agent = mock_agent
+
+    # Mock chatbot
+    mock_chatbot = MagicMock()
+    mock_chatbot._typing_tasks = {}
+    mock_chatbot._intermediate_messages = {}
+
+    view = MessageHeaderView(gateway=mock_gateway, session_id="s123", chatbot=mock_chatbot)
+
+    mock_interaction = AsyncMock(spec=discord.Interaction)
+    mock_interaction.response = MagicMock()
+    mock_interaction.response.defer = AsyncMock()
+    mock_interaction.followup = AsyncMock()
+    mock_interaction.channel_id = "chan_abc"
+    mock_message = AsyncMock(spec=discord.Message)
+    mock_interaction.message = mock_message
+    mock_button = MagicMock(spec=discord.ui.Button)
+
+    # Mock DB user message to stop, with metrics
+    mock_gateway.get_session_history.return_value = [
+        Message(
+            id="msg_u1",
+            session_id="s123",
+            chatbot_id="discord",
+            channel_id="chan_abc",
+            sender="User",
+            role=ROLE_USER,
+            type=TYPE_TEXT,
+            content="Help me",
+            status="processing",
+            metadata={
+                "turn_metrics": {
+                    "session_turns": 5,
+                    "context_tokens": 8400,
+                    "turn_tool_calls": 2,
+                    "turn_tokens": 1200,
+                    "turn_time": 4.5,
+                    "status": "interrupted",
+                }
+            }
+        )
+    ]
+
+
+    await view.stop_turn.callback(mock_interaction)
+
+    # Asserts:
+    mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
+    # Message containing the view should be edited to update the view and show metrics
+    expected_content = (
+        "🛑 **Session:** 5 turns | **Context:** 8K tokens (Interrupted)\n"
+        "⏱️ **Turn:** 2 tool calls | 1K tokens | 4.5s"
+    )
+    mock_message.edit.assert_called_once_with(content=expected_content, view=view)
+

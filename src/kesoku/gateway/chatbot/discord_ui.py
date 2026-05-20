@@ -3,6 +3,7 @@
 Provides interactive UI elements such as persistent views and html trajectory viewers.
 """
 
+import asyncio
 import datetime
 import html
 import io
@@ -92,10 +93,6 @@ class MessageHeaderView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
 
         try:
-            # Remove the stop button from the view and edit the message immediately
-            self.remove_item(button)
-            await interaction.message.edit(view=self)
-
             # 1. Locate the active dispatcher agent and session worker, and stop the turn
             agent = self.gateway.agent
             if agent:
@@ -105,6 +102,9 @@ class MessageHeaderView(discord.ui.View):
                     # Remove worker reference to allow clean subsequent turns
                     agent.workers.pop(self.session_id, None)
 
+            # Allow the cancelled worker to write the turn metrics to database
+            await asyncio.sleep(0.15)
+
             # 2. Fetch recent history to find the active user message and update its status
             history = await self.gateway.get_session_history(self.session_id, limit=20)
             user_msg = None
@@ -112,8 +112,36 @@ class MessageHeaderView(discord.ui.View):
                 if msg.role == ROLE_USER:
                     user_msg = msg
                     break
-            if user_msg and user_msg.status in ("pending_agent", "processing"):
-                await self.gateway.update_message_status(user_msg.id, STATUS_INTERRUPTED)
+
+            header_content = None
+            if user_msg:
+                if user_msg.status in ("pending_agent", "processing"):
+                    await self.gateway.update_message_status(user_msg.id, STATUS_INTERRUPTED)
+
+                metrics = user_msg.metadata.get("turn_metrics")
+                if metrics:
+                    session_turns = metrics.get("session_turns", 0)
+                    context_tokens = metrics.get("context_tokens", 0)
+                    turn_tool_calls = metrics.get("turn_tool_calls", 0)
+                    turn_tokens = metrics.get("turn_tokens", 0)
+                    turn_time = metrics.get("turn_time", 0.0)
+
+                    context_k = f"{round(context_tokens / 1000)}K"
+                    turn_k = f"{round(turn_tokens / 1000)}K"
+
+                    header_content = (
+                        f"🛑 **Session:** {session_turns} turns | **Context:** {context_k} tokens (Interrupted)\n"
+                        f"⏱️ **Turn:** {turn_tool_calls} tool calls | {turn_k} tokens | {turn_time:.1f}s"
+                    )
+
+            # Remove the stop button from the view and edit the message with the metrics
+            self.remove_item(button)
+            if header_content is not None:
+                await interaction.message.edit(content=header_content, view=self)
+            else:
+                await interaction.message.edit(view=self)
+
+
 
             # 3. Stop typing task and clean up intermediate special messages in Discord UI
             if self.chatbot:

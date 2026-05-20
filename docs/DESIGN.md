@@ -81,6 +81,14 @@ Kesoku includes a fully functional Discord chatbot adapter (`DiscordChatbot`) co
   - **View Trajectory (`📜`)**: Streams a custom-generated interactive dark-mode HTML trace file of the conversation turn.
   - **Stop Turn (`🛑`)**: Stops/aborts the active `SessionWorker` turn task, marks the pending user prompt as `interrupted` in the database, and deletes any intermediate special messages (such as thoughts and tool calls) from the Discord UI.
   - **Clear Session (`♻️`)**: Deletes the session and all its messages from the SQLite database, recursively deletes the session workspace folder on disk, and deletes active UI components. This button is only visible inside regular channels and is hidden inside threads.
+- **Session and Turn Metrics**: Upon completion or interruption of each logical conversational turn, the persistent header message is dynamically edited in-place with detailed session and turn execution statistics:
+  - **Total Session Turns**: The total number of user turns processed in the current session.
+  - **Context Window Size**: The number of tokens currently in the session context window (prompt/input tokens) measured in integer K.
+  - **Turn Tool Calls**: The total count of tools executed in the current turn.
+  - **Turn Token Usage**: The total tokens consumed (input + output tokens) across all agent reasoning steps in the current turn, measured in integer K.
+  - **Turn Timing**: The total elapsed time in seconds taken to execute the entire turn.
+  - Formatting varies beautifully to denote the final turn state: finished turns are labeled with a `⚡` emoji, while interrupted turns are labeled with a `🛑` emoji and the `(Interrupted)` suffix.
+
 - **Slash Commands System (`discord_command.py`)**: The Discord chatbot integrates native slash commands using `discord.app_commands.CommandTree`.
   - `/restart`: Restarts the Kesoku background service. It sends an ephemeral confirmation message, stops active chatbot listeners cleanly, and executes a non-blocking `kesoku service restart` (supporting both `--user` and `--system` installations) to cleanly recycle the OS process. If those commands are not available or fail, it falls back to an in-place replacement via `os.execv`.
 

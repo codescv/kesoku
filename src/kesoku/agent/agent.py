@@ -8,6 +8,7 @@ anti-stall mechanisms.
 import asyncio
 import inspect
 import json
+import time
 from typing import Any
 
 from kesoku.agent.llm import BaseLLM, get_llm
@@ -127,6 +128,15 @@ class SessionWorker:
                 logger.error(f"Error in SessionWorker for session {self.session_id}: {e}", exc_info=True)
                 await asyncio.sleep(1.0)
 
+    async def _get_session_turns_count(self) -> int:
+        """Get the number of conversational turns (user messages) in the current session.
+
+        Returns:
+            The count of user messages in this session.
+        """
+        raw_history = await self.gateway.get_session_history(self.session_id, limit=0)
+        return len([m for m in raw_history if m.role == ROLE_USER])
+
     async def _process_turn(self, current_msg: Message) -> None:
         chatbot_id = current_msg.chatbot_id
         channel_id = current_msg.channel_id
@@ -140,154 +150,198 @@ class SessionWorker:
         folder_name = session.workspace_name
         tool_context = ToolContext(session_id=self.session_id, session_workspace=folder_name)
 
-        while self.running:
-            # Check-in before atomic action (Thought Interruption)
-            latest_msg = await self._drain_queue_and_pivot(current_msg)
-            if latest_msg != current_msg:
-                current_msg = latest_msg
+        start_time = time.time()
+        turn_tool_calls = 0
+        turn_tokens = 0
+        last_context_tokens = 0
 
-            # Retrieve and build the cleaned, prioritized, and aligned session history
-            history = await self._build_clean_history()
+        try:
+            while self.running:
+                # Check-in before atomic action (Thought Interruption)
+                latest_msg = await self._drain_queue_and_pivot(current_msg)
+                if latest_msg != current_msg:
+                    current_msg = latest_msg
 
-            tools_list = self.tool_registry.get_tools_list()
+                # Retrieve and build the cleaned, prioritized, and aligned session history
+                history = await self._build_clean_history()
 
-            # LLM inference
-            res = await self.llm.generate(
-                history=history,
-                tools=tools_list,
-            )
+                tools_list = self.tool_registry.get_tools_list()
 
-            # Check if LLM requested tool calls
-            if res.tool_calls:
-                thought_text = res.thought or res.content
-                if thought_text:
-                    thought_msg = Message(
+                # LLM inference
+                res = await self.llm.generate(
+                    history=history,
+                    tools=tools_list,
+                )
+
+                # Accumulate token metrics
+                if res.prompt_tokens:
+                    last_context_tokens = res.prompt_tokens
+                if res.total_tokens:
+                    turn_tokens += res.total_tokens
+
+                # Check if LLM requested tool calls
+                if res.tool_calls:
+                    turn_tool_calls += len(res.tool_calls)
+                    thought_text = res.thought or res.content
+                    if thought_text:
+                        thought_msg = Message(
+                            session_id=self.session_id,
+                            chatbot_id=chatbot_id,
+                            channel_id=channel_id,
+                            sender="Kesoku",
+                            role=ROLE_ASSISTANT,
+                            type=TYPE_THOUGHT,
+                            content=thought_text,
+                            status=STATUS_RESPONDED,
+                            parent_id=current_msg.id,
+                        )
+                        await self.gateway.post(thought_msg)
+
+                    tool_call_msgs = []
+                    for call in res.tool_calls:
+                        logger.info(f"Executing requested tool call: '{call.name}' with args {call.arguments}")
+                        call_args_json = json.dumps(call.arguments, indent=2, ensure_ascii=False)
+                        tool_call_msg = Message(
+                            session_id=self.session_id,
+                            chatbot_id=chatbot_id,
+                            channel_id=channel_id,
+                            sender="Kesoku",
+                            role=ROLE_TOOL,
+                            type=TYPE_TOOL_CALL,
+                            content=f"Calling tool `{call.name}` with arguments:\n```json\n{call_args_json}\n```",
+                            status=STATUS_RESPONDED,
+                            parent_id=current_msg.id,
+                            metadata={
+                                "tool_name": call.name,
+                                "tool_arguments": call.arguments,
+                                "thought_signature": call.thought_signature,
+                            },
+                        )
+                        await self.gateway.post(tool_call_msg)
+                        tool_call_msgs.append((call, tool_call_msg))
+
+                    async def _exec_tool(call: Any, tc_msg: Message) -> Message:
+                        """Execute a single tool call asynchronously and return the resulting Message.
+
+                        Args:
+                            call: ToolCallRequest instance.
+                            tc_msg: The corresponding ToolCall Message.
+
+                        Returns:
+                            A Message representing either successful tool result or error.
+                        """
+                        if not self.queue.empty():
+                            logger.info(f"Interruption prior to tool '{call.name}'. Aborting tool execution.")
+                        try:
+                            tool_func = self.tool_registry.get_tool(call.name)
+                            call_kwargs = dict(call.arguments)
+                            sig = inspect.signature(tool_func)
+                            if "context" in sig.parameters:
+                                call_kwargs["context"] = tool_context
+                            # Atomic tool execution
+                            result = await asyncio.to_thread(tool_func, **call_kwargs)
+                            return Message(
+                                session_id=self.session_id,
+                                chatbot_id=chatbot_id,
+                                channel_id=channel_id,
+                                sender=call.name,
+                                role=ROLE_TOOL,
+                                type=TYPE_TOOL_RESULT,
+                                content=f"Tool `{call.name}` returned:\n```\n{result}\n```",
+                                status=STATUS_RESPONDED,
+                                parent_id=tc_msg.id,
+                                metadata={"tool_name": call.name, "tool_result": str(result)},
+                            )
+                        except Exception as te:
+                            logger.error(f"Error executing tool '{call.name}': {te}")
+                            return Message(
+                                session_id=self.session_id,
+                                chatbot_id=chatbot_id,
+                                channel_id=channel_id,
+                                sender=call.name,
+                                role=ROLE_TOOL,
+                                type=TYPE_TOOL_RESULT,
+                                content=f"Tool `{call.name}` error:\n```\n{te}\n```",
+                                status=STATUS_RESPONDED,
+                                parent_id=tc_msg.id,
+                                metadata={"tool_name": call.name, "tool_error": str(te)},
+                            )
+
+                    exec_tasks = [_exec_tool(call, tc_msg) for call, tc_msg in tool_call_msgs]
+                    if not self.queue.empty():
+                        logger.info("Interruption detected before launching concurrent tool execution.")
+                        for coro in exec_tasks:
+                            coro.close()
+                        break
+                    result_msgs = await asyncio.gather(*exec_tasks)
+                    for rm in result_msgs:
+                        await self.gateway.post(rm)
+
+                    continue
+                else:
+                    if res.thought:
+                        thought_msg = Message(
+                            session_id=self.session_id,
+                            chatbot_id=chatbot_id,
+                            channel_id=channel_id,
+                            sender="Kesoku",
+                            role=ROLE_ASSISTANT,
+                            type=TYPE_THOUGHT,
+                            content=res.thought,
+                            status=STATUS_RESPONDED,
+                            parent_id=current_msg.id,
+                        )
+                        await self.gateway.post(thought_msg)
+
+                    final_content = res.content
+                    if not final_content:
+                        final_content = "Processed request successfully."
+
+                    final_msg = Message(
                         session_id=self.session_id,
                         chatbot_id=chatbot_id,
                         channel_id=channel_id,
                         sender="Kesoku",
                         role=ROLE_ASSISTANT,
-                        type=TYPE_THOUGHT,
-                        content=thought_text,
-                        status=STATUS_RESPONDED,
-                        parent_id=current_msg.id,
-                    )
-                    await self.gateway.post(thought_msg)
-
-                tool_call_msgs = []
-                for call in res.tool_calls:
-                    logger.info(f"Executing requested tool call: '{call.name}' with args {call.arguments}")
-                    call_args_json = json.dumps(call.arguments, indent=2, ensure_ascii=False)
-                    tool_call_msg = Message(
-                        session_id=self.session_id,
-                        chatbot_id=chatbot_id,
-                        channel_id=channel_id,
-                        sender="Kesoku",
-                        role=ROLE_TOOL,
-                        type=TYPE_TOOL_CALL,
-                        content=f"Calling tool `{call.name}` with arguments:\n```json\n{call_args_json}\n```",
-                        status=STATUS_RESPONDED,
+                        type=TYPE_TEXT,
+                        content=final_content,
+                        status=STATUS_PENDING,
                         parent_id=current_msg.id,
                         metadata={
-                            "tool_name": call.name,
-                            "tool_arguments": call.arguments,
-                            "thought_signature": call.thought_signature,
+                            "turn_metrics": {
+                                "session_turns": await self._get_session_turns_count(),
+                                "context_tokens": last_context_tokens,
+                                "turn_tool_calls": turn_tool_calls,
+                                "turn_tokens": turn_tokens,
+                                "turn_time": time.time() - start_time,
+                                "status": "finished",
+                            }
                         },
                     )
-                    await self.gateway.post(tool_call_msg)
-                    tool_call_msgs.append((call, tool_call_msg))
-
-                async def _exec_tool(call: Any, tc_msg: Message) -> Message:
-                    """Execute a single tool call asynchronously and return the resulting Message.
-
-                    Args:
-                        call: ToolCallRequest instance.
-                        tc_msg: The corresponding ToolCall Message.
-
-                    Returns:
-                        A Message representing either successful tool result or error.
-                    """
-                    if not self.queue.empty():
-                        logger.info(f"Interruption prior to tool '{call.name}'. Aborting tool execution.")
-                    try:
-                        tool_func = self.tool_registry.get_tool(call.name)
-                        call_kwargs = dict(call.arguments)
-                        sig = inspect.signature(tool_func)
-                        if "context" in sig.parameters:
-                            call_kwargs["context"] = tool_context
-                        # Atomic tool execution
-                        result = await asyncio.to_thread(tool_func, **call_kwargs)
-                        return Message(
-                            session_id=self.session_id,
-                            chatbot_id=chatbot_id,
-                            channel_id=channel_id,
-                            sender=call.name,
-                            role=ROLE_TOOL,
-                            type=TYPE_TOOL_RESULT,
-                            content=f"Tool `{call.name}` returned:\n```\n{result}\n```",
-                            status=STATUS_RESPONDED,
-                            parent_id=tc_msg.id,
-                            metadata={"tool_name": call.name, "tool_result": str(result)},
-                        )
-                    except Exception as te:
-                        logger.error(f"Error executing tool '{call.name}': {te}")
-                        return Message(
-                            session_id=self.session_id,
-                            chatbot_id=chatbot_id,
-                            channel_id=channel_id,
-                            sender=call.name,
-                            role=ROLE_TOOL,
-                            type=TYPE_TOOL_RESULT,
-                            content=f"Tool `{call.name}` error:\n```\n{te}\n```",
-                            status=STATUS_RESPONDED,
-                            parent_id=tc_msg.id,
-                            metadata={"tool_name": call.name, "tool_error": str(te)},
-                        )
-
-                exec_tasks = [_exec_tool(call, tc_msg) for call, tc_msg in tool_call_msgs]
-                if not self.queue.empty():
-                    logger.info("Interruption detected before launching concurrent tool execution.")
-                    for coro in exec_tasks:
-                        coro.close()
+                    await self.gateway.post(final_msg)
+                    await self.gateway.mark_message_processed(current_msg.id)
                     break
-                result_msgs = await asyncio.gather(*exec_tasks)
-                for rm in result_msgs:
-                    await self.gateway.post(rm)
+        except asyncio.CancelledError:
+            # Interrupted turn: save turn metrics to the initiating user message
+            turn_metrics = {
+                "session_turns": await self._get_session_turns_count(),
+                "context_tokens": last_context_tokens,
+                "turn_tool_calls": turn_tool_calls,
+                "turn_tokens": turn_tokens,
+                "turn_time": time.time() - start_time,
+                "status": "interrupted",
+            }
+            history = await self.gateway.get_session_history(self.session_id, limit=20)
+            user_msg = None
+            for msg in reversed(history):
+                if msg.role == ROLE_USER:
+                    user_msg = msg
+                    break
+            if user_msg:
+                user_msg.metadata["turn_metrics"] = turn_metrics
+                await self.gateway.update_message_metadata(user_msg.id, user_msg.metadata)
+            raise
 
-                continue
-            else:
-                if res.thought:
-                    thought_msg = Message(
-                        session_id=self.session_id,
-                        chatbot_id=chatbot_id,
-                        channel_id=channel_id,
-                        sender="Kesoku",
-                        role=ROLE_ASSISTANT,
-                        type=TYPE_THOUGHT,
-                        content=res.thought,
-                        status=STATUS_RESPONDED,
-                        parent_id=current_msg.id,
-                    )
-                    await self.gateway.post(thought_msg)
-
-                final_content = res.content
-                if not final_content:
-                    final_content = "Processed request successfully."
-
-                final_msg = Message(
-                    session_id=self.session_id,
-                    chatbot_id=chatbot_id,
-                    channel_id=channel_id,
-                    sender="Kesoku",
-                    role=ROLE_ASSISTANT,
-                    type=TYPE_TEXT,
-                    content=final_content,
-                    status=STATUS_PENDING,
-                    parent_id=current_msg.id,
-                )
-                await self.gateway.post(final_msg)
-                await self.gateway.mark_message_processed(current_msg.id)
-                break
 
     async def _build_clean_history(
         self,

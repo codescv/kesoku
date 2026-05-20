@@ -237,6 +237,17 @@ class Gateway:
         await asyncio.to_thread(self.db.update_message_status, message_id, status)
         logger.debug(f"Message {message_id} status updated to {status}.")
 
+    async def update_message_metadata(self, message_id: str, metadata: dict[str, Any]) -> None:
+        """Update the metadata of a message in storage.
+
+        Args:
+            message_id: Message ID.
+            metadata: Dictionary representing the new metadata.
+        """
+        await asyncio.to_thread(self.db.update_message_metadata, message_id, metadata)
+        logger.debug(f"Message {message_id} metadata updated.")
+
+
     async def get_session_history(self, session_id: str, limit: int = 20, order: str = "phased") -> list[Message]:
         """Retrieve historical messages for a specific internal session.
 
