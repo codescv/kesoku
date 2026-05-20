@@ -762,27 +762,7 @@ class GoogleChatChatbot(Chatbot):
         card_sections = [thoughts_tools_section]
 
         # Control / Metrics section
-        if status == "running":
-            card_sections.append({
-                "widgets": [
-                    {
-                        "buttonList": {
-                            "buttons": [
-                                {
-                                    "text": "Stop Turn 🛑",
-                                    "onClick": {
-                                        "action": {
-                                            "function": "stop_turn",
-                                            "parameters": [{"key": "session_id", "value": session_id}],
-                                        }
-                                    },
-                                }
-                            ]
-                        }
-                    }
-                ]
-            })
-        elif status in ("finished", "interrupted") and metrics:
+        if status in ("finished", "interrupted") and metrics:
             session_turns = metrics.get("session_turns", 0)
             context_tokens = metrics.get("context_tokens", 0)
             turn_tool_calls = metrics.get("turn_tool_calls", 0)
@@ -825,39 +805,23 @@ class GoogleChatChatbot(Chatbot):
         }
 
     def _build_question_card(self, session_id: str, question: str, choices: list[str]) -> dict[str, Any]:
-        """Construct the interactive multiple-choice question card.
+        """Construct the multiple-choice question card without interactive buttons.
 
         Args:
             session_id: Active session ID.
             question: The question prompt text.
-            choices: A list of buttons values.
+            choices: A list of choice values.
 
         Returns:
             A cardsV2 dictionary structure.
         """
-        buttons = []
-        for choice in choices:
-            buttons.append(
-                {
-                    "text": choice,
-                    "onClick": {
-                        "action": {
-                            "function": "submit_choice",
-                            "parameters": [
-                                {"key": "session_id", "value": session_id},
-                                {"key": "choice", "value": choice},
-                            ],
-                        }
-                    },
-                }
-            )
-
+        choices_list = "\n".join(f"- {choice}" for choice in choices)
+        card_text = f"{question}\n\n{choices_list}"
         return {
             "cardId": f"question_{session_id}",
             "card": {
                 "sections": [
-                    {"widgets": [{"textParagraph": {"text": question}}]},
-                    {"widgets": [{"buttonList": {"buttons": buttons}}]},
+                    {"widgets": [{"textParagraph": {"text": card_text}}]},
                 ],
             },
         }

@@ -410,8 +410,8 @@ async def test_handle_outgoing_message_delivery_foldable_ui(
         assert card["header"]["title"] == "Kesoku Agent"
         assert card["sections"][0]["header"] == "Thoughts & Tools"
         assert "Thought:" in card["sections"][0]["widgets"][0]["textParagraph"]["text"]
-        # Verify Stop Turn button is present
-        assert card["sections"][1]["widgets"][0]["buttonList"]["buttons"][0]["text"] == "Stop Turn 🛑"
+        # Verify Stop Turn button is not present (only thoughts and tools section is present)
+        assert len(card["sections"]) == 1
 
         # 2. Post the final reply
         final_msg = Message(
@@ -511,10 +511,10 @@ async def test_handle_outgoing_message_delivery_question(
         assert "cardsV2" in body_arg
         card = body_arg["cardsV2"][0]["card"]
         assert "header" not in card
-        assert card["sections"][0]["widgets"][0]["textParagraph"]["text"] == "Do you want to compile?"
+        text = card["sections"][0]["widgets"][0]["textParagraph"]["text"]
+        assert "Do you want to compile?" in text
+        assert "- Yes, run it" in text
+        assert "- No, abort" in text
 
-        # Buttons should exist matching choice inputs
-        buttons = card["sections"][1]["widgets"][0]["buttonList"]["buttons"]
-        assert len(buttons) == 2
-        assert buttons[0]["text"] == "Yes, run it"
-        assert buttons[1]["text"] == "No, abort"
+        # Verify no buttons section exists
+        assert len(card["sections"]) == 1

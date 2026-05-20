@@ -20,7 +20,7 @@ from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-MAX_OUTPUT_LENGTH = 1000
+MAX_OUTPUT_LENGTH = 10_000
 TIMEOUT_SECONDS = 1800
 
 
