@@ -39,6 +39,26 @@ Rules for file sending:
 5. Always ensure that the path inside `[file: <path>]` or `[voice: <path>]` is a fully resolved absolute path."""
 
 
+QUESTION_INSTRUCTION = """
+# Asking the User Questions with Multiple-Choice Options
+When you need to ask the user a question and want to provide them with clear, clickable multiple-choice buttons,
+you MUST include the following exact syntax in your final textual response to the user:
+[question: <the question> | choice1 | choice2 | ...]
+
+Example: 'Would you like me to generate code in Python? [question: Choose language: | Python | Go]'
+
+Rules for asking questions:
+1. Put the question text block first, followed by choices separated by the '|' pipe symbol.
+2. Ensure choices are concise, actionable button labels.
+3. Selecting an option automatically posts a new user message containing that exact choice string.
+
+When to ask:
+1. To clarify user requests.
+2. To predict user's follow up response and provide them as choices as a convenience.
+3. To get user's feedback on how to proceed.
+"""
+
+
 def build_sys_prompt(
     custom_prompt: str | None = None,
     session: Session | None = None,
@@ -67,10 +87,12 @@ Unless the user explicitly instructs otherwise, do not refer to any file outside
         session_dir_info = f"""
 # Session Staging Directory
 > STAGING_DIR='{staging_path}'
-Unless the user explicitly instructs otherwise, you MUST save all files (such as generated
-images, photos, audios, videos, report documents, scripts, or other output files) in this
-session staging directory by default. This is your staging directory for your work in this session.
-        """
+- This is your where you are supposed to save your files, unless the user explicitly instructs otherwise.
+  Create it if it doesn't exist.
+- Save all output files, including generated images, photos, audios, videos, report documents, scripts, 
+  command output files, cloned repos, downloaded files or other output files) in this session staging directory.
+- If you accidentally saved any files outside of this directory, move them to this directory in the end.
+    """
 
     user_prompts_sections = []
     # Process and load user_prompts files
@@ -96,6 +118,7 @@ session staging directory by default. This is your staging directory for your wo
         [
             SKILLS_INSTRUCTIONS.strip(),
             FILE_SENDING_INSTRUCTIONS.strip(),
+            QUESTION_INSTRUCTION.strip(),
         ]
     )
 

@@ -16,6 +16,10 @@ def test_build_sys_prompt_default() -> None:
     assert "[voice: /abs/path/to/audio]" in prompt
     assert "Rules for file sending:" in prompt
 
+    # Check question instructions are included
+    assert "# Asking the User Questions with Multiple-Choice Options" in prompt
+    assert "[question: <the question> | choice1 | choice2 | ...]" in prompt
+
 
 def test_build_sys_prompt_with_custom_context() -> None:
     """Verify build_sys_prompt appends custom context instructions correctly."""

@@ -96,3 +96,48 @@ def test_parse_voice_whitespace_and_formatting() -> None:
         {"type": "text", "content": "Listen: "},
         {"type": "voice", "path": "/path/voice.wav"},
     ]
+
+
+def test_parse_single_question_block() -> None:
+    """Verify that a question block is correctly parsed and recognized."""
+    content = "Please choose:\n[question: What is your favorite color? | Red | Blue | Green]\nThank you!"
+    segments = parse_message_content(content)
+    assert segments == [
+        {"type": "text", "content": "Please choose:\n"},
+        {
+            "type": "question",
+            "question": "What is your favorite color?",
+            "choices": ["Red", "Blue", "Green"],
+        },
+        {"type": "text", "content": "\nThank you!"},
+    ]
+
+
+def test_parse_question_block_spaces() -> None:
+    """Verify that spaces in question and choices are stripped correctly."""
+    content = "[question:   Are you ready?    |   Yes  |  No   ]"
+    segments = parse_message_content(content)
+    assert segments == [
+        {
+            "type": "question",
+            "question": "Are you ready?",
+            "choices": ["Yes", "No"],
+        }
+    ]
+
+
+def test_parse_mixed_question_file_voice() -> None:
+    """Verify mixed parsing of question, file, and voice blocks."""
+    content = "[file: /a.png] and [voice: /b.wav] next [question: Continue? | Yes | No]"
+    segments = parse_message_content(content)
+    assert segments == [
+        {"type": "file", "path": "/a.png"},
+        {"type": "text", "content": " and "},
+        {"type": "voice", "path": "/b.wav"},
+        {"type": "text", "content": " next "},
+        {
+            "type": "question",
+            "question": "Continue?",
+            "choices": ["Yes", "No"],
+        },
+    ]

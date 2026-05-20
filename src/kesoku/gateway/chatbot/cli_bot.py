@@ -124,6 +124,18 @@ class CLIChatbot(Chatbot):
                                 border_style="green",
                             )
                         )
+                    elif segment["type"] == "question":
+                        question_text = segment["question"]
+                        choices = segment["choices"]
+                        choices_str = " | ".join(choices)
+                        self.console.print(
+                            Panel(
+                                f"{question_text}\n\n[bold cyan]Choices:[/bold cyan] {choices_str}",
+                                title=f"[bold blue]{message.sender} (Question)[/bold blue]",
+                                title_align="left",
+                                border_style="cyan",
+                            )
+                        )
                 await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
                 self.final_response_event.set()
                 logger.debug(f"CLIChatbot received final response for channel {message.channel_id}")

@@ -3,6 +3,7 @@
 import asyncio
 import re
 from abc import ABC, abstractmethod
+from typing import Any
 
 from kesoku.constants import ROLE_USER, STATUS_DELIVERED
 from kesoku.db import Message
@@ -12,8 +13,10 @@ from kesoku.logger import setup_logger
 logger = setup_logger(__name__)
 
 
-def parse_message_content(content: str) -> list[dict[str, str]]:
-    """Parse message content to extract zero or more `[file: /path/to/file]` or `[voice: /path/to/file]` blocks.
+def parse_message_content(content: str) -> list[dict[str, Any]]:
+    """Parse message content to extract zero or more blocks.
+
+    Recognizes `[file: /path]`, `[voice: /path]`, or `[question: <question> | choice1 | ...]`.
 
     Args:
         content: Raw message text content to parse.
@@ -21,12 +24,14 @@ def parse_message_content(content: str) -> list[dict[str, str]]:
     Returns:
         A list of segment dictionaries. Text segments have format:
         {"type": "text", "content": "..."}, file segments have format:
-        {"type": "file", "path": "..."}, and voice segments have format:
-        {"type": "voice", "path": "..."}.
+        {"type": "file", "path": "..."}, voice segments have format:
+        {"type": "voice", "path": "..."}, and question segments have format:
+        {"type": "question", "question": "...", "choices": [...]}.
     """
-    # Regex matches [file: <path>] or [voice: <path>] where <path> contains any character except closed bracket
-    pattern = re.compile(r"\[(file|voice):\s*([^\]]+)\s*\]")
-    segments: list[dict[str, str]] = []
+    # Regex matches [file: <path>], [voice: <path>], or [question: <text>]
+    # where <text> is any character except closed bracket
+    pattern = re.compile(r"\[(file|voice|question):\s*([^\]]+)\s*\]")
+    segments: list[dict[str, Any]] = []
     last_idx = 0
 
     for match in pattern.finditer(content):
@@ -35,8 +40,19 @@ def parse_message_content(content: str) -> list[dict[str, str]]:
             segments.append({"type": "text", "content": text_before})
 
         block_type = match.group(1)
-        file_path = match.group(2).strip()
-        segments.append({"type": block_type, "path": file_path})
+        inner_val = match.group(2).strip()
+
+        if block_type == "question":
+            parts = [p.strip() for p in inner_val.split("|")]
+            question_text = parts[0]
+            choices = parts[1:]
+            segments.append({
+                "type": "question",
+                "question": question_text,
+                "choices": choices,
+            })
+        else:
+            segments.append({"type": block_type, "path": inner_val})
         last_idx = match.end()
 
     text_after = content[last_idx:]

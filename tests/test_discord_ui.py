@@ -1,5 +1,6 @@
 """Unit tests for Kesoku Discord Chatbot UI components."""
 
+import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
@@ -16,7 +17,7 @@ from kesoku.constants import (
     TYPE_TOOL_CALL,
 )
 from kesoku.db import Message
-from kesoku.gateway.chatbot.discord_ui import MessageHeaderView
+from kesoku.gateway.chatbot.discord_ui import MessageHeaderView, QuestionView
 from kesoku.gateway.gateway import Gateway
 
 
@@ -397,4 +398,87 @@ async def test_stop_turn_callback_with_metrics(mock_gateway: MagicMock) -> None:
         "⏱️ **Turn:** 2 tool calls | 1K tokens | 4.5s"
     )
     mock_message.edit.assert_called_once_with(content=expected_content, view=view)
+
+
+@pytest.mark.asyncio
+async def test_question_view_init_and_callback(mock_gateway: MagicMock) -> None:
+    """Test that QuestionView initializes buttons and handles selection callback correctly."""
+    mock_chatbot = MagicMock()
+    mock_chatbot.chatbot_id = "discord"
+    mock_chatbot._typing_tasks = {}
+    mock_chatbot._keep_typing = AsyncMock()
+
+    choices = ["Red", "Blue"]
+    view = QuestionView(
+        gateway=mock_gateway,
+        session_id="s123",
+        chatbot=mock_chatbot,
+        question="What is your favorite color?",
+        choices=choices,
+    )
+
+    # Asserts on initialization
+    assert view.gateway == mock_gateway
+    assert view.session_id == "s123"
+    assert view.chatbot == mock_chatbot
+    assert view.question == "What is your favorite color?"
+    assert view.choices == choices
+    assert len(view.children) == 2
+    assert isinstance(view.children[0], discord.ui.Button)
+    assert view.children[0].label == "Red"
+    assert view.children[1].label == "Blue"
+
+    # Mock interaction
+    mock_interaction = AsyncMock(spec=discord.Interaction)
+    mock_interaction.response = MagicMock()
+    mock_interaction.response.defer = AsyncMock()
+    mock_interaction.channel_id = "chan_abc"
+
+    mock_message = AsyncMock(spec=discord.Message)
+    mock_interaction.message = mock_message
+
+    mock_channel = AsyncMock(spec=discord.TextChannel)
+    mock_response_msg = MagicMock(spec=discord.Message)
+    mock_response_msg.id = "res_123"
+    mock_response_msg.created_at = datetime.datetime.now(datetime.UTC)
+    mock_channel.send.return_value = mock_response_msg
+    mock_interaction.channel = mock_channel
+    mock_interaction.user = MagicMock()
+    mock_interaction.user.id = "user_999"
+    mock_interaction.user.display_name = "Alice"
+
+    # Trigger callback of the first button ("Red")
+    button_callback = view.children[0].callback
+    await button_callback(mock_interaction)
+
+    # Asserts on callback behaviour:
+    # 1. Defer called
+    mock_interaction.response.defer.assert_called_once()
+
+    # 2. Buttons are all disabled
+    assert view.children[0].disabled is True
+    assert view.children[1].disabled is True
+
+    # 3. Message edited to show disabled view
+    mock_message.edit.assert_called_once_with(view=view)
+
+    # 4. Visual feedback message sent to channel
+    mock_channel.send.assert_called_once_with("<@user_999> selected: **Red**")
+
+    # 5. Gateway post called to ingest ROLE_USER message
+    mock_gateway.post.assert_called_once()
+    posted_msg = mock_gateway.post.call_args[0][0]
+    assert isinstance(posted_msg, Message)
+    assert posted_msg.session_id == "s123"
+    assert posted_msg.chatbot_id == "discord"
+    assert posted_msg.channel_id == "chan_abc"
+    assert posted_msg.sender == "Alice"
+    assert posted_msg.role == ROLE_USER
+    assert posted_msg.type == TYPE_TEXT
+    assert "Red" in posted_msg.content
+    assert posted_msg.metadata["discord_message_id"] == "res_123"
+    assert posted_msg.metadata["discord_author_id"] == "user_999"
+
+    # 6. Chatbot typing task is started
+    assert "chan_abc" in mock_chatbot._typing_tasks
 

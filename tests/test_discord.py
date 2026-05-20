@@ -1035,3 +1035,42 @@ async def test_handle_message_removes_stop_button_on_final_response(
             # The header message should be edited to update the view
             mock_header_msg.edit.assert_called_once_with(view=mock_header_view)
             mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+
+
+@pytest.mark.asyncio
+async def test_handle_message_with_question(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test that a question block in the message triggers sending a QuestionView to the channel."""
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.Thread)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+
+            content = "[question: Choose? | Yes | No]"
+            msg = Message(
+                id="msg123",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_ASSISTANT,
+                type=TYPE_TEXT,
+                content=content,
+            )
+
+            with patch("kesoku.gateway.chatbot.discord.QuestionView") as mock_question_view_class:
+                mock_view = MagicMock()
+                mock_question_view_class.return_value = mock_view
+
+                await bot.handle_message(msg)
+
+                mock_question_view_class.assert_called_once_with(
+                    gateway=mock_gateway,
+                    session_id="thread123",
+                    chatbot=bot,
+                    question="Choose?",
+                    choices=["Yes", "No"],
+                )
+                mock_channel.send.assert_called_once_with(content="Choose?", view=mock_view)
+                mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)

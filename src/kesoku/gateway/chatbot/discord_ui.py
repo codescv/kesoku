@@ -10,12 +10,15 @@ import io
 from typing import Any
 
 import discord
+import tzlocal
 
 from kesoku.constants import (
     ROLE_ASSISTANT,
     ROLE_TOOL,
     ROLE_USER,
     STATUS_INTERRUPTED,
+    STATUS_PENDING_AGENT,
+    TYPE_TEXT,
     TYPE_THOUGHT,
     TYPE_TOOL_CALL,
 )
@@ -537,3 +540,111 @@ rel="stylesheet">
     </script>
 </body>
 </html>"""
+
+
+def _get_local_timezone_name() -> str:
+    """Retrieve the local system timezone name (e.g., 'Asia/Shanghai')."""
+    try:
+        return tzlocal.get_localzone().key or "UTC"
+    except Exception:
+        return datetime.datetime.now().astimezone().tzname() or "UTC"
+
+
+class QuestionView(discord.ui.View):
+    """Dynamic Discord View representing a multiple-choice question.
+
+    Renders choice options as action buttons. Selecting a choice posts a
+    simulated user message response directly to the Kesoku gateway.
+    """
+
+    def __init__(
+        self,
+        gateway: Gateway,
+        session_id: str,
+        chatbot: Any,
+        question: str,
+        choices: list[str],
+    ) -> None:
+        """Initialize the QuestionView with multiple-choice buttons.
+
+        Args:
+            gateway: The Kesoku Gateway instance.
+            session_id: Session ID of the conversation.
+            chatbot: Reference to the active Discord chatbot.
+            question: The question text block.
+            choices: A list of string choice values representing buttons.
+        """
+        super().__init__(timeout=None)
+        self.gateway = gateway
+        self.session_id = session_id
+        self.chatbot = chatbot
+        self.question = question
+        self.choices = choices
+
+        for choice in choices:
+            button = discord.ui.Button(
+                style=discord.ButtonStyle.primary,
+                label=choice,
+                custom_id=f"btn_q_{session_id}_{choice[:20]}",
+            )
+            button.callback = self.make_callback(choice)
+            self.add_item(button)
+
+    def make_callback(self, choice: str) -> Any:
+        """Create a callback function bound to a specific multiple-choice value.
+
+        Args:
+            choice: The string choice value.
+
+        Returns:
+            A callback coroutine for the button interaction.
+        """
+        async def callback(interaction: discord.Interaction) -> None:
+            # Defer the interaction response
+            await interaction.response.defer()
+
+            # Disable all buttons to prevent multiple clicks or duplicate responses
+            for item in self.children:
+                if isinstance(item, discord.ui.Button):
+                    item.disabled = True
+
+            # Edit the interaction message to show disabled buttons
+            await interaction.message.edit(view=self)
+
+            # Send a visible confirmation message to the channel
+            response_msg = await interaction.channel.send(
+                f"<@{interaction.user.id}> selected: **{choice}**"
+            )
+
+            # Construct and post the user message to the Gateway
+            tz_name = _get_local_timezone_name()
+            discord_msg_content = (
+                f"`{interaction.user.display_name}` <@{interaction.user.id}> "
+                f"at `{response_msg.created_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')} {tz_name}`:\n"
+                f"{choice}"
+            )
+            msg = Message(
+                session_id=self.session_id,
+                chatbot_id=self.chatbot.chatbot_id,
+                channel_id=str(interaction.channel_id),
+                sender=interaction.user.display_name,
+                role=ROLE_USER,
+                type=TYPE_TEXT,
+                content=discord_msg_content,
+                timestamp=response_msg.created_at.timestamp(),
+                status=STATUS_PENDING_AGENT,
+                metadata={
+                    "discord_message_id": str(response_msg.id),
+                    "discord_author_id": str(interaction.user.id),
+                },
+            )
+            await self.gateway.post(msg)
+
+            # Trigger typing task since a new user message was posted
+            channel_id_str = str(interaction.channel_id)
+            if channel_id_str not in self.chatbot._typing_tasks:
+                self.chatbot._typing_tasks[channel_id_str] = asyncio.create_task(
+                    self.chatbot._keep_typing(interaction.channel)
+                )
+
+        return callback

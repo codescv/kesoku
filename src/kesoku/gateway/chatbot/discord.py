@@ -26,7 +26,7 @@ from kesoku.constants import (
 from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot, parse_message_content
 from kesoku.gateway.chatbot.discord_command import setup_discord_commands
-from kesoku.gateway.chatbot.discord_ui import MessageHeaderView
+from kesoku.gateway.chatbot.discord_ui import MessageHeaderView, QuestionView
 from kesoku.gateway.chatbot.discord_voice_message import send_voice_message
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
@@ -505,6 +505,21 @@ class DiscordChatbot(Chatbot):
                         except Exception as fe:
                             logger.error(f"Failed to send voice file fallback for {file_path}: {fe}", exc_info=True)
                             await channel.send(f"⚠️ Failed to send voice file {file_path}: {fe}")
+            elif segment["type"] == "question":
+                question_text = segment["question"]
+                choices = segment["choices"]
+                try:
+                    question_view = QuestionView(
+                        gateway=self.gateway,
+                        session_id=message.session_id,
+                        chatbot=self,
+                        question=question_text,
+                        choices=choices,
+                    )
+                    await channel.send(content=question_text, view=question_view)
+                except Exception as qe:
+                    logger.error(f"Failed to send question view to Discord: {qe}", exc_info=True)
+                    await channel.send(f"⚠️ Failed to send question: {question_text}")
 
         await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
 
