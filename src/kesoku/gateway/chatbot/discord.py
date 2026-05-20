@@ -516,7 +516,11 @@ class DiscordChatbot(Chatbot):
                         question=question_text,
                         choices=choices,
                     )
-                    await channel.send(content=question_text, view=question_view)
+                    embed = discord.Embed(
+                        title=f"❓ {question_text}",
+                        color=discord.Color.blurple(),
+                    )
+                    await channel.send(embed=embed, view=question_view)
                 except Exception as qe:
                     logger.error(f"Failed to send question view to Discord: {qe}", exc_info=True)
                     await channel.send(f"⚠️ Failed to send question: {question_text}")

@@ -43,9 +43,14 @@ def parse_message_content(content: str) -> list[dict[str, Any]]:
         inner_val = match.group(2).strip()
 
         if block_type == "question":
-            parts = [p.strip() for p in inner_val.split("|")]
-            question_text = parts[0]
-            choices = parts[1:]
+            if "||" in inner_val:
+                q_part, choices_part = inner_val.split("||", 1)
+                question_text = q_part.strip()
+                choices = [c.strip() for c in choices_part.split("|") if c.strip()]
+            else:
+                parts = [p.strip() for p in inner_val.split("|")]
+                question_text = parts[0]
+                choices = parts[1:]
             segments.append({
                 "type": "question",
                 "question": question_text,

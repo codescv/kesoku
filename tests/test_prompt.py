@@ -18,7 +18,7 @@ def test_build_sys_prompt_default() -> None:
 
     # Check question instructions are included
     assert "# Asking the User Questions with Multiple-Choice Options" in prompt
-    assert "[question: <the question> | choice1 | choice2 | ...]" in prompt
+    assert "[question: <the question> || choice1 | choice2 | ...]" in prompt
 
 
 def test_build_sys_prompt_with_custom_context() -> None:

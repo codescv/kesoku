@@ -43,12 +43,12 @@ QUESTION_INSTRUCTION = """
 # Asking the User Questions with Multiple-Choice Options
 When you need to ask the user a question and want to provide them with clear, clickable multiple-choice buttons,
 you MUST include the following exact syntax in your final textual response to the user:
-[question: <the question> | choice1 | choice2 | ...]
+[question: <the question> || choice1 | choice2 | ...]
 
-Example: 'Would you like me to generate code in Python? [question: Choose language: | Python | Go]'
+Example: 'Would you like me to generate code in Python? [question: Choose language: || Python | Go]'
 
 Rules for asking questions:
-1. Put the question text block first, followed by choices separated by the '|' pipe symbol.
+1. Use '||' to separate the question from the first choice option, then separate subsequent choices with '|'.
 2. Ensure choices are concise, actionable button labels.
 3. Selecting an option automatically posts a new user message containing that exact choice string.
 
@@ -89,7 +89,7 @@ Unless the user explicitly instructs otherwise, do not refer to any file outside
 > STAGING_DIR='{staging_path}'
 - This is your where you are supposed to save your files, unless the user explicitly instructs otherwise.
   Create it if it doesn't exist.
-- Save all output files, including generated images, photos, audios, videos, report documents, scripts, 
+- Save all output files, including generated images, photos, audios, videos, report documents, scripts,
   command output files, cloned repos, downloaded files or other output files) in this session staging directory.
 - If you accidentally saved any files outside of this directory, move them to this directory in the end.
     """

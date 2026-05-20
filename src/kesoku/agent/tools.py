@@ -216,6 +216,11 @@ def run_shell_command(
     All temporary scripts, data files, or build artifacts should be created in the session staging directory
     (which can be found in the system prompt STAGING_DIR instructions).
 
+    Tips:
+    - You are encouraged to combine commands using '|', '&&', ';' etc to save turns.
+    - If you think the output of the command is long or not important, redirect it to
+      a file in /tmp or filter the output (e.g. `ls -R | grep .py`)
+
     Args:
         command: The command string to execute (e.g., 'uv run pytest' or 'echo hello').
         cwd: Optional target working directory for executing the command.

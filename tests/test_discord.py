@@ -1047,7 +1047,7 @@ async def test_handle_message_with_question(mock_config: KesokuConfig, mock_gate
             mock_channel = AsyncMock(spec=discord.Thread)
             bot.bot.get_channel = MagicMock(return_value=mock_channel)
 
-            content = "[question: Choose? | Yes | No]"
+            content = "[question: Choose? || Yes | No]"
             msg = Message(
                 id="msg123",
                 session_id="thread123",
@@ -1063,14 +1063,22 @@ async def test_handle_message_with_question(mock_config: KesokuConfig, mock_gate
                 mock_view = MagicMock()
                 mock_question_view_class.return_value = mock_view
 
-                await bot.handle_message(msg)
+                with patch("discord.Embed") as mock_embed_class:
+                    mock_embed = MagicMock()
+                    mock_embed_class.return_value = mock_embed
 
-                mock_question_view_class.assert_called_once_with(
-                    gateway=mock_gateway,
-                    session_id="thread123",
-                    chatbot=bot,
-                    question="Choose?",
-                    choices=["Yes", "No"],
-                )
-                mock_channel.send.assert_called_once_with(content="Choose?", view=mock_view)
-                mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+                    await bot.handle_message(msg)
+
+                    mock_question_view_class.assert_called_once_with(
+                        gateway=mock_gateway,
+                        session_id="thread123",
+                        chatbot=bot,
+                        question="Choose?",
+                        choices=["Yes", "No"],
+                    )
+                    mock_embed_class.assert_called_once_with(
+                        title="Choose?❓",
+                        color=discord.Color.blurple(),
+                    )
+                    mock_channel.send.assert_called_once_with(embed=mock_embed, view=mock_view)
+                    mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
