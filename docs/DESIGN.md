@@ -73,7 +73,7 @@ All message ingestion and routing is unified through `Gateway.post()`. Every mes
 ## Discord Chatbot Adapter Architecture
 Kesoku includes a fully functional Discord chatbot adapter (`DiscordChatbot`) connecting external Discord servers with the internal Gateway broker:
 - **Allowlist Filtering & Token Fallback**: Configured via `user_allowlist`. If populated, unlisted users only receive replies if explicitly mentioning the bot. Messages explicitly mentioning third parties are ignored. The chatbot supports fallback token lookup via the `DISCORD_TOKEN` environment variable when `bot_token` is not specified in the configuration file.
-- **Thread-Based Context Separation & Direct Channel Interaction**: To prevent multi-user context collisions, conversations are normally isolated inside Discord threads, where the thread ID maps to Kesoku's external `channel_id`. To support direct channel interaction without thread creation, a configuration option `no_auto_thread_channels` can be populated with channel IDs or names. For designated channels in this list, the bot interacts directly in the main channel without automatically spawning new threads. If a user manually starts a thread within a direct channel, the adapter detects the thread context and interacts within the thread naturally. Session creation timestamps are synchronized with initial Discord message timestamps to ensure correct chronological ordering. If multiple bots run in the same channel, thread creation race conditions (`discord.HTTPException`) are gracefully handled by discovering and joining the thread created by peer bots.
+- **Thread-Based Context Separation & Direct Channel Interaction**: To prevent multi-user context collisions, conversations are normally isolated inside Discord threads, where the thread ID maps to Kesoku's external `channel_id`. To support direct channel interaction without thread creation, a configuration option `auto_thread` is provided inside `[[discord.channels]]` channel overrides (setting it to `false` prevents automatic thread creation in matching channels). By default, regular channels auto-thread. If a user manually starts a thread within a direct channel, the adapter detects the thread context and interacts within the thread naturally. Session creation timestamps are synchronized with initial Discord message timestamps to ensure correct chronological ordering. If multiple bots run in the same channel, thread creation race conditions (`discord.HTTPException`) are gracefully handled by discovering and joining the thread created by peer bots.
 - **Special Context Prompts**: Server and channel metadata, along with active member lists and Discord user IDs, are dynamically injected into the session's system prompt.
 - **Newline Chunking, File-Sending Syntax & Message Splitting**: The bot renders all assistant responses, thoughts (`💭`), tool calls (`🛠️`), and tool results (`📥`) to Discord. Output exceeding Discord's 2000-character limit is cleanly chunked at newline boundaries. In addition, Kesoku supports a standardized file-sending syntax `[file: /abs/path/to/file]`. When the Discord chatbot encounters this syntax in any outgoing message content, it automatically splits the content around the file blocks, uploads existing files as attachments via `discord.File`, and filters out empty or whitespace-only message segments to strictly conform to Discord API constraints. If a specified file does not exist on disk, a user-friendly warning notification is gracefully dispatched to the thread.
 - **Asynchronous Typing Status Indicator**: While the agent is thinking, running tools, or generating responses, `DiscordChatbot` continuously displays a typing status in the corresponding thread or channel. The typing indicator starts when an incoming user message is received, and is gracefully cancelled upon successful delivery of the final assistant text response. To prevent infinite typing during an unexpected error or network drop, each typing task is guarded by a robust 10-minute safety timeout.
@@ -148,12 +148,22 @@ project_id = "gcp-project-id" # for vertex mode
 location = "us-central1" # for vertex mode
 thinking_level = "high" # thinking level for reasoning ('minimal', 'low', 'medium', 'high')
 
+[claude]
+model_name = "claude-3-5-sonnet@20241022"
+project_id = "gcp-project-id" # for Vertex AI
+location = "us-east5" # for Vertex AI
+
 [discord]
 enabled = false
 bot_token = "discord-bot-token"
 chatbot_id = "discord"
 user_allowlist = ["allowed_username"]
-no_auto_thread_channels = ["no-thread-channel-name-or-id"]
+
+# Channel-specific configuration overrides
+[[discord.channels]]
+channels = ["channel_id_or_name"]
+llm = "claude"
+auto_thread = false
 
 [shell]
 enabled = true
@@ -162,6 +172,12 @@ mode = "blocklist"
 allowlist_patterns = ["^(echo|ls|pwd|cat|git|uv|grep|find|python|sed|awk)(\\s|$)"]
 blocklist_patterns = ["(\\b|^)(rm|sudo|shutdown|reboot|mkfs|dd|chmod|chown)(\\b|\\s|$)"]
 ```
+
+### Claude LLM Support (Vertex AI)
+Kesoku supports Anthropic's Claude models hosted on Google Cloud Vertex AI. 
+- **Alternating Message Alignment**: Converts and groups database historical turns to strictly comply with Anthropic's alternating user/assistant pattern.
+- **Dynamic Tool Conversion**: Automatically generates JSON tool schema definitions matching the Anthropic Tool Use specification from Python callables with docstrings and type annotations.
+- **Parallel Multi-Tool Calls**: Correlates and tracks concurrent tool calls and execution results using database message parent links as the `tool_use_id`.
 
 ## Autonomous Skill System
 Kesoku features an autonomous skill system that allows agents to dynamically discover and adopt specialized domain capabilities and prompt instructions during conversational sessions.

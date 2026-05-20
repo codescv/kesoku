@@ -21,14 +21,26 @@ project_id = "your-gcp-project"
 location = "global"
 thinking_level = "medium" # 'minimal', 'low', 'medium', 'high', or comment out for model default
 
+[claude]
+# Available models on Vertex AI:
+# - Claude Opus 4.7: "claude-opus-4-7"
+# - Claude Sonnet 4.6: "claude-sonnet-4-6"
+model_name = "claude-opus-4-7"
+project_id = "your-gcp-project"
+location = "us-east5"
+
 [discord]
 enabled = false
 bot_token = "your-discord-bot-token"
 chatbot_id = "discord"
 # List of allowed Discord user IDs or usernames (if empty, all users can mention the bot)
 # user_allowlist = ["1234567890"]
-# List of Discord channel IDs or names where threads should not be automatically created
-# no_auto_thread_channels = ["general", "1234567890"]
+
+# Optional: Channel-specific configuration overrides
+# [[discord.channels]]
+# channels = ["channel_id", "channel_name"]
+# llm = "claude"
+# auto_thread = false
 
 [shell]
 enabled = true

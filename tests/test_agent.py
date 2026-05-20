@@ -660,3 +660,53 @@ async def test_clean_history_config_loading(temp_db: str) -> None:
         history = await worker._build_clean_history()
         assert len(history) == 1
         assert history[0].role == "system"
+
+
+@pytest.mark.asyncio
+async def test_session_worker_dynamic_llm(temp_db: str) -> None:
+    """Verify that SessionWorker resolves the correct LLM based on channel overrides."""
+    DatabaseManager(temp_db).init_tables()
+    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+
+    await gw.create_session("sess_override", title="Override Session")
+
+    # Ingest user message with Discord chatbot and channel metadata matching our override
+    msg = Message(
+        session_id="sess_override",
+        chatbot_id="discord",
+        channel_id="12345",
+        sender="u1",
+        role="user",
+        type="text",
+        content="Hello!",
+        metadata={"channel_name": "announcements"},
+    )
+    await gw.post(msg)
+
+    from kesoku.agent.agent import SessionWorker
+    from kesoku.config import DiscordChannelOverride, KesokuConfig
+
+    cfg = KesokuConfig()
+    cfg.discord.channels = [
+        DiscordChannelOverride(
+            channels=["announcements"],
+            llm="claude",
+        )
+    ]
+
+    with patch("kesoku.agent.agent.get_config", return_value=cfg), \
+         patch("kesoku.agent.agent.get_llm") as mock_get_llm:
+        mock_claude = MagicMock()
+        mock_get_llm.return_value = mock_claude
+
+        worker = SessionWorker(
+            session_id="sess_override",
+            gateway=gw,
+            llm=MockLLM(),
+            tool_registry=ToolRegistry(),
+            dispatcher=None,
+        )
+
+        resolved_llm = worker._resolve_llm(msg)
+        assert resolved_llm == mock_claude
+        mock_get_llm.assert_called_once_with("claude")

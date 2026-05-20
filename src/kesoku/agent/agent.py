@@ -59,7 +59,7 @@ class SessionWorker:
         """
         self.session_id = session_id
         self.gateway = gateway
-        self.llm = llm
+        self.default_llm = llm
         self.tool_registry = tool_registry
         self.dispatcher = dispatcher
         self.queue: asyncio.Queue[Message] = asyncio.Queue()
@@ -137,6 +137,41 @@ class SessionWorker:
         raw_history = await self.gateway.get_session_history(self.session_id, limit=0)
         return len([m for m in raw_history if m.role == ROLE_USER])
 
+    def _resolve_llm(self, current_msg: Message) -> BaseLLM:
+        """Resolve the appropriate LLM instance for the current message, applying overrides.
+
+        Args:
+            current_msg: The active user message initiating the turn.
+
+        Returns:
+            A BaseLLM instance to use for this turn.
+        """
+        if current_msg.chatbot_id == "discord":
+            channel_id = current_msg.channel_id
+            channel_name = current_msg.metadata.get("channel_name", "")
+            parent_id = current_msg.metadata.get("parent_channel_id")
+            parent_name = current_msg.metadata.get("parent_channel_name")
+
+            cfg = get_config()
+            for override in cfg.discord.channels:
+                identifiers = {channel_id, channel_name}
+                if parent_id:
+                    identifiers.add(parent_id)
+                if parent_name:
+                    identifiers.add(parent_name)
+                if any(ident in override.channels for ident in identifiers if ident):
+                    if override.llm:
+                        logger.info(
+                            f"Applying LLM override '{override.llm}' for Discord channel {channel_id} "
+                            f"('{channel_name}')"
+                        )
+                        try:
+                            return get_llm(override.llm)
+                        except Exception as e:
+                            logger.error(f"Failed to get override LLM provider '{override.llm}': {e}")
+
+        return self.default_llm
+
     async def _process_turn(self, current_msg: Message) -> None:
         chatbot_id = current_msg.chatbot_id
         channel_id = current_msg.channel_id
@@ -162,13 +197,16 @@ class SessionWorker:
                 if latest_msg != current_msg:
                     current_msg = latest_msg
 
+                # Resolve LLM dynamically for the current message (applying channel overrides)
+                llm = self._resolve_llm(current_msg)
+
                 # Retrieve and build the cleaned, prioritized, and aligned session history
                 history = await self._build_clean_history()
 
                 tools_list = self.tool_registry.get_tools_list()
 
                 # LLM inference
-                res = await self.llm.generate(
+                res = await llm.generate(
                     history=history,
                     tools=tools_list,
                 )

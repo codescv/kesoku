@@ -11,7 +11,7 @@ from collections import defaultdict
 import discord
 import tzlocal
 
-from kesoku.config import get_config
+from kesoku.config import DiscordChannelOverride, get_config
 from kesoku.constants import (
     ROLE_ASSISTANT,
     ROLE_SYSTEM,
@@ -159,6 +159,34 @@ class DiscordChatbot(Chatbot):
         self._typing_tasks: dict[str, asyncio.Task[None]] = {}
         self._intermediate_messages: defaultdict[str, list[discord.Message]] = defaultdict(list)
 
+    def _resolve_channel_override(
+        self,
+        channel_id: str,
+        channel_name: str,
+        parent_id: str | None = None,
+        parent_name: str | None = None,
+    ) -> DiscordChannelOverride | None:
+        """Resolve the matching DiscordChannelOverride for the given channel identifiers.
+
+        Args:
+            channel_id: Direct channel ID.
+            channel_name: Direct channel name.
+            parent_id: Optional parent channel ID (if thread).
+            parent_name: Optional parent channel name (if thread).
+
+        Returns:
+            The matching DiscordChannelOverride instance if found, None otherwise.
+        """
+        for override in self.config.discord.channels:
+            identifiers = {channel_id, channel_name}
+            if parent_id:
+                identifiers.add(parent_id)
+            if parent_name:
+                identifiers.add(parent_name)
+            if any(ident in override.channels for ident in identifiers if ident):
+                return override
+        return None
+
     async def start(self) -> None:
         """Start the Discord bot and Gateway listener subscriber background loop."""
         self._subscriber_task = asyncio.create_task(super().start())
@@ -271,12 +299,18 @@ class DiscordChatbot(Chatbot):
         if isinstance(message.channel, discord.Thread):
             target_channel = message.channel
         else:
-            # In regular channel; check if this channel is in no_auto_thread_channels
-            no_thread_channels = self.config.discord.no_auto_thread_channels
-            channel_name = getattr(message.channel, "name", "")
-            is_no_thread = str(message.channel.id) in no_thread_channels or channel_name in no_thread_channels
+            channel_id_str = str(message.channel.id)
+            channel_name = getattr(message.channel, "name", "") or ""
 
-            if is_no_thread:
+            # Check if there is an override for this channel
+            override = self._resolve_channel_override(channel_id_str, channel_name)
+
+            # Determine auto-threading behavior
+            auto_thread = True  # Default is to auto-thread
+            if override is not None and override.auto_thread is not None:
+                auto_thread = override.auto_thread
+
+            if not auto_thread:
                 target_channel = message.channel
             else:
                 # In regular channel; find or create a thread
@@ -337,6 +371,26 @@ class DiscordChatbot(Chatbot):
             f"at `{message.created_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')} {tz_name}`:\n"
             f"{message.content}"
         )
+        # Construct metadata with parent/thread identifiers
+        channel_name = getattr(target_channel, "name", "") or ""
+        parent_channel_id = ""
+        parent_channel_name = ""
+        if isinstance(target_channel, discord.Thread):
+            parent = target_channel.parent
+            if parent:
+                parent_channel_id = str(parent.id)
+                parent_channel_name = getattr(parent, "name", "") or ""
+
+        msg_metadata = {
+            "discord_message_id": str(message.id),
+            "discord_author_id": str(message.author.id),
+            "channel_name": channel_name,
+        }
+        if parent_channel_id:
+            msg_metadata["parent_channel_id"] = parent_channel_id
+        if parent_channel_name:
+            msg_metadata["parent_channel_name"] = parent_channel_name
+
         msg = Message(
             session_id=session_id,
             chatbot_id=self.chatbot_id,
@@ -347,7 +401,7 @@ class DiscordChatbot(Chatbot):
             content=discord_msg_content,
             timestamp=message.created_at.timestamp(),
             status=STATUS_PENDING_AGENT,
-            metadata={"discord_message_id": str(message.id), "discord_author_id": str(message.author.id)},
+            metadata=msg_metadata,
         )
         await self.gateway.post(msg)
 
@@ -615,12 +669,20 @@ class DiscordChatbot(Chatbot):
 
         # Determine if this is an auto-thread channel
         is_thread = isinstance(channel, discord.Thread)
-        no_thread_channels = self.config.discord.no_auto_thread_channels
-        channel_name = getattr(channel, "name", "")
-        is_no_thread = str(channel.id) in no_thread_channels or channel_name in no_thread_channels
+        channel_id_str = str(channel.id)
+        channel_name = getattr(channel, "name", "") or ""
+
+        # Check override
+        auto_thread = True
+        if not is_thread:
+            override = self._resolve_channel_override(channel_id_str, channel_name)
+            if override is not None and override.auto_thread is not None:
+                auto_thread = override.auto_thread
+        else:
+            auto_thread = False
 
         target_channel = channel
-        if not is_thread and not is_no_thread and hasattr(channel, "create_thread"):
+        if auto_thread and hasattr(channel, "create_thread"):
             try:
                 mention_str = f"<@{mention_user_id}> " if mention_user_id else ""
                 starter_text = f"{mention_str}Scheduled job initiated."
@@ -664,6 +726,25 @@ class DiscordChatbot(Chatbot):
             f"{prompt_content}"
         )
 
+        # Construct metadata with parent/thread identifiers
+        channel_name = getattr(target_channel, "name", "") or ""
+        parent_channel_id = ""
+        parent_channel_name = ""
+        if isinstance(target_channel, discord.Thread):
+            parent = target_channel.parent
+            if parent:
+                parent_channel_id = str(parent.id)
+                parent_channel_name = getattr(parent, "name", "") or ""
+
+        msg_metadata = {
+            "is_cronjob": True,
+            "channel_name": channel_name,
+        }
+        if parent_channel_id:
+            msg_metadata["parent_channel_id"] = parent_channel_id
+        if parent_channel_name:
+            msg_metadata["parent_channel_name"] = parent_channel_name
+
         msg = Message(
             session_id=session_id,
             chatbot_id=self.chatbot_id,
@@ -674,7 +755,7 @@ class DiscordChatbot(Chatbot):
             content=discord_msg_content,
             timestamp=now_dt.timestamp(),
             status=STATUS_PENDING_AGENT,
-            metadata={"is_cronjob": True},
+            metadata=msg_metadata,
         )
         await self.gateway.post(msg)
 

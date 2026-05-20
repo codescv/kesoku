@@ -25,3 +25,36 @@ def test_load_config_success(tmp_path: Any) -> None:
     cfg = load_config(str(config_path))
     assert isinstance(cfg, KesokuConfig)
     assert cfg.workspace.db_path == os.path.join(tmp_path, "kesoku.db")
+
+
+def test_config_overrides(tmp_path: Any) -> None:
+    """Verify ClaudeConfig and DiscordChannelOverride are correctly parsed from TOML."""
+    config_path = tmp_path / "config.toml"
+    toml_content = """
+[workspace]
+db_path = "kesoku.db"
+
+[claude]
+model_name = "custom-claude"
+project_id = "test-proj"
+location = "us-west1"
+
+[[discord.channels]]
+channels = ["12345", "announcements"]
+llm = "claude"
+auto_thread = false
+"""
+    with open(config_path, "w") as f:
+        f.write(toml_content)
+
+    cfg = load_config(str(config_path))
+    assert cfg.claude.model_name == "custom-claude"
+    assert cfg.claude.project_id == "test-proj"
+    assert cfg.claude.location == "us-west1"
+
+    assert len(cfg.discord.channels) == 1
+    override = cfg.discord.channels[0]
+    assert "12345" in override.channels
+    assert "announcements" in override.channels
+    assert override.llm == "claude"
+    assert override.auto_thread is False

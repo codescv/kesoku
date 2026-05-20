@@ -43,9 +43,20 @@ auth_mode = "api_key" # Use "vertex" for Google Cloud Vertex AI
 api_key = "your_api_key"
 thinking_level = "high"
 
+[claude]
+model_name = "claude-3-5-sonnet@20241022"
+project_id = "your-gcp-project"
+location = "us-east5"
+
 [discord]
 enabled = false
 bot_token = "your_discord_bot_token" # Optional if DISCORD_TOKEN environment variable is set
+
+# Channel-specific overrides
+[[discord.channels]]
+channels = ["1234567890", "announcements"]
+llm = "claude"
+auto_thread = false
 ```
 
 ## Usage 🚀

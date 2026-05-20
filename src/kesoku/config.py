@@ -63,6 +63,24 @@ class GeminiConfig(BaseModel):
     )
 
 
+class ClaudeConfig(BaseModel):
+    """Anthropic / Claude LLM configuration settings on Vertex AI."""
+
+    model_name: str = Field(default="claude-3-5-sonnet@20241022", description="Claude model identifier")
+    project_id: str | None = Field(
+        default="gtech-ads-localizer-external", description="GCP Project ID (for Vertex AI)"
+    )
+    location: str | None = Field(default="us-east5", description="GCP Region/Location (for Vertex AI)")
+
+
+class DiscordChannelOverride(BaseModel):
+    """Override settings for specific Discord channels."""
+
+    channels: list[str] = Field(default_factory=list, description="Channel IDs or names to match")
+    llm: str | None = Field(default=None, description="Override LLM provider (e.g., 'claude', 'gemini')")
+    auto_thread: bool | None = Field(default=None, description="Override auto_thread behavior")
+
+
 class DiscordConfig(BaseModel):
     """Discord chatbot adapter settings."""
 
@@ -70,9 +88,9 @@ class DiscordConfig(BaseModel):
     bot_token: str | None = Field(default=None, description="Discord bot token")
     chatbot_id: str = Field(default="discord", description="Unique chatbot identifier")
     user_allowlist: list[str] = Field(default_factory=list, description="List of allowed Discord user IDs or usernames")
-    no_auto_thread_channels: list[str] = Field(
+    channels: list[DiscordChannelOverride] = Field(
         default_factory=list,
-        description="List of Discord channel IDs or names where threads should not be automatically created",
+        description="Channel-specific configuration overrides",
     )
 
 
@@ -108,6 +126,7 @@ class KesokuConfig(BaseModel):
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     gemini: GeminiConfig = Field(default_factory=GeminiConfig)
+    claude: ClaudeConfig = Field(default_factory=ClaudeConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
     shell: ShellConfig = Field(default_factory=ShellConfig)
     agent_working_dir: str | None = Field(

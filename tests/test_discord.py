@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 import discord
 import pytest
 
-from kesoku.config import DiscordConfig, KesokuConfig
+from kesoku.config import DiscordChannelOverride, DiscordConfig, KesokuConfig
 from kesoku.constants import ROLE_ASSISTANT, STATUS_DELIVERED, TYPE_TEXT
 from kesoku.db import Message, Session
 from kesoku.gateway.chatbot.discord import DiscordChatbot
@@ -702,13 +702,17 @@ async def test_handle_message_with_voice_fallback(mock_config: KesokuConfig, moc
 
 @pytest.mark.asyncio
 async def test_on_message_no_auto_thread_by_channel_id(mock_gateway: MagicMock) -> None:
-    """Test that if incoming message channel ID is in no_auto_thread_channels, no thread is created."""
+    """Test that if incoming message channel ID matches a channel override with auto_thread=False,
+    no thread is created.
+    """
     cfg = KesokuConfig()
     cfg.discord = DiscordConfig(
         enabled=True,
         bot_token="test_token",
         chatbot_id="discord_test",
-        no_auto_thread_channels=["999888"],
+        channels=[
+            DiscordChannelOverride(channels=["999888"], auto_thread=False)
+        ],
     )
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
@@ -745,13 +749,17 @@ async def test_on_message_no_auto_thread_by_channel_id(mock_gateway: MagicMock) 
 
 @pytest.mark.asyncio
 async def test_on_message_no_auto_thread_by_channel_name(mock_gateway: MagicMock) -> None:
-    """Test that if incoming message channel name is in no_auto_thread_channels, no thread is created."""
+    """Test that if incoming message channel name matches a channel override with auto_thread=False,
+    no thread is created.
+    """
     cfg = KesokuConfig()
     cfg.discord = DiscordConfig(
         enabled=True,
         bot_token="test_token",
         chatbot_id="discord_test",
-        no_auto_thread_channels=["no-thread-channel"],
+        channels=[
+            DiscordChannelOverride(channels=["no-thread-channel"], auto_thread=False)
+        ],
     )
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
@@ -787,13 +795,17 @@ async def test_on_message_no_auto_thread_by_channel_name(mock_gateway: MagicMock
 
 @pytest.mark.asyncio
 async def test_on_message_in_existing_thread_inside_no_thread_channel(mock_gateway: MagicMock) -> None:
-    """Test that if incoming message is already inside a Thread, it uses the Thread, even if the channel matches."""
+    """Test that if incoming message is already inside a Thread, it uses the Thread,
+    even if the parent channel matches a no-thread override.
+    """
     cfg = KesokuConfig()
     cfg.discord = DiscordConfig(
         enabled=True,
         bot_token="test_token",
         chatbot_id="discord_test",
-        no_auto_thread_channels=["no-thread-channel"],
+        channels=[
+            DiscordChannelOverride(channels=["no-thread-channel"], auto_thread=False)
+        ],
     )
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
@@ -946,7 +958,9 @@ async def test_trigger_cronjob_auto_thread(mock_gateway: MagicMock) -> None:
         enabled=True,
         bot_token="test_token",
         chatbot_id="discord_test",
-        no_auto_thread_channels=["no-thread-channel"],
+        channels=[
+            DiscordChannelOverride(channels=["no-thread-channel"], auto_thread=False)
+        ],
     )
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
@@ -1082,3 +1096,25 @@ async def test_handle_message_with_question(mock_config: KesokuConfig, mock_gate
                     )
                     mock_channel.send.assert_called_once_with(embed=mock_embed, view=mock_view)
                     mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+
+
+@pytest.mark.asyncio
+async def test_channel_override_auto_thread_matching(mock_gateway: MagicMock) -> None:
+    """Test that various matching criteria (parent ID, direct name, etc.) work for Discord channel overrides."""
+    cfg = KesokuConfig()
+    cfg.discord = DiscordConfig(
+        enabled=True,
+        bot_token="test_token",
+        chatbot_id="discord_test",
+        channels=[
+            DiscordChannelOverride(channels=["parent-channel-id"], auto_thread=False)
+        ],
+    )
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+
+            override = bot._resolve_channel_override("222", "some-thread", "parent-channel-id", "general")
+            assert override is not None
+            assert override.auto_thread is False
