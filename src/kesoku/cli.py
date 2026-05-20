@@ -115,7 +115,7 @@ def start_cmd(
     load_config(config)
     cfg = get_config()
 
-    if not cfg.discord.enabled:
+    if not cfg.discord.enabled and not cfg.google_chat.enabled:
         console = Console()
         console.print("[bold red]Error: No chatbots are enabled in the configuration.[/bold red]")
         sys.exit(1)
@@ -136,6 +136,13 @@ def start_cmd(
         console = Console()
         console.print("[bold red]Error: Discord is enabled but bot_token is not configured.[/bold red]")
         sys.exit(1)
+
+    if cfg.google_chat.enabled:
+        from kesoku.gateway.chatbot.google_chat import GoogleChatChatbot
+
+        gchat_bot = GoogleChatChatbot(chatbot_id=cfg.google_chat.chatbot_id, gateway=gateway)
+        bot_tasks.append(gchat_bot.start())
+        bots.append(gchat_bot)
 
     cron_manager = None
     config_dir = cfg.agent_working_dir

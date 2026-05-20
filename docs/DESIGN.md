@@ -101,7 +101,12 @@ Kesoku includes a fully functional Discord chatbot adapter (`DiscordChatbot`) co
   - `/restart`: Restarts the Kesoku background service. It sends an ephemeral confirmation message, stops active chatbot listeners cleanly, and executes a non-blocking `kesoku service restart` (supporting both `--user` and `--system` installations) to cleanly recycle the OS process. If those commands are not available or fail, it falls back to an in-place replacement via `os.execv`.
 
 
-
+## Google Chat Chatbot Adapter Architecture
+Kesoku includes a highly modular Google Chat chatbot adapter (`GoogleChatChatbot`) utilizing a stateless Google Cloud Pub/Sub Pull Subscription and standard GCP public APIs:
+- **Pub/Sub Pull Subscription (Firewall-Friendly)**: To operate without requiring inbound HTTP webhooks, public DNS, or SSL/TLS configurations, the adapter continuously pulls interaction events in an asynchronous, thread-safe queue listener loop.
+- **Service Account Impersonation**: Supports standard service account auth via key files, or secure key-less service account impersonation (via Google Application Default Credentials) to generate short-lived tokens automatically without managing static JSON files on disk.
+- **Thread-Based Conversation Context**: Conversations are kept contextual by extracting `message.thread.name` (or `space.name` if threadless) and mapping it directly to the Kesoku `channel_id` and `session_id`. Outgoing replies automatically append thread identifiers to route replies seamlessly back into the same thread context.
+- **GCP Interactive Card UI**: Renders control buttons (Stop logical agent turn, Clear SQLite session record, View turn trajectories) and parses user choice clicks from `CARD_CLICKED` interaction payloads without requiring any end-user OAuth/login flows. Multiple-choice question blocks (`[question: ... | choices]`) are parsed and presented visually as vertical interactive button cards, posting selections back to Gateway on behalf of the clicking user.
 
 
 ## Systemd Service Integration

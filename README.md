@@ -7,7 +7,7 @@ Kesoku (name inspired by `結束/Kessoku`) is a minimal, readable, and modular a
 - **Structured TOML Config**: Manage workspaces, LLMs (API key or Vertex AI), and chatbot tokens centrally in `config.toml`.
 - **Gateway Architecture**: Decouples Chatbots from the Agent loop. Messages are buffered and routed reliably.
 - **Session Management**: Maintain multiple persistent chat sessions in SQLite. List, resume, and view formatted chat histories instantly with `rich`.
-- **Separate Execution Modes**: Run `kesoku chat` for one-shot session-based CLI interactions or `kesoku start` to run background daemons (like Discord).
+- **Separate Execution Modes**: Run `kesoku chat` for one-shot session-based CLI interactions or `kesoku start` to run background daemons (supporting both Discord and Google Chat).
 - **Extensible Tooling & Skills**: Simple decorator-based or function registry system allowing the agent to execute tools.
 
 ## Installation 📦
@@ -16,7 +16,9 @@ Kesoku uses `uv` for lightning-fast dependency management and packaging.
 
 ```bash
 git clone <repository_url> kesoku
+# Navigate to project
 cd kesoku
+# Synchronize dependencies
 uv sync
 ```
 
@@ -57,6 +59,18 @@ bot_token = "your_discord_bot_token" # Optional if DISCORD_TOKEN environment var
 channels = ["1234567890", "announcements"]
 llm = "claude"
 auto_thread = false
+
+[google_chat]
+enabled = false
+chatbot_id = "google_chat"
+project_id = "your-gcp-project"
+topic_id = "kesoku-chat-events"
+subscription_id = "kesoku-chat-sub"
+credentials_json = "" # Optional path to JSON key file. If empty, uses ADC.
+impersonate_service_account = "" # Optional target service account email to impersonate (key-less)
+
+# For step-by-step instructions on setting up Google Cloud Platform (GCP) components,
+# see: docs/GOOGLE_CHAT_SETUP.md
 ```
 
 ## Usage 🚀

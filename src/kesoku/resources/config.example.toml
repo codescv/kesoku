@@ -42,6 +42,17 @@ chatbot_id = "discord"
 # llm = "claude"
 # auto_thread = false
 
+[google_chat]
+enabled = false
+chatbot_id = "google_chat"
+project_id = "your-gcp-project"
+topic_id = "your-gchat-topic"
+subscription_id = "your-gchat-subscription"
+credentials_json = "" # Optional: path to service account JSON file
+impersonate_service_account = "" # Optional: target service account email to impersonate
+# List of allowed Google Chat user resource names or emails
+# user_allowlist = ["users/1234567890"]
+
 [shell]
 enabled = true
 use_shell = true

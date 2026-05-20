@@ -120,6 +120,21 @@ class ShellConfig(BaseModel):
     )
 
 
+class GoogleChatConfig(BaseModel):
+    """Google Chat chatbot adapter settings."""
+
+    enabled: bool = Field(default=False, description="Whether to launch the Google Chat chatbot in daemon mode")
+    chatbot_id: str = Field(default="google_chat", description="Unique chatbot identifier")
+    project_id: str | None = Field(default=None, description="GCP Project ID for Pub/Sub")
+    topic_id: str | None = Field(default=None, description="GCP Pub/Sub Topic ID")
+    subscription_id: str | None = Field(default=None, description="GCP Pub/Sub Pull Subscription ID")
+    credentials_json: str | None = Field(default=None, description="Path to service account JSON file (optional)")
+    impersonate_service_account: str | None = Field(
+        default=None, description="Email of target service account to impersonate (optional)"
+    )
+    user_allowlist: list[str] = Field(default_factory=list, description="Allowed Google Chat users (emails or IDs)")
+
+
 class KesokuConfig(BaseModel):
     """Root Kesoku configuration structure."""
 
@@ -128,6 +143,7 @@ class KesokuConfig(BaseModel):
     gemini: GeminiConfig = Field(default_factory=GeminiConfig)
     claude: ClaudeConfig = Field(default_factory=ClaudeConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
+    google_chat: GoogleChatConfig = Field(default_factory=GoogleChatConfig)
     shell: ShellConfig = Field(default_factory=ShellConfig)
     agent_working_dir: str | None = Field(
         default=None, exclude=True, description="Absolute path of the directory containing the config file"

@@ -58,3 +58,36 @@ auto_thread = false
     assert "announcements" in override.channels
     assert override.llm == "claude"
     assert override.auto_thread is False
+
+
+def test_config_google_chat(tmp_path: Any) -> None:
+    """Verify GoogleChatConfig parameters are correctly parsed from TOML."""
+    config_path = tmp_path / "config.toml"
+    toml_content = """
+[workspace]
+db_path = "kesoku.db"
+
+[google_chat]
+enabled = true
+chatbot_id = "gchat-custom"
+project_id = "my-gcp-project"
+topic_id = "my-topic"
+subscription_id = "my-sub"
+credentials_json = "/keys/sa.json"
+impersonate_service_account = "sa@my-gcp-project.iam.gserviceaccount.com"
+user_allowlist = ["users/111", "users/222"]
+"""
+    with open(config_path, "w") as f:
+        f.write(toml_content)
+
+    cfg = load_config(str(config_path))
+    assert cfg.google_chat.enabled is True
+    assert cfg.google_chat.chatbot_id == "gchat-custom"
+    assert cfg.google_chat.project_id == "my-gcp-project"
+    assert cfg.google_chat.topic_id == "my-topic"
+    assert cfg.google_chat.subscription_id == "my-sub"
+    assert cfg.google_chat.credentials_json == "/keys/sa.json"
+    assert cfg.google_chat.impersonate_service_account == "sa@my-gcp-project.iam.gserviceaccount.com"
+    assert "users/111" in cfg.google_chat.user_allowlist
+    assert "users/222" in cfg.google_chat.user_allowlist
+
