@@ -1,6 +1,6 @@
 # Agent Features
-- [ ] History / context management (compaction etc)
-- [ ] System Prompt Design
+- [x] History / context management (compaction etc)
+- [x] System Prompt Design
   - Inject current date, time, timezone etc.
 
 # Tools
@@ -15,7 +15,7 @@
 - [x] Basic Messages
 - [x] Attachments (Outgoing)
 - [ ] Attachments (Incoming)
-- [ ] Multi choice UI
+- [x] Multi choice UI
 
 # Bug fix
 - [ ] cleanup the config not found defensive code.

@@ -1077,7 +1077,7 @@ async def test_handle_message_with_question(mock_config: KesokuConfig, mock_gate
                         choices=["Yes", "No"],
                     )
                     mock_embed_class.assert_called_once_with(
-                        title="Choose?❓",
+                        title="❓ Choose?",
                         color=discord.Color.blurple(),
                     )
                     mock_channel.send.assert_called_once_with(embed=mock_embed, view=mock_view)

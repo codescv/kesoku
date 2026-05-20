@@ -154,14 +154,13 @@ def load_config(config_path: str) -> KesokuConfig:
 
     Returns:
         KesokuConfig instance populated from file.
+
+    Raises:
+        FileNotFoundError: If the configuration file is not found.
     """
     global _global_config
     if not os.path.exists(config_path):
-        logger.warning(f"Configuration file {config_path} not found. Using defaults.")
-        cfg = KesokuConfig()
-        cfg.resolve_paths(config_path)
-        _global_config = cfg
-        return cfg
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
     try:
         with open(config_path, "rb") as f:

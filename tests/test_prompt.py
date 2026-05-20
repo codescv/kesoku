@@ -31,15 +31,18 @@ def test_build_sys_prompt_with_custom_context() -> None:
     assert custom_context in prompt
 
 
-def test_build_sys_prompt_with_working_directory() -> None:
+def test_build_sys_prompt_with_working_directory(tmp_path) -> None:
     """Verify build_sys_prompt includes agent working directory when config is loaded."""
     import kesoku.config
-    from kesoku.config import load_config
+    from kesoku.config import init_config, load_config
+
+    config_path = tmp_path / "config.toml"
+    init_config(str(config_path))
 
     original_config = kesoku.config._global_config
     try:
         # Load a dummy configuration path
-        cfg = load_config("test_workspace/config.toml")
+        cfg = load_config(str(config_path))
 
         prompt = build_sys_prompt()
 
@@ -54,7 +57,7 @@ def test_build_sys_prompt_with_working_directory() -> None:
 def test_build_sys_prompt_with_user_prompts(tmp_path) -> None:
     """Verify build_sys_prompt resolves and injects user_prompts files correctly."""
     import kesoku.config
-    from kesoku.config import load_config
+    from kesoku.config import init_config, load_config
 
     # Create a couple of dummy prompt files
     prompt_dir = tmp_path / "prompts"
@@ -67,7 +70,9 @@ def test_build_sys_prompt_with_user_prompts(tmp_path) -> None:
     original_config = kesoku.config._global_config
     try:
         # Load config and manually inject the relative paths for the test prompts
-        cfg = load_config(str(tmp_path / "config.toml"))
+        config_path = tmp_path / "config.toml"
+        init_config(str(config_path))
+        cfg = load_config(str(config_path))
         cfg.agent.user_prompts = [
             "prompts/prompt_a.txt",
             "prompts/prompt_b.md",
@@ -87,15 +92,18 @@ def test_build_sys_prompt_with_user_prompts(tmp_path) -> None:
         kesoku.config._global_config = original_config
 
 
-def test_build_sys_prompt_with_session() -> None:
+def test_build_sys_prompt_with_session(tmp_path) -> None:
     """Verify build_sys_prompt includes session staging directory when session is provided."""
     import kesoku.config
-    from kesoku.config import load_config
+    from kesoku.config import init_config, load_config
     from kesoku.db import Session
+
+    config_path = tmp_path / "config.toml"
+    init_config(str(config_path))
 
     original_config = kesoku.config._global_config
     try:
-        cfg = load_config("test_workspace/config.toml")
+        cfg = load_config(str(config_path))
         sess = Session(id="sessionid", title="title", created_at=1779264000.0)
 
         prompt = build_sys_prompt(session=sess)

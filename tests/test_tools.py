@@ -52,11 +52,12 @@ def test_web_search_tool_api_failure() -> None:
 def test_run_shell_command_default_cwd(tmp_path) -> None:
     """Test that run_shell_command defaults to executing inside the AWD."""
     import kesoku.config
-    from kesoku.config import load_config
+    from kesoku.config import init_config, load_config
 
     original_config = kesoku.config._global_config
     try:
         config_path = tmp_path / "config.toml"
+        init_config(str(config_path))
         cfg = load_config(str(config_path))
         # Set AWD
         cfg.agent_working_dir = str(tmp_path)
@@ -76,11 +77,12 @@ def test_run_shell_command_default_cwd(tmp_path) -> None:
 def test_run_shell_command_custom_cwd(tmp_path) -> None:
     """Test that run_shell_command executes in custom cwd if supplied."""
     import kesoku.config
-    from kesoku.config import load_config
+    from kesoku.config import init_config, load_config
 
     original_config = kesoku.config._global_config
     try:
         config_path = tmp_path / "config.toml"
+        init_config(str(config_path))
         cfg = load_config(str(config_path))
         cfg.agent_working_dir = str(tmp_path)
 
@@ -109,11 +111,12 @@ def test_run_shell_command_env_variables(tmp_path) -> None:
     import os
 
     import kesoku.config
-    from kesoku.config import load_config
+    from kesoku.config import init_config, load_config
 
     original_config = kesoku.config._global_config
     try:
         config_path = tmp_path / "config.toml"
+        init_config(str(config_path))
         cfg = load_config(str(config_path))
         cfg.agent_working_dir = str(tmp_path)
 
@@ -135,11 +138,12 @@ def test_run_shell_command_failure(tmp_path) -> None:
     import pytest
 
     import kesoku.config
-    from kesoku.config import load_config
+    from kesoku.config import init_config, load_config
 
     original_config = kesoku.config._global_config
     try:
         config_path = tmp_path / "config.toml"
+        init_config(str(config_path))
         cfg = load_config(str(config_path))
         cfg.agent_working_dir = str(tmp_path)
 
@@ -162,11 +166,12 @@ def test_run_shell_command_timeout(tmp_path) -> None:
     import pytest
 
     import kesoku.config
-    from kesoku.config import load_config
+    from kesoku.config import init_config, load_config
 
     original_config = kesoku.config._global_config
     try:
         config_path = tmp_path / "config.toml"
+        init_config(str(config_path))
         cfg = load_config(str(config_path))
         cfg.agent_working_dir = str(tmp_path)
 
@@ -191,11 +196,12 @@ def test_run_shell_command_start_failure(tmp_path) -> None:
     import pytest
 
     import kesoku.config
-    from kesoku.config import load_config
+    from kesoku.config import init_config, load_config
 
     original_config = kesoku.config._global_config
     try:
         config_path = tmp_path / "config.toml"
+        init_config(str(config_path))
         cfg = load_config(str(config_path))
         cfg.agent_working_dir = str(tmp_path)
         # Disable shell mode to allow shlex splitting and triggering FileNotFoundError for non-existent executable
@@ -218,11 +224,12 @@ def test_run_shell_command_failure_truncation(tmp_path) -> None:
     import pytest
 
     import kesoku.config
-    from kesoku.config import load_config
+    from kesoku.config import init_config, load_config
 
     original_config = kesoku.config._global_config
     try:
         config_path = tmp_path / "config.toml"
+        init_config(str(config_path))
         cfg = load_config(str(config_path))
         cfg.agent_working_dir = str(tmp_path)
 

@@ -53,7 +53,8 @@ def test_cli_chat_before_init(tmp_path: Any) -> None:
     config_path = tmp_path / "nonexistent.toml"
     result = runner.invoke(app, ["chat", "-c", str(config_path), "Hello"])
     assert result.exit_code == 1
-    assert "Please run 'kesoku init' first" in result.output
+    assert isinstance(result.exception, FileNotFoundError)
+    assert "Configuration file not found" in str(result.exception)
 
 
 def test_cli_init_overwrite_options(tmp_path: Any) -> None:
