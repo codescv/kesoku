@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import discord
@@ -15,9 +16,19 @@ from kesoku.gateway.gateway import Gateway
 
 
 @pytest.fixture
-def mock_config() -> KesokuConfig:
-    """Provide a mock Kesoku configuration."""
+def mock_config(tmp_path: Any) -> KesokuConfig:
+    """Provide a mock Kesoku configuration with temporary paths.
+
+    Args:
+        tmp_path: Pytest's temporary path fixture.
+
+    Returns:
+        A mock KesokuConfig instance.
+    """
     cfg = KesokuConfig()
+    cfg.workspace.sessions_dir = str(tmp_path / "sessions")
+    cfg.workspace.db_path = str(tmp_path / "kesoku.db")
+    cfg.workspace.skills_dir = str(tmp_path / "skills")
     cfg.discord = DiscordConfig(
         enabled=True, bot_token="test_token", chatbot_id="discord_test", user_allowlist=["allowed_user"]
     )

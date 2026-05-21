@@ -6,6 +6,8 @@ Defines structured Pydantic settings and TOML persistence.
 import importlib.resources
 import os
 import shutil
+import sys
+import tempfile
 import time
 import tomllib
 from typing import Literal
@@ -18,12 +20,39 @@ from kesoku.logger import setup_logger
 logger = setup_logger(__name__)
 
 
+def _default_db_path() -> str:
+    if "pytest" in sys.modules:
+        return os.path.join(tempfile.gettempdir(), "kesoku_tests.db")
+    return "kesoku.db"
+
+
+def _default_skills_dir() -> str:
+    if "pytest" in sys.modules:
+        return os.path.join(tempfile.gettempdir(), "kesoku_tests_skills")
+    return "skills"
+
+
+def _default_sessions_dir() -> str:
+    if "pytest" in sys.modules:
+        return os.path.join(tempfile.gettempdir(), "kesoku_tests_sessions")
+    return "sessions"
+
+
 class WorkspaceConfig(BaseModel):
     """Workspace-level configuration settings."""
 
-    db_path: str = Field(default="kesoku.db", description="Path to SQLite database file")
-    skills_dir: str = Field(default="skills", description="Path to skills directory")
-    sessions_dir: str = Field(default="sessions", description="Path to session staging directory")
+    db_path: str = Field(
+        default_factory=_default_db_path,
+        description="Path to SQLite database file",
+    )
+    skills_dir: str = Field(
+        default_factory=_default_skills_dir,
+        description="Path to skills directory",
+    )
+    sessions_dir: str = Field(
+        default_factory=_default_sessions_dir,
+        description="Path to session staging directory",
+    )
 
 
 class AgentHistoryConfig(BaseModel):
