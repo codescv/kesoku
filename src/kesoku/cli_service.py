@@ -46,24 +46,26 @@ def _verify_linux_platform(console: Console) -> None:
         raise typer.Exit(code=1)
 
 
-def _get_service_params(user: bool) -> tuple[str, list[str], str]:
-    """Determine target path, systemctl reload command, and user flags based on execution level.
+def _get_service_params(user: bool, name: str | None = None) -> tuple[str, list[str], str, str]:
+    """Determine target path, systemctl reload command, user flags, and service name.
 
     Args:
         user: True for user-level installation, False for system-level.
+        name: Optional name suffix of the service instance.
 
     Returns:
-        A tuple of (service_file_path, reload_cmd_list, user_flag_string)
+        A tuple of (service_file_path, reload_cmd_list, user_flag_string, service_name)
     """
+    service_name = "kesoku" if not name else f"kesoku-{name}"
     if user:
-        target_path = os.path.expanduser("~/.config/systemd/user/kesoku.service")
+        target_path = os.path.expanduser(f"~/.config/systemd/user/{service_name}.service")
         systemctl_reload = ["systemctl", "--user", "daemon-reload"]
         user_flag = "--user "
     else:
-        target_path = "/etc/systemd/system/kesoku.service"
+        target_path = f"/etc/systemd/system/{service_name}.service"
         systemctl_reload = ["sudo", "systemctl", "daemon-reload"]
         user_flag = ""
-    return target_path, systemctl_reload, user_flag
+    return target_path, systemctl_reload, user_flag, service_name
 
 
 @service_app.command("install")
@@ -98,6 +100,13 @@ def install_cmd(
             help="Only print the systemd service file to stdout without installing",
         ),
     ] = False,
+    name: Annotated[
+        str | None,
+        typer.Option(
+            "--name",
+            help="Name/identifier suffix of the service instance (installs kesoku-<name>.service)",
+        ),
+    ] = None,
 ) -> None:
     """Install Kesoku as a systemd background service on Linux."""
     console = Console()
@@ -148,15 +157,24 @@ def install_cmd(
             )
             raise typer.Exit(code=1)
 
+    # Inject service instance metadata environment variables
+    env_dict["KESOKU_SERVICE_USER"] = "true" if user else "false"
+    if name:
+        env_dict["KESOKU_SERVICE_INSTANCE_NAME"] = name
+
     env_lines = [f'Environment="{k}={v}"' for k, v in env_dict.items()]
     environment_block = "\n".join(env_lines)
 
-    target_path, systemctl_reload, user_flag = _get_service_params(user)
+    target_path, systemctl_reload, user_flag, service_name = _get_service_params(user, name)
     wanted_by = "default.target" if user else "multi-user.target"
+
+    description = "Kesoku AI Agent Service"
+    if name:
+        description += f" ({name})"
 
     # Generate Systemd unit file content with journal logging and improved recovery/lifecycle options
     unit_content = f"""[Unit]
-Description=Kesoku AI Agent Service
+Description={description}
 After=network.target
 
 [Service]
@@ -212,7 +230,7 @@ WantedBy={wanted_by}
         )
 
     # Always automatically enable the service to register boot-time auto-start
-    enable_cmd = ["systemctl"] + user_flag.split() + ["enable", "kesoku"]
+    enable_cmd = ["systemctl"] + user_flag.split() + ["enable", service_name]
     if not user:
         enable_cmd = ["sudo"] + enable_cmd
 
@@ -226,12 +244,14 @@ WantedBy={wanted_by}
 
     console.print("\n[bold green]Kesoku service installed successfully![/bold green]")
     console.print("You can control the service using the following commands:")
-    console.print(f"  [bold cyan]kesoku service start {user_flag.strip()}[/bold cyan]   - Start the service")
-    console.print(f"  [bold cyan]kesoku service stop {user_flag.strip()}[/bold cyan]    - Stop the service")
+    name_opt = f" --name {name}" if name else ""
+    console.print(f"  [bold cyan]kesoku service start {user_flag.strip()}{name_opt}[/bold cyan]   - Start the service")
+    console.print(f"  [bold cyan]kesoku service stop {user_flag.strip()}{name_opt}[/bold cyan]    - Stop the service")
+    status_label = f"kesoku service status {user_flag.strip()}{name_opt}"
     console.print(
-        f"  [bold cyan]kesoku service status {user_flag.strip()}[/bold cyan]  - Check service status (via systemctl)"
+        f"  [bold cyan]{status_label}[/bold cyan]  - Check service status (via systemctl)"
     )
-    console.print(f"  [bold cyan]kesoku service logs {user_flag.strip()}[/bold cyan]    - View service logs")
+    console.print(f"  [bold cyan]kesoku service logs {user_flag.strip()}{name_opt}[/bold cyan]    - View service logs")
 
 
 @service_app.command("uninstall")
@@ -243,23 +263,30 @@ def uninstall_cmd(
             help="Uninstall as a user-level systemd service (default) or system-level service",
         ),
     ] = True,
+    name: Annotated[
+        str | None,
+        typer.Option(
+            "--name",
+            help="Name/identifier suffix of the service instance to uninstall",
+        ),
+    ] = None,
 ) -> None:
     """Stop, disable, and uninstall Kesoku systemd service."""
     console = Console()
     _verify_linux_platform(console)
 
-    target_path, systemctl_reload, user_flag = _get_service_params(user)
+    target_path, systemctl_reload, user_flag, service_name = _get_service_params(user, name)
 
     # 1. Stop the service
-    logger.info("Stopping the background service...")
-    stop_cmd_list = ["systemctl"] + user_flag.split() + ["stop", "kesoku"]
+    logger.info(f"Stopping the background service: {service_name}...")
+    stop_cmd_list = ["systemctl"] + user_flag.split() + ["stop", service_name]
     if not user:
         stop_cmd_list = ["sudo"] + stop_cmd_list
     subprocess.run(stop_cmd_list, capture_output=True)
 
     # 2. Disable the service
-    logger.info("Disabling the background service...")
-    disable_cmd_list = ["systemctl"] + user_flag.split() + ["disable", "kesoku"]
+    logger.info(f"Disabling the background service: {service_name}...")
+    disable_cmd_list = ["systemctl"] + user_flag.split() + ["disable", service_name]
     if not user:
         disable_cmd_list = ["sudo"] + disable_cmd_list
     subprocess.run(disable_cmd_list, capture_output=True)
@@ -295,27 +322,31 @@ def uninstall_cmd(
     console.print("[bold green]Kesoku service has been uninstalled successfully![/bold green]")
 
 
-def _run_systemctl_action(action: str, user: bool, console: Console) -> None:
+def _run_systemctl_action(action: str, user: bool, name: str | None, console: Console) -> None:
     """Internal helper to run systemctl command for start/stop/restart.
 
     Args:
         action: The systemctl command verb (e.g., 'start', 'stop', 'restart').
         user: True for user service scope, False for system.
+        name: Optional name suffix of the service instance.
         console: Rich Console instance.
     """
     _verify_linux_platform(console)
-    _, _, user_flag = _get_service_params(user)
+    _, _, user_flag, service_name = _get_service_params(user, name)
 
-    cmd_list = ["systemctl"] + user_flag.split() + [action, "kesoku"]
+    cmd_list = ["systemctl"] + user_flag.split() + [action, service_name]
     if not user:
         cmd_list = ["sudo"] + cmd_list
 
     logger.info(f"Running: {' '.join(cmd_list)}...")
     try:
         subprocess.run(cmd_list, check=True, capture_output=True, text=True)
-        console.print(f"[bold green]Successfully executed service {action}![/bold green]")
+        console.print(f"[bold green]Successfully executed service {action} for {service_name}![/bold green]")
     except subprocess.CalledProcessError as e:
-        console.print(f"[bold red]Error executing service {action}: {e.stderr.strip() or e}[/bold red]")
+        err_msg = e.stderr.strip() or e
+        console.print(
+            f"[bold red]Error executing service {action} for {service_name}: {err_msg}[/bold red]"
+        )
         raise typer.Exit(code=1)
 
 
@@ -328,10 +359,17 @@ def start_cmd(
             help="Start as a user-level systemd service (default) or system-level service",
         ),
     ] = True,
+    name: Annotated[
+        str | None,
+        typer.Option(
+            "--name",
+            help="Name/identifier suffix of the service instance to start",
+        ),
+    ] = None,
 ) -> None:
     """Start the Kesoku background service."""
     console = Console()
-    _run_systemctl_action("start", user, console)
+    _run_systemctl_action("start", user, name, console)
 
 
 @service_app.command("stop")
@@ -343,10 +381,17 @@ def stop_cmd(
             help="Stop as a user-level systemd service (default) or system-level service",
         ),
     ] = True,
+    name: Annotated[
+        str | None,
+        typer.Option(
+            "--name",
+            help="Name/identifier suffix of the service instance to stop",
+        ),
+    ] = None,
 ) -> None:
     """Stop the Kesoku background service."""
     console = Console()
-    _run_systemctl_action("stop", user, console)
+    _run_systemctl_action("stop", user, name, console)
 
 
 @service_app.command("restart")
@@ -358,10 +403,17 @@ def restart_cmd(
             help="Restart as a user-level systemd service (default) or system-level service",
         ),
     ] = True,
+    name: Annotated[
+        str | None,
+        typer.Option(
+            "--name",
+            help="Name/identifier suffix of the service instance to restart",
+        ),
+    ] = None,
 ) -> None:
     """Restart the Kesoku background service."""
     console = Console()
-    _run_systemctl_action("restart", user, console)
+    _run_systemctl_action("restart", user, name, console)
 
 
 @service_app.command("logs")
@@ -389,16 +441,23 @@ def logs_cmd(
             help="Number of journal entries to show",
         ),
     ] = 50,
+    name: Annotated[
+        str | None,
+        typer.Option(
+            "--name",
+            help="Name/identifier suffix of the service instance to show logs for",
+        ),
+    ] = None,
 ) -> None:
     """Show logs from journald for the Kesoku background service."""
     console = Console()
     _verify_linux_platform(console)
-    _, _, user_flag = _get_service_params(user)
+    _, _, user_flag, service_name = _get_service_params(user, name)
 
     cmd_list = ["journalctl"]
     if user:
         cmd_list += ["--user"]
-    cmd_list += ["-u", "kesoku"]
+    cmd_list += ["-u", service_name]
 
     if follow:
         cmd_list += ["-f"]
@@ -424,13 +483,20 @@ def status_cmd(
             help="Check status of user-level systemd service (default) or system-level service",
         ),
     ] = True,
+    name: Annotated[
+        str | None,
+        typer.Option(
+            "--name",
+            help="Name/identifier suffix of the service instance to check status of",
+        ),
+    ] = None,
 ) -> None:
     """Check the status of the Kesoku background service."""
     console = Console()
     _verify_linux_platform(console)
-    _, _, user_flag = _get_service_params(user)
+    _, _, user_flag, service_name = _get_service_params(user, name)
 
-    cmd_list = ["systemctl"] + user_flag.split() + ["status", "kesoku"]
+    cmd_list = ["systemctl"] + user_flag.split() + ["status", service_name]
     if not user:
         cmd_list = ["sudo"] + cmd_list
 

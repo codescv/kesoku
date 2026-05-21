@@ -61,11 +61,12 @@ async def test_restart_command_success(mock_chatbot: MagicMock) -> None:
 
     kesoku_bin = _get_kesoku_executable()
 
-    # Mock subprocess.Popen and os.execv
+    # Case 1: Default behavior without specific service env variables (defaults to --user, no name)
     with (
         patch("subprocess.Popen") as mock_popen,
         patch("os.execv") as mock_execv,
-        patch("asyncio.sleep", AsyncMock()) as mock_sleep,
+        patch("asyncio.sleep", AsyncMock()),
+        patch.dict("os.environ", {}, clear=True),
     ):
         await restart_cmd.callback(interaction)
 
@@ -74,14 +75,37 @@ async def test_restart_command_success(mock_chatbot: MagicMock) -> None:
 
         # Assert Popen was called with correct parameters
         mock_popen.assert_called_once_with(
-            [kesoku_bin, "service", "restart"],
+            [kesoku_bin, "service", "restart", "--user"],
             start_new_session=True
         )
 
         # Assert chatbot stop was called cleanly
         mock_chatbot.stop.assert_called_once()
+        mock_execv.assert_not_called()
 
-        # os.execv should NOT be called
+    # Reset mocks
+    interaction.response.send_message.reset_mock()
+    mock_chatbot.stop.reset_mock()
+
+    # Case 2: Service is configured as a system service with an instance suffix name
+    with (
+        patch("subprocess.Popen") as mock_popen,
+        patch("os.execv") as mock_execv,
+        patch("asyncio.sleep", AsyncMock()),
+        patch.dict("os.environ", {
+            "KESOKU_SERVICE_USER": "false",
+            "KESOKU_SERVICE_INSTANCE_NAME": "custom-inst"
+        }, clear=True),
+    ):
+        await restart_cmd.callback(interaction)
+
+        # Assert Popen was called with --system and --name custom-inst
+        mock_popen.assert_called_once_with(
+            [kesoku_bin, "service", "restart", "--system", "--name", "custom-inst"],
+            start_new_session=True
+        )
+
+        mock_chatbot.stop.assert_called_once()
         mock_execv.assert_not_called()
 
 

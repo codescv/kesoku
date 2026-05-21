@@ -520,3 +520,103 @@ def test_cli_service_start_stop_restart() -> None:
             capture_output=True,
             text=True,
         )
+
+
+def test_cli_service_named_instances() -> None:
+    """Verify installing, managing, and uninstalling named service instances."""
+    # 1. Test named install dry-run
+    with (
+        patch("sys.platform", "linux"),
+        patch("kesoku.cli_service.load_config", return_value=KesokuConfig()),
+        patch(
+            "os.path.abspath",
+            side_effect=lambda p: (
+                "/mock/workspace/config.toml" if "config.toml" in p else f"/mock/bin/{os.path.basename(p)}"
+            ),
+        ),
+        patch("os.path.exists", return_value=True),
+    ):
+        result = runner.invoke(app, ["service", "install", "--dry-run", "--name", "custom-inst"])
+        assert result.exit_code == 0
+        assert "# Generated systemd service unit path: " in result.stdout
+        assert "kesoku-custom-inst.service" in result.stdout
+        assert "Description=Kesoku AI Agent Service (custom-inst)" in result.stdout
+        assert "/mock/bin/kesoku start -c /mock/workspace/config.toml" in result.stdout
+
+    # 2. Test named start, stop, restart, status, logs
+    with (
+        patch("sys.platform", "linux"),
+        patch("subprocess.run") as mock_run,
+    ):
+        # Start named service
+        res_start = runner.invoke(app, ["service", "start", "--name", "custom-inst"])
+        assert res_start.exit_code == 0
+        assert "executed service start for kesoku-custom-inst" in res_start.stdout.lower()
+        mock_run.assert_any_call(
+            ["systemctl", "--user", "start", "kesoku-custom-inst"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        # Stop named service (system-level)
+        res_stop = runner.invoke(app, ["service", "stop", "--system", "--name", "custom-inst"])
+        assert res_stop.exit_code == 0
+        assert "executed service stop for kesoku-custom-inst" in res_stop.stdout.lower()
+        mock_run.assert_any_call(
+            ["sudo", "systemctl", "stop", "kesoku-custom-inst"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        # Restart named service
+        res_restart = runner.invoke(app, ["service", "restart", "--name", "custom-inst"])
+        assert res_restart.exit_code == 0
+        assert "executed service restart for kesoku-custom-inst" in res_restart.stdout.lower()
+        mock_run.assert_any_call(
+            ["systemctl", "--user", "restart", "kesoku-custom-inst"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        # Status of named service
+        res_status = runner.invoke(app, ["service", "status", "--name", "custom-inst"])
+        assert res_status.exit_code == 0
+        mock_run.assert_any_call(
+            ["systemctl", "--user", "status", "kesoku-custom-inst"]
+        )
+
+        # Logs of named service
+        res_logs = runner.invoke(app, ["service", "logs", "--name", "custom-inst"])
+        assert res_logs.exit_code == 0
+        mock_run.assert_any_call(
+            ["journalctl", "--user", "-u", "kesoku-custom-inst", "-n", "50"],
+            check=True
+        )
+
+    # 3. Test named uninstall
+    with (
+        patch("sys.platform", "linux"),
+        patch("kesoku.cli.load_config"),
+        patch("os.path.exists", return_value=True),
+        patch("os.remove") as mock_remove,
+        patch("subprocess.run") as mock_run,
+    ):
+        result = runner.invoke(app, ["service", "uninstall", "--name", "custom-inst"])
+        assert result.exit_code == 0
+        assert "uninstalled successfully" in result.stdout.lower()
+
+        # Check service file path containing 'kesoku-custom-inst.service' is removed
+        remove_call_args = mock_remove.call_args[0][0]
+        assert "kesoku-custom-inst.service" in remove_call_args
+
+        # Verify systemctl stop, disable on kesoku-custom-inst
+        stop_call = mock_run.mock_calls[0]
+        disable_call = mock_run.mock_calls[1]
+        assert "stop" in stop_call[1][0]
+        assert "kesoku-custom-inst" in stop_call[1][0]
+        assert "disable" in disable_call[1][0]
+        assert "kesoku-custom-inst" in disable_call[1][0]
+

@@ -63,11 +63,22 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
 
             # Launch the restart command in a new session to decouple from parent group termination
             import subprocess
-            subprocess.Popen([  # noqa: ASYNC220
-                kesoku_bin,
-                "service",
-                "restart",
-            ], start_new_session=True)
+
+            cmd = [kesoku_bin, "service", "restart"]
+
+            # Check if service was user or system level
+            service_user = os.environ.get("KESOKU_SERVICE_USER", "true") == "true"
+            if service_user:
+                cmd.append("--user")
+            else:
+                cmd.append("--system")
+
+            instance_name = os.environ.get("KESOKU_SERVICE_INSTANCE_NAME")
+            if instance_name:
+                cmd.extend(["--name", instance_name])
+
+            logger.info(f"Launching restart command: {' '.join(cmd)}")
+            subprocess.Popen(cmd, start_new_session=True)  # noqa: ASYNC220
             logger.info("Successfully launched kesoku service restart command.")
         except Exception as e:
             logger.error(f"Failed to run restart command: {e}")
