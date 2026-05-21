@@ -22,7 +22,6 @@ from kesoku.constants import (
     ROLE_TOOL,
     ROLE_USER,
     STATUS_DELIVERED,
-    STATUS_INTERRUPTED,
     STATUS_PENDING_AGENT,
     TYPE_TEXT,
     TYPE_THOUGHT,
@@ -186,17 +185,10 @@ class GoogleChatChatbot(Chatbot):
         event_type = event.get("type")
         logger.debug(f"Google Chat received Pub/Sub event type: {event_type}")
 
-        # 1. Direct / Space Messages
+        # Direct / Space Messages
         if event_type == "MESSAGE":
             await self._handle_incoming_message(event)
 
-        # 2. Interactive Card Button Click
-        elif event_type == "CARD_CLICKED":
-            await self._handle_card_interaction(event)
-
-        # 3. Added to Space
-        elif event_type == "ADDED_TO_SPACE":
-            await self._handle_added_to_space(event)
 
     async def _handle_incoming_message(self, event: dict[str, Any]) -> None:
         """Process an incoming standard text message or mention.
@@ -293,211 +285,9 @@ class GoogleChatChatbot(Chatbot):
         # Post user message to trigger agent processing loop
         await self.gateway.post(user_msg)
 
-    async def _handle_card_interaction(self, event: dict[str, Any]) -> None:
-        """Route action clicks on Google Chat interactive cards.
 
-        Args:
-            event: The decoded JSON interaction event payload.
-        """
-        action_data = event.get("action", {})
-        function_name = action_data.get("actionMethodName")
-        parameters = {p["key"]: p["value"] for p in action_data.get("parameters", [])}
 
-        session_id = parameters.get("session_id")
-        if not session_id:
-            return
 
-        logger.info(f"Google Chat button clicked: {function_name} for session: {session_id}")
-
-        if function_name == "stop_turn":
-            # Trigger worker cancellation via gateway registered agent dispatcher
-            if self.gateway.agent:
-                await self.gateway.agent.stop_session_worker(session_id)
-                logger.info(f"Google Chat requested stop turn for session: {session_id}")
-
-            # Allow the cancelled worker to write the turn metrics to database
-            await asyncio.sleep(0.15)
-
-            # Fetch recent history to find the active user message and update its status
-            history = await self.gateway.get_session_history(session_id, limit=20)
-            user_msg = None
-            for msg in reversed(history):
-                if msg.role == ROLE_USER:
-                    user_msg = msg
-                    break
-
-            metrics = None
-            if user_msg:
-                if user_msg.status in ("pending_agent", "processing"):
-                    await self.gateway.update_message_status(user_msg.id, STATUS_INTERRUPTED)
-                metrics = user_msg.metadata.get("turn_metrics")
-
-            # Reconstruct card update directly from the event's cardsV2 definition
-            message_name = event.get("message", {}).get("name")
-            self._foldable_ui_messages.pop(session_id, None)
-
-            if message_name:
-                msg_obj = event.get("message", {})
-                cards = msg_obj.get("cardsV2", [])
-                if cards:
-                    card_def = cards[0].get("card", {})
-                    sections = card_def.get("sections", [])
-                    # Build new sections removing the stop button
-                    new_sections = []
-                    for section in sections:
-                        has_stop_button = False
-                        widgets = section.get("widgets", [])
-                        for widget in widgets:
-                            buttons = widget.get("buttonList", {}).get("buttons", [])
-                            for btn in buttons:
-                                if btn.get("onClick", {}).get("action", {}).get("function") == "stop_turn":
-                                    has_stop_button = True
-                                    break
-                        if not has_stop_button:
-                            new_sections.append(section)
-
-                    if metrics:
-                        session_turns = metrics.get("session_turns", 0)
-                        context_tokens = metrics.get("context_tokens", 0)
-                        turn_tool_calls = metrics.get("turn_tool_calls", 0)
-                        turn_tokens = metrics.get("turn_tokens", 0)
-                        turn_time = metrics.get("turn_time", 0.0)
-
-                        context_k = f"{round(context_tokens / 1000)}K"
-                        turn_k = f"{round(turn_tokens / 1000)}K"
-
-                        metrics_text = (
-                            f"🛑 <b>Session:</b> {session_turns} turns | "
-                            f"<b>Context:</b> {context_k} tokens (Interrupted)<br>"
-                            f"⏱️ <b>Turn:</b> {turn_tool_calls} tool calls | {turn_k} tokens | {turn_time:.1f}s"
-                        )
-                        new_sections.append({
-                            "widgets": [
-                                {
-                                    "textParagraph": {
-                                        "text": metrics_text
-                                    }
-                                }
-                            ]
-                        })
-
-                    card_def["sections"] = new_sections
-                    card_def["header"] = {
-                        "title": "Kesoku Agent",
-                        "subtitle": "Turn Completed",
-                    }
-                    body = {
-                        "cardsV2": cards
-                    }
-                    if "thread" in msg_obj:
-                        body["thread"] = msg_obj["thread"]
-
-                    try:
-                        await asyncio.to_thread(
-                            self._chat_service.spaces()
-                            .messages()
-                            .patch(
-                                name=message_name,
-                                body=body,
-                                updateMask="cardsV2",
-                            )
-                            .execute
-                        )
-                    except Exception as e:
-                        logger.error(f"Failed to patch Google Chat foldable UI card after stop: {e}", exc_info=True)
-
-        elif function_name == "clear_session":
-            # Clean up active foldable UI reference
-            self._foldable_ui_messages.pop(session_id, None)
-            # Recursively delete session database records and workspace staging directories
-            await self.gateway.delete_session(session_id)
-            logger.info(f"Google Chat requested clear session for: {session_id}")
-
-        elif function_name == "submit_choice":
-            choice_val = parameters.get("choice")
-            space_data = event.get("space", {})
-            thread_data = event.get("message", {}).get("thread", {})
-            thread_name = thread_data.get("name")
-            space_name = space_data.get("name")
-            channel_id = thread_name if thread_name else space_name
-
-            if choice_val:
-                # Post choice to the gateway as a new user message
-                choice_msg = Message(
-                    session_id=session_id,
-                    chatbot_id=self.chatbot_id,
-                    channel_id=channel_id,
-                    sender=event.get("user", {}).get("displayName", "User"),
-                    role=ROLE_USER,
-                    type=TYPE_TEXT,
-                    content=choice_val,
-                    status=STATUS_PENDING_AGENT,
-                    timestamp=time.time(),
-                )
-                await self.gateway.post(choice_msg)
-
-                # Update choice card to disable/replace buttons and prevent "unable to process request" error
-                message_name = event.get("message", {}).get("name")
-                if message_name:
-                    msg_obj = event.get("message", {})
-                    cards = msg_obj.get("cardsV2", [])
-                    if cards:
-                        card_def = cards[0].get("card", {})
-                        sections = card_def.get("sections", [])
-                        if len(sections) > 1:
-                            # Replace choice buttons section with confirmation text
-                            sections[1] = {
-                                "widgets": [
-                                    {
-                                        "textParagraph": {
-                                            "text": f"👤 Selected: <b>{html.escape(choice_val)}</b>"
-                                        }
-                                    }
-                                ]
-                            }
-                        body = {
-                            "cardsV2": cards
-                        }
-                        if "thread" in msg_obj:
-                            body["thread"] = msg_obj["thread"]
-
-                        try:
-                            await asyncio.to_thread(
-                                self._chat_service.spaces()
-                                .messages()
-                                .patch(
-                                    name=message_name,
-                                    body=body,
-                                    updateMask="cardsV2",
-                                )
-                                .execute
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"Failed to patch Google Chat question card on choice select: {e}",
-                                exc_info=True,
-                            )
-
-    async def _handle_added_to_space(self, event: dict[str, Any]) -> None:
-        """Greet the user when the bot is added to a space.
-
-        Args:
-            event: The decoded JSON interaction event payload.
-        """
-        space_data = event.get("space", {})
-        space_name = space_data.get("name")
-
-        logger.info(f"Google Chat: Bot was added to space {space_name}")
-
-        welcome_body = {
-            "text": (
-                "👋 Hello! I am the Kesoku Autonomous AI Coding Agent. "
-                "Ask me questions or mention me to begin coding!"
-            )
-        }
-        await asyncio.to_thread(
-            self._chat_service.spaces().messages().create(parent=space_name, body=welcome_body).execute
-        )
 
     async def handle_message(self, message: Message) -> None:
         """Process and send outgoing assistant messages to the Google Chat API.

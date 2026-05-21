@@ -235,8 +235,8 @@ def test_run_shell_command_failure_truncation(tmp_path) -> None:
 
         ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
 
-        # Generate extremely long output (more than 1000 characters)
-        long_cmd = "python3 -c 'print(\"a\" * 2000); exit(1)'"
+        # Generate extremely long output (more than 10000 characters)
+        long_cmd = "python3 -c 'print(\"a\" * 12000); exit(1)'"
         with pytest.raises(ShellCommandError) as exc_info:
             run_shell_command(long_cmd, context=ctx)
 
@@ -254,7 +254,7 @@ def test_run_shell_command_failure_truncation(tmp_path) -> None:
         assert os.path.exists(filepath)
         with open(filepath, encoding="utf-8") as f:
             content = f.read()
-            assert "a" * 2000 in content
+            assert "a" * 12000 in content
     finally:
         kesoku.config._global_config = original_config
 
