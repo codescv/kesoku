@@ -52,6 +52,7 @@ credentials_json = "" # Optional: path to service account JSON file
 impersonate_service_account = "" # Optional: target service account email to impersonate
 # List of allowed Google Chat user resource names or emails
 # user_allowlist = ["users/1234567890"]
+# reaction_emoji = "👀" # Optional: Emoji to react with when receiving a user message
 
 [shell]
 enabled = true

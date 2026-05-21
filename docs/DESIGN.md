@@ -109,6 +109,7 @@ Kesoku includes a highly modular Google Chat chatbot adapter (`GoogleChatChatbot
 - **Foldable UI for Intermediate Thoughts and Tools**: During agent reasoning steps, all intermediate special messages (thoughts, tool calls, system messages) are rendered inside a single foldable UI card featuring a collapsible `"Thoughts & Tools"` section. The tool calls display dynamic argument suffixes formatted inside `<code>` tags.
 - **Foldable UI & Turn Metrics**: The active foldable UI card tracks intermediate steps. Once the turn finishes successfully or gets stopped/interrupted by the user, it displays detailed turn and session metrics (total session turns, context window size, executed tool calls, turn token usage, and elapsed time), signaling the final state of the turn clearly.
 - **Markdown Choice Question Card**: Multiple-choice question blocks (`[question: ... | choices]`) are parsed and presented visually as standard markdown lists under the question text within the card, rather than interactive buttons.
+- **Emoji Reactions via User Credentials**: A configurable `reaction_emoji` option allows the adapter to react with a specified emoji (unicode or custom) to every incoming user message. Since standard service accounts cannot perform reaction actions in Google Chat, this feature builds a separate `user_chat_service` utilizing user Application Default Credentials (ADC) to create the space reactions.
 
 
 

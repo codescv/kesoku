@@ -1,20 +1,24 @@
 """Unit tests for Kesoku Google Chat chatbot adapter."""
 
+import asyncio
 import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from google.cloud import pubsub_v1
+from googleapiclient.errors import HttpError
 
 from kesoku.config import GoogleChatConfig, KesokuConfig
 from kesoku.constants import (
     ROLE_ASSISTANT,
+    ROLE_TOOL,
     ROLE_USER,
     STATUS_DELIVERED,
     STATUS_PENDING_AGENT,
     TYPE_TEXT,
     TYPE_THOUGHT,
+    TYPE_TOOL_CALL,
 )
 from kesoku.db import Message, Session
 from kesoku.gateway.chatbot.google_chat import GoogleChatChatbot
@@ -407,3 +411,396 @@ async def test_handle_outgoing_message_delivery_question(
 
         # Verify no buttons section exists
         assert len(card["sections"]) == 1
+
+
+@pytest.mark.asyncio
+@patch("google.auth.default")
+@patch("google.cloud.pubsub_v1.SubscriberClient")
+@patch("kesoku.gateway.chatbot.google_chat.build")
+async def test_load_user_credentials_adc(
+    mock_build: MagicMock,
+    mock_subscriber: MagicMock,
+    mock_auth_default: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+) -> None:
+    """Test loading user credentials for reactions using ADC with exact user scopes."""
+    mock_auth_default.return_value = (MagicMock(), "user-project")
+
+    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+        bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
+        creds, project = bot._load_user_credentials()
+        assert project == "user-project"
+        mock_auth_default.assert_any_call(scopes=[
+            "https://www.googleapis.com/auth/chat.messages.reactions.create",
+            "https://www.googleapis.com/auth/chat.messages",
+        ])
+
+
+@pytest.mark.asyncio
+@patch("google.auth.default")
+@patch("google.cloud.pubsub_v1.SubscriberClient")
+@patch("kesoku.gateway.chatbot.google_chat.build")
+async def test_user_chat_service_initialization(
+    mock_build: MagicMock,
+    mock_subscriber: MagicMock,
+    mock_auth_default: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+) -> None:
+    """Test that user_chat_service is initialized only when reaction_emoji is configured."""
+    mock_auth_default.return_value = (MagicMock(), "test-project")
+
+    # Case 1: reaction_emoji is None -> user_chat_service should be None
+    mock_config.google_chat.reaction_emoji = None
+    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+        bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
+        assert bot._user_chat_service is None
+
+    mock_build.reset_mock()
+
+    # Case 2: reaction_emoji is set -> user_chat_service should be initialized
+    mock_config.google_chat.reaction_emoji = "👀"
+    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+        bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
+        assert bot._user_chat_service is not None
+        # The build function should have been called twice (once for _chat_service, once for _user_chat_service)
+        assert mock_build.call_count == 2
+
+
+@pytest.mark.asyncio
+@patch("google.auth.default")
+@patch("google.cloud.pubsub_v1.SubscriberClient")
+@patch("kesoku.gateway.chatbot.google_chat.build")
+async def test_incoming_message_triggers_reaction(
+    mock_build: MagicMock,
+    mock_subscriber: MagicMock,
+    mock_auth_default: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+) -> None:
+    """Test that an incoming user message triggers the user emoji reaction."""
+    mock_auth_default.return_value = (MagicMock(), "test-project")
+    mock_config.google_chat.reaction_emoji = "👀"
+
+    mock_chat_client = MagicMock()
+    # Mock two builds: first for self._chat_service, second for self._user_chat_service
+    mock_build.side_effect = [MagicMock(), mock_chat_client]
+
+    mock_reactions = MagicMock()
+    mock_chat_client.spaces.return_value.messages.return_value.reactions.return_value = mock_reactions
+    mock_create = MagicMock()
+    mock_reactions.create = mock_create
+    mock_create.return_value.execute = MagicMock()
+
+    event_payload = {
+        "type": "MESSAGE",
+        "space": {"name": "spaces/AAA"},
+        "message": {
+            "name": "spaces/AAA/messages/msg123",
+            "text": "Hi Agent!",
+            "sender": {
+                "displayName": "Test User",
+                "name": "users/allowed_user",
+                "email": "allowed@example.com",
+            },
+            "thread": {"name": "spaces/AAA/threads/BBB"},
+        },
+    }
+
+    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+        bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
+
+        pubsub_msg = MagicMock(spec=pubsub_v1.subscriber.message.Message)
+        pubsub_msg.data = json.dumps(event_payload).encode("utf-8")
+
+        # Trigger incoming message handling
+        await bot._on_pubsub_message(pubsub_msg)
+
+        # Yield control to allow background asyncio task for reaction to run
+        await asyncio.sleep(0.1)
+
+        # Verify the create reaction API was called with the correct parent and payload
+        mock_create.assert_called_once_with(
+            parent="spaces/AAA/messages/msg123",
+            body={"emoji": {"unicode": "👀"}},
+        )
+
+
+@pytest.mark.asyncio
+@patch("google.auth.default")
+@patch("google.cloud.pubsub_v1.SubscriberClient")
+@patch("kesoku.gateway.chatbot.google_chat.build")
+async def test_incoming_message_no_reaction_if_disabled(
+    mock_build: MagicMock,
+    mock_subscriber: MagicMock,
+    mock_auth_default: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+) -> None:
+    """Test that no reaction is added when reaction_emoji is not configured."""
+    mock_auth_default.return_value = (MagicMock(), "test-project")
+    mock_config.google_chat.reaction_emoji = None
+
+    mock_chat_client = MagicMock()
+    mock_build.return_value = mock_chat_client
+
+    mock_reactions = MagicMock()
+    mock_chat_client.spaces.return_value.messages.return_value.reactions.return_value = mock_reactions
+    mock_create = MagicMock()
+    mock_reactions.create = mock_create
+
+    event_payload = {
+        "type": "MESSAGE",
+        "space": {"name": "spaces/AAA"},
+        "message": {
+            "name": "spaces/AAA/messages/msg123",
+            "text": "Hi Agent!",
+            "sender": {
+                "displayName": "Test User",
+                "name": "users/allowed_user",
+                "email": "allowed@example.com",
+            },
+            "thread": {"name": "spaces/AAA/threads/BBB"},
+        },
+    }
+
+    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+        bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
+
+        pubsub_msg = MagicMock(spec=pubsub_v1.subscriber.message.Message)
+        pubsub_msg.data = json.dumps(event_payload).encode("utf-8")
+
+        await bot._on_pubsub_message(pubsub_msg)
+        await asyncio.sleep(0.1)
+
+        # Verify reaction create was never called
+        mock_create.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("google.auth.default")
+@patch("google.cloud.pubsub_v1.SubscriberClient")
+@patch("kesoku.gateway.chatbot.google_chat.build")
+async def test_add_reaction_toggle_deletion(
+    mock_build: MagicMock,
+    mock_subscriber: MagicMock,
+    mock_auth_default: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+) -> None:
+    """Test that attempting to react with an already reacted emoji deletes/toggles the reaction."""
+    mock_auth_default.return_value = (MagicMock(), "test-project")
+    mock_config.google_chat.reaction_emoji = "👀"
+
+    mock_chat_client = MagicMock()
+    mock_build.side_effect = [MagicMock(), mock_chat_client]
+
+    mock_reactions = MagicMock()
+    mock_chat_client.spaces.return_value.messages.return_value.reactions.return_value = mock_reactions
+
+    # Configure the create and delete mocks
+    mock_create = MagicMock()
+    mock_reactions.create = mock_create
+    mock_create.return_value.execute = MagicMock(return_value={"name": "spaces/AAA/messages/msg123/reactions/XYZ123"})
+
+    mock_delete = MagicMock()
+    mock_reactions.delete = mock_delete
+    mock_delete.return_value.execute = MagicMock()
+
+    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+        bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
+
+        message_name = "spaces/AAA/messages/msg123"
+
+        # 1. Add reaction first time -> triggers create
+        await bot._add_reaction(message_name, "👀")
+        mock_create.assert_called_once()
+        assert bot._used_reactions[message_name]["👀"] == "spaces/AAA/messages/msg123/reactions/XYZ123"
+
+        # 2. Add reaction second time -> triggers delete (toggle)
+        await bot._add_reaction(message_name, "👀")
+        mock_delete.assert_called_once_with(name="spaces/AAA/messages/msg123/reactions/XYZ123")
+        # Confirm it was removed from the used reactions map
+        assert "👀" not in bot._used_reactions[message_name]
+
+
+@pytest.mark.asyncio
+@patch("google.auth.default")
+@patch("google.cloud.pubsub_v1.SubscriberClient")
+@patch("kesoku.gateway.chatbot.google_chat.build")
+async def test_add_reaction_409_conflict_triggers_list_and_delete(
+    mock_build: MagicMock,
+    mock_subscriber: MagicMock,
+    mock_auth_default: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+) -> None:
+    """Test that if create raises a duplicate 409 error, the handler lists reactions and deletes the duplicate."""
+    mock_auth_default.return_value = (MagicMock(), "test-project")
+    mock_config.google_chat.reaction_emoji = "👀"
+
+    mock_chat_client = MagicMock()
+    mock_build.side_effect = [MagicMock(), mock_chat_client]
+
+    mock_reactions = MagicMock()
+    mock_chat_client.spaces.return_value.messages.return_value.reactions.return_value = mock_reactions
+
+    # Configure the create mock to raise HTTP 409 HttpError
+    resp = MagicMock()
+    resp.status = 409
+    error_payload = b'{"error": {"message": "Already exists"}}'
+    http_error = HttpError(resp, error_payload)
+    mock_reactions.create.return_value.execute = MagicMock(side_effect=http_error)
+
+    # Configure list and delete mocks
+    mock_list = MagicMock()
+    mock_reactions.list = mock_list
+    mock_list.return_value.execute = MagicMock(return_value={
+        "reactions": [
+            {
+                "name": "spaces/AAA/messages/msg123/reactions/XYZ999",
+                "emoji": {"unicode": "👀"}
+            }
+        ]
+    })
+
+    mock_delete = MagicMock()
+    mock_reactions.delete = mock_delete
+    mock_delete.return_value.execute = MagicMock()
+
+    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+        bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
+
+        message_name = "spaces/AAA/messages/msg123"
+
+        # Add reaction -> raises 409 -> lists and deletes
+        await bot._add_reaction(message_name, "👀")
+
+        mock_reactions.create.assert_called_once()
+        mock_list.assert_called_once_with(parent=message_name)
+        mock_delete.assert_called_once_with(name="spaces/AAA/messages/msg123/reactions/XYZ999")
+
+
+def test_parse_emoji_sequence() -> None:
+    """Test parse_emoji_sequence correctly segments different emoji sequences."""
+    from kesoku.gateway.chatbot.google_chat import parse_emoji_sequence
+
+    # Case 1: Space separated
+    assert parse_emoji_sequence("👀 🛠️ 🚀") == ["👀", "🛠️", "🚀"]
+    # Case 2: Comma separated
+    assert parse_emoji_sequence("👀,🛠️,🚀") == ["👀", "🛠️", "🚀"]
+    # Case 3: Sequence string with standard emojis and Variation Selectors (🛠️ has VS16)
+    assert parse_emoji_sequence("👀🛠️🚀") == ["👀", "🛠️", "🚀"]
+    # Case 4: Single emoji
+    assert parse_emoji_sequence("👍") == ["👍"]
+    # Case 5: Empty string
+    assert parse_emoji_sequence("") == []
+
+
+@pytest.mark.asyncio
+@patch("google.auth.default")
+@patch("google.cloud.pubsub_v1.SubscriberClient")
+@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("random.choice")
+async def test_incoming_message_triggers_random_reaction(
+    mock_random_choice: MagicMock,
+    mock_build: MagicMock,
+    mock_subscriber: MagicMock,
+    mock_auth_default: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+) -> None:
+    """Test that a random emoji from the configured sequence is chosen and reacted."""
+    mock_auth_default.return_value = (MagicMock(), "test-project")
+    # Configure a sequence of 3 emojis
+    mock_config.google_chat.reaction_emoji = "👀🛠️🚀"
+
+    # Configure random.choice to return specific emojis sequentially for predictability
+    mock_random_choice.side_effect = ["👀", "🛠️", "🚀"]
+
+    mock_chat_client = MagicMock()
+    mock_build.side_effect = [MagicMock(), mock_chat_client]
+
+    mock_reactions = MagicMock()
+    mock_chat_client.spaces.return_value.messages.return_value.reactions.return_value = mock_reactions
+    mock_create = MagicMock()
+    mock_reactions.create = mock_create
+    mock_create.return_value.execute = MagicMock()
+
+    event_payload = {
+        "type": "MESSAGE",
+        "space": {"name": "spaces/AAA"},
+        "message": {
+            "name": "spaces/AAA/messages/msg123",
+            "text": "Run some tools!",
+            "sender": {
+                "displayName": "Test User",
+                "name": "users/allowed_user",
+                "email": "allowed@example.com",
+            },
+            "thread": {"name": "spaces/AAA/threads/BBB"},
+        },
+    }
+
+    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+        bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
+
+        pubsub_msg = MagicMock(spec=pubsub_v1.subscriber.message.Message)
+        pubsub_msg.data = json.dumps(event_payload).encode("utf-8")
+
+        # 1. Handle incoming message -> should trigger randomly chosen emoji "👀"
+        await bot._on_pubsub_message(pubsub_msg)
+        await asyncio.sleep(0.1)
+
+        mock_create.assert_called_once_with(
+            parent="spaces/AAA/messages/msg123",
+            body={"emoji": {"unicode": "👀"}},
+        )
+        mock_create.reset_mock()
+
+        # 2. First tool call -> should trigger randomly chosen emoji "🛠️"
+        tool_msg_1 = Message(
+            id="toolcall1",
+            session_id="sess123",
+            chatbot_id="gchat_test",
+            channel_id="spaces/AAA/threads/BBB",
+            sender="Kesoku",
+            role=ROLE_TOOL,
+            type=TYPE_TOOL_CALL,
+            content="",
+            timestamp=time.time(),
+            metadata={"tool_name": "search_web"},
+        )
+        await bot.handle_message(tool_msg_1)
+        await asyncio.sleep(0.1)
+
+        mock_create.assert_called_once_with(
+            parent="spaces/AAA/messages/msg123",
+            body={"emoji": {"unicode": "🛠️"}},
+        )
+        mock_create.reset_mock()
+
+        # 3. Second tool call -> should trigger randomly chosen emoji "🚀"
+        tool_msg_2 = Message(
+            id="toolcall2",
+            session_id="sess123",
+            chatbot_id="gchat_test",
+            channel_id="spaces/AAA/threads/BBB",
+            sender="Kesoku",
+            role=ROLE_TOOL,
+            type=TYPE_TOOL_CALL,
+            content="",
+            timestamp=time.time(),
+            metadata={"tool_name": "run_command"},
+        )
+        await bot.handle_message(tool_msg_2)
+        await asyncio.sleep(0.1)
+
+        mock_create.assert_called_once_with(
+            parent="spaces/AAA/messages/msg123",
+            body={"emoji": {"unicode": "🚀"}},
+        )
+
+
+

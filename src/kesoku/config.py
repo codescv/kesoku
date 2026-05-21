@@ -133,6 +133,7 @@ class GoogleChatConfig(BaseModel):
         default=None, description="Email of target service account to impersonate (optional)"
     )
     user_allowlist: list[str] = Field(default_factory=list, description="Allowed Google Chat users (emails or IDs)")
+    reaction_emoji: str | None = Field(default=None, description="Emoji to react with when receiving a user message")
 
 
 class KesokuConfig(BaseModel):

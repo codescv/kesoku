@@ -7,6 +7,7 @@ a Google Cloud Pub/Sub Pull Subscription and GCP public APIs.
 import asyncio
 import html
 import json
+import random
 import time
 from typing import Any
 
@@ -14,6 +15,7 @@ import google.auth
 from google.auth import impersonated_credentials
 from google.cloud import pubsub_v1
 from googleapiclient.discovery import Resource, build
+from googleapiclient.errors import HttpError
 
 from kesoku.config import get_config
 from kesoku.constants import (
@@ -33,6 +35,40 @@ from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+
+def parse_emoji_sequence(emoji_str: str) -> list[str]:
+    """Parse a string of emojis into a list of individual emojis.
+
+    Supports space-separated, comma-separated, or a sequence of Unicode emojis.
+
+    Args:
+        emoji_str: The configuration string containing emojis.
+
+    Returns:
+        A list of individual emoji strings.
+    """
+    if not emoji_str:
+        return []
+    if " " in emoji_str:
+        return [e.strip() for e in emoji_str.split(" ") if e.strip()]
+    if "," in emoji_str:
+        return [e.strip() for e in emoji_str.split(",") if e.strip()]
+
+    # Otherwise, extract individual emojis (handling variation selectors and ZWJs safely)
+    emojis = []
+    current: list[str] = []
+    for char in emoji_str:
+        # Variation Selector (0xfe0f) or ZWJ (0x200d) or Fitzpatrick skin tones
+        if ord(char) in (0xfe0f, 0x200d) or (current and ord(char) in range(0x1f3fb, 0x1f3ff + 1)):
+            current.append(char)
+        else:
+            if current:
+                emojis.append("".join(current))
+            current = [char]
+    if current:
+        emojis.append("".join(current))
+    return emojis
 
 
 class GoogleChatChatbot(Chatbot):
@@ -63,6 +99,8 @@ class GoogleChatChatbot(Chatbot):
         self._running = False
         self._pubsub_task: asyncio.Task[None] | None = None
         self._foldable_ui_messages: dict[str, dict[str, Any]] = {}
+        self._active_user_message_names: dict[str, str] = {}
+        self._used_reactions: dict[str, dict[str, str]] = {}
 
         # Load credentials and initialize Google APIs
         self._credentials, self._project_id = self._load_credentials()
@@ -73,6 +111,18 @@ class GoogleChatChatbot(Chatbot):
 
         # Build standard Google Chat API client
         self._chat_service: Resource = build("chat", "v1", credentials=self._credentials)
+
+        # Build user authenticated Google Chat API client if emoji reactions are enabled
+        self._user_chat_service: Resource | None = None
+        if self.config.reaction_emoji:
+            try:
+                user_creds, _ = self._load_user_credentials()
+                self._user_chat_service = build("chat", "v1", credentials=user_creds)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to load user credentials or build user_chat_service for reactions: {e}."
+                    " Reaction emoji feature will be disabled."
+                )
 
     def _load_credentials(self) -> tuple[Any, str]:
         """Load GCP credentials using ADC, key files, or impersonation options.
@@ -107,6 +157,20 @@ class GoogleChatChatbot(Chatbot):
 
         logger.info("Loading Google Chat credentials using Application Default Credentials (ADC).")
         return source_creds, project_id or self.config.project_id
+
+    def _load_user_credentials(self) -> tuple[Any, str]:
+        """Load GCP user credentials strictly using ADC (no service account or impersonation).
+
+        Returns:
+            A tuple of (credentials, project_id).
+        """
+        scopes = [
+            "https://www.googleapis.com/auth/chat.messages.reactions.create",
+            "https://www.googleapis.com/auth/chat.messages",
+        ]
+        logger.info("Loading Google Chat user credentials strictly using ADC.")
+        source_creds, project_id = google.auth.default(scopes=scopes)
+        return source_creds, project_id or (self.config.project_id if self.config.project_id else "")
 
     async def start(self) -> None:
         """Start listening to outgoing agent responses and run the Pub/Sub Pull task."""
@@ -282,11 +346,120 @@ class GoogleChatChatbot(Chatbot):
             timestamp=time.time(),
         )
 
+        # Store active user message name for this session
+        if message_data.get("name"):
+            self._active_user_message_names[session.id] = message_data["name"]
+            self._used_reactions[message_data["name"]] = {}
+
         # Post user message to trigger agent processing loop
         await self.gateway.post(user_msg)
 
+        # Optionally add a random emoji reaction if configured and using user credentials
+        if self.config.reaction_emoji and self._user_chat_service and message_data.get("name"):
+            emojis = parse_emoji_sequence(self.config.reaction_emoji)
+            if emojis:
+                selected_emoji = random.choice(emojis)
+                asyncio.create_task(self._add_reaction(message_data["name"], selected_emoji))
 
+    async def _add_reaction(self, message_name: str, emoji: str) -> None:
+        """Add an emoji reaction to a Google Chat message using user credentials.
 
+        If the emoji already exists as a reaction, removes it instead.
+
+        Args:
+            message_name: The fully qualified resource name of the message.
+            emoji: The emoji string to react with.
+        """
+        if not self._user_chat_service:
+            return
+
+        # Initialize used reactions dictionary for the message if not present
+        if message_name not in self._used_reactions:
+            self._used_reactions[message_name] = {}
+
+        used_map = self._used_reactions[message_name]
+
+        # Toggle Deletion: If this emoji is already in the used map, delete it!
+        if emoji in used_map:
+            reaction_name = used_map[emoji]
+            try:
+                await asyncio.to_thread(
+                    self._user_chat_service.spaces()
+                    .messages()
+                    .reactions()
+                    .delete(name=reaction_name)
+                    .execute
+                )
+                used_map.pop(emoji)
+                logger.debug(f"Successfully removed reaction '{emoji}' from message: {message_name}")
+            except Exception as e:
+                logger.error(f"Failed to delete reaction '{emoji}' from message {message_name}: {e}")
+            return
+
+        emoji_payload: dict[str, Any] = {}
+        if emoji.startswith(":") and emoji.endswith(":"):
+            emoji_payload = {"customEmoji": {"uid": emoji}}
+        else:
+            emoji_payload = {"unicode": emoji}
+
+        body = {"emoji": emoji_payload}
+        try:
+            res = await asyncio.to_thread(
+                self._user_chat_service.spaces()
+                .messages()
+                .reactions()
+                .create(parent=message_name, body=body)
+                .execute
+            )
+            # Store the created reaction resource name mapped to the emoji
+            used_map[emoji] = res["name"]
+            logger.debug(f"Successfully reacted with '{emoji}' to message: {message_name}")
+        except HttpError as e:
+            if e.resp.status == 409:
+                # Duplicate reaction reported by the API. We don't have the name in memory,
+                # but since it already exists, let's query reactions to find it and delete it.
+                logger.warning(
+                    f"Reaction '{emoji}' already exists on {message_name} (Http 409). Resolving and deleting."
+                )
+                try:
+                    reactions_list_res = await asyncio.to_thread(
+                        self._user_chat_service.spaces()
+                        .messages()
+                        .reactions()
+                        .list(parent=message_name)
+                        .execute
+                    )
+                    reactions_list = reactions_list_res.get("reactions", [])
+                    # Find our reaction
+                    found = False
+                    for r in reactions_list:
+                        r_emoji = r.get("emoji", {})
+                        r_unicode = r_emoji.get("unicode")
+                        r_custom = r_emoji.get("customEmoji", {}).get("uid")
+                        if r_unicode == emoji or r_custom == emoji:
+                            # Found it! Let's delete it
+                            await asyncio.to_thread(
+                                self._user_chat_service.spaces()
+                                .messages()
+                                .reactions()
+                                .delete(name=r["name"])
+                                .execute
+                            )
+                            logger.debug(
+                                f"Successfully removed duplicate reaction '{emoji}' from message: {message_name}"
+                            )
+                            found = True
+                            break
+                    if not found:
+                        logger.warning(f"Could not resolve duplicate reaction '{emoji}' to delete on {message_name}.")
+                except Exception as delete_error:
+                    logger.error(
+                        f"Failed to resolve/delete duplicate reaction '{emoji}' on {message_name}: {delete_error}"
+                    )
+            else:
+                logger.error(f"Google Chat API error when adding reaction '{emoji}': {e}")
+        except Exception as e:
+            logger.error(f"Failed to add reaction '{emoji}' to message {message_name}: {e}")
 
 
     async def handle_message(self, message: Message) -> None:
@@ -334,6 +507,15 @@ class GoogleChatChatbot(Chatbot):
                     "arg_suffix": arg_suffix,
                     "status": "⏳",
                 })
+
+                # Trigger a random emoji reaction for the tool call if configured
+                if self.config.reaction_emoji and self._user_chat_service:
+                    message_name = self._active_user_message_names.get(session_id)
+                    if message_name:
+                        emojis = parse_emoji_sequence(self.config.reaction_emoji)
+                        if emojis:
+                            selected_emoji = random.choice(emojis)
+                            asyncio.create_task(self._add_reaction(message_name, selected_emoji))
             elif message.role == ROLE_TOOL and message.type != TYPE_TOOL_CALL:
                 tool_call_msg_id = message.parent_id
                 found = False

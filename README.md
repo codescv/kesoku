@@ -68,6 +68,7 @@ topic_id = "kesoku-chat-events"
 subscription_id = "kesoku-chat-sub"
 credentials_json = "" # Optional path to JSON key file. If empty, uses ADC.
 impersonate_service_account = "" # Optional target service account email to impersonate (key-less)
+# reaction_emoji = "👀" # Optional: Emoji to react with when receiving a user message
 
 # For step-by-step instructions on setting up Google Cloud Platform (GCP) components,
 # see: docs/GOOGLE_CHAT_SETUP.md
