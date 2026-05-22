@@ -7,6 +7,7 @@ import asyncio
 import datetime
 import os
 from collections import defaultdict
+from typing import Any
 
 import discord
 import tzlocal
@@ -158,6 +159,8 @@ class DiscordChatbot(Chatbot):
         self._header_views: dict[str, tuple[discord.Message, MessageHeaderView]] = {}
         self._typing_tasks: dict[str, asyncio.Task[None]] = {}
         self._intermediate_messages: defaultdict[str, list[discord.Message]] = defaultdict(list)
+        self._turn_tool_calls: dict[str, list[dict[str, Any]]] = {}
+        self._turn_tool_msg: dict[str, discord.Message] = {}
 
     def _resolve_channel_override(
         self,
@@ -364,6 +367,30 @@ class DiscordChatbot(Chatbot):
             session_id = session.id
             await self.gateway.update_session_updated_at(session_id)
 
+            # Clean up any active previous turn UI elements if a new turn is started (thought interruption)
+            task = self._typing_tasks.pop(channel_id, None)
+            if task:
+                task.cancel()
+
+            intermediate_msgs = self._intermediate_messages.pop(channel_id, [])
+            if intermediate_msgs:
+                for msg in intermediate_msgs:
+                    try:
+                        await msg.delete()
+                    except Exception as de:
+                        logger.warning(f"Failed to delete intermediate message {msg.id} on interruption: {de}")
+
+            active_turn_ids = [tid for tid in self._header_views if tid == session_id or tid.startswith(session_id)]
+            for tid in active_turn_ids:
+                header_msg, header_view = self._header_views.pop(tid)
+                try:
+                    await header_msg.delete()
+                except Exception as he:
+                    logger.warning(f"Failed to delete header message {header_msg.id} on interruption: {he}")
+
+            self._turn_tool_calls.pop(session_id, None)
+            self._turn_tool_msg.pop(session_id, None)
+
         # Save any incoming attachments to the session staging directory
         attachments_metadata = []
         if message.attachments:
@@ -472,6 +499,35 @@ class DiscordChatbot(Chatbot):
         # Try in-place editing if it is a tool result and we have the cached message
         if message.role == ROLE_TOOL and message.type != TYPE_TOOL_CALL:
             tool_call_msg_id = message.parent_id
+            session_id = message.session_id
+            if session_id in self._turn_tool_calls:
+                tool_calls = self._turn_tool_calls[session_id]
+                tc_item = None
+                for tc in tool_calls:
+                    if tc["id"] == tool_call_msg_id:
+                        tc_item = tc
+                        break
+
+                if tc_item:
+                    emoji = "❌" if message.metadata.get("tool_error") else "✅"
+                    tc_item["status"] = emoji
+
+                    # Re-render the combined statuses of all tool calls
+                    lines = []
+                    for tc in tool_calls:
+                        lines.append(f"🛠️ **{tc['tool_name']}**{tc['arg_suffix']} {tc['status']}")
+                    new_content = "\n".join(lines)
+
+                    discord_msg = self._turn_tool_msg.get(session_id)
+                    if discord_msg:
+                        try:
+                            await discord_msg.edit(content=new_content)
+                        except Exception as ee:
+                            logger.warning(f"Failed to edit single tool calls message: {ee}")
+
+                    await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+                    return
+
             if tool_call_msg_id and tool_call_msg_id in self._sent_tool_calls:
                 discord_msg = self._sent_tool_calls.pop(tool_call_msg_id)
                 try:
@@ -501,7 +557,37 @@ class DiscordChatbot(Chatbot):
             is_special_message = True
             tool_name = message.metadata.get("tool_name") or message.sender or "unknown_tool"
             arg_suffix = await self._get_tool_arguments_suffix(message)
-            output_text = f"🛠️ **{tool_name}**{arg_suffix} ⏳"
+
+            session_id = message.session_id
+            if session_id not in self._turn_tool_calls:
+                self._turn_tool_calls[session_id] = []
+
+            tc_exists = any(tc["id"] == message.id for tc in self._turn_tool_calls[session_id])
+            if not tc_exists:
+                self._turn_tool_calls[session_id].append({
+                    "id": message.id,
+                    "tool_name": tool_name,
+                    "arg_suffix": arg_suffix,
+                    "status": "⏳",
+                })
+
+            # Render the combined statuses of all tool calls
+            lines = []
+            for tc in self._turn_tool_calls[session_id]:
+                lines.append(f"🛠️ **{tc['tool_name']}**{tc['arg_suffix']} {tc['status']}")
+            new_content = "\n".join(lines)
+
+            if session_id in self._turn_tool_msg:
+                discord_msg = self._turn_tool_msg[session_id]
+                try:
+                    await discord_msg.edit(content=new_content)
+                except Exception as ee:
+                    logger.warning(f"Failed to edit single tool calls message: {ee}")
+
+                await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+                return
+
+            output_text = new_content
         elif message.role == ROLE_SYSTEM:
             is_special_message = True
             first_line = message.content.split("\n")[0].strip()
@@ -568,6 +654,7 @@ class DiscordChatbot(Chatbot):
                         # Cache the sent message object if it's a tool call for future editing
                         if message.role == ROLE_TOOL and message.type == TYPE_TOOL_CALL:
                             self._sent_tool_calls[message.id] = sent_msg
+                            self._turn_tool_msg[message.session_id] = sent_msg
             elif segment["type"] == "file":
                 file_path = segment["path"]
                 if not os.path.exists(file_path):  # noqa: ASYNC240
@@ -638,6 +725,10 @@ class DiscordChatbot(Chatbot):
                         logger.warning(
                             f"Failed to delete intermediate message {msg.id} in channel {message.channel_id}: {de}"
                         )
+
+            # Clean up tool call single-message caches for the session
+            self._turn_tool_calls.pop(message.session_id, None)
+            self._turn_tool_msg.pop(message.session_id, None)
 
             # Remove stop button from the header view for this turn
             turn_id = message.parent_id or message.session_id

@@ -247,6 +247,11 @@ async def test_stop_turn_callback(mock_gateway: MagicMock) -> None:
     mock_msg1 = AsyncMock(spec=discord.Message)
     mock_chatbot._intermediate_messages = {"chan_abc": [mock_msg1]}
 
+    mock_message = AsyncMock(spec=discord.Message)
+    mock_chatbot._header_views = {"s123": (mock_message, MagicMock())}
+    mock_chatbot._turn_tool_calls = {"s123": []}
+    mock_chatbot._turn_tool_msg = {"s123": MagicMock()}
+
     view = MessageHeaderView(gateway=mock_gateway, session_id="s123", chatbot=mock_chatbot)
 
     mock_interaction = AsyncMock(spec=discord.Interaction)
@@ -254,7 +259,6 @@ async def test_stop_turn_callback(mock_gateway: MagicMock) -> None:
     mock_interaction.response.defer = AsyncMock()
     mock_interaction.followup = AsyncMock()
     mock_interaction.channel_id = "chan_abc"
-    mock_message = AsyncMock(spec=discord.Message)
     mock_interaction.message = mock_message
     mock_button = MagicMock(spec=discord.ui.Button)
 
@@ -277,8 +281,9 @@ async def test_stop_turn_callback(mock_gateway: MagicMock) -> None:
 
     # Asserts:
     mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
-    # Message containing the view should be edited to update the view (hiding stop button)
-    mock_message.edit.assert_called_once_with(view=view)
+    # Message containing the view should be deleted entirely
+    mock_message.delete.assert_called_once()
+    mock_message.edit.assert_not_called()
     # Worker stop should be called
     mock_worker.stop.assert_called_once()
     # Worker should be removed from agent
@@ -291,6 +296,10 @@ async def test_stop_turn_callback(mock_gateway: MagicMock) -> None:
     mock_msg1.delete.assert_called_once()
     # Sent feedback followup
     mock_interaction.followup.send.assert_called_once()
+    # Turn caches cleared
+    assert "s123" not in mock_chatbot._header_views
+    assert "s123" not in mock_chatbot._turn_tool_calls
+    assert "s123" not in mock_chatbot._turn_tool_msg
 
 
 @pytest.mark.asyncio
@@ -350,6 +359,10 @@ async def test_stop_turn_callback_with_metrics(mock_gateway: MagicMock) -> None:
     mock_chatbot = MagicMock()
     mock_chatbot._typing_tasks = {}
     mock_chatbot._intermediate_messages = {}
+    mock_message = AsyncMock(spec=discord.Message)
+    mock_chatbot._header_views = {"s123": (mock_message, MagicMock())}
+    mock_chatbot._turn_tool_calls = {"s123": []}
+    mock_chatbot._turn_tool_msg = {"s123": MagicMock()}
 
     view = MessageHeaderView(gateway=mock_gateway, session_id="s123", chatbot=mock_chatbot)
 
@@ -358,7 +371,6 @@ async def test_stop_turn_callback_with_metrics(mock_gateway: MagicMock) -> None:
     mock_interaction.response.defer = AsyncMock()
     mock_interaction.followup = AsyncMock()
     mock_interaction.channel_id = "chan_abc"
-    mock_message = AsyncMock(spec=discord.Message)
     mock_interaction.message = mock_message
     mock_button = MagicMock(spec=discord.ui.Button)
 
@@ -392,12 +404,13 @@ async def test_stop_turn_callback_with_metrics(mock_gateway: MagicMock) -> None:
 
     # Asserts:
     mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
-    # Message containing the view should be edited to update the view and show metrics
-    expected_content = (
-        "🛑 **Session:** 5 turns | **Context:** 8K tokens (Interrupted)\n"
-        "⏱️ **Turn:** 2 tool calls | 1K tokens | 4.5s"
-    )
-    mock_message.edit.assert_called_once_with(content=expected_content, view=view)
+    # Message containing the view should be deleted entirely
+    mock_message.delete.assert_called_once()
+    mock_message.edit.assert_not_called()
+    # Turn caches cleared
+    assert "s123" not in mock_chatbot._header_views
+    assert "s123" not in mock_chatbot._turn_tool_calls
+    assert "s123" not in mock_chatbot._turn_tool_msg
 
 
 @pytest.mark.asyncio

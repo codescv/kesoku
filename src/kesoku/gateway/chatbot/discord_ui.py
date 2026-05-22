@@ -116,35 +116,15 @@ class MessageHeaderView(discord.ui.View):
                     user_msg = msg
                     break
 
-            header_content = None
             if user_msg:
                 if user_msg.status in ("pending_agent", "processing"):
                     await self.gateway.update_message_status(user_msg.id, STATUS_INTERRUPTED)
 
-                metrics = user_msg.metadata.get("turn_metrics")
-                if metrics:
-                    session_turns = metrics.get("session_turns", 0)
-                    context_tokens = metrics.get("context_tokens", 0)
-                    turn_tool_calls = metrics.get("turn_tool_calls", 0)
-                    turn_tokens = metrics.get("turn_tokens", 0)
-                    turn_time = metrics.get("turn_time", 0.0)
-
-                    context_k = f"{round(context_tokens / 1000)}K"
-                    turn_k = f"{round(turn_tokens / 1000)}K"
-
-                    header_content = (
-                        f"🛑 **Session:** {session_turns} turns | **Context:** {context_k} tokens (Interrupted)\n"
-                        f"⏱️ **Turn:** {turn_tool_calls} tool calls | {turn_k} tokens | {turn_time:.1f}s"
-                    )
-
-            # Remove the stop button from the view and edit the message with the metrics
-            self.remove_item(button)
-            if header_content is not None:
-                await interaction.message.edit(content=header_content, view=self)
-            else:
-                await interaction.message.edit(view=self)
-
-
+            # Delete the message header entirely on interruption
+            try:
+                await interaction.message.delete()
+            except Exception as de:
+                logger.warning(f"Failed to delete header message on stop: {de}")
 
             # 3. Stop typing task and clean up intermediate special messages in Discord UI
             if self.chatbot:
@@ -160,6 +140,15 @@ class MessageHeaderView(discord.ui.View):
                             await msg.delete()
                         except Exception as de:
                             logger.warning(f"Failed to delete intermediate message {msg.id}: {de}")
+
+                # Clear session reference from chatbot's header views cache
+                for tid, (header_msg, _) in list(self.chatbot._header_views.items()):
+                    if header_msg.id == interaction.message.id:
+                        self.chatbot._header_views.pop(tid, None)
+                        break
+
+                self.chatbot._turn_tool_calls.pop(self.session_id, None)
+                self.chatbot._turn_tool_msg.pop(self.session_id, None)
 
             await interaction.followup.send(
                 content="🛑 The agent turn was stopped, and intermediate special messages were removed.",
@@ -216,6 +205,9 @@ class MessageHeaderView(discord.ui.View):
                     tid: val for tid, val in self.chatbot._header_views.items()
                     if not tid.startswith(self.session_id) and tid != self.session_id
                 }
+
+                self.chatbot._turn_tool_calls.pop(self.session_id, None)
+                self.chatbot._turn_tool_msg.pop(self.session_id, None)
 
             await interaction.followup.send(
                 content="♻️ Session successfully cleared. The next message will initiate a new session.",

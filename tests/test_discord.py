@@ -527,7 +527,7 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
             # Case 1: Tool call with zero arguments
             msg_no_args = Message(
                 id="msg1",
-                session_id="thread123",
+                session_id="thread_case1",
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
@@ -542,7 +542,7 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
             # Case 2: Tool call with exactly one argument
             msg_one_arg = Message(
                 id="msg2",
-                session_id="thread123",
+                session_id="thread_case2",
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
@@ -557,7 +557,7 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
             # Case 3: Tool call with exactly one argument and context
             msg_context_arg = Message(
                 id="msg3",
-                session_id="thread123",
+                session_id="thread_case3",
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
@@ -573,7 +573,7 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
             long_arg = "A" * 100
             msg_long_arg = Message(
                 id="msg4",
-                session_id="thread123",
+                session_id="thread_case4",
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
@@ -589,7 +589,7 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
             # Case 5: Tool call with multiple arguments
             msg_multiple_args = Message(
                 id="msg5",
-                session_id="thread123",
+                session_id="thread_case5",
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
