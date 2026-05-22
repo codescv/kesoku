@@ -16,6 +16,7 @@ dependencies = [
     "anthropic[vertex]>=0.103.1",
     "google-cloud-pubsub>=2.38.0",
     "google-api-python-client>=2.196.0",
+    "qrcode>=8.2",
 ]
 
 [project.scripts]

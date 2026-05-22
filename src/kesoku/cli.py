@@ -28,6 +28,40 @@ app = typer.Typer(help="Kesoku AI Agent CLI manager.")
 
 app.add_typer(service_app, name="service")
 
+wechat_app = typer.Typer(help="Manage WeChat chatbot integration.")
+app.add_typer(wechat_app, name="wechat")
+
+
+@wechat_app.command("pair")
+def wechat_pair(
+    config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
+    timeout: Annotated[int, typer.Option("-t", "--timeout", help="Timeout in seconds for QR scan confirmation")] = 480,
+) -> None:
+    """Pair WeChat account with Kesoku via terminal barcode QR code."""
+    cfg = load_config(config)
+
+    from kesoku.gateway.chatbot.wechat import qr_login
+
+    logger.info("Starting WeChat pairing flow...")
+    credentials = asyncio.run(qr_login(timeout_seconds=timeout))
+    if not credentials:
+        logger.error("WeChat pairing failed or timed out.")
+        sys.exit(1)
+
+    # Update config
+    cfg.wechat.enabled = True
+    cfg.wechat.account_id = credentials["account_id"]
+    cfg.wechat.token = credentials["token"]
+    cfg.wechat.base_url = credentials["base_url"]
+
+    from kesoku.config import save_config
+    save_config(cfg, config)
+
+    console = Console()
+    console.print("\n[bold green]WeChat chatbot paired and enabled successfully![/bold green]")
+    console.print(f"  Account ID: [cyan]{credentials['account_id']}[/cyan]")
+    console.print("  Token saved to configuration file.")
+
 
 @app.command("init")
 def init_cmd(
@@ -115,7 +149,7 @@ def start_cmd(
     load_config(config)
     cfg = get_config()
 
-    if not cfg.discord.enabled and not cfg.google_chat.enabled:
+    if not cfg.discord.enabled and not cfg.google_chat.enabled and not cfg.wechat.enabled:
         console = Console()
         console.print("[bold red]Error: No chatbots are enabled in the configuration.[/bold red]")
         sys.exit(1)
@@ -143,6 +177,13 @@ def start_cmd(
         gchat_bot = GoogleChatChatbot(chatbot_id=cfg.google_chat.chatbot_id, gateway=gateway)
         bot_tasks.append(gchat_bot.start())
         bots.append(gchat_bot)
+
+    if cfg.wechat.enabled:
+        from kesoku.gateway.chatbot.wechat import WechatChatbot
+
+        wechat_bot = WechatChatbot(chatbot_id=cfg.wechat.chatbot_id, gateway=gateway)
+        bot_tasks.append(wechat_bot.start())
+        bots.append(wechat_bot)
 
     cron_manager = None
     config_dir = cfg.agent_working_dir

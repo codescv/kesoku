@@ -54,6 +54,15 @@ impersonate_service_account = "" # Optional: target service account email to imp
 # user_allowlist = ["users/1234567890"]
 # reaction_emoji = "👀" # Optional: Emoji to react with when receiving a user message
 
+[wechat]
+enabled = false
+chatbot_id = "wechat"
+account_id = "" # Filled automatically by 'kesoku wechat pair'
+token = "" # Filled automatically by 'kesoku wechat pair'
+base_url = "https://ilinkai.weixin.qq.com"
+# Optional path to custom system prompt markdown file relative to agent working directory
+# sys_prompt_file = "memory/wechat_prompt.md"
+
 [shell]
 enabled = true
 use_shell = true

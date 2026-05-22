@@ -165,6 +165,17 @@ class GoogleChatConfig(BaseModel):
     reaction_emoji: str | None = Field(default=None, description="Emoji to react with when receiving a user message")
 
 
+class WechatConfig(BaseModel):
+    """WeChat chatbot adapter settings."""
+
+    enabled: bool = Field(default=False, description="Whether to launch the WeChat chatbot in daemon mode")
+    chatbot_id: str = Field(default="wechat", description="Unique chatbot identifier")
+    account_id: str | None = Field(default=None, description="WeChat/iLink bot account ID")
+    token: str | None = Field(default=None, description="WeChat/iLink bot auth token")
+    base_url: str = Field(default="https://ilinkai.weixin.qq.com", description="WeChat/iLink API base URL")
+    sys_prompt_file: str | None = Field(default=None, description="Path to custom system prompt file for WeChat relative to agent working directory")
+
+
 class KesokuConfig(BaseModel):
     """Root Kesoku configuration structure."""
 
@@ -174,6 +185,7 @@ class KesokuConfig(BaseModel):
     claude: ClaudeConfig = Field(default_factory=ClaudeConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
     google_chat: GoogleChatConfig = Field(default_factory=GoogleChatConfig)
+    wechat: WechatConfig = Field(default_factory=WechatConfig)
     shell: ShellConfig = Field(default_factory=ShellConfig)
     agent_working_dir: str | None = Field(
         default=None, exclude=True, description="Absolute path of the directory containing the config file"
