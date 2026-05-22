@@ -625,14 +625,36 @@ class GoogleChatChatbot(Chatbot):
                     choices = seg["choices"]
 
             body = {}
-            if text_reply.strip():
-                body["text"] = text_reply.strip()
-
             if message.channel_id and "threads" in message.channel_id:
                 body["thread"] = {"name": message.channel_id}
 
+            cards = []
+            if text_reply.strip():
+                cards.append(
+                    {
+                        "cardId": f"response_{session_id}_{int(time.time())}",
+                        "card": {
+                            "sections": [
+                                {
+                                    "widgets": [
+                                        {
+                                            "textParagraph": {
+                                                "text": text_reply.strip(),
+                                                "textSyntax": "MARKDOWN",
+                                            }
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                    }
+                )
+
             if choices:
-                body["cardsV2"] = [self._build_question_card(session_id, question_text, choices)]
+                cards.append(self._build_question_card(session_id, question_text, choices))
+
+            if cards:
+                body["cardsV2"] = cards
 
             parent_space = message.channel_id.split("/threads/")[0] if message.channel_id else "spaces/unknown"
             try:
@@ -793,7 +815,16 @@ class GoogleChatChatbot(Chatbot):
             "cardId": f"question_{session_id}",
             "card": {
                 "sections": [
-                    {"widgets": [{"textParagraph": {"text": card_text}}]},
+                    {
+                        "widgets": [
+                            {
+                                "textParagraph": {
+                                    "text": card_text,
+                                    "textSyntax": "MARKDOWN",
+                                }
+                            }
+                        ]
+                    },
                 ],
             },
         }

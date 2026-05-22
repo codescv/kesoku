@@ -354,11 +354,15 @@ async def test_handle_outgoing_message_delivery_foldable_ui(
         assert "Context:" in metrics_text
         assert "Turn:" in metrics_text
 
-        # Verify final text message was created
+        # Verify final response card was created
         assert mock_messages.create.call_count == 2
         final_create_args = mock_messages.create.call_args_list[1][1]
-        assert final_create_args["body"]["text"] == "Hello world reply"
         assert final_create_args["body"]["thread"]["name"] == "spaces/AAA/threads/BBB"
+        assert "cardsV2" in final_create_args["body"]
+        final_card = final_create_args["body"]["cardsV2"][0]["card"]
+        widget = final_card["sections"][0]["widgets"][0]["textParagraph"]
+        assert widget["text"] == "Hello world reply"
+        assert widget["textSyntax"] == "MARKDOWN"
 
         # Verify delivery statuses were updated
         mock_gateway.update_message_status.assert_any_call("thought1", STATUS_DELIVERED)
