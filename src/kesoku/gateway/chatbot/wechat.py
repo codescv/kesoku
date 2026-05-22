@@ -16,6 +16,7 @@ import struct
 import textwrap
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -35,6 +36,7 @@ from kesoku.constants import (
     STATUS_PENDING_AGENT,
     TYPE_TEXT,
     TYPE_THOUGHT,
+    TYPE_TOOL_CALL,
 )
 from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot, parse_message_content
@@ -1021,7 +1023,7 @@ class WechatChatbot(Chatbot):
 You are interacting with the user via WeChat (Weixin).
 - Channel/Chat Type: {chat_type}
 - Chat ID: {chat_id}
-- WeChat doesn't support level 4+ headings.
+- Wechat is for human interaction. Talk like a human. Don't use markdown formats, bullet points, etc.
 - Keep your messages relatively concise since WeChat clients have character and readability limitations.
 """
 
@@ -1137,6 +1139,215 @@ You are interacting with the user via WeChat (Weixin).
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                     consecutive_failures = 0
 
+    async def _handle_slash_command(self, chat_id: str, cmd_text: str, sender_id: str) -> None:
+        """Process text-based slash commands for WeChat."""
+        parts = cmd_text.strip().split()
+        command = parts[0].lower()
+        context_token = self._token_store.get(self._account_id, sender_id)
+        client_id = f"kesoku-wechat-cmd-{uuid.uuid4().hex}"
+
+        if command == "/restart":
+            logger.info(f"WeChat: Received /restart command from {sender_id} in {chat_id}")
+            try:
+                await _send_message(
+                    self._send_session,
+                    base_url=self._base_url,
+                    token=self._token,
+                    to=chat_id,
+                    text="🔄 Restarting service...",
+                    context_token=context_token,
+                    client_id=client_id,
+                )
+            except Exception as e:
+                logger.error(f"WeChat: failed to send restart confirmation: {e}")
+
+            await asyncio.sleep(0.5)
+            self.stop()
+
+            # Resolve kesoku binary path
+            import shutil
+            import sys
+            executable_dir = os.path.dirname(sys.executable)
+            kesoku_bin = os.path.join(executable_dir, "kesoku")
+            if not os.path.exists(kesoku_bin):  # noqa: ASYNC240
+                kesoku_bin = shutil.which("kesoku") or "kesoku"
+
+            import subprocess
+            cmd = [kesoku_bin, "service", "restart"]
+            service_user = os.environ.get("KESOKU_SERVICE_USER", "true") == "true"
+            if service_user:
+                cmd.append("--user")
+            else:
+                cmd.append("--system")
+
+            instance_name = os.environ.get("KESOKU_SERVICE_INSTANCE_NAME")
+            if instance_name:
+                cmd.extend(["--name", instance_name])
+
+            logger.info(f"WeChat: Launching restart command: {' '.join(cmd)}")
+            subprocess.Popen(cmd, start_new_session=True)  # noqa: ASYNC220
+
+        elif command in ("/clear", "/reset"):
+            logger.info(f"WeChat: Received {command} command from {sender_id} in {chat_id}")
+            session = await self.gateway.get_session_by_channel(self.chatbot_id, chat_id)
+            if session:
+                agent = self.gateway.agent
+                if agent:
+                    worker = agent.workers.get(session.id)
+                    if worker:
+                        worker.stop()
+                        agent.workers.pop(session.id, None)
+                await self.gateway.delete_session(session.id)
+                reply = "♻️ Session successfully cleared. The next message will initiate a new session."
+            else:
+                reply = "⚠️ No active session found for this chat."
+
+            try:
+                await _send_message(
+                    self._send_session,
+                    base_url=self._base_url,
+                    token=self._token,
+                    to=chat_id,
+                    text=reply,
+                    context_token=context_token,
+                    client_id=client_id,
+                )
+            except Exception as e:
+                logger.error(f"WeChat: failed to send reset reply: {e}")
+
+        elif command == "/status":
+            logger.info(f"WeChat: Received /status command from {sender_id} in {chat_id}")
+            session = await self.gateway.get_session_by_channel(self.chatbot_id, chat_id)
+            if session:
+                history = await self.gateway.get_session_history(session.id, limit=100)
+                metrics = None
+                for msg in reversed(history):
+                    if msg.role == ROLE_ASSISTANT and msg.metadata and msg.metadata.get("turn_metrics"):
+                        metrics = msg.metadata.get("turn_metrics")
+                        break
+
+                session_turns = len([m for m in history if m.role == ROLE_USER])
+                context_tokens = metrics.get("context_tokens", 0) if metrics else 0
+                turn_tool_calls = metrics.get("turn_tool_calls", 0) if metrics else len(
+                    [m for m in history if m.role == ROLE_TOOL and m.type == TYPE_TOOL_CALL]
+                )
+                turn_tokens = metrics.get("turn_tokens", 0) if metrics else 0
+                turn_time = metrics.get("turn_time", 0.0) if metrics else 0.0
+
+                context_k = f"{round(context_tokens / 1000)}K" if context_tokens else "0K"
+                turn_k = f"{round(turn_tokens / 1000)}K" if turn_tokens else "0K"
+
+                reply = (
+                    f"【Current Stats】\n"
+                    f"⚡ Session: {session_turns} turns\n"
+                    f"📖 Context: {context_k} tokens\n"
+                    f"⏱️ Last Turn:\n"
+                    f"  - Tool Calls: {turn_tool_calls}\n"
+                    f"  - Tokens: {turn_k}\n"
+                    f"  - Time: {turn_time:.1f}s"
+                )
+            else:
+                reply = "⚠️ No active session found for this chat."
+
+            try:
+                await _send_message(
+                    self._send_session,
+                    base_url=self._base_url,
+                    token=self._token,
+                    to=chat_id,
+                    text=reply,
+                    context_token=context_token,
+                    client_id=client_id,
+                )
+            except Exception as e:
+                logger.error(f"WeChat: failed to send status reply: {e}")
+        else:
+            reply = f"⚠️ Unrecognized command: {command}"
+            try:
+                await _send_message(
+                    self._send_session,
+                    base_url=self._base_url,
+                    token=self._token,
+                    to=chat_id,
+                    text=reply,
+                    context_token=context_token,
+                    client_id=client_id,
+                )
+            except Exception as e:
+                logger.error(f"WeChat: failed to send error reply: {e}")
+
+    async def trigger_cronjob(
+        self,
+        channel_id: str,
+        prompt_content: str,
+        mention_user_id: str | None = None,
+    ) -> None:
+        """Trigger a scheduled cronjob in the specified WeChat chat/room."""
+        session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
+        if not session:
+            title = f"WeChat Scheduled Job {channel_id}"
+            chat_type = "group" if channel_id.endswith("@chatroom") else "dm"
+            custom_prompt = self._build_wechat_custom_prompt(channel_id, chat_type)
+
+            # Read custom configurable system prompt file if present
+            if self.config.sys_prompt_file:
+                sys_file = self.config.sys_prompt_file
+                cfg = get_config()
+                if not os.path.isabs(sys_file) and cfg.agent_working_dir:
+                    sys_file = os.path.join(cfg.agent_working_dir, sys_file)  # noqa: ASYNC240
+                if os.path.exists(sys_file):  # noqa: ASYNC240
+                    try:
+                        with open(sys_file, encoding="utf-8") as f:  # noqa: ASYNC230
+                            custom_sys_prompt = f.read().strip()
+                        if custom_sys_prompt:
+                            custom_prompt = f"{custom_prompt}\n\n{custom_sys_prompt}"
+                    except Exception as e:
+                        logger.error(f"WeChat: Failed to read system prompt file {sys_file}: {e}")
+
+            session = await self.gateway.create_session(
+                session_id=None,
+                title=title,
+                custom_prompt=custom_prompt,
+            )
+        else:
+            await self.gateway.update_session_updated_at(session.id)
+
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        msg_content = f"Scheduled job starting at `{now_str}`:\n{prompt_content}"
+        if mention_user_id:
+            msg_content = f"@{mention_user_id} {msg_content}"
+
+        user_msg = Message(
+            session_id=session.id,
+            chatbot_id=self.chatbot_id,
+            channel_id=channel_id,
+            sender="System Scheduler",
+            role=ROLE_USER,
+            type=TYPE_TEXT,
+            content=msg_content,
+            timestamp=time.time(),
+            status=STATUS_PENDING_AGENT,
+            metadata={
+                "cronjob": True,
+            },
+        )
+        await self.gateway.post(user_msg)
+
+        # Start typing indicator
+        typing_ticket = self._typing_cache.get(channel_id)
+        if typing_ticket:
+            try:
+                await _send_typing(
+                    self._send_session,
+                    base_url=self._base_url,
+                    token=self._token,
+                    to_user_id=channel_id,
+                    typing_ticket=typing_ticket,
+                    status=TYPING_START,
+                )
+            except Exception as e:
+                logger.debug("WeChat: typing start failed: %s", e)
+
     async def _process_message_safe(self, message: dict[str, Any]) -> None:
         try:
             await self._process_message(message)
@@ -1160,6 +1371,10 @@ You are interacting with the user via WeChat (Weixin).
         text = _extract_text(item_list)
 
         chat_type, effective_chat_id = _guess_chat_type(message, self._account_id)
+
+        if text.startswith("/"):
+            await self._handle_slash_command(effective_chat_id, text, sender_id)
+            return
 
         context_token = str(message.get("context_token") or "").strip()
         if context_token:

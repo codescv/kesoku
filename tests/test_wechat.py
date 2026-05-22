@@ -55,6 +55,7 @@ def mock_gateway() -> MagicMock:
     gw.update_session_updated_at = AsyncMock()
     gw.post = AsyncMock()
     gw.update_message_status = AsyncMock()
+    gw.agent = MagicMock()
     return gw
 
 
@@ -283,3 +284,153 @@ async def test_wechat_chatbot_send_text(
         mock_gateway.update_message_status.assert_called_once_with(
             "msg_out_999", STATUS_DELIVERED
         )
+
+
+@pytest.mark.asyncio
+@patch("aiohttp.ClientSession")
+async def test_wechat_chatbot_slash_command_clear(
+    mock_session_cls: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+) -> None:
+    """Test that /clear or /reset command deletes session and history."""
+    mock_session = MagicMock()
+    mock_session_cls.return_value = mock_session
+    mock_session.post = AsyncMock()
+    mock_session.post.return_value.__aenter__.return_value.ok = True
+    mock_session.post.return_value.__aenter__.return_value.text = AsyncMock(
+        return_value='{"ret": 0, "errcode": 0}'
+    )
+
+    with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
+        bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
+        bot._poll_session = mock_session
+        bot._send_session = mock_session
+
+        # Mock existing session
+        mock_gateway.get_session_by_channel.return_value = Session(id="sess123", title="Active Session")
+
+        inbound_payload = {
+            "from_user_id": "user_alice",
+            "to_user_id": "test_bot_id",
+            "message_id": "msg_001",
+            "item_list": [
+                {"type": 1, "text_item": {"text": "/clear"}}
+            ],
+        }
+
+        # Handle message containing command
+        await bot._process_message(inbound_payload)
+
+        # Verify session deletion was triggered via gateway
+        mock_gateway.delete_session.assert_called_once_with("sess123")
+
+        # Verify confirmation message was sent
+        mock_session.post.assert_called_once()
+        body = json.loads(mock_session.post.call_args[1]["data"])
+        assert "Session successfully cleared" in body["msg"]["item_list"][0]["text_item"]["text"]
+
+
+@pytest.mark.asyncio
+@patch("aiohttp.ClientSession")
+async def test_wechat_chatbot_slash_command_status(
+    mock_session_cls: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+) -> None:
+    """Test that /status command returns session metrics."""
+    mock_session = MagicMock()
+    mock_session_cls.return_value = mock_session
+    mock_session.post = AsyncMock()
+    mock_session.post.return_value.__aenter__.return_value.ok = True
+    mock_session.post.return_value.__aenter__.return_value.text = AsyncMock(
+        return_value='{"ret": 0, "errcode": 0}'
+    )
+
+    with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
+        bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
+        bot._poll_session = mock_session
+        bot._send_session = mock_session
+
+        mock_gateway.get_session_by_channel.return_value = Session(id="sess123", title="Active Session")
+
+        # Mock history containing metrics
+        mock_history = [
+            Message(
+                id="msg1", session_id="sess123", chatbot_id="wechat_test",
+                channel_id="user_alice", sender="Alice", role=ROLE_USER,
+                type=TYPE_TEXT, content="hi"
+            ),
+            Message(
+                id="msg2", session_id="sess123", chatbot_id="wechat_test",
+                channel_id="user_alice", sender="Kesoku", role=ROLE_ASSISTANT,
+                type=TYPE_TEXT, content="hello",
+                metadata={
+                    "turn_metrics": {
+                        "session_turns": 1,
+                        "context_tokens": 3000,
+                        "turn_tool_calls": 2,
+                        "turn_tokens": 150,
+                        "turn_time": 1.5,
+                    }
+                }
+            )
+        ]
+        mock_gateway.get_session_history.return_value = mock_history
+
+        inbound_payload = {
+            "from_user_id": "user_alice",
+            "to_user_id": "test_bot_id",
+            "message_id": "msg_001",
+            "item_list": [
+                {"type": 1, "text_item": {"text": "/status"}}
+            ],
+        }
+
+        await bot._process_message(inbound_payload)
+
+        # Verify status reply content
+        mock_session.post.assert_called_once()
+        body = json.loads(mock_session.post.call_args[1]["data"])
+        status_text = body["msg"]["item_list"][0]["text_item"]["text"]
+        assert "Current Stats" in status_text
+        assert "Session: 1 turns" in status_text
+        assert "Context: 3K tokens" in status_text
+        assert "Tool Calls: 2" in status_text
+        assert "Time: 1.5s" in status_text
+
+
+@pytest.mark.asyncio
+@patch("aiohttp.ClientSession")
+async def test_wechat_chatbot_trigger_cronjob(
+    mock_session_cls: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+) -> None:
+    """Test that trigger_cronjob successfully creates session and posts message."""
+    mock_session = MagicMock()
+    mock_session_cls.return_value = mock_session
+
+    with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
+        bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
+        bot._poll_session = mock_session
+        bot._send_session = mock_session
+
+        # Run trigger_cronjob
+        await bot.trigger_cronjob(
+            channel_id="user_alice",
+            prompt_content="Execute scheduled system check",
+            mention_user_id="12345",
+        )
+
+        # Verify new session was created
+        mock_gateway.create_session.assert_called_once()
+        create_args = mock_gateway.create_session.call_args[1]
+        assert "WeChat Scheduled Job user_alice" in create_args["title"]
+
+        # Verify gateway.post was called
+        mock_gateway.post.assert_called_once()
+        posted = mock_gateway.post.call_args[0][0]
+        assert posted.role == ROLE_USER
+        assert "Execute scheduled system check" in posted.content
+        assert "@12345" in posted.content
