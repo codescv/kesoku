@@ -147,8 +147,8 @@ class MessageHeaderView(discord.ui.View):
                         self.chatbot._header_views.pop(tid, None)
                         break
 
-                self.chatbot._turn_tool_calls.pop(self.session_id, None)
-                self.chatbot._turn_tool_msg.pop(self.session_id, None)
+                self.chatbot._turn_special_items.pop(self.session_id, None)
+                self.chatbot._turn_special_msg.pop(self.session_id, None)
 
             await interaction.followup.send(
                 content="🛑 The agent turn was stopped, and intermediate special messages were removed.",
@@ -206,8 +206,8 @@ class MessageHeaderView(discord.ui.View):
                     if not tid.startswith(self.session_id) and tid != self.session_id
                 }
 
-                self.chatbot._turn_tool_calls.pop(self.session_id, None)
-                self.chatbot._turn_tool_msg.pop(self.session_id, None)
+                self.chatbot._turn_special_items.pop(self.session_id, None)
+                self.chatbot._turn_special_msg.pop(self.session_id, None)
 
             await interaction.followup.send(
                 content="♻️ Session successfully cleared. The next message will initiate a new session.",

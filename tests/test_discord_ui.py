@@ -249,8 +249,8 @@ async def test_stop_turn_callback(mock_gateway: MagicMock) -> None:
 
     mock_message = AsyncMock(spec=discord.Message)
     mock_chatbot._header_views = {"s123": (mock_message, MagicMock())}
-    mock_chatbot._turn_tool_calls = {"s123": []}
-    mock_chatbot._turn_tool_msg = {"s123": MagicMock()}
+    mock_chatbot._turn_special_items = {"s123": []}
+    mock_chatbot._turn_special_msg = {"s123": MagicMock()}
 
     view = MessageHeaderView(gateway=mock_gateway, session_id="s123", chatbot=mock_chatbot)
 
@@ -298,8 +298,8 @@ async def test_stop_turn_callback(mock_gateway: MagicMock) -> None:
     mock_interaction.followup.send.assert_called_once()
     # Turn caches cleared
     assert "s123" not in mock_chatbot._header_views
-    assert "s123" not in mock_chatbot._turn_tool_calls
-    assert "s123" not in mock_chatbot._turn_tool_msg
+    assert "s123" not in mock_chatbot._turn_special_items
+    assert "s123" not in mock_chatbot._turn_special_msg
 
 
 @pytest.mark.asyncio
@@ -317,6 +317,8 @@ async def test_clear_session_callback(mock_gateway: MagicMock) -> None:
     mock_msg1 = AsyncMock(spec=discord.Message)
     mock_chatbot._intermediate_messages = {"chan_abc": [mock_msg1]}
     mock_chatbot._header_views = {"s123": (MagicMock(), MagicMock()), "some_turn": (MagicMock(), MagicMock())}
+    mock_chatbot._turn_special_items = {"s123": []}
+    mock_chatbot._turn_special_msg = {"s123": MagicMock()}
 
     view = MessageHeaderView(gateway=mock_gateway, session_id="s123", chatbot=mock_chatbot)
 
@@ -342,6 +344,9 @@ async def test_clear_session_callback(mock_gateway: MagicMock) -> None:
     # header_views cleaned up
     assert "s123" not in mock_chatbot._header_views
     assert "some_turn" in mock_chatbot._header_views
+    # special items/msg caches cleaned up
+    assert "s123" not in mock_chatbot._turn_special_items
+    assert "s123" not in mock_chatbot._turn_special_msg
     # Sent feedback followup
     mock_interaction.followup.send.assert_called_once()
 
@@ -361,8 +366,8 @@ async def test_stop_turn_callback_with_metrics(mock_gateway: MagicMock) -> None:
     mock_chatbot._intermediate_messages = {}
     mock_message = AsyncMock(spec=discord.Message)
     mock_chatbot._header_views = {"s123": (mock_message, MagicMock())}
-    mock_chatbot._turn_tool_calls = {"s123": []}
-    mock_chatbot._turn_tool_msg = {"s123": MagicMock()}
+    mock_chatbot._turn_special_items = {"s123": []}
+    mock_chatbot._turn_special_msg = {"s123": MagicMock()}
 
     view = MessageHeaderView(gateway=mock_gateway, session_id="s123", chatbot=mock_chatbot)
 
@@ -409,8 +414,8 @@ async def test_stop_turn_callback_with_metrics(mock_gateway: MagicMock) -> None:
     mock_message.edit.assert_not_called()
     # Turn caches cleared
     assert "s123" not in mock_chatbot._header_views
-    assert "s123" not in mock_chatbot._turn_tool_calls
-    assert "s123" not in mock_chatbot._turn_tool_msg
+    assert "s123" not in mock_chatbot._turn_special_items
+    assert "s123" not in mock_chatbot._turn_special_msg
 
 
 @pytest.mark.asyncio

@@ -159,8 +159,8 @@ class DiscordChatbot(Chatbot):
         self._header_views: dict[str, tuple[discord.Message, MessageHeaderView]] = {}
         self._typing_tasks: dict[str, asyncio.Task[None]] = {}
         self._intermediate_messages: defaultdict[str, list[discord.Message]] = defaultdict(list)
-        self._turn_tool_calls: dict[str, list[dict[str, Any]]] = {}
-        self._turn_tool_msg: dict[str, discord.Message] = {}
+        self._turn_special_items: dict[str, list[dict[str, Any]]] = {}
+        self._turn_special_msg: dict[str, discord.Message] = {}
 
     def _resolve_channel_override(
         self,
@@ -388,8 +388,8 @@ class DiscordChatbot(Chatbot):
                 except Exception as he:
                     logger.warning(f"Failed to delete header message {header_msg.id} on interruption: {he}")
 
-            self._turn_tool_calls.pop(session_id, None)
-            self._turn_tool_msg.pop(session_id, None)
+            self._turn_special_items.pop(session_id, None)
+            self._turn_special_msg.pop(session_id, None)
 
         # Save any incoming attachments to the session staging directory
         attachments_metadata = []
@@ -500,30 +500,35 @@ class DiscordChatbot(Chatbot):
         if message.role == ROLE_TOOL and message.type != TYPE_TOOL_CALL:
             tool_call_msg_id = message.parent_id
             session_id = message.session_id
-            if session_id in self._turn_tool_calls:
-                tool_calls = self._turn_tool_calls[session_id]
+            if session_id in self._turn_special_items:
+                items = self._turn_special_items[session_id]
                 tc_item = None
-                for tc in tool_calls:
-                    if tc["id"] == tool_call_msg_id:
-                        tc_item = tc
+                for item in items:
+                    if item["type"] == "tool_call" and item["id"] == tool_call_msg_id:
+                        tc_item = item
                         break
 
                 if tc_item:
                     emoji = "❌" if message.metadata.get("tool_error") else "✅"
                     tc_item["status"] = emoji
 
-                    # Re-render the combined statuses of all tool calls
+                    # Re-render the combined statuses of all special messages
                     lines = []
-                    for tc in tool_calls:
-                        lines.append(f"🛠️ **{tc['tool_name']}**{tc['arg_suffix']} {tc['status']}")
+                    for item in items:
+                        if item["type"] == "thought":
+                            lines.append(f"💭 {item['content']}")
+                        elif item["type"] == "tool_call":
+                            lines.append(f"🛠️ **{item['tool_name']}**{item['arg_suffix']} {item['status']}")
+                        elif item["type"] == "system":
+                            lines.append(f"⚙️ *System Message:* {item['content']}")
                     new_content = "\n".join(lines)
 
-                    discord_msg = self._turn_tool_msg.get(session_id)
+                    discord_msg = self._turn_special_msg.get(session_id)
                     if discord_msg:
                         try:
                             await discord_msg.edit(content=new_content)
                         except Exception as ee:
-                            logger.warning(f"Failed to edit single tool calls message: {ee}")
+                            logger.warning(f"Failed to edit single special message: {ee}")
 
                     await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
                     return
@@ -543,14 +548,27 @@ class DiscordChatbot(Chatbot):
         is_special_message = False
         output_text = ""
 
-        if message.role == ROLE_ASSISTANT:
-            if message.type == TYPE_THOUGHT:
-                is_special_message = True
-                first_line = message.content.split("\n")[0].strip()
-                hidden_chars = len(message.content) - len(first_line)
-                output_text = f"💭 {first_line} ... *(+{hidden_chars} chars)*"
-            else:
-                output_text = message.content
+        if message.role == ROLE_ASSISTANT and message.type == TYPE_THOUGHT:
+            is_special_message = True
+            first_line = message.content.split("\n")[0].strip()
+            hidden_chars = len(message.content) - len(first_line)
+            thought_content = f"{first_line} ... *(+{hidden_chars} chars)*"
+
+            session_id = message.session_id
+            if session_id not in self._turn_special_items:
+                self._turn_special_items[session_id] = []
+
+            tc_exists = any(
+                item["type"] == "thought" and item["id"] == message.id
+                for item in self._turn_special_items[session_id]
+            )
+            if not tc_exists:
+                self._turn_special_items[session_id].append({
+                    "type": "thought",
+                    "id": message.id,
+                    "content": thought_content,
+                })
+
         elif message.role == ROLE_TOOL:
             # Since tool results/errors are handled and early-returned above,
             # this block only ever handles TYPE_TOOL_CALL!
@@ -559,42 +577,68 @@ class DiscordChatbot(Chatbot):
             arg_suffix = await self._get_tool_arguments_suffix(message)
 
             session_id = message.session_id
-            if session_id not in self._turn_tool_calls:
-                self._turn_tool_calls[session_id] = []
+            if session_id not in self._turn_special_items:
+                self._turn_special_items[session_id] = []
 
-            tc_exists = any(tc["id"] == message.id for tc in self._turn_tool_calls[session_id])
+            tc_exists = any(
+                item["type"] == "tool_call" and item["id"] == message.id
+                for item in self._turn_special_items[session_id]
+            )
             if not tc_exists:
-                self._turn_tool_calls[session_id].append({
+                self._turn_special_items[session_id].append({
+                    "type": "tool_call",
                     "id": message.id,
                     "tool_name": tool_name,
                     "arg_suffix": arg_suffix,
                     "status": "⏳",
                 })
 
-            # Render the combined statuses of all tool calls
+        elif message.role == ROLE_SYSTEM:
+            is_special_message = True
+            first_line = message.content.split("\n")[0].strip()
+            hidden_chars = len(message.content) - len(first_line)
+            system_content = f"{first_line} ... *(+{hidden_chars} chars)*"
+
+            session_id = message.session_id
+            if session_id not in self._turn_special_items:
+                self._turn_special_items[session_id] = []
+
+            tc_exists = any(
+                item["type"] == "system" and item["id"] == message.id
+                for item in self._turn_special_items[session_id]
+            )
+            if not tc_exists:
+                self._turn_special_items[session_id].append({
+                    "type": "system",
+                    "id": message.id,
+                    "content": system_content,
+                })
+        else:
+            output_text = message.content
+
+        if is_special_message:
+            session_id = message.session_id
             lines = []
-            for tc in self._turn_tool_calls[session_id]:
-                lines.append(f"🛠️ **{tc['tool_name']}**{tc['arg_suffix']} {tc['status']}")
+            for item in self._turn_special_items[session_id]:
+                if item["type"] == "thought":
+                    lines.append(f"💭 {item['content']}")
+                elif item["type"] == "tool_call":
+                    lines.append(f"🛠️ **{item['tool_name']}**{item['arg_suffix']} {item['status']}")
+                elif item["type"] == "system":
+                    lines.append(f"⚙️ *System Message:* {item['content']}")
             new_content = "\n".join(lines)
 
-            if session_id in self._turn_tool_msg:
-                discord_msg = self._turn_tool_msg[session_id]
+            if session_id in self._turn_special_msg:
+                discord_msg = self._turn_special_msg[session_id]
                 try:
                     await discord_msg.edit(content=new_content)
                 except Exception as ee:
-                    logger.warning(f"Failed to edit single tool calls message: {ee}")
+                    logger.warning(f"Failed to edit single special message: {ee}")
 
                 await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
                 return
 
             output_text = new_content
-        elif message.role == ROLE_SYSTEM:
-            is_special_message = True
-            first_line = message.content.split("\n")[0].strip()
-            hidden_chars = len(message.content) - len(first_line)
-            output_text = f"⚙️ *System Message:* {first_line} ... *(+{hidden_chars} chars)*"
-        else:
-            output_text = message.content
 
         if not output_text:
             output_text = message.content
@@ -651,10 +695,11 @@ class DiscordChatbot(Chatbot):
                         if is_special_message:
                             self._intermediate_messages[message.channel_id].append(sent_msg)
 
-                        # Cache the sent message object if it's a tool call for future editing
-                        if message.role == ROLE_TOOL and message.type == TYPE_TOOL_CALL:
-                            self._sent_tool_calls[message.id] = sent_msg
-                            self._turn_tool_msg[message.session_id] = sent_msg
+                        # Cache the sent message object if it's a special message for future editing
+                        if is_special_message:
+                            self._turn_special_msg[message.session_id] = sent_msg
+                            if message.role == ROLE_TOOL and message.type == TYPE_TOOL_CALL:
+                                self._sent_tool_calls[message.id] = sent_msg
             elif segment["type"] == "file":
                 file_path = segment["path"]
                 if not os.path.exists(file_path):  # noqa: ASYNC240
@@ -727,8 +772,8 @@ class DiscordChatbot(Chatbot):
                         )
 
             # Clean up tool call single-message caches for the session
-            self._turn_tool_calls.pop(message.session_id, None)
-            self._turn_tool_msg.pop(message.session_id, None)
+            self._turn_special_items.pop(message.session_id, None)
+            self._turn_special_msg.pop(message.session_id, None)
 
             # Remove stop button from the header view for this turn
             turn_id = message.parent_id or message.session_id

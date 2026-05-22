@@ -904,8 +904,8 @@ async def test_handle_message_intermediate_special_messages_tracking(
                 metadata={"tool_name": "my_tool", "tool_arguments": {}},
             )
             await bot.handle_message(tool_call)
-            assert len(bot._intermediate_messages["12345"]) == 2
-            assert bot._intermediate_messages["12345"][1] == msg2
+            # Grouped in the single special message via in-place edit
+            assert len(bot._intermediate_messages["12345"]) == 1
 
             # 3. System message (special)
             sys_msg = Message(
@@ -919,8 +919,8 @@ async def test_handle_message_intermediate_special_messages_tracking(
                 content="System event...",
             )
             await bot.handle_message(sys_msg)
-            assert len(bot._intermediate_messages["12345"]) == 3
-            assert bot._intermediate_messages["12345"][2] == msg3
+            # Grouped in the single special message via in-place edit
+            assert len(bot._intermediate_messages["12345"]) == 1
 
 
 @pytest.mark.asyncio
