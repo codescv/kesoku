@@ -710,3 +710,72 @@ async def test_session_worker_dynamic_llm(temp_db: str) -> None:
         resolved_llm = worker._resolve_llm(msg)
         assert resolved_llm == mock_claude
         mock_get_llm.assert_called_once_with("claude")
+
+
+@pytest.mark.asyncio
+async def test_agent_empty_response_nudge(temp_db: str) -> None:
+    """Verify that the agent nudges the LLM when the first response is empty, and succeeds on the second try."""
+    from kesoku.agent.llm import BaseLLM, LLMResponse
+
+    DatabaseManager(temp_db).init_tables()
+    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    reg = ToolRegistry()
+
+    await gw.create_session("sess_nudge", title="Nudge Session")
+    await gw.post(
+        Message(
+            session_id="sess_nudge",
+            chatbot_id="cli",
+            channel_id="ch1",
+            sender="u1",
+            role="user",
+            type="text",
+            content="Hello!",
+            status="pending_agent",
+        )
+    )
+
+    class NudgeLLM(BaseLLM):
+        def __init__(self) -> None:
+            self.generate_calls = 0
+
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+        ) -> LLMResponse:
+            self.generate_calls += 1
+            if self.generate_calls == 1:
+                # First call returns empty content to trigger nudge
+                return LLMResponse(content="", thought="I thought about it but forgot to reply.")
+            else:
+                # Second call returns content after nudge
+                return LLMResponse(content="Hello! Here is the reply after nudge.")
+
+    llm = NudgeLLM()
+    agent = Agent(gw, llm, reg)
+
+    agent_task = asyncio.create_task(agent.start())
+    await asyncio.sleep(0.6)
+    agent.stop()
+    await asyncio.gather(agent_task, return_exceptions=True)
+
+    history = await gw.get_session_history("sess_nudge")
+
+    # We expect:
+    # 1. System prompt (from create_session)
+    # 2. User Prompt ("Hello!")
+    # 3. Thought ("I thought about it...")
+    # 4. System nudge message ("[System Notification: Your previous response had empty content...]")
+    # 5. Final Assistant Response ("Hello! Here is the reply after nudge.")
+    assert len(history) >= 5
+
+    nudge_msgs = [m for m in history if m.sender == "System" and "empty content" in m.content]
+    assert len(nudge_msgs) == 1
+    assert nudge_msgs[0].role == "system"
+
+    final_msgs = [m for m in history if m.role == "assistant" and m.content == "Hello! Here is the reply after nudge."]
+    assert len(final_msgs) == 1
+

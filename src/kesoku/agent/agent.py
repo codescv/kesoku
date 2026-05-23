@@ -190,6 +190,7 @@ class SessionWorker:
         turn_tokens = 0
         last_context_tokens = 0
 
+        nudged = False
         try:
             while self.running:
                 # Check-in before atomic action (Thought Interruption)
@@ -333,7 +334,34 @@ class SessionWorker:
 
                     final_content = res.content
                     if not final_content:
-                        final_content = "Processed request successfully."
+                        if not nudged:
+                            logger.info(
+                                f"LLM returned empty content in session {self.session_id}. "
+                                f"Nudging model."
+                            )
+                            nudge_msg = Message(
+                                session_id=self.session_id,
+                                chatbot_id=chatbot_id,
+                                channel_id=channel_id,
+                                sender="System",
+                                role=ROLE_SYSTEM,
+                                type=TYPE_TEXT,
+                                content=(
+                                    "Your previous response had empty content. Please provide a final "
+                                    "user-facing response summarizing your results/actions."
+                                ),
+                                status=STATUS_RESPONDED,
+                                parent_id=current_msg.id,
+                            )
+                            await self.gateway.post(nudge_msg)
+                            nudged = True
+                            continue
+                        else:
+                            logger.warning(
+                                f"LLM returned empty content again after nudge in session "
+                                f"{self.session_id}. Using fallback."
+                            )
+                            final_content = "Processed request successfully."
 
                     final_msg = Message(
                         session_id=self.session_id,
@@ -457,7 +485,7 @@ class SessionWorker:
                 system_msg = m
                 break
 
-        conv_msgs = [m for m in raw_history if (not system_msg or m.id != system_msg.id) and m.role != ROLE_SYSTEM]
+        conv_msgs = [m for m in raw_history if (not system_msg or m.id != system_msg.id)]
 
         # 3. Groups messages into complete logical turns (User prompt -> ... -> before next user prompt).
         turns: list[list[Message]] = []

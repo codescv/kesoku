@@ -173,7 +173,10 @@ class WechatConfig(BaseModel):
     account_id: str | None = Field(default=None, description="WeChat/iLink bot account ID")
     token: str | None = Field(default=None, description="WeChat/iLink bot auth token")
     base_url: str = Field(default="https://ilinkai.weixin.qq.com", description="WeChat/iLink API base URL")
-    sys_prompt_file: str | None = Field(default=None, description="Path to custom system prompt file for WeChat relative to agent working directory")
+    sys_prompt_file: str | None = Field(
+        default=None,
+        description="Path to custom system prompt file for WeChat relative to agent working directory",
+    )
 
 
 class KesokuConfig(BaseModel):

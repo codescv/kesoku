@@ -711,7 +711,9 @@ async def test_handle_message_special_message_truncation(mock_config: KesokuConf
 
 
 @pytest.mark.asyncio
-async def test_handle_message_individual_tool_call_edit_truncation(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+async def test_handle_message_individual_tool_call_edit_truncation(
+    mock_config: KesokuConfig, mock_gateway: MagicMock
+) -> None:
     """Test that individual tool call message edits exceeding 2000 characters are truncated."""
     from kesoku.constants import ROLE_TOOL, TYPE_TOOL_RESULT
 
