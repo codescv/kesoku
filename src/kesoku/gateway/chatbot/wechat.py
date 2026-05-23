@@ -167,14 +167,34 @@ def _is_stale_session_ret(
 
 
 class ContextTokenStore:
-    """In-memory cache for WeChat ``context_token`` keyed by account + peer."""
+    """Persistent or in-memory cache for WeChat ``context_token`` keyed by account + peer."""
 
-    def __init__(self) -> None:
+    def __init__(self, persist_path: str | None = None) -> None:
         """Initialize ContextTokenStore cache."""
         self._cache: dict[str, str] = {}
+        self._persist_path = persist_path
+        self._load()
 
     def _key(self, account_id: str, user_id: str) -> str:
         return f"{account_id}:{user_id}"
+
+    def _load(self) -> None:
+        if not self._persist_path or not os.path.exists(self._persist_path):
+            return
+        try:
+            with open(self._persist_path, "r", encoding="utf-8") as f:
+                self._cache = json.load(f)
+        except Exception as e:
+            logger.warning("WeChat: Failed to load persistent context tokens: %s", e)
+
+    def _save(self) -> None:
+        if not self._persist_path:
+            return
+        try:
+            with open(self._persist_path, "w", encoding="utf-8") as f:
+                json.dump(self._cache, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning("WeChat: Failed to save persistent context tokens: %s", e)
 
     def get(self, account_id: str, user_id: str) -> str | None:
         """Get context token for the given user ID."""
@@ -183,6 +203,8 @@ class ContextTokenStore:
     def set(self, account_id: str, user_id: str, token: str) -> None:
         """Store context token for the given user ID."""
         self._cache[self._key(account_id, user_id)] = token
+        self._save()
+
 
 
 class TypingTicketCache:
@@ -1008,7 +1030,10 @@ class WechatChatbot(Chatbot):
         self._poll_session: aiohttp.ClientSession | None = None
         self._send_session: aiohttp.ClientSession | None = None
 
-        self._token_store = ContextTokenStore()
+        persist_path = None
+        if cfg.agent_working_dir:
+            persist_path = os.path.join(cfg.agent_working_dir, ".wechat_context_tokens.json")
+        self._token_store = ContextTokenStore(persist_path)
         self._typing_cache = TypingTicketCache()
         self._dedup = MessageDeduplicator()
 
@@ -1378,7 +1403,7 @@ You are interacting with the user via WeChat (Weixin).
 
         context_token = str(message.get("context_token") or "").strip()
         if context_token:
-            self._token_store.set(self._account_id, sender_id, context_token)
+            self._token_store.set(self._account_id, effective_chat_id, context_token)
         asyncio.create_task(
             self._maybe_fetch_typing_ticket(sender_id, context_token or None)
         )
