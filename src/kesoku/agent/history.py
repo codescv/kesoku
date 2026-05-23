@@ -64,15 +64,16 @@ async def build_clean_history(
 ) -> list[Message]:
     """Retrieve, clean up, and format the conversational history for the LLM.
 
-    Resolves orphaned tool calls, handles initial turns pinning, applies priority-based turn dropping,
-    recovers loaded skills, and slides the turn window.
+    Resolves orphaned tool calls, deduplicates duplicate interrupted tool results, handles initial turns
+    pinning, applies priority-based turn dropping, recovers loaded skills, and slides the turn window.
 
     Example Turn-Based Truncation for 100 Turns (max_turns=30, pin_initial_turns=3, pin_recent_turns=10):
     - System Prompt (kept at history[0])
-    - Pinned initial Turns 1, 2, and 3 (retained in full)
-    - Pinned recovered skill Turns (e.g., Turn 5 that loaded 'role-playing', recovered in full)
-    - Candidate Turns 74 to 90 (stripped of thoughts and resolved tools, keeping only user/assistant text)
-    - Candidate Turns 91 to 100 (kept in 100% full execution detail: prompts, thoughts, tool calls/results)
+    - Pinned initial Turns 1, 2, and 3 (retains user, assistant, system, and all tool calls/results; thoughts are dropped)
+    - Pinned recovered skill Turns (e.g., Turn 5 that loaded 'role-playing', recovered in full, use_skill not serialized)
+    - Candidate Turns 74 to 89 (drops thoughts, drops resolved intermediate tool calls/results; keeps user/assistant/system text)
+    - Completed Recent Turns 90 to 98 (retains user, assistant, system, and all tool calls/results; thoughts are dropped)
+    - Absolute Latest Turn 99 (kept in 100% full execution detail: prompts, thoughts, tool calls/results)
 
     Args:
         gateway: Gateway instance to interact with storage.
@@ -176,12 +177,33 @@ async def build_clean_history(
         is_latest = (idx == len(turns) - 1)
         is_recent = (idx >= len(turns) - pin_recent_turns)
 
-        if is_latest:
-            # Latest turn: full details
-            cleaned_turns.append(turn)
-            continue
-
         dropped_ids = set()
+
+        # Deduplicate duplicate/orphaned interrupted tool results for the same tool call
+        # If a tool call has both an interrupted result and a valid result, drop the interrupted one.
+        tc_results = {}
+        for m in turn:
+            if m.type == TYPE_TOOL_RESULT and m.parent_id:
+                tc_results.setdefault(m.parent_id, []).append(m)
+
+        for parent_id, results in tc_results.items():
+            if len(results) > 1:
+                interrupted_msg = None
+                has_valid_result = False
+                for r in results:
+                    if r.metadata.get("tool_error") == "Tool execution was interrupted due to service restart.":
+                        interrupted_msg = r
+                    else:
+                        has_valid_result = True
+                
+                if interrupted_msg and has_valid_result:
+                    dropped_ids.add(interrupted_msg.id)
+
+        if is_latest:
+            # Latest turn: full details (retains all details but drops duplicate interrupted tool results)
+            clean_turn = [m for m in turn if m.id not in dropped_ids]
+            cleaned_turns.append(clean_turn)
+            continue
         if is_pinned or is_recent:
             # Pinned and recent turns: keep user, assistant, system, and all tool messages (serialize if needed).
             # Thoughts must be dropped (thoughts: only in absolute latest turn).
