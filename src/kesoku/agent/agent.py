@@ -685,16 +685,17 @@ class SessionWorker:
                             if msg.metadata.get("tool_name") == "use_skill":
                                 continue
                             raw_output = msg.metadata.get("tool_result") or msg.metadata.get("tool_error") or msg.content
-                            file_path = os.path.join(staging_dir, f"tool_output_{msg.id}.txt")
-                            if not os.path.exists(file_path):
-                                with open(file_path, "w", encoding="utf-8") as f:
-                                    f.write(raw_output)
-                            
-                            msg.content = f"tool output in {file_path}"
-                            if "tool_result" in msg.metadata:
-                                msg.metadata["tool_result"] = f"tool output in {file_path}"
-                            if "tool_error" in msg.metadata:
-                                msg.metadata["tool_error"] = f"tool output in {file_path}"
+                            if len(raw_output) > cfg.serialize_tool_results_threshold:
+                                file_path = os.path.join(staging_dir, f"tool_output_{msg.id}.txt")
+                                if not os.path.exists(file_path):
+                                    with open(file_path, "w", encoding="utf-8") as f:
+                                        f.write(raw_output)
+                                
+                                msg.content = f"tool output in {file_path}"
+                                if "tool_result" in msg.metadata:
+                                    msg.metadata["tool_result"] = f"tool output in {file_path}"
+                                if "tool_error" in msg.metadata:
+                                    msg.metadata["tool_error"] = f"tool output in {file_path}"
 
                 # Optimize active turn
                 if cfg.active_turn_keep_tool_results_for_k_recent_calls >= 0:
@@ -709,16 +710,17 @@ class SessionWorker:
                                 if msg.metadata.get("tool_name") == "use_skill":
                                     continue
                                 raw_output = msg.metadata.get("tool_result") or msg.metadata.get("tool_error") or msg.content
-                                file_path = os.path.join(staging_dir, f"tool_output_{msg.id}.txt")
-                                if not os.path.exists(file_path):
-                                    with open(file_path, "w", encoding="utf-8") as f:
-                                        f.write(raw_output)
-                                
-                                msg.content = f"tool output in {file_path}"
-                                if "tool_result" in msg.metadata:
-                                    msg.metadata["tool_result"] = f"tool output in {file_path}"
-                                if "tool_error" in msg.metadata:
-                                    msg.metadata["tool_error"] = f"tool output in {file_path}"
+                                if len(raw_output) > cfg.serialize_tool_results_threshold:
+                                    file_path = os.path.join(staging_dir, f"tool_output_{msg.id}.txt")
+                                    if not os.path.exists(file_path):
+                                        with open(file_path, "w", encoding="utf-8") as f:
+                                            f.write(raw_output)
+                                    
+                                    msg.content = f"tool output in {file_path}"
+                                    if "tool_result" in msg.metadata:
+                                        msg.metadata["tool_result"] = f"tool output in {file_path}"
+                                    if "tool_error" in msg.metadata:
+                                        msg.metadata["tool_error"] = f"tool output in {file_path}"
 
         return final_history
 

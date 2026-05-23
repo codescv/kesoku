@@ -880,6 +880,7 @@ async def test_context_optimization_tool_serialization(temp_db: str, tmp_path: A
         cfg.workspace.sessions_dir = str(tmp_path / "sessions")
         cfg.agent.history.active_turn_keep_tool_results_for_k_recent_calls = 1
         cfg.agent.history.serialize_historical_tool_results = True
+        cfg.agent.history.serialize_tool_results_threshold = 200
         mock_get_config.return_value = cfg
 
         session = await gw.create_session("sess_opt", title="Optimization Session")
@@ -898,11 +899,12 @@ async def test_context_optimization_tool_serialization(temp_db: str, tmp_path: A
             parent_id=user1.id, metadata={"tool_name": "dummy_tool"}
         )
         await gw.post(tc1)
-        # 3. Tool result (should be serialized because it's historical and not use_skill)
+        # 3. Tool result (long content > 200: should be serialized because it's historical and not use_skill)
+        long_content_1 = "Dummy tool result content " * 10
         tr1 = Message(
             session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="dummy_tool",
-            role="tool", type="tool_result", content="Dummy tool result content", status="responded",
-            parent_id=tc1.id, metadata={"tool_name": "dummy_tool", "tool_result": "Dummy tool result content"}
+            role="tool", type="tool_result", content=long_content_1, status="responded",
+            parent_id=tc1.id, metadata={"tool_name": "dummy_tool", "tool_result": long_content_1}
         )
         await gw.post(tr1)
         # 4. Pinned skill tool call and result (should NOT be serialized because it's use_skill)
@@ -918,7 +920,20 @@ async def test_context_optimization_tool_serialization(temp_db: str, tmp_path: A
             parent_id=tc_skill.id, metadata={"tool_name": "use_skill", "tool_result": "Skill loaded content"}
         )
         await gw.post(tr_skill)
-        # 5. Assistant response
+        # 5. Short tool result (should NOT be serialized because length <= 200)
+        tc_short = Message(
+            session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
+            role="tool", type="tool_call", content="Calling short tool", status="responded",
+            parent_id=user1.id, metadata={"tool_name": "short_tool"}
+        )
+        await gw.post(tc_short)
+        tr_short = Message(
+            session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="short_tool",
+            role="tool", type="tool_result", content="Short tool result content", status="responded",
+            parent_id=tc_short.id, metadata={"tool_name": "short_tool", "tool_result": "Short tool result content"}
+        )
+        await gw.post(tr_short)
+        # 6. Assistant response
         resp1 = Message(
             session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
             role="assistant", content="Response 1", status="responded"
@@ -932,17 +947,18 @@ async def test_context_optimization_tool_serialization(temp_db: str, tmp_path: A
             role="user", content="Turn 2 message", status="pending_agent"
         )
         await gw.post(user2)
-        # 2. LLM Call Batch 1 (Older active turn batch)
+        # 2. LLM Call Batch 1 (Older active turn batch, long content > 200: should be serialized)
         tc2_1 = Message(
             session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
             role="tool", type="tool_call", content="Calling tool 2.1", status="responded",
             parent_id=user2.id, metadata={"tool_name": "tool2_1"}
         )
         await gw.post(tc2_1)
+        long_content_2_1 = "Tool 2.1 result content " * 15
         tr2_1 = Message(
             session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="tool2_1",
-            role="tool", type="tool_result", content="Tool 2.1 result content", status="responded",
-            parent_id=tc2_1.id, metadata={"tool_name": "tool2_1", "tool_result": "Tool 2.1 result content"}
+            role="tool", type="tool_result", content=long_content_2_1, status="responded",
+            parent_id=tc2_1.id, metadata={"tool_name": "tool2_1", "tool_result": long_content_2_1}
         )
         await gw.post(tr2_1)
         
@@ -971,29 +987,34 @@ async def test_context_optimization_tool_serialization(temp_db: str, tmp_path: A
 
         history = await worker._build_clean_history(max_turns=10, pin_initial_turns=2, pin_recent_turns=2)
         
-        # 1. Check that historical tr1 was serialized
+        # 1. Check that historical long tr1 was serialized
         tr1_msg = next(m for m in history if m.id == tr1.id)
         assert "tool output in" in tr1_msg.content
         assert "tool output in" in tr1_msg.metadata["tool_result"]
         file_path1 = tr1_msg.content.split("tool output in ")[1]
         assert os.path.exists(file_path1)
         with open(file_path1, encoding="utf-8") as f:
-            assert f.read() == "Dummy tool result content"
+            assert f.read() == long_content_1
 
         # 2. Check that historical tr_skill was NOT serialized (preserved use_skill)
         tr_skill_msg = next(m for m in history if m.id == tr_skill.id)
         assert tr_skill_msg.content == "Skill loaded content"
         assert tr_skill_msg.metadata["tool_result"] == "Skill loaded content"
 
-        # 3. Check that active turn tr2_1 (older batch) was serialized
+        # 3. Check that historical short tool result tr_short was NOT serialized
+        tr_short_msg = next(m for m in history if m.id == tr_short.id)
+        assert tr_short_msg.content == "Short tool result content"
+        assert tr_short_msg.metadata["tool_result"] == "Short tool result content"
+
+        # 4. Check that active turn long tr2_1 (older batch) was serialized
         tr2_1_msg = next(m for m in history if m.id == tr2_1.id)
         assert "tool output in" in tr2_1_msg.content
         file_path2_1 = tr2_1_msg.content.split("tool output in ")[1]
         assert os.path.exists(file_path2_1)
         with open(file_path2_1, encoding="utf-8") as f:
-            assert f.read() == "Tool 2.1 result content"
+            assert f.read() == long_content_2_1
 
-        # 4. Check that active turn tr2_2 (latest batch, K=1) was NOT serialized (kept in full detail)
+        # 5. Check that active turn tr2_2 (latest batch, K=1) was NOT serialized (kept in full detail)
         tr2_2_msg = next(m for m in history if m.id == tr2_2.id)
         assert tr2_2_msg.content == "Tool 2.2 result content"
         assert tr2_2_msg.metadata["tool_result"] == "Tool 2.2 result content"

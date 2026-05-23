@@ -69,6 +69,10 @@ class AgentHistoryConfig(BaseModel):
         default=True,
         description="Whether to serialize historical turn tool results to files and replace with pointer",
     )
+    serialize_tool_results_threshold: int = Field(
+        default=200,
+        description="Minimum length of tool output (in characters) to trigger serialization to files",
+    )
 
 
 class AgentConfig(BaseModel):
