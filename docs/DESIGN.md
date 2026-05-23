@@ -57,6 +57,17 @@ To handle multiple users and user interruptions gracefully, Kesoku implements an
    - **Thought Interruption**: If a new user message arrives in the queue while the LLM is generating or before a tool is invoked, the worker pivots immediately to the new message, updating previous pending actions as `interrupted`.
 4. **Turn-Based Thread Sorting**: To perfectly preserve interrupted branches and asynchronous tool outputs without temporal interleaving, session history is ordered logically by turn root timestamp: `(root_message_timestamp, message_timestamp)`.
 
+## LLM Turn Logging
+To facilitate auditing, debugging, and trajectory evaluation, Kesoku logs every raw LLM inference turn:
+- **Session Staging Directory**: Logs are saved in the session's dedicated workspace/staging directory on disk.
+- **YAML Format**: To be both human-readable and programmatically parseable, the logs are serialized as `.log.yaml` files.
+- **Sequential Naming**: Each inference turn is saved as `llm-turn-{idx}.log.yaml`, where `{idx}` is a sequential integer starting from 1. The turn index is dynamically calculated at runtime by scanning the staging directory, making it robust across service restarts.
+- **Rich Contents**: Each turn log captures:
+  - **Metadata**: Unix and ISO timestamps, session ID, turn index, and active LLM provider name.
+  - **History**: The complete, cleaned, and formatted conversational history sent to the LLM.
+  - **Tools**: Detailed descriptions, parameter list, and types for all tools made available to the LLM.
+  - **Response**: The LLM's raw text output, thoughts, tool calls, and token metrics.
+
 ## Message Data Model & Native Tool Calling
 All message ingestion and routing is unified through `Gateway.post()`. Every message in Kesoku follows strict role, type, status, and sender conventions as detailed in [Message and Lifecycle Specification](MESSAGE_AND_LIFECYCLE.md):
 - **Roles**: `user`, `assistant`, `tool`, `system`

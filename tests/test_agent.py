@@ -779,3 +779,91 @@ async def test_agent_empty_response_nudge(temp_db: str) -> None:
     final_msgs = [m for m in history if m.role == "assistant" and m.content == "Hello! Here is the reply after nudge."]
     assert len(final_msgs) == 1
 
+
+@pytest.mark.asyncio
+async def test_llm_turn_logging(temp_db: str, tmp_path: Any) -> None:
+    """Verify that raw LLM turns are logged to the session staging directory as YAML files."""
+    import os
+
+    import yaml
+
+    DatabaseManager(temp_db).init_tables()
+    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    reg = ToolRegistry()
+
+    @reg.register
+    def dummy_calculator(expression: str, context: Any = None) -> str:
+        """Perform basic calculations."""
+        return "4.0"
+
+    # Configure workspaces directory to temp_path / "sessions"
+    with patch("kesoku.agent.agent.get_config") as mock_get_config:
+        cfg = KesokuConfig()
+        cfg.workspace.db_path = temp_db
+        cfg.workspace.sessions_dir = str(tmp_path / "sessions")
+        mock_get_config.return_value = cfg
+
+        # Create a session and post a user message
+        session = await gw.create_session("sess_log", title="Logging Session")
+        user_msg = Message(
+            session_id="sess_log",
+            chatbot_id="cli",
+            channel_id="ch1",
+            sender="u1",
+            role="user",
+            type="text",
+            content="Do dummy task",
+            status="pending_agent",
+        )
+        await gw.post(user_msg)
+
+        # Mock LLM that returns a tool call
+        mock_tools = [
+            ToolCallRequest(name="dummy_calculator", arguments={"expression": "dummy"}),
+        ]
+        llm = MockLLM(mock_tools=mock_tools)
+        agent = Agent(gw, llm, reg)
+
+        # Start agent loop to process the turn
+        agent_task = asyncio.create_task(agent.start())
+        await asyncio.sleep(0.5)
+        agent.stop()
+        await asyncio.gather(agent_task, return_exceptions=True)
+
+        # Construct the expected session staging directory path
+        staging_dir = os.path.join(cfg.workspace.sessions_dir, session.workspace_name)
+        assert os.path.exists(staging_dir)  # noqa: ASYNC240
+
+        # Verify that llm-turn-1.log.yaml exists
+        log_path = os.path.join(staging_dir, "llm-turn-1.log.yaml")
+        assert os.path.exists(log_path)  # noqa: ASYNC240
+
+        # Load and verify the contents of the log file
+        with open(log_path, encoding="utf-8") as f:  # noqa: ASYNC230
+            log_data = yaml.safe_load(f)
+
+        assert log_data["metadata"]["session_id"] == "sess_log"
+        assert log_data["metadata"]["turn_index"] == 1
+        assert log_data["metadata"]["llm_provider"] == "MockLLM"
+
+        # Verify history serialization
+        history = log_data["history"]
+        assert len(history) >= 2
+        assert history[0]["role"] == "system"
+        assert history[1]["role"] == "user"
+        assert history[1]["content"] == "Do dummy task"
+
+        # Verify tools serialization
+        tools = log_data["tools"]
+        assert len(tools) >= 1
+        dummy_tool = next(t for t in tools if t["name"] == "dummy_calculator")
+        assert dummy_tool["description"] == "Perform basic calculations."
+        assert "expression" in dummy_tool["parameters"]
+
+        # Verify response serialization
+        response = log_data["response"]
+        assert len(response["tool_calls"]) == 1
+        assert response["tool_calls"][0]["name"] == "dummy_calculator"
+        assert response["tool_calls"][0]["arguments"] == {"expression": "dummy"}
+
+
