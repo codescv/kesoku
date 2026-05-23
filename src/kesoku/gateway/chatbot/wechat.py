@@ -158,9 +158,7 @@ def _headers(token: str | None, body: str) -> dict[str, str]:
     return headers
 
 
-def _is_stale_session_ret(
-    ret: int | None, errcode: int | None, errmsg: str | None
-) -> bool:
+def _is_stale_session_ret(ret: int | None, errcode: int | None, errmsg: str | None) -> bool:
     if ret != RATE_LIMIT_ERRCODE and errcode != RATE_LIMIT_ERRCODE:
         return False
     return (errmsg or "").lower() == "unknown error"
@@ -205,6 +203,10 @@ class ContextTokenStore:
         self._cache[self._key(account_id, user_id)] = token
         self._save()
 
+    def get_all_channels(self, account_id: str) -> list[str]:
+        """Get all channel IDs (user IDs) associated with this account ID."""
+        prefix = f"{account_id}:"
+        return [k[len(prefix) :] for k in self._cache.keys() if k.startswith(prefix)]
 
 
 class TypingTicketCache:
@@ -279,10 +281,7 @@ def _guess_chat_type(message: dict[str, Any], account_id: str) -> tuple[str, str
     room_id = str(message.get("room_id") or message.get("chat_room_id") or "").strip()
     to_user_id = str(message.get("to_user_id") or "").strip()
     is_group = bool(room_id) or (
-        to_user_id
-        and account_id
-        and to_user_id != account_id
-        and message.get("msg_type") == 1
+        to_user_id and account_id and to_user_id != account_id and message.get("msg_type") == 1
     )
     if is_group:
         return "group", room_id or to_user_id or str(message.get("from_user_id") or "")
@@ -465,18 +464,14 @@ async def _upload_ciphertext(
 ) -> str:
     async def _do_upload() -> str:
         headers = {"Content-Type": "application/octet-stream"}
-        async with session.post(
-            upload_url, data=ciphertext, headers=headers
-        ) as response:
+        async with session.post(upload_url, data=ciphertext, headers=headers) as response:
             if response.status == 200:
                 encrypted_param = response.headers.get("x-encrypted-param")
                 if encrypted_param:
                     await response.read()
                     return encrypted_param
                 raw = await response.text()
-                raise RuntimeError(
-                    f"CDN upload missing x-encrypted-param header: {raw[:200]}"
-                )
+                raise RuntimeError(f"CDN upload missing x-encrypted-param header: {raw[:200]}")
             raw = await response.text()
             raise RuntimeError(f"CDN upload HTTP {response.status}: {raw[:200]}")
 
@@ -519,13 +514,9 @@ def _assert_weixin_cdn_url(url: str) -> None:
         raise ValueError(f"Unparseable media URL: {url!r}") from exc
 
     if scheme not in {"http", "https"}:
-        raise ValueError(
-            f"Media URL has disallowed scheme {scheme!r}; only http/https are permitted."
-        )
+        raise ValueError(f"Media URL has disallowed scheme {scheme!r}; only http/https are permitted.")
     if host not in _WEIXIN_CDN_ALLOWLIST:
-        raise ValueError(
-            f"Media URL host {host!r} is not in the WeChat CDN allowlist. Refusing to fetch."
-        )
+        raise ValueError(f"Media URL host {host!r} is not in the WeChat CDN allowlist. Refusing to fetch.")
 
 
 def _media_reference(item: dict[str, Any], key: str) -> dict[str, Any]:
@@ -549,9 +540,7 @@ async def _download_and_decrypt_media(
         )
     elif full_url:
         _assert_weixin_cdn_url(full_url)
-        raw = await _download_bytes(
-            session, url=full_url, timeout_seconds=timeout_seconds
-        )
+        raw = await _download_bytes(session, url=full_url, timeout_seconds=timeout_seconds)
     else:
         raise RuntimeError("media item had neither encrypt_query_param nor full_url")
     if aes_key_b64:
@@ -826,9 +815,7 @@ def _pack_markdown_blocks_for_weixin(content: str, max_length: int) -> list[str]
     return packed
 
 
-def _split_text_for_weixin_delivery(
-    content: str, max_length: int, split_per_line: bool = False
-) -> list[str]:
+def _split_text_for_weixin_delivery(content: str, max_length: int, split_per_line: bool = False) -> list[str]:
     if not content:
         return []
     if split_per_line:
@@ -990,9 +977,7 @@ async def qr_login(
                 baseurl = str(status_resp.get("baseurl") or ILINK_BASE_URL)
                 user_id = str(status_resp.get("ilink_user_id") or "")
                 if not account_id or not token:
-                    logger.error(
-                        "weixin: QR confirmed but credential payload incomplete"
-                    )
+                    logger.error("weixin: QR confirmed but credential payload incomplete")
                     return None
                 print(f"\n微信连接成功，account_id={account_id}")
                 return {
@@ -1157,9 +1142,7 @@ You are interacting with the user via WeChat (Weixin).
                     exc,
                 )
                 await asyncio.sleep(
-                    BACKOFF_DELAY_SECONDS
-                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES
-                    else RETRY_DELAY_SECONDS
+                    BACKOFF_DELAY_SECONDS if consecutive_failures >= MAX_CONSECUTIVE_FAILURES else RETRY_DELAY_SECONDS
                 )
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                     consecutive_failures = 0
@@ -1192,12 +1175,14 @@ You are interacting with the user via WeChat (Weixin).
             # Resolve kesoku binary path
             import shutil
             import sys
+
             executable_dir = os.path.dirname(sys.executable)
             kesoku_bin = os.path.join(executable_dir, "kesoku")
             if not os.path.exists(kesoku_bin):  # noqa: ASYNC240
                 kesoku_bin = shutil.which("kesoku") or "kesoku"
 
             import subprocess
+
             cmd = [kesoku_bin, "service", "restart"]
             service_user = os.environ.get("KESOKU_SERVICE_USER", "true") == "true"
             if service_user:
@@ -1253,8 +1238,10 @@ You are interacting with the user via WeChat (Weixin).
 
                 session_turns = len([m for m in history if m.role == ROLE_USER])
                 context_tokens = metrics.get("context_tokens", 0) if metrics else 0
-                turn_tool_calls = metrics.get("turn_tool_calls", 0) if metrics else len(
-                    [m for m in history if m.role == ROLE_TOOL and m.type == TYPE_TOOL_CALL]
+                turn_tool_calls = (
+                    metrics.get("turn_tool_calls", 0)
+                    if metrics
+                    else len([m for m in history if m.role == ROLE_TOOL and m.type == TYPE_TOOL_CALL])
                 )
                 turn_tokens = metrics.get("turn_tokens", 0) if metrics else 0
                 turn_time = metrics.get("turn_time", 0.0) if metrics else 0.0
@@ -1303,11 +1290,38 @@ You are interacting with the user via WeChat (Weixin).
 
     async def trigger_cronjob(
         self,
-        channel_id: str,
+        channel_id: str | None,
         prompt_content: str,
         mention_user_id: str | None = None,
     ) -> None:
         """Trigger a scheduled cronjob in the specified WeChat chat/room."""
+        if not channel_id:
+            channels = self._token_store.get_all_channels(self._account_id)
+            if not channels:
+                logger.warning(
+                    "WeChat: Cannot trigger cronjob because no active channel/user is saved in the context file."
+                )
+                return
+            for chan in channels:
+                await self._trigger_cronjob_for_channel(
+                    channel_id=chan,
+                    prompt_content=prompt_content,
+                    mention_user_id=mention_user_id,
+                )
+        else:
+            await self._trigger_cronjob_for_channel(
+                channel_id=channel_id,
+                prompt_content=prompt_content,
+                mention_user_id=mention_user_id,
+            )
+
+    async def _trigger_cronjob_for_channel(
+        self,
+        channel_id: str,
+        prompt_content: str,
+        mention_user_id: str | None = None,
+    ) -> None:
+        """Helper to trigger cronjob in a single specific channel."""
         session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
         if not session:
             title = f"WeChat Scheduled Job {channel_id}"
@@ -1404,15 +1418,11 @@ You are interacting with the user via WeChat (Weixin).
         context_token = str(message.get("context_token") or "").strip()
         if context_token:
             self._token_store.set(self._account_id, effective_chat_id, context_token)
-        asyncio.create_task(
-            self._maybe_fetch_typing_ticket(sender_id, context_token or None)
-        )
+        asyncio.create_task(self._maybe_fetch_typing_ticket(sender_id, context_token or None))
 
         # Resolve or create Kesoku session mapped to the thread/space context
         channel_id = effective_chat_id
-        session = await self.gateway.get_session_by_channel(
-            self.chatbot_id, channel_id
-        )
+        session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
         if not session:
             title = f"WeChat Session: {text[:30]}"
             custom_prompt = self._build_wechat_custom_prompt(channel_id, chat_type)
@@ -1428,13 +1438,9 @@ You are interacting with the user via WeChat (Weixin).
                         with open(sys_file, encoding="utf-8") as f:  # noqa: ASYNC230
                             custom_sys_prompt = f.read().strip()
                         if custom_sys_prompt:
-                            custom_prompt = (
-                                f"{custom_prompt}\n\n{custom_sys_prompt}"
-                            )
+                            custom_prompt = f"{custom_prompt}\n\n{custom_sys_prompt}"
                     except Exception as e:
-                        logger.error(
-                            f"WeChat: Failed to read system prompt file {sys_file}: {e}"
-                        )
+                        logger.error(f"WeChat: Failed to read system prompt file {sys_file}: {e}")
 
             session = await self.gateway.create_session(
                 session_id=None,
@@ -1446,9 +1452,7 @@ You are interacting with the user via WeChat (Weixin).
 
         attachments_metadata = []
         session_staging_dir = os.path.realpath(  # noqa: ASYNC240
-            os.path.join(
-                get_config().workspace.sessions_dir, session.workspace_name
-            )
+            os.path.join(get_config().workspace.sessions_dir, session.workspace_name)
         )
         os.makedirs(session_staging_dir, exist_ok=True)
 
@@ -1463,9 +1467,7 @@ You are interacting with the user via WeChat (Weixin).
                 media = _media_reference(item, "image_item")
                 aeskey = (item.get("image_item") or {}).get("aeskey")
                 aes_key_b64 = (
-                    base64.b64encode(bytes.fromhex(str(aeskey))).decode("ascii")
-                    if aeskey
-                    else media.get("aes_key")
+                    base64.b64encode(bytes.fromhex(str(aeskey))).decode("ascii") if aeskey else media.get("aes_key")
                 )
                 try:
                     data = await _download_and_decrypt_media(
@@ -1534,17 +1536,17 @@ You are interacting with the user via WeChat (Weixin).
 
             if data and filename:
                 # Sanitize filename
-                safe_filename = "".join(
-                    c for c in filename if c.isalnum() or c in "._-"
-                )
+                safe_filename = "".join(c for c in filename if c.isalnum() or c in "._-")
                 filepath = os.path.join(session_staging_dir, safe_filename)
                 with open(filepath, "wb") as f:  # noqa: ASYNC230
                     f.write(data)
-                attachments_metadata.append({
-                    "path": filepath,
-                    "mime_type": mime,
-                    "filename": filename,
-                })
+                attachments_metadata.append(
+                    {
+                        "path": filepath,
+                        "mime_type": mime,
+                        "filename": filename,
+                    }
+                )
 
         if not text and not attachments_metadata:
             return
@@ -1552,8 +1554,7 @@ You are interacting with the user via WeChat (Weixin).
         msg_content = text
         if attachments_metadata:
             files_str = "\n".join(
-                f"[Attachment: {a['filename']} ({a['mime_type']}) saved at {a['path']}]"
-                for a in attachments_metadata
+                f"[Attachment: {a['filename']} ({a['mime_type']}) saved at {a['path']}]" for a in attachments_metadata
             )
             if msg_content:
                 msg_content += f"\n\nAttachments:\n{files_str}"
@@ -1593,9 +1594,7 @@ You are interacting with the user via WeChat (Weixin).
             except Exception as e:
                 logger.debug("WeChat: typing start failed: %s", e)
 
-    async def _maybe_fetch_typing_ticket(
-        self, user_id: str, context_token: str | None
-    ) -> None:
+    async def _maybe_fetch_typing_ticket(self, user_id: str, context_token: str | None) -> None:
         if not self._poll_session or not self._token:
             return
         if self._typing_cache.get(user_id):
@@ -1652,12 +1651,8 @@ You are interacting with the user via WeChat (Weixin).
                 text_content = segment["content"]
                 if text_content.strip():
                     # Normalize markdown and lines for WeChat
-                    normalized_text = _wrap_copy_friendly_lines_for_weixin(
-                        _normalize_markdown_blocks(text_content)
-                    )
-                    chunks = _split_text_for_weixin_delivery(
-                        normalized_text, max_length=2000
-                    )
+                    normalized_text = _wrap_copy_friendly_lines_for_weixin(_normalize_markdown_blocks(text_content))
+                    chunks = _split_text_for_weixin_delivery(normalized_text, max_length=2000)
                     for chunk in chunks:
                         if chunk.strip():
                             client_id = f"kesoku-wechat-{uuid.uuid4().hex}"
@@ -1736,13 +1731,9 @@ You are interacting with the user via WeChat (Weixin).
         if upload_full_url:
             upload_url = upload_full_url
         elif upload_param:
-            upload_url = _cdn_upload_url(
-                WEIXIN_CDN_BASE_URL, upload_param, filekey
-            )
+            upload_url = _cdn_upload_url(WEIXIN_CDN_BASE_URL, upload_param, filekey)
         else:
-            raise RuntimeError(
-                f"WeChat: upload URL unavailable: {upload_response}"
-            )
+            raise RuntimeError(f"WeChat: upload URL unavailable: {upload_response}")
 
         encrypted_query_param = await _upload_ciphertext(
             self._send_session,
@@ -1750,9 +1741,7 @@ You are interacting with the user via WeChat (Weixin).
             upload_url=upload_url,
         )
 
-        aes_key_for_api = base64.b64encode(
-            aes_key.hex().encode("ascii")
-        ).decode("ascii")
+        aes_key_for_api = base64.b64encode(aes_key.hex().encode("ascii")).decode("ascii")
 
         media_item = {
             "media": {

@@ -206,8 +206,12 @@ class CronManager:
         prompt_path = job.get("prompt")
         mention_user_id = job.get("mention_user_id")
 
-        if not channel_id or not prompt_path:
-            logger.warning(f"Cronjob {job_idx} is missing channel_id or prompt field.")
+        if not prompt_path:
+            logger.warning(f"Cronjob {job_idx} is missing prompt field.")
+            return
+
+        if not channel_id and chatbot_id != "wechat":
+            logger.warning(f"Cronjob {job_idx} is missing channel_id field.")
             return
 
         bot = self.chatbots.get(chatbot_id)
@@ -237,12 +241,15 @@ class CronManager:
             logger.error(f"Failed to read prompt file for cronjob {job_idx}: {e}")
             return
 
-        logger.info(f"Triggering scheduled cronjob {job_idx} on chatbot '{chatbot_id}' in channel {channel_id}...")
+        logger.info(
+            f"Triggering scheduled cronjob {job_idx} on chatbot '{chatbot_id}' "
+            f"in channel {channel_id or 'auto-resolved'}..."
+        )
 
         try:
             if hasattr(bot, "trigger_cronjob"):
                 await bot.trigger_cronjob(
-                    channel_id=str(channel_id),
+                    channel_id=str(channel_id) if channel_id else None,
                     prompt_content=prompt_content,
                     mention_user_id=str(mention_user_id) if mention_user_id else None,
                 )
