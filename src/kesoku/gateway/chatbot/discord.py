@@ -34,6 +34,8 @@ from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
 
+DISCORD_MAX_CONTENT_LENGTH = 2000
+
 
 def _get_local_timezone_name() -> str:
     """Retrieve the local system timezone name (e.g., 'Asia/Shanghai')."""
@@ -522,6 +524,8 @@ class DiscordChatbot(Chatbot):
                         elif item["type"] == "system":
                             lines.append(f"⚙️ *System Message:* {item['content']}")
                     new_content = "\n".join(lines)
+                    if len(new_content) > DISCORD_MAX_CONTENT_LENGTH:
+                        new_content = new_content[:DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
 
                     discord_msg = self._turn_special_msg.get(session_id)
                     if discord_msg:
@@ -538,6 +542,8 @@ class DiscordChatbot(Chatbot):
                 try:
                     emoji = "❌" if message.metadata.get("tool_error") else "✅"
                     content = discord_msg.content.replace("⏳", emoji)
+                    if len(content) > DISCORD_MAX_CONTENT_LENGTH:
+                        content = content[:DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
                     await discord_msg.edit(content=content)
                 except Exception as ee:
                     logger.warning(f"Failed to edit tool call message in-place: {ee}")
@@ -627,6 +633,8 @@ class DiscordChatbot(Chatbot):
                 elif item["type"] == "system":
                     lines.append(f"⚙️ *System Message:* {item['content']}")
             new_content = "\n".join(lines)
+            if len(new_content) > DISCORD_MAX_CONTENT_LENGTH:
+                new_content = new_content[:DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
 
             if session_id in self._turn_special_msg:
                 discord_msg = self._turn_special_msg[session_id]
@@ -668,21 +676,21 @@ class DiscordChatbot(Chatbot):
                 text_content = segment["content"]
                 # Only send if the text chunk is not empty and contains non-whitespace characters
                 if text_content.strip():
-                    # Newline Chunking (<= 2000 chars) for Discord compatibility
+                    # Newline Chunking (<= DISCORD_MAX_CONTENT_LENGTH chars) for Discord compatibility
                     lines = text_content.splitlines(keepends=True)
                     current_chunk = ""
                     for line in lines:
-                        if len(line) > 2000:
+                        if len(line) > DISCORD_MAX_CONTENT_LENGTH:
                             if current_chunk:
                                 sent_msg = await channel.send(current_chunk)
                                 if is_special_message:
                                     self._intermediate_messages[message.channel_id].append(sent_msg)
                                 current_chunk = ""
-                            for i in range(0, len(line), 2000):
-                                sent_msg = await channel.send(line[i : i + 2000])
+                            for i in range(0, len(line), DISCORD_MAX_CONTENT_LENGTH):
+                                sent_msg = await channel.send(line[i : i + DISCORD_MAX_CONTENT_LENGTH])
                                 if is_special_message:
                                     self._intermediate_messages[message.channel_id].append(sent_msg)
-                        elif len(current_chunk) + len(line) > 2000:
+                        elif len(current_chunk) + len(line) > DISCORD_MAX_CONTENT_LENGTH:
                             sent_msg = await channel.send(current_chunk)
                             if is_special_message:
                                 self._intermediate_messages[message.channel_id].append(sent_msg)

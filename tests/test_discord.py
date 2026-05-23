@@ -646,6 +646,108 @@ async def test_handle_message_tool_result_in_place_edit(mock_config: KesokuConfi
 
 
 @pytest.mark.asyncio
+async def test_handle_message_special_message_truncation(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test that special messages exceeding 2000 characters are truncated with ' (omitted)'."""
+    from kesoku.constants import ROLE_ASSISTANT, TYPE_THOUGHT
+
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.Thread)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+
+            # Setup a mock header view & msg to avoid issues during initial special message handling
+            mock_header_msg = AsyncMock(spec=discord.Message)
+            mock_channel.send.return_value = mock_header_msg
+
+            # Create a massive thought message that will exceed 2000 characters
+            massive_content = "Thinking " + "A" * 2500
+            thought_msg = Message(
+                id="msg123",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_ASSISTANT,
+                type=TYPE_THOUGHT,
+                content=massive_content,
+            )
+
+            await bot.handle_message(thought_msg)
+
+            # On initial send, since it's special message and _turn_special_msg is empty,
+            # it should send a truncated message. Let's check what mock_channel.send was called with.
+            # Note that the first call is for the header view, the second call is the actual special message text.
+            assert mock_channel.send.call_count == 2
+            special_msg_sent = mock_channel.send.call_args_list[1][0][0]
+            assert len(special_msg_sent) == 2000
+            assert special_msg_sent.endswith(" (omitted)")
+
+            # Now, let's test in-place editing of special messages.
+            # Set the cached message
+            mock_special_msg = AsyncMock(spec=discord.Message)
+            bot._turn_special_msg["thread123"] = mock_special_msg
+
+            # Trigger another thought to cause an edit
+            another_thought = Message(
+                id="msg124",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_ASSISTANT,
+                type=TYPE_THOUGHT,
+                content="Thinking even more " + "B" * 2500,
+            )
+
+            await bot.handle_message(another_thought)
+
+            # The cached special message should be edited
+            mock_special_msg.edit.assert_called_once()
+            edited_content = mock_special_msg.edit.call_args[1]["content"]
+            assert len(edited_content) == 2000
+            assert edited_content.endswith(" (omitted)")
+
+
+@pytest.mark.asyncio
+async def test_handle_message_individual_tool_call_edit_truncation(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test that individual tool call message edits exceeding 2000 characters are truncated."""
+    from kesoku.constants import ROLE_TOOL, TYPE_TOOL_RESULT
+
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.Thread)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+
+            # Mock a sent tool call message that is extremely long
+            mock_discord_msg = AsyncMock(spec=discord.Message)
+            mock_discord_msg.content = "🛠️ **my_tool**: `" + "C" * 2000 + "` ⏳"
+            bot._sent_tool_calls["parent123"] = mock_discord_msg
+
+            result_msg = Message(
+                id="result123",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="my_tool",
+                role=ROLE_TOOL,
+                type=TYPE_TOOL_RESULT,
+                content="Result...",
+                parent_id="parent123",
+            )
+
+            await bot.handle_message(result_msg)
+
+            mock_discord_msg.edit.assert_called_once()
+            edited_content = mock_discord_msg.edit.call_args[1]["content"]
+            assert len(edited_content) == 2000
+            assert edited_content.endswith(" (omitted)")
+
+
+@pytest.mark.asyncio
 async def test_handle_message_with_voice_success(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test that a voice block successfully sends a native voice message via Discord API."""
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
