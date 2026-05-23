@@ -225,16 +225,17 @@ class SessionWorker:
                 )
 
                 # Log the raw LLM turn in a log file in the session staging directory
-                try:
-                    self._log_llm_turn(
-                        session_staging_dir=session_staging_dir,
-                        llm_provider=llm.__class__.__name__,
-                        history=history,
-                        tools=tools_list,
-                        response=res,
-                    )
-                except Exception as le:
-                    logger.error(f"Failed to log LLM turn: {le}", exc_info=True)
+                if cfg.agent.raw_llm_logs:
+                    try:
+                        self._log_llm_turn(
+                            session_staging_dir=session_staging_dir,
+                            llm_provider=llm.__class__.__name__,
+                            history=history,
+                            tools=tools_list,
+                            response=res,
+                        )
+                    except Exception as le:
+                        logger.error(f"Failed to log LLM turn: {le}", exc_info=True)
 
                 # Accumulate token metrics
                 if res.prompt_tokens:
@@ -310,9 +311,9 @@ class SessionWorker:
                                     missing_args.append(param.name)
                             if missing_args:
                                 raise ValueError(
-                                    f"Command too long! Split your command into smaller chunks!\n"
-                                    f"If you are writing a file, write at most 4000 characters per command!\n"
-                                    f"Note: only emit 1 tool call in your response because it's too long!"
+                                    "Command too long! Split your command into smaller chunks!\n"
+                                    "If you are writing a file, write at most 4000 characters per command!\n"
+                                    "Note: only emit 1 tool call in your response because it's too long!"
                                 )
 
                             if "context" in sig.parameters:
@@ -452,7 +453,7 @@ class SessionWorker:
         """Group tool result messages in the active turn by their corresponding LLM call."""
         # 1. Map each tool call id to its message
         tc_map = {m.id: m for m in turn_msgs if m.type == TYPE_TOOL_CALL}
-        
+
         # 2. Get all tool results sorted by parent tool call timestamp
         tr_msgs = [m for m in turn_msgs if m.type == TYPE_TOOL_RESULT]
         tr_msgs.sort(key=lambda m: tc_map[m.parent_id].timestamp if m.parent_id in tc_map else m.timestamp)
@@ -465,7 +466,7 @@ class SessionWorker:
         for tr in tr_msgs:
             parent_tc = tc_map.get(tr.parent_id)
             ts = parent_tc.timestamp if parent_tc else tr.timestamp
-            
+
             if last_ts is None:
                 current_batch.append(tr)
             elif ts - last_ts < 0.5:
@@ -670,10 +671,10 @@ class SessionWorker:
             session = await self.gateway.get_session(self.session_id)
             if session:
                 app_cfg = get_config()
-                staging_dir = os.path.realpath(
+                staging_dir = os.path.realpath(  # noqa: ASYNC240
                     os.path.join(app_cfg.workspace.sessions_dir, session.workspace_name)
                 )
-                os.makedirs(staging_dir, exist_ok=True)
+                os.makedirs(staging_dir, exist_ok=True)  # noqa: ASYNC240
 
                 historical_msgs = final_history[:last_user_idx]
                 active_msgs = final_history[last_user_idx:]
@@ -684,13 +685,17 @@ class SessionWorker:
                         if msg.type == TYPE_TOOL_RESULT:
                             if msg.metadata.get("tool_name") == "use_skill":
                                 continue
-                            raw_output = msg.metadata.get("tool_result") or msg.metadata.get("tool_error") or msg.content
+                            raw_output = (
+                                msg.metadata.get("tool_result")
+                                or msg.metadata.get("tool_error")
+                                or msg.content
+                            )
                             if len(raw_output) > cfg.serialize_tool_results_threshold:
                                 file_path = os.path.join(staging_dir, f"tool_output_{msg.id}.txt")
-                                if not os.path.exists(file_path):
-                                    with open(file_path, "w", encoding="utf-8") as f:
+                                if not os.path.exists(file_path):  # noqa: ASYNC240
+                                    with open(file_path, "w", encoding="utf-8") as f:  # noqa: ASYNC230
                                         f.write(raw_output)
-                                
+
                                 msg.content = f"tool output in {file_path}"
                                 if "tool_result" in msg.metadata:
                                     msg.metadata["tool_result"] = f"tool output in {file_path}"
@@ -709,13 +714,17 @@ class SessionWorker:
                             for msg in batch:
                                 if msg.metadata.get("tool_name") == "use_skill":
                                     continue
-                                raw_output = msg.metadata.get("tool_result") or msg.metadata.get("tool_error") or msg.content
+                                raw_output = (
+                                    msg.metadata.get("tool_result")
+                                    or msg.metadata.get("tool_error")
+                                    or msg.content
+                                )
                                 if len(raw_output) > cfg.serialize_tool_results_threshold:
                                     file_path = os.path.join(staging_dir, f"tool_output_{msg.id}.txt")
-                                    if not os.path.exists(file_path):
-                                        with open(file_path, "w", encoding="utf-8") as f:
+                                    if not os.path.exists(file_path):  # noqa: ASYNC240
+                                        with open(file_path, "w", encoding="utf-8") as f:  # noqa: ASYNC230
                                             f.write(raw_output)
-                                    
+
                                     msg.content = f"tool output in {file_path}"
                                     if "tool_result" in msg.metadata:
                                         msg.metadata["tool_result"] = f"tool output in {file_path}"

@@ -182,7 +182,7 @@ class ContextTokenStore:
         if not self._persist_path or not os.path.exists(self._persist_path):
             return
         try:
-            with open(self._persist_path, "r", encoding="utf-8") as f:
+            with open(self._persist_path, encoding="utf-8") as f:
                 self._cache = json.load(f)
         except Exception as e:
             logger.warning("WeChat: Failed to load persistent context tokens: %s", e)

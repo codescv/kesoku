@@ -868,12 +868,69 @@ async def test_llm_turn_logging(temp_db: str, tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_llm_turn_logging_disabled(temp_db: str, tmp_path: Any) -> None:
+    """Verify that raw LLM turns are NOT logged to the session staging directory when disabled."""
+    import os
+
+    DatabaseManager(temp_db).init_tables()
+    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    reg = ToolRegistry()
+
+    @reg.register
+    def dummy_calculator(expression: str, context: Any = None) -> str:
+        """Perform basic calculations."""
+        return "4.0"
+
+    # Configure workspaces directory to temp_path / "sessions"
+    with patch("kesoku.agent.agent.get_config") as mock_get_config:
+        cfg = KesokuConfig()
+        cfg.workspace.db_path = temp_db
+        cfg.workspace.sessions_dir = str(tmp_path / "sessions")
+        cfg.agent.raw_llm_logs = False
+        mock_get_config.return_value = cfg
+
+        # Create a session and post a user message
+        session = await gw.create_session("sess_log_disabled", title="No Logging Session")
+        user_msg = Message(
+            session_id="sess_log_disabled",
+            chatbot_id="cli",
+            channel_id="ch1",
+            sender="u1",
+            role="user",
+            type="text",
+            content="Do dummy task",
+            status="pending_agent",
+        )
+        await gw.post(user_msg)
+
+        # Mock LLM that returns a tool call
+        mock_tools = [
+            ToolCallRequest(name="dummy_calculator", arguments={"expression": "dummy"}),
+        ]
+        llm = MockLLM(mock_tools=mock_tools)
+        agent = Agent(gw, llm, reg)
+
+        # Start agent loop to process the turn
+        agent_task = asyncio.create_task(agent.start())
+        await asyncio.sleep(0.5)
+        agent.stop()
+        await asyncio.gather(agent_task, return_exceptions=True)
+
+        # Construct the expected session staging directory path
+        staging_dir = os.path.join(cfg.workspace.sessions_dir, session.workspace_name)
+
+        # The log file should NOT exist
+        log_path = os.path.join(staging_dir, "llm-turn-1.log.yaml")
+        assert not os.path.exists(log_path)  # noqa: ASYNC240
+
+
+@pytest.mark.asyncio
 async def test_context_optimization_tool_serialization(temp_db: str, tmp_path: Any) -> None:
     """Verify that tool results are serialized and truncated under the context optimization settings."""
     import os
     DatabaseManager(temp_db).init_tables()
     gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
-    
+
     with patch("kesoku.agent.agent.get_config") as mock_get_config:
         cfg = KesokuConfig()
         cfg.workspace.db_path = temp_db
@@ -961,10 +1018,10 @@ async def test_context_optimization_tool_serialization(temp_db: str, tmp_path: A
             parent_id=tc2_1.id, metadata={"tool_name": "tool2_1", "tool_result": long_content_2_1}
         )
         await gw.post(tr2_1)
-        
+
         # Simulate delay of second LLM call to ensure separate timestamps for batches
         await asyncio.sleep(0.6)
-        
+
         # 3. LLM Call Batch 2 (Latest active turn batch, keep_k=1, so this should be kept in full detail)
         tc2_2 = Message(
             session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
@@ -986,14 +1043,14 @@ async def test_context_optimization_tool_serialization(temp_db: str, tmp_path: A
         )
 
         history = await worker._build_clean_history(max_turns=10, pin_initial_turns=2, pin_recent_turns=2)
-        
+
         # 1. Check that historical long tr1 was serialized
         tr1_msg = next(m for m in history if m.id == tr1.id)
         assert "tool output in" in tr1_msg.content
         assert "tool output in" in tr1_msg.metadata["tool_result"]
         file_path1 = tr1_msg.content.split("tool output in ")[1]
-        assert os.path.exists(file_path1)
-        with open(file_path1, encoding="utf-8") as f:
+        assert os.path.exists(file_path1)  # noqa: ASYNC240
+        with open(file_path1, encoding="utf-8") as f:  # noqa: ASYNC230
             assert f.read() == long_content_1
 
         # 2. Check that historical tr_skill was NOT serialized (preserved use_skill)
@@ -1010,8 +1067,8 @@ async def test_context_optimization_tool_serialization(temp_db: str, tmp_path: A
         tr2_1_msg = next(m for m in history if m.id == tr2_1.id)
         assert "tool output in" in tr2_1_msg.content
         file_path2_1 = tr2_1_msg.content.split("tool output in ")[1]
-        assert os.path.exists(file_path2_1)
-        with open(file_path2_1, encoding="utf-8") as f:
+        assert os.path.exists(file_path2_1)  # noqa: ASYNC240
+        with open(file_path2_1, encoding="utf-8") as f:  # noqa: ASYNC230
             assert f.read() == long_content_2_1
 
         # 5. Check that active turn tr2_2 (latest batch, K=1) was NOT serialized (kept in full detail)

@@ -53,7 +53,10 @@ async def test_init_missing_token() -> None:
     """Test initialization without token raises ValueError."""
     cfg = KesokuConfig()
     cfg.discord = DiscordConfig(enabled=True, bot_token=None, chatbot_id="discord")
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
+    with (
+        patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg),
+        patch.dict("os.environ", {"DISCORD_TOKEN": ""}),
+    ):
         gw = MagicMock(spec=Gateway)
         with pytest.raises(ValueError, match="Discord bot token is required"):
             DiscordChatbot(chatbot_id="discord", gateway=gw)

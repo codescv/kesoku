@@ -83,6 +83,10 @@ class AgentConfig(BaseModel):
         default_factory=list,
         description="List of custom user prompt file paths relative to agent working directory",
     )
+    raw_llm_logs: bool = Field(
+        default=True,
+        description="Whether to write raw LLM inputs and outputs to turn log files in the session directory",
+    )
     history: AgentHistoryConfig = Field(default_factory=AgentHistoryConfig)
 
 

@@ -209,7 +209,7 @@ def run_shell_command(
     cwd: str | None = None,
     context: ToolContext | None = None,
 ) -> str:
-    f"""Execute a CLI shell command within a target directory, defaulting to the AWD (Agent Working Directory).
+    """Execute a CLI shell command within a target directory, defaulting to the AWD (Agent Working Directory).
 
     The command is executed within the specified `cwd` directory. If `cwd` is not provided or is empty,
     it defaults to the Agent Working Directory (AWD). If `cwd` is a relative path, it is resolved relative to the AWD.
@@ -219,10 +219,10 @@ def run_shell_command(
     Tips:
     - **IMPORTANT**: Because you have an output token limit (4096) when calling the LLM,
       if you use this tool to write a file, make sure you split into multiple commands,
-      and write at most 4000 characters per command. 
+      and write at most 4000 characters per command.
     - NEVER run commands that are more than 5000 characters just to be safe.
     - If you have a command that is very long, only emit 1 tool call to avoid token limit exceed error.
-    - Tool output is capped at {MAX_TOOL_OUTPUT_LENGTH} characters to save tokens. If you need to view
+    - Tool output is capped at 3000 characters to save tokens. If you need to view
       a large file, read it by chunks of lines.
     - You are encouraged to combine commands using '|', '&&', ';' etc to save turns.
     - If you think the output of the command is long or not important, redirect it to

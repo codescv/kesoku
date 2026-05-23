@@ -7,6 +7,7 @@ sessions_dir = "sessions"
 llm = "gemini"
 # Optional: List of custom system prompt file paths relative to agent working directory
 # user_prompts = ["memory/USER.md"]
+raw_llm_logs = true
 
 [agent.history]
 max_turns = 30
