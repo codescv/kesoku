@@ -174,6 +174,7 @@ async def build_clean_history(
     for idx, turn in enumerate(turns):
         is_pinned = (idx < pin_initial_turns)
         is_latest = (idx == len(turns) - 1)
+        is_recent = (idx >= len(turns) - pin_recent_turns)
 
         if is_latest:
             # Latest turn: full details
@@ -181,19 +182,15 @@ async def build_clean_history(
             continue
 
         dropped_ids = set()
-        if is_pinned:
-            # pinned turns: only keep user, assistant and tool messages with skill.
-            # thoughts must be dropped (thoughts: only in latest turns. drop in all others).
+        if is_pinned or is_recent:
+            # Pinned and recent turns: keep user, assistant, system, and all tool messages (serialize if needed).
+            # Thoughts must be dropped (thoughts: only in absolute latest turn).
             for m in turn:
                 if m.type == TYPE_THOUGHT:
                     dropped_ids.add(m.id)
                     continue
-                if m.role in (ROLE_USER, ROLE_ASSISTANT, ROLE_SYSTEM):
+                if m.role in (ROLE_USER, ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_TOOL):
                     continue
-                if m.role == ROLE_TOOL:
-                    tool_name = m.metadata.get("tool_name")
-                    if tool_name == "use_skill":
-                        continue
                 dropped_ids.add(m.id)
         else:
             # in-between other turns: drop thoughts, resolved intermediate tool calls/results

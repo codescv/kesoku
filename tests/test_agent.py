@@ -981,8 +981,8 @@ async def test_context_optimization_tool_serialization(temp_db: str, tmp_path: A
         await gw.post(tc_skill)
         tr_skill = Message(
             session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="use_skill",
-            role="tool", type="tool_result", content="Skill loaded content " * 15, status="responded",
-            parent_id=tc_skill.id, metadata={"tool_name": "use_skill", "tool_result": "Skill loaded content " * 15}
+            role="tool", type="tool_result", content="Skill loaded content", status="responded",
+            parent_id=tc_skill.id, metadata={"tool_name": "use_skill", "tool_result": "Skill loaded content"}
         )
         await gw.post(tr_skill)
         # 5. Short tool result (should NOT be serialized because length <= 200)
@@ -1051,18 +1051,25 @@ async def test_context_optimization_tool_serialization(temp_db: str, tmp_path: A
         )
 
         history = await worker._build_clean_history(max_turns=10, pin_initial_turns=2, pin_recent_turns=2)
-        history_ids = {m.id for m in history}
 
-        # 1. Verify that historical non-skill tr1 was dropped from history
-        assert tr1.id not in history_ids
+        # 1. Check that historical long tr1 was serialized
+        tr1_msg = next(m for m in history if m.id == tr1.id)
+        assert "tool output in" in tr1_msg.content
+        assert "tool output in" in tr1_msg.metadata["tool_result"]
+        file_path1 = tr1_msg.content.split("tool output in ")[1]
+        assert os.path.exists(file_path1)  # noqa: ASYNC240
+        with open(file_path1, encoding="utf-8") as f:  # noqa: ASYNC230
+            assert f.read() == long_content_1
 
-        # 2. Verify that historical tr_skill (use_skill) was kept but NOT serialized even though it exceeds 200 chars
+        # 2. Check that historical tr_skill was NOT serialized (preserved use_skill)
         tr_skill_msg = next(m for m in history if m.id == tr_skill.id)
-        assert tr_skill_msg.content == "Skill loaded content " * 15
-        assert tr_skill_msg.metadata["tool_result"] == "Skill loaded content " * 15
+        assert tr_skill_msg.content == "Skill loaded content"
+        assert tr_skill_msg.metadata["tool_result"] == "Skill loaded content"
 
-        # 3. Verify that historical non-skill short tool result tr_short was dropped
-        assert tr_short.id not in history_ids
+        # 3. Check that historical short tool result tr_short was NOT serialized
+        tr_short_msg = next(m for m in history if m.id == tr_short.id)
+        assert tr_short_msg.content == "Short tool result content"
+        assert tr_short_msg.metadata["tool_result"] == "Short tool result content"
 
         # 4. Check that active turn long tr2_1 (older batch) was serialized
         tr2_1_msg = next(m for m in history if m.id == tr2_1.id)
