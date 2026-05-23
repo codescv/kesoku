@@ -27,6 +27,22 @@ from kesoku.gateway.chatbot.wechat import (
 from kesoku.gateway.gateway import Gateway
 
 
+def mock_http_method(
+    mock_method: MagicMock,
+    response_json: str = '{"ret": 0, "errcode": 0}',
+    ok: bool = True,
+) -> None:
+    """Configure a MagicMock to act as an aiohttp async context manager returning a mock response."""
+    mock_response = MagicMock()
+    mock_response.ok = ok
+    mock_response.status = 200 if ok else 400
+    mock_response.text = AsyncMock(return_value=response_json)
+    mock_response.read = AsyncMock(return_value=response_json.encode("utf-8"))
+
+    mock_method.return_value.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_method.return_value.__aexit__ = AsyncMock()
+
+
 @pytest.fixture
 def mock_config(tmp_path) -> KesokuConfig:
     """Provide a mock Kesoku configuration with WeChat enabled."""
@@ -143,8 +159,10 @@ async def test_wechat_chatbot_process_message(
     mock_session_cls.return_value = mock_session
 
     # Mock ClientSession POST / GET
-    mock_session.post = AsyncMock()
-    mock_session.get = AsyncMock()
+    mock_session.post = MagicMock()
+    mock_http_method(mock_session.post)
+    mock_session.get = MagicMock()
+    mock_http_method(mock_session.get)
 
     with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
         bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
@@ -198,6 +216,10 @@ async def test_wechat_chatbot_process_message_with_sys_prompt_file(
     """Test custom configurable system prompt file inclusion."""
     mock_session = MagicMock()
     mock_session_cls.return_value = mock_session
+    mock_session.post = MagicMock()
+    mock_http_method(mock_session.post)
+    mock_session.get = MagicMock()
+    mock_http_method(mock_session.get)
 
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".md", delete=False, encoding="utf-8"
@@ -244,13 +266,8 @@ async def test_wechat_chatbot_send_text(
     """Test sending assistant final response to WeChat."""
     mock_session = MagicMock()
     mock_session_cls.return_value = mock_session
-    mock_session.post = AsyncMock()
-
-    # Return success response from EP_SEND_MESSAGE
-    mock_session.post.return_value.__aenter__.return_value.ok = True
-    mock_session.post.return_value.__aenter__.return_value.text = AsyncMock(
-        return_value='{"ret": 0, "errcode": 0}'
-    )
+    mock_session.post = MagicMock()
+    mock_http_method(mock_session.post, response_json='{"ret": 0, "errcode": 0}')
 
     with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
         bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
@@ -296,11 +313,8 @@ async def test_wechat_chatbot_slash_command_clear(
     """Test that /clear or /reset command deletes session and history."""
     mock_session = MagicMock()
     mock_session_cls.return_value = mock_session
-    mock_session.post = AsyncMock()
-    mock_session.post.return_value.__aenter__.return_value.ok = True
-    mock_session.post.return_value.__aenter__.return_value.text = AsyncMock(
-        return_value='{"ret": 0, "errcode": 0}'
-    )
+    mock_session.post = MagicMock()
+    mock_http_method(mock_session.post, response_json='{"ret": 0, "errcode": 0}')
 
     with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
         bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
@@ -341,11 +355,8 @@ async def test_wechat_chatbot_slash_command_status(
     """Test that /status command returns session metrics."""
     mock_session = MagicMock()
     mock_session_cls.return_value = mock_session
-    mock_session.post = AsyncMock()
-    mock_session.post.return_value.__aenter__.return_value.ok = True
-    mock_session.post.return_value.__aenter__.return_value.text = AsyncMock(
-        return_value='{"ret": 0, "errcode": 0}'
-    )
+    mock_session.post = MagicMock()
+    mock_http_method(mock_session.post, response_json='{"ret": 0, "errcode": 0}')
 
     with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
         bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
@@ -410,6 +421,10 @@ async def test_wechat_chatbot_trigger_cronjob(
     """Test that trigger_cronjob successfully creates session and posts message."""
     mock_session = MagicMock()
     mock_session_cls.return_value = mock_session
+    mock_session.post = MagicMock()
+    mock_http_method(mock_session.post)
+    mock_session.get = MagicMock()
+    mock_http_method(mock_session.get)
 
     with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
         bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
