@@ -61,6 +61,14 @@ class AgentHistoryConfig(BaseModel):
     max_turns: int = Field(default=30, description="Maximum logical turns in context history")
     pin_initial_turns: int = Field(default=3, description="Number of initial conversational turns to pin")
     pin_recent_turns: int = Field(default=10, description="Number of recent turns to keep in full detail")
+    active_turn_keep_tool_results_for_k_recent_calls: int = Field(
+        default=3,
+        description="For active turn, only keep tool results in the latest K LLM calls; others serialize to files",
+    )
+    serialize_historical_tool_results: bool = Field(
+        default=True,
+        description="Whether to serialize historical turn tool results to files and replace with pointer",
+    )
 
 
 class AgentConfig(BaseModel):

@@ -448,6 +448,37 @@ class SessionWorker:
                 await self.gateway.update_message_metadata(user_msg.id, user_msg.metadata)
             raise
 
+    def _group_tool_results_by_llm_call(self, turn_msgs: list[Message]) -> list[list[Message]]:
+        """Group tool result messages in the active turn by their corresponding LLM call."""
+        # 1. Map each tool call id to its message
+        tc_map = {m.id: m for m in turn_msgs if m.type == TYPE_TOOL_CALL}
+        
+        # 2. Get all tool results sorted by parent tool call timestamp
+        tr_msgs = [m for m in turn_msgs if m.type == TYPE_TOOL_RESULT]
+        tr_msgs.sort(key=lambda m: tc_map[m.parent_id].timestamp if m.parent_id in tc_map else m.timestamp)
+
+        # 3. Group by parent tool call timestamp threshold (e.g., 0.5 seconds)
+        batches: list[list[Message]] = []
+        current_batch: list[Message] = []
+        last_ts = None
+
+        for tr in tr_msgs:
+            parent_tc = tc_map.get(tr.parent_id)
+            ts = parent_tc.timestamp if parent_tc else tr.timestamp
+            
+            if last_ts is None:
+                current_batch.append(tr)
+            elif ts - last_ts < 0.5:
+                current_batch.append(tr)
+            else:
+                if current_batch:
+                    batches.append(current_batch)
+                current_batch = [tr]
+            last_ts = ts
+
+        if current_batch:
+            batches.append(current_batch)
+        return batches
 
     async def _build_clean_history(
         self,
@@ -628,6 +659,66 @@ class SessionWorker:
             final_history.extend(turn)
         for turn in suffix_turns:
             final_history.extend(turn)
+
+        # 9. Context Optimization: Serialize tool outputs to files and replace with pointer messages
+        last_user_idx = -1
+        for i, msg in enumerate(final_history):
+            if msg.role == ROLE_USER:
+                last_user_idx = i
+
+        if last_user_idx != -1:
+            session = await self.gateway.get_session(self.session_id)
+            if session:
+                app_cfg = get_config()
+                staging_dir = os.path.realpath(
+                    os.path.join(app_cfg.workspace.sessions_dir, session.workspace_name)
+                )
+                os.makedirs(staging_dir, exist_ok=True)
+
+                historical_msgs = final_history[:last_user_idx]
+                active_msgs = final_history[last_user_idx:]
+
+                # Optimize historical turns
+                if cfg.serialize_historical_tool_results:
+                    for msg in historical_msgs:
+                        if msg.type == TYPE_TOOL_RESULT:
+                            if msg.metadata.get("tool_name") == "use_skill":
+                                continue
+                            raw_output = msg.metadata.get("tool_result") or msg.metadata.get("tool_error") or msg.content
+                            file_path = os.path.join(staging_dir, f"tool_output_{msg.id}.txt")
+                            if not os.path.exists(file_path):
+                                with open(file_path, "w", encoding="utf-8") as f:
+                                    f.write(raw_output)
+                            
+                            msg.content = f"tool output in {file_path}"
+                            if "tool_result" in msg.metadata:
+                                msg.metadata["tool_result"] = f"tool output in {file_path}"
+                            if "tool_error" in msg.metadata:
+                                msg.metadata["tool_error"] = f"tool output in {file_path}"
+
+                # Optimize active turn
+                if cfg.active_turn_keep_tool_results_for_k_recent_calls >= 0:
+                    batches = self._group_tool_results_by_llm_call(active_msgs)
+                    if len(batches) > cfg.active_turn_keep_tool_results_for_k_recent_calls:
+                        if cfg.active_turn_keep_tool_results_for_k_recent_calls == 0:
+                            batches_to_serialize = batches
+                        else:
+                            batches_to_serialize = batches[:-cfg.active_turn_keep_tool_results_for_k_recent_calls]
+                        for batch in batches_to_serialize:
+                            for msg in batch:
+                                if msg.metadata.get("tool_name") == "use_skill":
+                                    continue
+                                raw_output = msg.metadata.get("tool_result") or msg.metadata.get("tool_error") or msg.content
+                                file_path = os.path.join(staging_dir, f"tool_output_{msg.id}.txt")
+                                if not os.path.exists(file_path):
+                                    with open(file_path, "w", encoding="utf-8") as f:
+                                        f.write(raw_output)
+                                
+                                msg.content = f"tool output in {file_path}"
+                                if "tool_result" in msg.metadata:
+                                    msg.metadata["tool_result"] = f"tool output in {file_path}"
+                                if "tool_error" in msg.metadata:
+                                    msg.metadata["tool_error"] = f"tool output in {file_path}"
 
         return final_history
 
