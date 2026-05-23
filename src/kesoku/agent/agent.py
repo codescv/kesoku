@@ -254,6 +254,7 @@ class SessionWorker:
                                 "tool_name": call.name,
                                 "tool_arguments": call.arguments,
                                 "thought_signature": call.thought_signature,
+                                "tool_call_id": call.tool_call_id,
                             },
                         )
                         await self.gateway.post(tool_call_msg)

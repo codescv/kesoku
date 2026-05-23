@@ -36,6 +36,8 @@ class ToolCallRequest(BaseModel):
     name: str
     arguments: dict[str, Any]
     thought_signature: str | None = None
+    tool_call_id: str | None = None
+
 
 
 class LLMResponse(BaseModel):
@@ -452,9 +454,12 @@ class ClaudeLLM(BaseLLM):
                         role = "assistant"
                         tool_name = msg.metadata.get("tool_name", "unknown_tool")
                         args = msg.metadata.get("tool_arguments", {})
+                        tool_call_id = msg.metadata.get("tool_call_id") or msg.id
+                        if not tool_call_id.startswith("toolu_"):
+                            tool_call_id = f"toolu_{tool_call_id}"
                         blocks.append({
                             "type": "tool_use",
-                            "id": msg.id,
+                            "id": tool_call_id,
                             "name": tool_name,
                             "input": args,
                         })
@@ -468,9 +473,18 @@ class ClaudeLLM(BaseLLM):
                             res_str = msg.metadata.get("tool_result", msg.content)
                             is_error = False
 
+                        parent_tc = next((m for m in history if m.id == msg.parent_id), None)
+                        tool_call_id = None
+                        if parent_tc:
+                            tool_call_id = parent_tc.metadata.get("tool_call_id")
+                        if not tool_call_id:
+                            tool_call_id = msg.parent_id
+                        if not tool_call_id.startswith("toolu_"):
+                            tool_call_id = f"toolu_{tool_call_id}"
+
                         block = {
                             "type": "tool_result",
-                            "tool_use_id": msg.parent_id,
+                            "tool_use_id": tool_call_id,
                             "content": res_str,
                         }
                         if is_error:
@@ -546,6 +560,7 @@ class ClaudeLLM(BaseLLM):
                                 name=block.name,
                                 arguments=dict(block.input) if block.input else {},
                                 thought_signature=None,
+                                tool_call_id=block.id,
                             )
                         )
 

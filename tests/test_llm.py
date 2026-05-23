@@ -155,12 +155,14 @@ async def test_claude_llm_generate_history_conversion() -> None:
         )
         assert tool_use_block["name"] == "calculator"
         assert tool_use_block["input"] == {"expr": "2+2"}
+        assert tool_use_block["id"] == f"toolu_{msg_tool_call.id}"
 
         # Verify tool result was represented correctly in user role
         tool_res_block = next(
             b for m in messages for b in m["content"] if b["type"] == "tool_result"
         )
         assert tool_res_block["content"] == "4"
+        assert tool_res_block["tool_use_id"] == f"toolu_{msg_tool_call.id}"
 
 
 @pytest.mark.asyncio
