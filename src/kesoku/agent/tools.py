@@ -20,7 +20,7 @@ from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-MAX_OUTPUT_LENGTH = 10_000
+MAX_TOOL_OUTPUT_LENGTH = 3000
 TIMEOUT_SECONDS = 1800
 
 
@@ -209,7 +209,7 @@ def run_shell_command(
     cwd: str | None = None,
     context: ToolContext | None = None,
 ) -> str:
-    """Execute a CLI shell command within a target directory, defaulting to the AWD (Agent Working Directory).
+    f"""Execute a CLI shell command within a target directory, defaulting to the AWD (Agent Working Directory).
 
     The command is executed within the specified `cwd` directory. If `cwd` is not provided or is empty,
     it defaults to the Agent Working Directory (AWD). If `cwd` is a relative path, it is resolved relative to the AWD.
@@ -217,6 +217,13 @@ def run_shell_command(
     (which can be found in the system prompt STAGING_DIR instructions).
 
     Tips:
+    - **IMPORTANT**: Because you have an output token limit (4096) when calling the LLM,
+      if you use this tool to write a file, make sure you split into multiple commands,
+      and write at most 4000 characters per command. 
+    - NEVER run commands that are more than 5000 characters just to be safe.
+    - If you have a command that is very long, only emit 1 tool call to avoid token limit exceed error.
+    - Tool output is capped at {MAX_TOOL_OUTPUT_LENGTH} characters to save tokens. If you need to view
+      a large file, read it by chunks of lines.
     - You are encouraged to combine commands using '|', '&&', ';' etc to save turns.
     - If you think the output of the command is long or not important, redirect it to
       a file in /tmp or filter the output (e.g. `ls -R | grep .py`)
@@ -319,7 +326,7 @@ def run_shell_command(
 
     # Unified truncation logic
     final_output = out_str
-    if len(out_str) > MAX_OUTPUT_LENGTH:
+    if len(out_str) > MAX_TOOL_OUTPUT_LENGTH:
         timestamp = int(time.time())
         output_filename = f"cmd_output_{timestamp}.txt"
         folder_name = context.session_workspace
@@ -329,7 +336,7 @@ def run_shell_command(
         try:
             with open(output_filepath, "w", encoding="utf-8") as f:
                 f.write(out_str)
-            preview_len = MAX_OUTPUT_LENGTH // 2
+            preview_len = MAX_TOOL_OUTPUT_LENGTH // 2
             final_output = (
                 f"Output truncated (total length {len(out_str)} bytes). "
                 f"Full output saved to session workspace file: `{output_filepath}`.\n"
@@ -341,7 +348,7 @@ def run_shell_command(
             logger.error(f"Failed to save truncated output to '{output_filepath}': {ex}")
             final_output = (
                 f"Output truncated (total length {len(out_str)} bytes). "
-                f"Preview:\n{out_str[:MAX_OUTPUT_LENGTH]}"
+                f"Preview:\n{out_str[:MAX_TOOL_OUTPUT_LENGTH]}"
             )
 
     if res.returncode != 0:

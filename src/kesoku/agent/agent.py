@@ -300,6 +300,21 @@ class SessionWorker:
                             tool_func = self.tool_registry.get_tool(call.name)
                             call_kwargs = dict(call.arguments)
                             sig = inspect.signature(tool_func)
+
+                            # Validate required parameters to handle LLM truncation gracefully
+                            missing_args = []
+                            for param in sig.parameters.values():
+                                if param.name == "context":
+                                    continue
+                                if param.default is inspect.Parameter.empty and param.name not in call_kwargs:
+                                    missing_args.append(param.name)
+                            if missing_args:
+                                raise ValueError(
+                                    f"Command too long! Split your command into smaller chunks!\n"
+                                    f"If you are writing a file, write at most 4000 characters per command!\n"
+                                    f"Note: only emit 1 tool call in your response because it's too long!"
+                                )
+
                             if "context" in sig.parameters:
                                 call_kwargs["context"] = tool_context
                             # Atomic tool execution
@@ -720,6 +735,7 @@ class SessionWorker:
                 "content": response.content,
                 "thought": response.thought,
                 "tool_calls": formatted_tool_calls,
+                "raw_response": response.raw_response,
                 "metrics": {
                     "prompt_tokens": response.prompt_tokens,
                     "candidates_tokens": response.candidates_tokens,
