@@ -2,8 +2,6 @@
 
 import logging
 import os
-import time
-from typing import Any
 
 from kesoku.config import get_config
 from kesoku.constants import (
@@ -69,11 +67,16 @@ async def build_clean_history(
 
     Example Turn-Based Truncation for 100 Turns (max_turns=30, pin_initial_turns=3, pin_recent_turns=10):
     - System Prompt (kept at history[0])
-    - Pinned initial Turns 1, 2, and 3 (retains user, assistant, system, and all tool calls/results; thoughts are dropped)
-    - Pinned recovered skill Turns (e.g., Turn 5 that loaded 'role-playing', recovered in full, use_skill not serialized)
-    - Candidate Turns 74 to 89 (drops thoughts, drops resolved intermediate tool calls/results; keeps user/assistant/system text)
-    - Completed Recent Turns 90 to 98 (retains user, assistant, system, and all tool calls/results; thoughts are dropped)
-    - Absolute Latest Turn 99 (kept in 100% full execution detail: prompts, thoughts, tool calls/results)
+    - Pinned initial Turns 1, 2, and 3 (retains user, assistant, system, and all tool
+      calls/results; thoughts are dropped)
+    - Pinned recovered skill Turns (e.g., Turn 5 that loaded 'role-playing', recovered in
+      full, use_skill not serialized)
+    - Candidate Turns 74 to 89 (drops thoughts, drops resolved intermediate tool
+      calls/results; keeps user/assistant/system text)
+    - Completed Recent Turns 90 to 98 (retains user, assistant, system, and all
+      tool calls/results; thoughts are dropped)
+    - Absolute Latest Turn 99 (kept in 100% full execution detail: prompts,
+      thoughts, tool calls/results)
 
     Args:
         gateway: Gateway instance to interact with storage.
@@ -195,7 +198,7 @@ async def build_clean_history(
                         interrupted_msg = r
                     else:
                         has_valid_result = True
-                
+
                 if interrupted_msg and has_valid_result:
                     dropped_ids.add(interrupted_msg.id)
 
@@ -284,7 +287,7 @@ async def build_clean_history(
         session = await gateway.get_session(session_id)
         if session:
             app_cfg = get_config()
-            staging_dir = os.path.realpath(
+            staging_dir = os.path.realpath(  # noqa: ASYNC240
                 os.path.join(app_cfg.workspace.sessions_dir, session.workspace_name)
             )
             os.makedirs(staging_dir, exist_ok=True)
@@ -305,8 +308,8 @@ async def build_clean_history(
                         )
                         if len(raw_output) > cfg.serialize_tool_results_threshold:
                             file_path = os.path.join(staging_dir, f"tool_output_{msg.id}.txt")
-                            if not os.path.exists(file_path):
-                                with open(file_path, "w", encoding="utf-8") as f:
+                            if not os.path.exists(file_path):  # noqa: ASYNC240
+                                with open(file_path, "w", encoding="utf-8") as f:  # noqa: ASYNC230
                                     f.write(raw_output)
 
                             msg.content = f"tool output in {file_path}"
@@ -334,8 +337,8 @@ async def build_clean_history(
                             )
                             if len(raw_output) > cfg.serialize_tool_results_threshold:
                                 file_path = os.path.join(staging_dir, f"tool_output_{msg.id}.txt")
-                                if not os.path.exists(file_path):
-                                    with open(file_path, "w", encoding="utf-8") as f:
+                                if not os.path.exists(file_path):  # noqa: ASYNC240
+                                    with open(file_path, "w", encoding="utf-8") as f:  # noqa: ASYNC230
                                         f.write(raw_output)
 
                                 msg.content = f"tool output in {file_path}"

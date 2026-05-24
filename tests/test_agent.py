@@ -1085,4 +1085,58 @@ async def test_context_optimization_tool_serialization(temp_db: str, tmp_path: A
         assert tr2_2_msg.metadata["tool_result"] == "Tool 2.2 result content"
 
 
+@pytest.mark.asyncio
+async def test_agent_llm_error_handling(temp_db: str) -> None:
+    """Verify that agent turn processing catches LLM exceptions, posts error message, and marks msg as error."""
+    DatabaseManager(temp_db).init_tables()
+    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    reg = ToolRegistry()
+
+    # Ingest user message
+    await gw.create_session("sess_err", title="Error Handling Session")
+    user_msg = Message(
+        session_id="sess_err",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        type="text",
+        content="Hello, will fail",
+        status="pending_agent",
+    )
+    await gw.post(user_msg)
+
+    from kesoku.agent.llm import BaseLLM, LLMResponse
+
+    class FailingLLM(BaseLLM):
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+        ) -> LLMResponse:
+            raise RuntimeError("LLM API Connection Failed")
+
+    llm = FailingLLM()
+    agent = Agent(gw, llm, reg)
+
+    agent_task = asyncio.create_task(agent.start())
+    await asyncio.sleep(0.5)
+    agent.stop()
+    await asyncio.gather(agent_task, return_exceptions=True)
+
+    history = await gw.get_session_history("sess_err")
+
+    # Verify that initiating user message is updated to status "error"
+    db_user_msg = next(m for m in history if m.id == user_msg.id)
+    assert db_user_msg.status == "error"
+
+    # Verify that an error response message is posted with Role Assistant
+    err_assistant_msg = next(m for m in history if m.role == "assistant" and "⚠️ An error occurred" in m.content)
+    assert err_assistant_msg is not None
+    assert "LLM API Connection Failed" in err_assistant_msg.content
+
+
+
 

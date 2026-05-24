@@ -17,8 +17,8 @@ from typing import Any
 
 import yaml
 
-from kesoku.agent.llm import BaseLLM, LLMResponse, get_llm
 from kesoku.agent.history import build_clean_history
+from kesoku.agent.llm import BaseLLM, LLMResponse, get_llm
 from kesoku.agent.tools import ToolContext, ToolRegistry, default_registry
 from kesoku.config import get_config
 from kesoku.constants import (
@@ -449,6 +449,22 @@ class SessionWorker:
                 user_msg.metadata["turn_metrics"] = turn_metrics
                 await self.gateway.update_message_metadata(user_msg.id, user_msg.metadata)
             raise
+        except Exception as e:
+            logger.error(f"Error in session turn {self.session_id}: {e}", exc_info=True)
+            error_msg = Message(
+                session_id=self.session_id,
+                chatbot_id=chatbot_id,
+                channel_id=channel_id,
+                sender="Kesoku",
+                role=ROLE_ASSISTANT,
+                type=TYPE_TEXT,
+                content=f"⚠️ An error occurred while processing your request: {e}",
+                status=STATUS_PENDING,
+                parent_id=current_msg.id,
+            )
+            await self.gateway.post(error_msg)
+            await self.gateway.update_message_status(current_msg.id, STATUS_ERROR)
+
 
     async def _build_clean_history(
         self,
