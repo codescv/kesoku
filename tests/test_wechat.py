@@ -506,3 +506,62 @@ def test_context_token_store_get_all_channels() -> None:
     assert sorted(store.get_all_channels("acc1")) == ["userA", "userB"]
     assert store.get_all_channels("acc2") == ["userC"]
     assert store.get_all_channels("acc3") == []
+
+
+@pytest.mark.asyncio
+@patch("aiohttp.ClientSession")
+async def test_wechat_inbound_image_mime_sniffing(
+    mock_session_cls: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+) -> None:
+    """Verify WeChat inbound image processing sniffs magic bytes to assign corrected mime type."""
+    mock_session = MagicMock()
+    mock_session_cls.return_value = mock_session
+    mock_session.post = MagicMock()
+    mock_http_method(mock_session.post)
+    mock_session.get = MagicMock()
+    mock_http_method(mock_session.get)
+
+    # Setup decrypted data with PNG magic bytes
+    png_bytes = b"\x89PNG\r\n\x1a\nfake_png_content"
+
+    from unittest.mock import mock_open
+    with (
+        patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config),
+        patch("kesoku.gateway.chatbot.wechat._download_and_decrypt_media", return_value=png_bytes) as mock_dl,
+        patch("builtins.open", mock_open()) as mock_file_open,
+    ):
+        bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
+        bot._poll_session = mock_session
+        bot._send_session = mock_session
+
+        inbound_payload = {
+            "from_user_id": "user_alice",
+            "to_user_id": "test_bot_id",
+            "message_id": "msg_002",
+            "item_list": [
+                {
+                    "type": 2,  # ITEM_IMAGE
+                    "image_item": {
+                        "aeskey": "1234567890abcdef1234567890abcdef",
+                        "media": {
+                            "encrypt_query_param": "query_val",
+                        }
+                    }
+                }
+            ],
+        }
+
+        await bot._process_message(inbound_payload)
+
+        # Verify that gateway.post is called with a message containing attachments metadata
+        mock_gateway.post.assert_called_once()
+        posted_msg = mock_gateway.post.call_args[0][0]
+        assert "attachments" in posted_msg.metadata
+        attachments = posted_msg.metadata["attachments"]
+        assert len(attachments) == 1
+        # The mime type should be correctly identified as image/png and the extension should be .png
+        assert attachments[0]["mime_type"] == "image/png"
+        assert attachments[0]["filename"].endswith(".png")
+

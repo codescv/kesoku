@@ -266,3 +266,66 @@ async def test_claude_llm_with_attachments() -> None:
         assert messages[0]["content"][1]["type"] == "document"
         assert messages[0]["content"][1]["source"]["media_type"] == "application/pdf"
         assert messages[0]["content"][1]["source"]["data"] == "ZmFrZV9wZGZfYnl0ZXM="
+
+
+@pytest.mark.asyncio
+async def test_image_mime_type_correction() -> None:
+    """Verify GeminiLLM and ClaudeLLM correct the mime type based on magic bytes if they mismatch."""
+    png_data = b"\x89PNG\r\n\x1a\n_fake_png_data"
+    msg = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="User",
+        role=ROLE_USER,
+        type=TYPE_TEXT,
+        content="Mismatched Image",
+        metadata={
+            "attachments": [
+                {
+                    "path": "/tmp/mismatched.jpg",
+                    "mime_type": "image/jpeg",  # Incorrect metadata mime_type
+                    "filename": "mismatched.jpg",
+                }
+            ]
+        },
+    )
+
+    # 1. Test Claude LLM correction
+    mock_claude_client = MagicMock()
+    mock_claude_res = MagicMock()
+    mock_claude_res.content = [MagicMock(type="text", text="Processed image")]
+    mock_claude_client.messages.create.return_value = mock_claude_res
+
+    from unittest.mock import mock_open
+    with (
+        patch("anthropic.AnthropicVertex", return_value=mock_claude_client),
+        patch("os.path.exists", return_value=True),
+        patch("builtins.open", mock_open(read_data=png_data)),
+    ):
+        claude = ClaudeLLM()
+        await claude.generate(history=[msg])
+
+        called_kwargs = mock_claude_client.messages.create.call_args[1]
+        messages = called_kwargs["messages"]
+        # Verify image was corrected to image/png in Claude source block
+        assert messages[0]["content"][1]["source"]["media_type"] == "image/png"
+
+    # 2. Test Gemini LLM correction
+    mock_gemini_client = MagicMock()
+    mock_gemini_res = MagicMock()
+    mock_gemini_res.parts = [MagicMock(text="Processed image", thought=False, function_call=None)]
+    mock_gemini_client.models.generate_content.return_value = mock_gemini_res
+
+    with (
+        patch("google.genai.Client", return_value=mock_gemini_client),
+        patch("os.path.exists", return_value=True),
+        patch("builtins.open", mock_open(read_data=png_data)),
+    ):
+        gemini = GeminiLLM()
+        await gemini.generate(history=[msg])
+
+        called_contents = mock_gemini_client.models.generate_content.call_args[1]["contents"]
+        # Verify image was corrected to image/png in Gemini Part inline_data
+        assert called_contents[0].parts[1].inline_data.mime_type == "image/png"
+

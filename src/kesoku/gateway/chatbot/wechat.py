@@ -552,6 +552,31 @@ def _mime_from_filename(filename: str) -> str:
     return mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
 
+def _detect_image_mime_type(file_bytes: bytes, fallback_mime: str = "image/jpeg") -> tuple[str, str]:
+    """Detect image mime type and matching file extension from magic bytes.
+
+    Returns:
+        A tuple of (mime_type, extension_with_dot).
+    """
+    if file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", ".png"
+    if file_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", ".jpg"
+    if file_bytes.startswith(b"GIF87a") or file_bytes.startswith(b"GIF89a"):
+        return "image/gif", ".gif"
+    if file_bytes.startswith(b"RIFF") and len(file_bytes) >= 12 and file_bytes[8:12] == b"WEBP":
+        return "image/webp", ".webp"
+
+    ext = ".jpg"
+    if fallback_mime == "image/png":
+        ext = ".png"
+    elif fallback_mime == "image/gif":
+        ext = ".gif"
+    elif fallback_mime == "image/webp":
+        ext = ".webp"
+    return fallback_mime, ext
+
+
 def _split_table_row(line: str) -> list[str]:
     row = line.strip()
     if row.startswith("|"):
@@ -1478,8 +1503,8 @@ You are interacting with the user via WeChat (Weixin).
                         full_url=media.get("full_url"),
                         timeout_seconds=30.0,
                     )
-                    filename = f"wechat_image_{secrets.token_hex(4)}.jpg"
-                    mime = "image/jpeg"
+                    mime, ext = _detect_image_mime_type(data, fallback_mime="image/jpeg")
+                    filename = f"wechat_image_{secrets.token_hex(4)}{ext}"
                 except Exception as e:
                     logger.warning("WeChat: image download failed: %s", e)
 

@@ -130,6 +130,23 @@ def function_to_anthropic_tool(func: Callable) -> dict[str, Any]:
     }
 
 
+def _detect_image_mime_type(file_bytes: bytes, fallback_mime: str = "image/jpeg") -> str:
+    """Detect image mime type from magic bytes.
+
+    Returns:
+        The detected mime_type string (e.g., 'image/png', 'image/jpeg').
+    """
+    if file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if file_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if file_bytes.startswith(b"GIF87a") or file_bytes.startswith(b"GIF89a"):
+        return "image/gif"
+    if file_bytes.startswith(b"RIFF") and len(file_bytes) >= 12 and file_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    return fallback_mime
+
+
 class BaseLLM(ABC):
     """Abstract base class defining the interface for LLM providers."""
 
@@ -226,8 +243,11 @@ class GeminiLLM(BaseLLM):
                             try:
                                 with open(path, "rb") as f:  # noqa: ASYNC230
                                     file_bytes = f.read()
-                                parts.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
-                                logger.info(f"Loaded native Gemini attachment part: {path} ({mime_type})")
+                                corrected_mime = mime_type
+                                if mime_type.startswith("image/"):
+                                    corrected_mime = _detect_image_mime_type(file_bytes, fallback_mime=mime_type)
+                                parts.append(types.Part.from_bytes(data=file_bytes, mime_type=corrected_mime))
+                                logger.info(f"Loaded native Gemini attachment part: {path} ({corrected_mime})")
                             except Exception as ex:
                                 logger.error(f"Failed to load attachment {path} for Gemini: {ex}")
                 elif msg.role == ROLE_ASSISTANT:
@@ -421,15 +441,16 @@ class ClaudeLLM(BaseLLM):
                                 data_b64 = base64.b64encode(file_bytes).decode("utf-8")
 
                                 if mime_type.startswith("image/"):
+                                    corrected_mime = _detect_image_mime_type(file_bytes, fallback_mime=mime_type)
                                     blocks.append({
                                         "type": "image",
                                         "source": {
                                             "type": "base64",
-                                            "media_type": mime_type,
+                                            "media_type": corrected_mime,
                                             "data": data_b64,
                                         },
                                     })
-                                    logger.info(f"Loaded native Claude image part: {path} ({mime_type})")
+                                    logger.info(f"Loaded native Claude image part: {path} ({corrected_mime})")
                                 elif mime_type == "application/pdf":
                                     blocks.append({
                                         "type": "document",
