@@ -582,3 +582,25 @@ class DatabaseManager:
             ]
         finally:
             conn.close()
+
+    def recover_orphaned_processing_messages(self, threshold_seconds: float = 300.0) -> int:
+        """Recover messages that got stuck in 'processing' status by reverting them to 'pending_agent'.
+
+        Args:
+            threshold_seconds: Messages with 'processing' status older than this threshold in seconds will be reverted.
+
+        Returns:
+            The number of messages recovered.
+        """
+        conn = self._get_connection()
+        try:
+            with conn:
+                cutoff = time.time() - threshold_seconds
+                cursor = conn.execute(
+                    "UPDATE messages SET status = 'pending_agent' WHERE status = 'processing' AND timestamp < ?",
+                    (cutoff,),
+                )
+                return cursor.rowcount
+        finally:
+            conn.close()
+

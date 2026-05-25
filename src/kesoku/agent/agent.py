@@ -49,6 +49,8 @@ class SessionWorker:
         self.queue: asyncio.Queue[Message] = asyncio.Queue()
         self._running = False
         self.task: asyncio.Task[None] | None = None
+        self._processing_turn = False
+        self._turn_finished_event = asyncio.Event()
 
     @property
     def running(self) -> bool:
@@ -73,11 +75,25 @@ class SessionWorker:
         """
         await self.queue.put(msg)
 
-    def stop(self) -> None:
-        """Stop the worker loop and cancel pending tasks."""
+    async def stop(self, grace_period: float = 5.0) -> None:
+        """Stop the worker loop gracefully, waiting up to grace_period seconds for the current turn.
+
+        Args:
+            grace_period: Maximum seconds to wait for active turn to complete.
+        """
         self._running = False
         if self.task and not self.task.done():
-            self.task.cancel()
+            if self._processing_turn:
+                try:
+                    async with asyncio.timeout(grace_period):
+                        await self._turn_finished_event.wait()
+                except TimeoutError:
+                    logger.warning(
+                        f"SessionWorker graceful stop timed out after {grace_period} seconds "
+                        f"for session {self.session_id}"
+                    )
+            if not self.task.done():
+                self.task.cancel()
 
     def queue_empty(self) -> bool:
         """Check if the message queue is empty.
@@ -119,15 +135,19 @@ class SessionWorker:
         while self._running:
             try:
                 msg = await self.queue.get()
-                await self._process_turn(msg)
+                self._processing_turn = True
+                self._turn_finished_event.clear()
+                try:
+                    await self._process_turn(msg)
+                finally:
+                    self._processing_turn = False
+                    self._turn_finished_event.set()
             except asyncio.CancelledError:
                 self._running = False
                 break
             except Exception as e:
                 logger.error(f"Error in SessionWorker for session {self.session_id}: {e}", exc_info=True)
                 await asyncio.sleep(1.0)
-
-
 
     async def _process_turn(self, current_msg: Message) -> None:
         session = await self.gateway.get_session(self.session_id)
@@ -189,6 +209,13 @@ class Agent:
         self._master_task = asyncio.current_task()
         logger.info("Kesoku Agent master dispatcher loop started.")
 
+        # Recover orphaned processing messages at startup
+        recovered_count = await asyncio.to_thread(
+            self.gateway.db.recover_orphaned_processing_messages
+        )
+        if recovered_count > 0:
+            logger.info(f"Recovered {recovered_count} orphaned processing messages back to pending_agent status.")
+
         try:
             async for msg in self.gateway.listen(role=ROLE_USER):
                 if not self._running:
@@ -222,7 +249,7 @@ class Agent:
             logger.info("Agent master dispatcher loop cancelled.")
         finally:
             self._running = False
-            self.stop_all_workers()
+            await self.stop_all_workers()
 
     async def stop_session_worker(self, session_id: str) -> None:
         """Stop the active session worker for the given session ID.
@@ -232,13 +259,14 @@ class Agent:
         """
         worker = self.workers.get(session_id)
         if worker:
-            worker.stop()
+            await worker.stop()
             self.workers.pop(session_id, None)
 
-    def stop_all_workers(self) -> None:
+    async def stop_all_workers(self) -> None:
         """Stop all active session workers."""
-        for worker in list(self.workers.values()):
-            worker.stop()
+        workers = list(self.workers.values())
+        if workers:
+            await asyncio.gather(*(worker.stop() for worker in workers), return_exceptions=True)
         self.workers.clear()
 
     def stop(self) -> None:
@@ -246,4 +274,5 @@ class Agent:
         self._running = False
         if self._master_task and not self._master_task.done():
             self._master_task.cancel()
-        self.stop_all_workers()
+        else:
+            asyncio.create_task(self.stop_all_workers())

@@ -1139,5 +1139,112 @@ async def test_agent_llm_error_handling(temp_db: str) -> None:
     assert "LLM API Connection Failed" in err_assistant_msg.content
 
 
+@pytest.mark.asyncio
+async def test_graceful_shutdown_and_orphaned_recovery(temp_db: str) -> None:
+    """Verify graceful shutdown in SessionWorker and orphaned processing message recovery."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+    reg = ToolRegistry()
+
+    # --- Part 1: Test Graceful Shutdown ---
+    await gw.create_session("sess_graceful", title="Graceful Session")
+
+    # 1. Post message
+    msg1 = Message(
+        session_id="sess_graceful",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        type="text",
+        content="Test graceful",
+        status="pending_agent",
+    )
+    await gw.post(msg1)
+
+    # Mock LLM that takes some time (0.3s) to return a response
+    from kesoku.agent.llm import BaseLLM, LLMResponse
+    class SlowLLM(BaseLLM):
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+        ) -> LLMResponse:
+            await asyncio.sleep(0.3)
+            return LLMResponse(content="Finished slowly.")
+
+    llm = SlowLLM()
+    context = KesokuContext(llm=llm, tool_registry=reg)
+    agent = Agent(gw, context=context)
+
+    agent_task = asyncio.create_task(agent.start())
+
+    # Allow worker to start and begin processing
+    await asyncio.sleep(0.15)
+
+    # Verify it's processing
+    history = await gw.get_session_history("sess_graceful")
+    db_msg = next(m for m in history if m.id == msg1.id)
+    assert db_msg.status == "processing"
+
+    # Now stop the agent and check that it gracefully waits and completes processing
+    agent.stop()
+    await asyncio.gather(agent_task, return_exceptions=True)
+
+    # The message should be marked as processed, not interrupted or error, because it finished gracefully!
+    history = await gw.get_session_history("sess_graceful")
+    db_msg = next(m for m in history if m.id == msg1.id)
+    assert db_msg.status == "processed"
+
+    # --- Part 2: Test Orphaned Processing Messages Recovery ---
+    # Manual post a message with status "processing" and old timestamp
+    import time
+    old_msg = Message(
+        session_id="sess_graceful",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        type="text",
+        content="Stuck message",
+        status="processing",
+        timestamp=time.time() - 400.0,  # > 300s ago
+    )
+    await gw.post(old_msg)
+
+    # Recently updated message (should NOT be recovered)
+    recent_msg = Message(
+        session_id="sess_graceful",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        type="text",
+        content="Recent processing message",
+        status="processing",
+        timestamp=time.time() - 50.0,  # < 300s ago
+    )
+    await gw.post(recent_msg)
+
+    # Directly trigger database recovery
+    recovered_count = await asyncio.to_thread(
+        gw.db.recover_orphaned_processing_messages, threshold_seconds=300.0
+    )
+    assert recovered_count == 1
+
+    # Verify that old_msg was reverted to pending_agent
+    history = await gw.get_session_history("sess_graceful")
+    db_old_msg = next(m for m in history if m.id == old_msg.id)
+    assert db_old_msg.status == "pending_agent"
+
+    # Verify that recent_msg remains in processing status
+    db_recent_msg = next(m for m in history if m.id == recent_msg.id)
+    assert db_recent_msg.status == "processing"
+
+
+
 
 
