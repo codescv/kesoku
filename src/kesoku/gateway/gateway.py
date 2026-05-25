@@ -13,16 +13,7 @@ from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 from kesoku.agent.prompt import build_sys_prompt
-from kesoku.constants import (
-    ROLE_SYSTEM,
-    ROLE_USER,
-    STATUS_ERROR,
-    STATUS_PENDING,
-    STATUS_PENDING_AGENT,
-    STATUS_PROCESSED,
-    STATUS_RESPONDED,
-    TYPE_TEXT,
-)
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.context import KesokuContext
 from kesoku.db import Message, Session
 from kesoku.logger import setup_logger
@@ -100,10 +91,10 @@ class Gateway:
             chatbot_id="system",
             channel_id="system",
             sender="System",
-            role=ROLE_SYSTEM,
-            type=TYPE_TEXT,
+            role=MessageRole.SYSTEM,
+            type=MessageType.TEXT,
             content=system_prompt or build_sys_prompt(custom_prompt=custom_prompt, session=sess),
-            status=STATUS_RESPONDED,
+            status=MessageStatus.RESPONDED,
             # Use a timestamp slightly in the past to ensure system message always comes first
             timestamp=now - 0.01,
         )
@@ -216,10 +207,10 @@ class Gateway:
         seen_ids = set()
 
         # Offline recovery / initial pending fetch
-        # Agent dispatcher recovers STATUS_PENDING_AGENT user messages,
-        # while chatbot adapters recover STATUS_PENDING assistant responses.
-        is_agent_query = filters.get("role") == ROLE_USER
-        recovery_status = STATUS_PENDING_AGENT if is_agent_query else STATUS_PENDING
+        # Agent dispatcher recovers MessageStatus.PENDING_AGENT user messages,
+        # while chatbot adapters recover MessageStatus.PENDING assistant responses.
+        is_agent_query = filters.get("role") == MessageRole.USER
+        recovery_status = MessageStatus.PENDING_AGENT if is_agent_query else MessageStatus.PENDING
 
         recovery_filters = {**filters}
         if "status" not in recovery_filters:
@@ -248,7 +239,7 @@ class Gateway:
         Args:
             message_id: Unique ID of the user message.
         """
-        await asyncio.to_thread(self.db.update_message_status, message_id, STATUS_PROCESSED)
+        await asyncio.to_thread(self.db.update_message_status, message_id, MessageStatus.PROCESSED)
         logger.debug(f"Message {message_id} marked as processed.")
 
     async def update_message_status(self, message_id: str, status: str) -> None:
@@ -289,11 +280,11 @@ class Gateway:
             logger.info(f"Aborting active session worker for session {session_id} due to lost channel.")
             await self.agent.stop_session_worker(session_id, immediate=True)
 
-        # Mark all outstanding (pending, processing, pending_agent) messages in this session as STATUS_ERROR
+        # Mark all outstanding (pending, processing, pending_agent) messages in this session as MessageStatus.ERROR
         history = await self.get_session_history(session_id, limit=0)
         for msg in history:
-            if msg.status in ("pending_agent", "processing", "pending"):
-                await self.update_message_status(msg.id, STATUS_ERROR)
+            if msg.status in (MessageStatus.PENDING_AGENT, MessageStatus.PROCESSING, MessageStatus.PENDING):
+                await self.update_message_status(msg.id, MessageStatus.ERROR)
 
 
     async def update_message_metadata(self, message_id: str, metadata: dict[str, Any]) -> None:

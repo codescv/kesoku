@@ -18,17 +18,7 @@ from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 
 from kesoku.config import get_config
-from kesoku.constants import (
-    ROLE_ASSISTANT,
-    ROLE_SYSTEM,
-    ROLE_TOOL,
-    ROLE_USER,
-    STATUS_DELIVERED,
-    STATUS_PENDING_AGENT,
-    TYPE_TEXT,
-    TYPE_THOUGHT,
-    TYPE_TOOL_CALL,
-)
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot, parse_message_content
 from kesoku.gateway.gateway import Gateway
@@ -302,7 +292,7 @@ class GoogleChatChatbot(Chatbot):
             history = await self.gateway.get_session_history(session.id, limit=20)
             prev_user_msg = None
             for msg in reversed(history):
-                if msg.role == ROLE_USER:
+                if msg.role == MessageRole.USER:
                     prev_user_msg = msg
                     break
             metrics = prev_user_msg.metadata.get("turn_metrics") if prev_user_msg else None
@@ -339,10 +329,10 @@ class GoogleChatChatbot(Chatbot):
             chatbot_id=self.chatbot_id,
             channel_id=channel_id,
             sender=sender_name,
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content=text,
-            status=STATUS_PENDING_AGENT,
+            status=MessageStatus.PENDING_AGENT,
             timestamp=time.time(),
         )
 
@@ -476,9 +466,9 @@ class GoogleChatChatbot(Chatbot):
 
         session_id = message.session_id
         is_intermediate = (
-            (message.role == ROLE_ASSISTANT and message.type == TYPE_THOUGHT)
-            or (message.role == ROLE_TOOL)
-            or (message.role == ROLE_SYSTEM)
+            (message.role == MessageRole.ASSISTANT and message.type == MessageType.THOUGHT)
+            or (message.role == MessageRole.TOOL)
+            or (message.role == MessageRole.SYSTEM)
         )
 
         if is_intermediate:
@@ -492,12 +482,12 @@ class GoogleChatChatbot(Chatbot):
 
             items = foldable["items"]
 
-            if message.role == ROLE_ASSISTANT and message.type == TYPE_THOUGHT:
+            if message.role == MessageRole.ASSISTANT and message.type == MessageType.THOUGHT:
                 items.append({
                     "type": "thought",
                     "content": message.content,
                 })
-            elif message.role == ROLE_TOOL and message.type == TYPE_TOOL_CALL:
+            elif message.role == MessageRole.TOOL and message.type == MessageType.TOOL_CALL:
                 tool_name = message.metadata.get("tool_name") or message.sender or "unknown_tool"
                 arg_suffix = await self._get_tool_arguments_suffix(message)
                 items.append({
@@ -516,7 +506,7 @@ class GoogleChatChatbot(Chatbot):
                         if emojis:
                             selected_emoji = random.choice(emojis)
                             asyncio.create_task(self._add_reaction(message_name, selected_emoji))
-            elif message.role == ROLE_TOOL and message.type != TYPE_TOOL_CALL:
+            elif message.role == MessageRole.TOOL and message.type != MessageType.TOOL_CALL:
                 tool_call_msg_id = message.parent_id
                 found = False
                 if tool_call_msg_id:
@@ -536,7 +526,7 @@ class GoogleChatChatbot(Chatbot):
                             else:
                                 item["status"] = "✅"
                             break
-            elif message.role == ROLE_SYSTEM:
+            elif message.role == MessageRole.SYSTEM:
                 items.append({
                     "type": "system",
                     "content": message.content,
@@ -574,13 +564,13 @@ class GoogleChatChatbot(Chatbot):
                         )
                         .execute
                     )
-                await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+                await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
             except Exception as e:
                 logger.error(f"Failed to send/update Google Chat foldable UI card: {e}", exc_info=True)
             return
 
         # Handle final text reply or questions
-        if message.role == ROLE_ASSISTANT and message.type == TYPE_TEXT:
+        if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT:
             metrics = message.metadata.get("turn_metrics")
             foldable = self._foldable_ui_messages.pop(session_id, None)
             if foldable and foldable["name"]:
@@ -668,7 +658,7 @@ class GoogleChatChatbot(Chatbot):
                     )
                     .execute
                 )
-                await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+                await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
             except Exception as e:
                 logger.error(f"Failed to send final message to Google Chat space: {e}", exc_info=True)
 

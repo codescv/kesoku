@@ -12,16 +12,7 @@ from typing import Any
 import discord
 import tzlocal
 
-from kesoku.constants import (
-    ROLE_ASSISTANT,
-    ROLE_TOOL,
-    ROLE_USER,
-    STATUS_INTERRUPTED,
-    STATUS_PENDING_AGENT,
-    TYPE_TEXT,
-    TYPE_THOUGHT,
-    TYPE_TOOL_CALL,
-)
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
@@ -112,13 +103,13 @@ class MessageHeaderView(discord.ui.View):
             history = await self.gateway.get_session_history(self.session_id, limit=20)
             user_msg = None
             for msg in reversed(history):
-                if msg.role == ROLE_USER:
+                if msg.role == MessageRole.USER:
                     user_msg = msg
                     break
 
             if user_msg:
-                if user_msg.status in ("pending_agent", "processing"):
-                    await self.gateway.update_message_status(user_msg.id, STATUS_INTERRUPTED)
+                if user_msg.status in (MessageStatus.PENDING_AGENT, MessageStatus.PROCESSING):
+                    await self.gateway.update_message_status(user_msg.id, MessageStatus.INTERRUPTED)
 
             # Delete the message header entirely on interruption
             try:
@@ -231,13 +222,13 @@ class MessageHeaderView(discord.ui.View):
             emoji_icon = "⚙️"
             label = "System"
 
-            if msg.role == ROLE_USER:
+            if msg.role == MessageRole.USER:
                 role_class = "user"
                 badge_class = "user"
                 emoji_icon = "👤"
                 label = "User"
-            elif msg.role == ROLE_ASSISTANT:
-                if msg.type == TYPE_THOUGHT:
+            elif msg.role == MessageRole.ASSISTANT:
+                if msg.type == MessageType.THOUGHT:
                     role_class = "thought"
                     badge_class = "thought"
                     emoji_icon = "💭"
@@ -247,8 +238,8 @@ class MessageHeaderView(discord.ui.View):
                     badge_class = "assistant"
                     emoji_icon = "🤖"
                     label = "Assistant"
-            elif msg.role == ROLE_TOOL:
-                if msg.type == TYPE_TOOL_CALL:
+            elif msg.role == MessageRole.TOOL:
+                if msg.type == MessageType.TOOL_CALL:
                     role_class = "tool-call"
                     badge_class = "tool"
                     emoji_icon = "🛠️"
@@ -620,11 +611,11 @@ class QuestionView(discord.ui.View):
                 chatbot_id=self.chatbot.chatbot_id,
                 channel_id=str(interaction.channel_id),
                 sender=interaction.user.display_name,
-                role=ROLE_USER,
-                type=TYPE_TEXT,
+                role=MessageRole.USER,
+                type=MessageType.TEXT,
                 content=discord_msg_content,
                 timestamp=response_msg.created_at.timestamp(),
-                status=STATUS_PENDING_AGENT,
+                status=MessageStatus.PENDING_AGENT,
                 metadata={
                     "discord_message_id": str(response_msg.id),
                     "discord_author_id": str(interaction.user.id),

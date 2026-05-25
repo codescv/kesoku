@@ -11,16 +11,7 @@ from rich.table import Table
 
 from kesoku.agent.agent import Agent
 from kesoku.agent.history import build_clean_history
-from kesoku.constants import (
-    ROLE_ASSISTANT,
-    ROLE_SYSTEM,
-    ROLE_TOOL,
-    ROLE_USER,
-    STATUS_PENDING_AGENT,
-    TYPE_TEXT,
-    TYPE_THOUGHT,
-    TYPE_TOOL_CALL,
-)
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.chatbot.cli_bot import CLIChatbot
 from kesoku.gateway.gateway import Gateway
@@ -36,12 +27,12 @@ def _render_message(console: Console, msg: Message) -> None:
         console: Rich console instance.
         msg: Message instance.
     """
-    if msg.role == ROLE_USER:
+    if msg.role == MessageRole.USER:
         console.print(
             Panel(msg.content, title=f"[bold green]{msg.sender}[/bold green]", title_align="left", border_style="green")
         )
-    elif msg.role == ROLE_TOOL:
-        if msg.type == TYPE_TOOL_CALL:
+    elif msg.role == MessageRole.TOOL:
+        if msg.type == MessageType.TOOL_CALL:
             console.print(
                 Panel(
                     Markdown(msg.content),
@@ -59,8 +50,8 @@ def _render_message(console: Console, msg: Message) -> None:
                     border_style="magenta",
                 )
             )
-    elif msg.role == ROLE_ASSISTANT:
-        if msg.type == TYPE_THOUGHT:
+    elif msg.role == MessageRole.ASSISTANT:
+        if msg.type == MessageType.THOUGHT:
             console.print(
                 Panel(
                     Markdown(msg.content),
@@ -78,7 +69,7 @@ def _render_message(console: Console, msg: Message) -> None:
                     border_style="blue",
                 )
             )
-    elif msg.role == ROLE_SYSTEM:
+    elif msg.role == MessageRole.SYSTEM:
         console.print(
             Panel(
                 Markdown(msg.content),
@@ -203,7 +194,7 @@ async def run_cli_chat_async(
             _render_message(console, m)
     else:
         for m in history:
-            if m.role == ROLE_SYSTEM:
+            if m.role == MessageRole.SYSTEM:
                 _render_message(console, m)
                 break
 
@@ -213,10 +204,10 @@ async def run_cli_chat_async(
         chatbot_id="cli",
         channel_id="cli_local",
         sender="User",
-        role=ROLE_USER,
-        type=TYPE_TEXT,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
         content=message,
-        status=STATUS_PENDING_AGENT,
+        status=MessageStatus.PENDING_AGENT,
     )
     await gateway.post(msg)
 

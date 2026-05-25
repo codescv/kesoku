@@ -5,7 +5,7 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any
 
-from kesoku.constants import ROLE_USER, STATUS_DELIVERED
+from kesoku.constants import MessageRole, MessageStatus
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
@@ -98,7 +98,7 @@ class Chatbot(ABC):
 
         try:
             async for msg in self.gateway.listen(
-                exclude_statuses=[STATUS_DELIVERED], exclude_roles=[ROLE_USER], **filters
+                exclude_statuses=[MessageStatus.DELIVERED], exclude_roles=[MessageRole.USER], **filters
             ):
                 await self.handle_message(msg)
         except asyncio.CancelledError:

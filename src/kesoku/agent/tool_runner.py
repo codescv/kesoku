@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from kesoku.agent.tools import ToolContext, ToolRegistry
-from kesoku.constants import ROLE_TOOL, STATUS_RESPONDED, TYPE_TOOL_RESULT
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.logger import setup_logger
 
@@ -53,10 +53,10 @@ class ToolRunner:
                 chatbot_id=tc_msg.chatbot_id,
                 channel_id=tc_msg.channel_id,
                 sender=call.name,
-                role=ROLE_TOOL,
-                type=TYPE_TOOL_RESULT,
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_RESULT,
                 content=f"Tool `{call.name}` execution was aborted due to thought interruption.",
-                status=STATUS_RESPONDED,
+                status=MessageStatus.RESPONDED,
                 parent_id=tc_msg.id,
                 metadata={
                     "tool_name": call.name,
@@ -98,10 +98,10 @@ class ToolRunner:
                 chatbot_id=tc_msg.chatbot_id,
                 channel_id=tc_msg.channel_id,
                 sender=call.name,
-                role=ROLE_TOOL,
-                type=TYPE_TOOL_RESULT,
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_RESULT,
                 content=f"Tool `{call.name}` returned:\n```\n{result}\n```",
-                status=STATUS_RESPONDED,
+                status=MessageStatus.RESPONDED,
                 parent_id=tc_msg.id,
                 metadata={"tool_name": call.name, "tool_result": str(result)},
             )
@@ -112,10 +112,10 @@ class ToolRunner:
                 chatbot_id=tc_msg.chatbot_id,
                 channel_id=tc_msg.channel_id,
                 sender=call.name,
-                role=ROLE_TOOL,
-                type=TYPE_TOOL_RESULT,
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_RESULT,
                 content=f"Tool `{call.name}` error:\n```\n{te}\n```",
-                status=STATUS_RESPONDED,
+                status=MessageStatus.RESPONDED,
                 parent_id=tc_msg.id,
                 metadata={"tool_name": call.name, "tool_error": str(te)},
             )

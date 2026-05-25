@@ -12,13 +12,7 @@ from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.tools import ToolContext
 from kesoku.agent.turn_executor import TurnExecutor
 from kesoku.agent.turn_logger import TurnLogger
-from kesoku.constants import (
-    ROLE_USER,
-    STATUS_ERROR,
-    STATUS_INTERRUPTED,
-    STATUS_PENDING_AGENT,
-    STATUS_PROCESSING,
-)
+from kesoku.constants import MessageRole, MessageStatus
 from kesoku.context import KesokuContext
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
@@ -126,8 +120,8 @@ class SessionWorker:
                 break
 
         for m in new_msgs[:-1]:
-            await self.gateway.update_message_status(m.id, STATUS_INTERRUPTED)
-        await self.gateway.update_message_status(current_msg.id, STATUS_INTERRUPTED)
+            await self.gateway.update_message_status(m.id, MessageStatus.INTERRUPTED)
+        await self.gateway.update_message_status(current_msg.id, MessageStatus.INTERRUPTED)
         latest_msg = new_msgs[-1]
         logger.info(f"Thought interruption detected in session {self.session_id}! Pivoting to {latest_msg.id}")
         return latest_msg
@@ -154,7 +148,7 @@ class SessionWorker:
         session = await self.gateway.get_session(self.session_id)
         if not session:
             logger.error(f"Session {self.session_id} not found in database. Aborting message processing.")
-            await self.gateway.update_message_status(current_msg.id, STATUS_ERROR)
+            await self.gateway.update_message_status(current_msg.id, MessageStatus.ERROR)
             return
 
         folder_name = session.workspace_name
@@ -223,14 +217,14 @@ class Agent:
             logger.info(f"Recovered {recovered_count} orphaned processing messages back to pending_agent status.")
 
         try:
-            async for msg in self.gateway.listen(role=ROLE_USER):
+            async for msg in self.gateway.listen(role=MessageRole.USER):
                 if not self._running:
                     break
 
-                if msg.status == STATUS_PENDING_AGENT:
+                if msg.status == MessageStatus.PENDING_AGENT:
                     # Atomically claim the message to prevent duplicate delivery/processing
                     success = await self.gateway.claim_message(
-                        msg.id, STATUS_PROCESSING, [STATUS_PENDING_AGENT]
+                        msg.id, MessageStatus.PROCESSING, [MessageStatus.PENDING_AGENT]
                     )
                     if not success:
                         logger.debug(

@@ -13,18 +13,7 @@ from kesoku.context import KesokuContext
 
 if TYPE_CHECKING:
     from kesoku.agent.agent import SessionWorker
-from kesoku.constants import (
-    ROLE_ASSISTANT,
-    ROLE_SYSTEM,
-    ROLE_TOOL,
-    ROLE_USER,
-    STATUS_ERROR,
-    STATUS_PENDING,
-    STATUS_RESPONDED,
-    TYPE_TEXT,
-    TYPE_THOUGHT,
-    TYPE_TOOL_CALL,
-)
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
@@ -174,10 +163,10 @@ class TurnExecutor:
                             chatbot_id=chatbot_id,
                             channel_id=channel_id,
                             sender="Kesoku",
-                            role=ROLE_ASSISTANT,
-                            type=TYPE_THOUGHT,
+                            role=MessageRole.ASSISTANT,
+                            type=MessageType.THOUGHT,
                             content=thought_text,
-                            status=STATUS_RESPONDED,
+                            status=MessageStatus.RESPONDED,
                             parent_id=current_msg.id,
                         )
                         await self.gateway.post(thought_msg)
@@ -191,10 +180,10 @@ class TurnExecutor:
                             chatbot_id=chatbot_id,
                             channel_id=channel_id,
                             sender="Kesoku",
-                            role=ROLE_TOOL,
-                            type=TYPE_TOOL_CALL,
+                            role=MessageRole.TOOL,
+                            type=MessageType.TOOL_CALL,
                             content=f"Calling tool `{call.name}` with arguments:\n```json\n{call_args_json}\n```",
-                            status=STATUS_RESPONDED,
+                            status=MessageStatus.RESPONDED,
                             parent_id=current_msg.id,
                             metadata={
                                 "tool_name": call.name,
@@ -231,10 +220,10 @@ class TurnExecutor:
                             chatbot_id=chatbot_id,
                             channel_id=channel_id,
                             sender="Kesoku",
-                            role=ROLE_ASSISTANT,
-                            type=TYPE_THOUGHT,
+                            role=MessageRole.ASSISTANT,
+                            type=MessageType.THOUGHT,
                             content=res.thought,
-                            status=STATUS_RESPONDED,
+                            status=MessageStatus.RESPONDED,
                             parent_id=current_msg.id,
                         )
                         await self.gateway.post(thought_msg)
@@ -251,13 +240,13 @@ class TurnExecutor:
                                 chatbot_id=chatbot_id,
                                 channel_id=channel_id,
                                 sender="System",
-                                role=ROLE_SYSTEM,
-                                type=TYPE_TEXT,
+                                role=MessageRole.SYSTEM,
+                                type=MessageType.TEXT,
                                 content=(
                                     "Your previous response had empty content. Please provide a final "
                                     "user-facing response summarizing your results/actions."
                                 ),
-                                status=STATUS_RESPONDED,
+                                status=MessageStatus.RESPONDED,
                                 parent_id=current_msg.id,
                             )
                             await self.gateway.post(nudge_msg)
@@ -275,10 +264,10 @@ class TurnExecutor:
                         chatbot_id=chatbot_id,
                         channel_id=channel_id,
                         sender="Kesoku",
-                        role=ROLE_ASSISTANT,
-                        type=TYPE_TEXT,
+                        role=MessageRole.ASSISTANT,
+                        type=MessageType.TEXT,
                         content=final_content,
-                        status=STATUS_PENDING,
+                        status=MessageStatus.PENDING,
                         parent_id=current_msg.id,
                         metadata={
                             "turn_metrics": {
@@ -307,7 +296,7 @@ class TurnExecutor:
             history = await self.gateway.get_session_history(self.session_id, limit=20)
             user_msg = None
             for msg in reversed(history):
-                if msg.role == ROLE_USER:
+                if msg.role == MessageRole.USER:
                     user_msg = msg
                     break
             if user_msg:
@@ -321,11 +310,11 @@ class TurnExecutor:
                 chatbot_id=chatbot_id,
                 channel_id=channel_id,
                 sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_TEXT,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
                 content=f"⚠️ An error occurred while processing your request: {e}",
-                status=STATUS_PENDING,
+                status=MessageStatus.PENDING,
                 parent_id=current_msg.id,
             )
             await self.gateway.post(error_msg)
-            await self.gateway.update_message_status(current_msg.id, STATUS_ERROR)
+            await self.gateway.update_message_status(current_msg.id, MessageStatus.ERROR)

@@ -13,17 +13,7 @@ import discord
 import tzlocal
 
 from kesoku.config import DiscordChannelOverride, get_config
-from kesoku.constants import (
-    ROLE_ASSISTANT,
-    ROLE_SYSTEM,
-    ROLE_TOOL,
-    ROLE_USER,
-    STATUS_DELIVERED,
-    STATUS_PENDING_AGENT,
-    TYPE_TEXT,
-    TYPE_THOUGHT,
-    TYPE_TOOL_CALL,
-)
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot, parse_message_content
 from kesoku.gateway.chatbot.discord_command import setup_discord_commands
@@ -465,11 +455,11 @@ class DiscordChatbot(Chatbot):
             chatbot_id=self.chatbot_id,
             channel_id=channel_id,
             sender=message.author.display_name,
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content=discord_msg_content,
             timestamp=message.created_at.timestamp(),
-            status=STATUS_PENDING_AGENT,
+            status=MessageStatus.PENDING_AGENT,
             metadata=msg_metadata,
         )
         await self.gateway.post(msg)
@@ -500,14 +490,14 @@ class DiscordChatbot(Chatbot):
                     "Aborting session and marking message as delivered to stop retrying."
                 )
                 await self.gateway.abort_session(message.session_id)
-                await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+                await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
                 return
             except Exception as fe:
                 logger.error(f"Failed to fetch Discord channel {target_id}: {fe}")
                 return
 
         # Try in-place editing if it is a tool result and we have the cached message
-        if message.role == ROLE_TOOL and message.type != TYPE_TOOL_CALL:
+        if message.role == MessageRole.TOOL and message.type != MessageType.TOOL_CALL:
             tool_call_msg_id = message.parent_id
             session_id = message.session_id
             if session_id in self._turn_special_items:
@@ -542,7 +532,7 @@ class DiscordChatbot(Chatbot):
                         except Exception as ee:
                             logger.warning(f"Failed to edit single special message: {ee}")
 
-                    await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+                    await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
                     return
 
             if tool_call_msg_id and tool_call_msg_id in self._sent_tool_calls:
@@ -556,13 +546,13 @@ class DiscordChatbot(Chatbot):
                 except Exception as ee:
                     logger.warning(f"Failed to edit tool call message in-place: {ee}")
 
-            await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+            await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
             return
 
         is_special_message = False
         output_text = ""
 
-        if message.role == ROLE_ASSISTANT and message.type == TYPE_THOUGHT:
+        if message.role == MessageRole.ASSISTANT and message.type == MessageType.THOUGHT:
             is_special_message = True
             first_line = message.content.split("\n")[0].strip()
             hidden_chars = len(message.content) - len(first_line)
@@ -583,9 +573,9 @@ class DiscordChatbot(Chatbot):
                     "content": thought_content,
                 })
 
-        elif message.role == ROLE_TOOL:
+        elif message.role == MessageRole.TOOL:
             # Since tool results/errors are handled and early-returned above,
-            # this block only ever handles TYPE_TOOL_CALL!
+            # this block only ever handles MessageType.TOOL_CALL!
             is_special_message = True
             tool_name = message.metadata.get("tool_name") or message.sender or "unknown_tool"
             arg_suffix = await self._get_tool_arguments_suffix(message)
@@ -607,7 +597,7 @@ class DiscordChatbot(Chatbot):
                     "status": "⏳",
                 })
 
-        elif message.role == ROLE_SYSTEM:
+        elif message.role == MessageRole.SYSTEM:
             is_special_message = True
             first_line = message.content.split("\n")[0].strip()
             hidden_chars = len(message.content) - len(first_line)
@@ -651,7 +641,7 @@ class DiscordChatbot(Chatbot):
                 except Exception as ee:
                     logger.warning(f"Failed to edit single special message: {ee}")
 
-                await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+                await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
                 return
 
             output_text = new_content
@@ -714,7 +704,7 @@ class DiscordChatbot(Chatbot):
                         # Cache the sent message object if it's a special message for future editing
                         if is_special_message:
                             self._turn_special_msg[message.session_id] = sent_msg
-                            if message.role == ROLE_TOOL and message.type == TYPE_TOOL_CALL:
+                            if message.role == MessageRole.TOOL and message.type == MessageType.TOOL_CALL:
                                 self._sent_tool_calls[message.id] = sent_msg
             elif segment["type"] == "file":
                 file_path = segment["path"]
@@ -767,11 +757,11 @@ class DiscordChatbot(Chatbot):
                     logger.error(f"Failed to send question view to Discord: {qe}", exc_info=True)
                     await channel.send(f"⚠️ Failed to send question: {question_text}")
 
-        await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+        await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
 
         # Stop typing status and clean up intermediate special messages
         # when the final assistant response is successfully delivered
-        if message.role == ROLE_ASSISTANT and message.type == TYPE_TEXT:
+        if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT:
             task = self._typing_tasks.pop(message.channel_id, None)
             if task:
                 task.cancel()
@@ -942,11 +932,11 @@ class DiscordChatbot(Chatbot):
             chatbot_id=self.chatbot_id,
             channel_id=target_channel_id_str,
             sender="System",
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content=discord_msg_content,
             timestamp=now_dt.timestamp(),
-            status=STATUS_PENDING_AGENT,
+            status=MessageStatus.PENDING_AGENT,
             metadata=msg_metadata,
         )
         await self.gateway.post(msg)

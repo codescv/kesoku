@@ -27,17 +27,7 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from kesoku.config import get_config
-from kesoku.constants import (
-    ROLE_ASSISTANT,
-    ROLE_SYSTEM,
-    ROLE_TOOL,
-    ROLE_USER,
-    STATUS_DELIVERED,
-    STATUS_PENDING_AGENT,
-    TYPE_TEXT,
-    TYPE_THOUGHT,
-    TYPE_TOOL_CALL,
-)
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot, parse_message_content
 from kesoku.gateway.gateway import Gateway
@@ -1257,16 +1247,16 @@ You are interacting with the user via WeChat (Weixin).
                 history = await self.gateway.get_session_history(session.id, limit=100)
                 metrics = None
                 for msg in reversed(history):
-                    if msg.role == ROLE_ASSISTANT and msg.metadata and msg.metadata.get("turn_metrics"):
+                    if msg.role == MessageRole.ASSISTANT and msg.metadata and msg.metadata.get("turn_metrics"):
                         metrics = msg.metadata.get("turn_metrics")
                         break
 
-                session_turns = len([m for m in history if m.role == ROLE_USER])
+                session_turns = len([m for m in history if m.role == MessageRole.USER])
                 context_tokens = metrics.get("context_tokens", 0) if metrics else 0
                 turn_tool_calls = (
                     metrics.get("turn_tool_calls", 0)
                     if metrics
-                    else len([m for m in history if m.role == ROLE_TOOL and m.type == TYPE_TOOL_CALL])
+                    else len([m for m in history if m.role == MessageRole.TOOL and m.type == MessageType.TOOL_CALL])
                 )
                 turn_tokens = metrics.get("turn_tokens", 0) if metrics else 0
                 turn_time = metrics.get("turn_time", 0.0) if metrics else 0.0
@@ -1386,11 +1376,11 @@ You are interacting with the user via WeChat (Weixin).
             chatbot_id=self.chatbot_id,
             channel_id=channel_id,
             sender="System Scheduler",
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content=msg_content,
             timestamp=time.time(),
-            status=STATUS_PENDING_AGENT,
+            status=MessageStatus.PENDING_AGENT,
             metadata={
                 "cronjob": True,
             },
@@ -1591,11 +1581,11 @@ You are interacting with the user via WeChat (Weixin).
             chatbot_id=self.chatbot_id,
             channel_id=channel_id,
             sender=sender_id,
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content=msg_content,
             timestamp=time.time(),
-            status=STATUS_PENDING_AGENT,
+            status=MessageStatus.PENDING_AGENT,
             metadata={
                 "wechat_message_id": message_id,
                 "attachments": attachments_metadata,
@@ -1647,9 +1637,9 @@ You are interacting with the user via WeChat (Weixin).
         context_token = self._token_store.get(self._account_id, chat_id)
 
         is_intermediate = (
-            (message.role == ROLE_ASSISTANT and message.type == TYPE_THOUGHT)
-            or (message.role == ROLE_TOOL)
-            or (message.role == ROLE_SYSTEM)
+            (message.role == MessageRole.ASSISTANT and message.type == MessageType.THOUGHT)
+            or (message.role == MessageRole.TOOL)
+            or (message.role == MessageRole.SYSTEM)
         )
         if is_intermediate:
             return
@@ -1710,7 +1700,7 @@ You are interacting with the user via WeChat (Weixin).
                 except Exception as e:
                     logger.error("WeChat: failed to send outbound file: %s", e)
 
-        await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+        await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
 
     async def _send_file(
         self,

@@ -7,15 +7,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from kesoku.constants import (
-    ROLE_ASSISTANT,
-    ROLE_TOOL,
-    STATUS_DELIVERED,
-    TYPE_TEXT,
-    TYPE_THOUGHT,
-    TYPE_TOOL_CALL,
-    TYPE_TOOL_RESULT,
-)
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot, parse_message_content
 from kesoku.gateway.gateway import Gateway
@@ -57,8 +49,8 @@ class CLIChatbot(Chatbot):
         if message.timestamp < self.start_time:
             return
 
-        if message.role == ROLE_TOOL and self.console:
-            if message.type == TYPE_TOOL_CALL:
+        if message.role == MessageRole.TOOL and self.console:
+            if message.type == MessageType.TOOL_CALL:
                 self.console.print(
                     Panel(
                         Markdown(message.content),
@@ -67,7 +59,7 @@ class CLIChatbot(Chatbot):
                         border_style="yellow",
                     )
                 )
-            elif message.type == TYPE_TOOL_RESULT:
+            elif message.type == MessageType.TOOL_RESULT:
                 self.console.print(
                     Panel(
                         Markdown(message.content),
@@ -78,8 +70,8 @@ class CLIChatbot(Chatbot):
                 )
             return
 
-        if message.role == ROLE_ASSISTANT and self.console:
-            if message.type == TYPE_THOUGHT:
+        if message.role == MessageRole.ASSISTANT and self.console:
+            if message.type == MessageType.THOUGHT:
                 self.console.print(
                     Panel(
                         Markdown(message.content),
@@ -89,7 +81,7 @@ class CLIChatbot(Chatbot):
                     )
                 )
                 return
-            elif message.type == TYPE_TEXT:
+            elif message.type == MessageType.TEXT:
                 self.final_response = message.content
                 segments = parse_message_content(message.content)
                 for segment in segments:
@@ -136,7 +128,7 @@ class CLIChatbot(Chatbot):
                                 border_style="cyan",
                             )
                         )
-                await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+                await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
                 self.final_response_event.set()
                 logger.debug(f"CLIChatbot received final response for channel {message.channel_id}")
                 return

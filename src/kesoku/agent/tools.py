@@ -173,7 +173,7 @@ async def monitor_background_job(
         stdout_task: The background stdout streaming task.
         stderr_task: The background stderr streaming task.
     """
-    from kesoku.constants import ROLE_SYSTEM, STATUS_PENDING_AGENT, TYPE_TEXT
+    from kesoku.constants import MessageRole, MessageStatus, MessageType
     from kesoku.db import Message
     from kesoku.gateway.gateway import Gateway
 
@@ -226,10 +226,10 @@ async def monitor_background_job(
             chatbot_id="system",
             channel_id="system",
             sender="System",
-            role=ROLE_SYSTEM,
-            type=TYPE_TEXT,
+            role=MessageRole.SYSTEM,
+            type=MessageType.TEXT,
             content=content,
-            status=STATUS_PENDING_AGENT,  # This triggers LLM wakeup
+            status=MessageStatus.PENDING_AGENT,  # This triggers LLM wakeup
             parent_id=original_msg_id,
         )
         await gw.post(wakeup_msg)
