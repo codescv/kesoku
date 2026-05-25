@@ -497,14 +497,28 @@ class DatabaseManager:
                     curr = msg_map[curr.parent_id]
                 return curr.timestamp
 
-            def get_sorting_phase(m: Message) -> int:
+            # Pre-build a map of root timestamp to tool result messages in this batch
+            tr_by_root: dict[float, list[Message]] = {}
+            for msg in all_msgs:
+                if msg.role == MessageRole.TOOL and msg.type == MessageType.TOOL_RESULT:
+                    root_ts = get_root_timestamp(msg)
+                    tr_by_root.setdefault(root_ts, []).append(msg)
+
+            def get_sorting_phase(m: Message) -> float:
                 if m.role == MessageRole.TOOL and m.type == MessageType.TOOL_CALL:
-                    return 1
+                    return 1.0
                 elif m.role == MessageRole.TOOL and m.type == MessageType.TOOL_RESULT:
-                    return 2
+                    return 2.0
+                elif m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT:
+                    # A thought is a post-tool thought if it occurred after a tool result in the same turn
+                    root_ts = get_root_timestamp(m)
+                    results = tr_by_root.get(root_ts, [])
+                    if any(tr.timestamp < m.timestamp for tr in results):
+                        return 2.5
+                    return 0.0
                 elif m.role == MessageRole.ASSISTANT and m.type != MessageType.THOUGHT:
-                    return 3
-                return 0
+                    return 3.0
+                return 0.0
 
             def get_tool_group_timestamp(m: Message) -> float:
                 if m.parent_id and m.parent_id in msg_map:
@@ -795,14 +809,28 @@ class DatabaseManager:
                     curr = msg_map[curr.parent_id]
                 return curr.timestamp
 
-            def get_sorting_phase(m: Message) -> int:
+            # Pre-build a map of root timestamp to tool result messages in this batch
+            tr_by_root: dict[float, list[Message]] = {}
+            for msg in all_msgs:
+                if msg.role == MessageRole.TOOL and msg.type == MessageType.TOOL_RESULT:
+                    root_ts = get_root_timestamp(msg)
+                    tr_by_root.setdefault(root_ts, []).append(msg)
+
+            def get_sorting_phase(m: Message) -> float:
                 if m.role == MessageRole.TOOL and m.type == MessageType.TOOL_CALL:
-                    return 1
+                    return 1.0
                 elif m.role == MessageRole.TOOL and m.type == MessageType.TOOL_RESULT:
-                    return 2
+                    return 2.0
+                elif m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT:
+                    # A thought is a post-tool thought if it occurred after a tool result in the same turn
+                    root_ts = get_root_timestamp(m)
+                    results = tr_by_root.get(root_ts, [])
+                    if any(tr.timestamp < m.timestamp for tr in results):
+                        return 2.5
+                    return 0.0
                 elif m.role == MessageRole.ASSISTANT and m.type != MessageType.THOUGHT:
-                    return 3
-                return 0
+                    return 3.0
+                return 0.0
 
             def get_tool_group_timestamp(m: Message) -> float:
                 if m.parent_id and m.parent_id in msg_map:

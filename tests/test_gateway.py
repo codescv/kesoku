@@ -10,12 +10,16 @@ from kesoku.config import KesokuConfig, WorkspaceConfig
 from kesoku.constants import (
     ROLE_ASSISTANT,
     ROLE_SYSTEM,
+    ROLE_TOOL,
     ROLE_USER,
     STATUS_DELIVERED,
     STATUS_PENDING,
     STATUS_PENDING_AGENT,
     STATUS_RESPONDED,
     TYPE_TEXT,
+    TYPE_THOUGHT,
+    TYPE_TOOL_CALL,
+    TYPE_TOOL_RESULT,
 )
 from kesoku.context import KesokuContext
 from kesoku.db import DatabaseManager, Message
@@ -137,6 +141,133 @@ async def test_gateway_history(temp_db: str) -> None:
     assert len(history) == 2
     assert history[0].content == "Msg 1"
     assert history[1].content == "Msg 2"
+
+
+@pytest.mark.asyncio
+async def test_gateway_history_phased_sorting_thought_messages(temp_db: str) -> None:
+    """Verify pre-tool and post-tool thoughts are sorted correctly in a turn."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    # Create messages in a single conversational turn
+    # USER message at t=1000.0
+    await gw.post(
+        Message(
+            id="msg_user",
+            session_id="sess_thought",
+            chatbot_id="bot1",
+            channel_id="ch1",
+            sender="u1",
+            role=ROLE_USER,
+            type=TYPE_TEXT,
+            content="Prompt",
+            timestamp=1000.0,
+            status=STATUS_RESPONDED,
+        )
+    )
+
+    # Pre-tool THOUGHT at t=1001.0
+    await gw.post(
+        Message(
+            id="msg_thought_1",
+            session_id="sess_thought",
+            chatbot_id="bot1",
+            channel_id="ch1",
+            sender="Kesoku",
+            role=ROLE_ASSISTANT,
+            type=TYPE_THOUGHT,
+            content="I should call a tool",
+            timestamp=1001.0,
+            status=STATUS_RESPONDED,
+            parent_id="msg_user",
+        )
+    )
+
+    # TOOL_CALL at t=1002.0
+    await gw.post(
+        Message(
+            id="msg_tool_call",
+            session_id="sess_thought",
+            chatbot_id="bot1",
+            channel_id="ch1",
+            sender="Kesoku",
+            role=ROLE_TOOL,
+            type=TYPE_TOOL_CALL,
+            content="Call tool",
+            timestamp=1002.0,
+            status=STATUS_RESPONDED,
+            parent_id="msg_user",
+        )
+    )
+
+    # TOOL_RESULT at t=1003.0
+    await gw.post(
+        Message(
+            id="msg_tool_result",
+            session_id="sess_thought",
+            chatbot_id="bot1",
+            channel_id="ch1",
+            sender="calculator",
+            role=ROLE_TOOL,
+            type=TYPE_TOOL_RESULT,
+            content="Result is 42",
+            timestamp=1003.0,
+            status=STATUS_RESPONDED,
+            parent_id="msg_tool_call",
+        )
+    )
+
+    # Post-tool THOUGHT at t=1004.0
+    await gw.post(
+        Message(
+            id="msg_thought_2",
+            session_id="sess_thought",
+            chatbot_id="bot1",
+            channel_id="ch1",
+            sender="Kesoku",
+            role=ROLE_ASSISTANT,
+            type=TYPE_THOUGHT,
+            content="Tool returned 42, now answering",
+            timestamp=1004.0,
+            status=STATUS_RESPONDED,
+            parent_id="msg_user",
+        )
+    )
+
+    # Final ASSISTANT response at t=1005.0
+    await gw.post(
+        Message(
+            id="msg_assistant",
+            session_id="sess_thought",
+            chatbot_id="bot1",
+            channel_id="ch1",
+            sender="Kesoku",
+            role=ROLE_ASSISTANT,
+            type=TYPE_TEXT,
+            content="The answer is 42",
+            timestamp=1005.0,
+            status=STATUS_RESPONDED,
+            parent_id="msg_user",
+        )
+    )
+
+    history = await gw.get_session_history("sess_thought", limit=10)
+    assert len(history) == 6
+
+    # The sorted order should be:
+    # 0: USER message
+    # 1: Pre-tool THOUGHT
+    # 2: TOOL_CALL
+    # 3: TOOL_RESULT
+    # 4: Post-tool THOUGHT
+    # 5: Final ASSISTANT response
+    assert history[0].id == "msg_user"
+    assert history[1].id == "msg_thought_1"
+    assert history[2].id == "msg_tool_call"
+    assert history[3].id == "msg_tool_result"
+    assert history[4].id == "msg_thought_2"
+    assert history[5].id == "msg_assistant"
 
 
 @pytest.mark.asyncio
