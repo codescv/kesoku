@@ -65,6 +65,19 @@ async def build_clean_history(
     Resolves orphaned tool calls, deduplicates duplicate interrupted tool results, handles initial turns
     pinning, applies priority-based turn dropping, recovers loaded skills, and slides the turn window.
 
+    Example Turn-Based Truncation for 100 Turns (max_turns=30, pin_initial_turns=3, pin_recent_turns=10):
+    - System Prompt (kept at history[0])
+    - Pinned initial Turns 1, 2, and 3 (retains user, assistant, system, and all tool
+      calls/results; thoughts are dropped)
+    - Pinned recovered skill Turns (e.g., Turn 5 that loaded 'role-playing', recovered in
+      full, use_skill not serialized)
+    - Candidate Turns 74 to 89 (drops thoughts, drops resolved intermediate tool
+      calls/results; keeps user/assistant/system text)
+    - Completed Recent Turns 90 to 98 (retains user, assistant, system, and all
+      tool calls/results; thoughts are dropped)
+    - Absolute Latest Turn 99 (kept in 100% full execution detail: prompts,
+      thoughts, tool calls/results)
+
     Args:
         gateway: Gateway instance to interact with storage.
         session_id: Unique conversational session identifier.

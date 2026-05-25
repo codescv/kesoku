@@ -101,6 +101,8 @@ class DatabaseManager:
                     conn.execute("ALTER TABLE messages ADD COLUMN type TEXT NOT NULL DEFAULT 'text'")
                 if "parent_id" not in columns:
                     conn.execute("ALTER TABLE messages ADD COLUMN parent_id TEXT")
+                # Clean up redundant single-column session index since idx_messages_session_timestamp supersedes it
+                conn.execute("DROP INDEX IF EXISTS idx_messages_session")
         except Exception as e:
             logger.error(f"Failed to apply database schema migrations: {e}")
             raise RuntimeError(f"Database schema migration error: {e}") from e
@@ -198,7 +200,10 @@ class DatabaseManager:
                     """
                 )
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp "
+                    "ON messages(session_id, timestamp);"
+                )
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(chatbot_id, channel_id);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);")
             self._ensure_migrations(conn)
