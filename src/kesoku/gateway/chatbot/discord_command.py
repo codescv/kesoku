@@ -1,8 +1,6 @@
 """Discord slash commands for Kesoku AI Agent chatbot."""
 
-import asyncio
-import os
-import sys
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 import discord
@@ -16,78 +14,58 @@ if TYPE_CHECKING:
 logger = setup_logger(__name__)
 
 
-def _get_kesoku_executable() -> str:
-    """Retrieve the absolute path or resolved command for the 'kesoku' executable."""
-    import shutil
-    executable_dir = os.path.dirname(sys.executable)
-    kesoku_path = os.path.join(executable_dir, "kesoku")
-    if os.path.exists(kesoku_path):
-        return kesoku_path
-    return shutil.which("kesoku") or "kesoku"
-
 
 def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
-    """Set up Discord application (slash) commands on the chatbot's client.
+    """Set up Discord application (slash) commands on the chatbot's client based on registered command registry.
 
     Args:
         chatbot: The DiscordChatbot instance.
     """
-    # Manually create the CommandTree if not present on the chatbot
     if not hasattr(chatbot, "tree"):
         chatbot.tree = app_commands.CommandTree(chatbot.bot)
 
-    @chatbot.tree.command(name="restart", description="Restart the Kesoku service.")
-    async def restart_command(interaction: discord.Interaction) -> None:
-        """Slash command handler to restart the entire Kesoku service.
+    for name, cmd_info in chatbot.commands.get_commands().items():
+        # Skip duplicate aliases to avoid Discord command registration collision
+        if name == "reset":
+            continue
 
-        Args:
-            interaction: The incoming Discord interaction.
-        """
-        logger.info(
-            f"Received /restart slash command from user {interaction.user.name} "
-            f"(ID: {interaction.user.id}) in channel {interaction.channel_id}"
+        cmd_name = name
+        description = cmd_info["description"]
+
+        # Define dynamic callback using a closure factory
+        def make_callback(c_name: str) -> Callable[[discord.Interaction], Awaitable[None]]:
+            async def callback(interaction: discord.Interaction) -> None:
+                logger.info(
+                    f"Received /{c_name} slash command from user {interaction.user.name} "
+                    f"(ID: {interaction.user.id}) in channel {interaction.channel_id}"
+                )
+                # Acknowledge the interaction first by deferring
+                await interaction.response.defer()
+
+                async def reply_func(text: str) -> None:
+                    await interaction.followup.send(text)
+
+                try:
+                    if c_name in {"clear", "reset", "status"}:
+                        await chatbot.commands.execute(c_name, reply_func, channel_id=str(interaction.channel_id))
+                    else:
+                        await chatbot.commands.execute(c_name, reply_func)
+                except Exception as e:
+                    logger.error(f"Discord command /{c_name} execution failed: {e}")
+                    if c_name == "restart":
+                        err_msg = str(e)
+                        if "Command not found" in err_msg:
+                            err_msg = "Command not found"
+                        await reply_func(f"Failed to restart service: {err_msg}")
+                    else:
+                        await reply_func(f"⚠️ Failed to execute command: {e}")
+
+            return callback
+
+        cmd = app_commands.Command(
+            name=cmd_name,
+            description=description,
+            callback=make_callback(cmd_name),
         )
+        chatbot.tree.add_command(cmd)
 
-        # Inform the user that the service is restarting
-        await interaction.response.send_message("🔄 Restarting service...")
-
-        try:
-            # Allow a small delay for the message to be fully sent
-            await asyncio.sleep(0.5)
-
-            # Stop the chatbot cleanly to release resources
-            chatbot.stop()
-
-            # Resolve kesoku binary path
-            kesoku_bin = _get_kesoku_executable()
-
-            # Launch the restart command in a new session to decouple from parent group termination
-            import subprocess
-
-            cmd = [kesoku_bin, "service", "restart"]
-
-            # Check if service was user or system level
-            service_user = os.environ.get("KESOKU_SERVICE_USER", "true") == "true"
-            if service_user:
-                cmd.append("--user")
-            else:
-                cmd.append("--system")
-
-            instance_name = os.environ.get("KESOKU_SERVICE_INSTANCE_NAME")
-            if instance_name:
-                cmd.extend(["--name", instance_name])
-
-            logger.info(f"Launching restart command: {' '.join(cmd)}")
-            subprocess.Popen(cmd, start_new_session=True)  # noqa: ASYNC220
-            logger.info("Successfully launched kesoku service restart command.")
-        except Exception as e:
-            logger.error(f"Failed to run restart command: {e}")
-            try:
-                # Fallback to in-place os.execv restart
-                logger.info("Falling back to in-place os.execv restart...")
-                sys.stdout.flush()
-                sys.stderr.flush()
-                os.execv(sys.executable, [sys.executable] + sys.argv)
-            except Exception as fallback_error:
-                logger.error(f"In-place fallback restart failed: {fallback_error}", exc_info=True)
-                await interaction.followup.send(f"Failed to restart service: {e}", ephemeral=True)

@@ -10,12 +10,11 @@ from collections import defaultdict
 from typing import Any
 
 import discord
-import tzlocal
 
 from kesoku.config import DiscordChannelOverride, get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
-from kesoku.gateway.chatbot.base import Chatbot, parse_message_content
+from kesoku.gateway.chatbot.base import Chatbot, DeliveryAbortedError, get_local_timezone_name
 from kesoku.gateway.chatbot.discord_command import setup_discord_commands
 from kesoku.gateway.chatbot.discord_ui import MessageHeaderView, QuestionView
 from kesoku.gateway.chatbot.discord_voice_message import send_voice_message
@@ -24,15 +23,11 @@ from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
 
+_get_local_timezone_name = get_local_timezone_name
+
+
 DISCORD_MAX_CONTENT_LENGTH = 2000
 
-
-def _get_local_timezone_name() -> str:
-    """Retrieve the local system timezone name (e.g., 'Asia/Shanghai')."""
-    try:
-        return tzlocal.get_localzone().key or "UTC"
-    except Exception:
-        return datetime.datetime.now().astimezone().tzname() or "UTC"
 
 
 def _build_discord_custom_prompt(
@@ -415,7 +410,7 @@ class DiscordChatbot(Chatbot):
                 })
 
         # Ingest user message into Gateway
-        tz_name = _get_local_timezone_name()
+        tz_name = get_local_timezone_name()
         discord_msg_content = (
             f"`{message.author.display_name}` <@{message.author.id}> "
             f"at `{message.created_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')} {tz_name}`:\n"
@@ -468,17 +463,17 @@ class DiscordChatbot(Chatbot):
         if channel_id not in self._typing_tasks:
             self._typing_tasks[channel_id] = asyncio.create_task(self._keep_typing(target_channel))
 
-    async def handle_message(self, message: Message) -> None:
-        """Process outgoing message from Gateway and send to target Discord thread.
 
-        Args:
-            message: Outgoing Message instance.
-        """
+    async def handle_message(self, message: Message) -> None:
+        """Process outgoing message from Gateway and send to target Discord thread."""
+        await self.render_outgoing_message(message)
+
+    async def _get_discord_channel_with_abort(self, message: Message) -> Any | None:
         try:
             target_id = int(message.channel_id)
         except ValueError:
             logger.error(f"Invalid Discord channel_id: {message.channel_id}")
-            return
+            return None
 
         channel = self.bot.get_channel(target_id)
         if not channel:
@@ -491,76 +486,26 @@ class DiscordChatbot(Chatbot):
                 )
                 await self.gateway.abort_session(message.session_id)
                 await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
-                return
+                raise DeliveryAbortedError("Discord channel fetch failed (deleted or forbidden)")
             except Exception as fe:
                 logger.error(f"Failed to fetch Discord channel {target_id}: {fe}")
-                return
+                return None
+        return channel
 
-        # Try in-place editing if it is a tool result and we have the cached message
-        if message.role == MessageRole.TOOL and message.type != MessageType.TOOL_CALL:
-            tool_call_msg_id = message.parent_id
-            session_id = message.session_id
-            if session_id in self._turn_special_items:
-                items = self._turn_special_items[session_id]
-                tc_item = None
-                for item in items:
-                    if item["type"] == "tool_call" and item["id"] == tool_call_msg_id:
-                        tc_item = item
-                        break
+    def supports_intermediate_messages(self) -> bool:
+        """Determine if the platform supports intermediate rendering of thoughts and tools."""
+        return True
 
-                if tc_item:
-                    emoji = "❌" if message.metadata.get("tool_error") else "✅"
-                    tc_item["status"] = emoji
-
-                    # Re-render the combined statuses of all special messages
-                    lines = []
-                    for item in items:
-                        if item["type"] == "thought":
-                            lines.append(f"💭 {item['content']}")
-                        elif item["type"] == "tool_call":
-                            lines.append(f"🛠️ **{item['tool_name']}**{item['arg_suffix']} {item['status']}")
-                        elif item["type"] == "system":
-                            lines.append(f"⚙️ *System Message:* {item['content']}")
-                    new_content = "\n".join(lines)
-                    if len(new_content) > DISCORD_MAX_CONTENT_LENGTH:
-                        new_content = new_content[:DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
-
-                    discord_msg = self._turn_special_msg.get(session_id)
-                    if discord_msg:
-                        try:
-                            await discord_msg.edit(content=new_content)
-                        except Exception as ee:
-                            logger.warning(f"Failed to edit single special message: {ee}")
-
-                    await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
-                    return
-
-            if tool_call_msg_id and tool_call_msg_id in self._sent_tool_calls:
-                discord_msg = self._sent_tool_calls.pop(tool_call_msg_id)
-                try:
-                    emoji = "❌" if message.metadata.get("tool_error") else "✅"
-                    content = discord_msg.content.replace("⏳", emoji)
-                    if len(content) > DISCORD_MAX_CONTENT_LENGTH:
-                        content = content[:DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
-                    await discord_msg.edit(content=content)
-                except Exception as ee:
-                    logger.warning(f"Failed to edit tool call message in-place: {ee}")
-
-            await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
-            return
-
-        is_special_message = False
-        output_text = ""
+    async def handle_intermediate_message(self, message: Message) -> None:
+        """Render an intermediate thought/tool/system message in the Discord UI."""
+        session_id = message.session_id
+        if session_id not in self._turn_special_items:
+            self._turn_special_items[session_id] = []
 
         if message.role == MessageRole.ASSISTANT and message.type == MessageType.THOUGHT:
-            is_special_message = True
             first_line = message.content.split("\n")[0].strip()
             hidden_chars = len(message.content) - len(first_line)
             thought_content = f"{first_line} ... *(+{hidden_chars} chars)*"
-
-            session_id = message.session_id
-            if session_id not in self._turn_special_items:
-                self._turn_special_items[session_id] = []
 
             tc_exists = any(
                 item["type"] == "thought" and item["id"] == message.id
@@ -574,15 +519,8 @@ class DiscordChatbot(Chatbot):
                 })
 
         elif message.role == MessageRole.TOOL:
-            # Since tool results/errors are handled and early-returned above,
-            # this block only ever handles MessageType.TOOL_CALL!
-            is_special_message = True
             tool_name = message.metadata.get("tool_name") or message.sender or "unknown_tool"
             arg_suffix = await self._get_tool_arguments_suffix(message)
-
-            session_id = message.session_id
-            if session_id not in self._turn_special_items:
-                self._turn_special_items[session_id] = []
 
             tc_exists = any(
                 item["type"] == "tool_call" and item["id"] == message.id
@@ -598,14 +536,9 @@ class DiscordChatbot(Chatbot):
                 })
 
         elif message.role == MessageRole.SYSTEM:
-            is_special_message = True
             first_line = message.content.split("\n")[0].strip()
             hidden_chars = len(message.content) - len(first_line)
             system_content = f"{first_line} ... *(+{hidden_chars} chars)*"
-
-            session_id = message.session_id
-            if session_id not in self._turn_special_items:
-                self._turn_special_items[session_id] = []
 
             tc_exists = any(
                 item["type"] == "system" and item["id"] == message.id
@@ -617,150 +550,190 @@ class DiscordChatbot(Chatbot):
                     "id": message.id,
                     "content": system_content,
                 })
-        else:
-            output_text = message.content
 
-        if is_special_message:
-            session_id = message.session_id
-            lines = []
-            for item in self._turn_special_items[session_id]:
-                if item["type"] == "thought":
-                    lines.append(f"💭 {item['content']}")
-                elif item["type"] == "tool_call":
-                    lines.append(f"🛠️ **{item['tool_name']}**{item['arg_suffix']} {item['status']}")
-                elif item["type"] == "system":
-                    lines.append(f"⚙️ *System Message:* {item['content']}")
-            new_content = "\n".join(lines)
-            if len(new_content) > DISCORD_MAX_CONTENT_LENGTH:
-                new_content = new_content[:DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
+        lines = []
+        for item in self._turn_special_items[session_id]:
+            if item["type"] == "thought":
+                lines.append(f"💭 {item['content']}")
+            elif item["type"] == "tool_call":
+                lines.append(f"🛠️ **{item['tool_name']}**{item['arg_suffix']} {item['status']}")
+            elif item["type"] == "system":
+                lines.append(f"⚙️ *System Message:* {item['content']}")
+        new_content = "\n".join(lines)
+        if len(new_content) > DISCORD_MAX_CONTENT_LENGTH:
+            new_content = new_content[:DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
 
-            if session_id in self._turn_special_msg:
-                discord_msg = self._turn_special_msg[session_id]
-                try:
-                    await discord_msg.edit(content=new_content)
-                except Exception as ee:
-                    logger.warning(f"Failed to edit single special message: {ee}")
+        channel = await self._get_discord_channel_with_abort(message)
+        if not channel:
+            return
+
+        # Send the MessageHeaderView at the start of the turn if it's a special message
+        turn_id = message.parent_id or message.session_id
+        if turn_id not in self._header_views:
+            try:
+                is_thread = isinstance(channel, discord.Thread)
+                header_view = MessageHeaderView(
+                    self.gateway,
+                    message.session_id,
+                    chatbot=self,
+                    is_thread=is_thread,
+                )
+                header_msg = await channel.send(view=header_view)
+                self._header_views[turn_id] = (header_msg, header_view)
+            except Exception as he:
+                logger.warning(f"Failed to send message header: {he}")
+
+        if session_id in self._turn_special_msg:
+            discord_msg = self._turn_special_msg[session_id]
+            try:
+                await discord_msg.edit(content=new_content)
+            except Exception as ee:
+                logger.warning(f"Failed to edit single special message: {ee}")
+            await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
+            return
+
+        sent_msg = await channel.send(new_content)
+        self._intermediate_messages[message.channel_id].append(sent_msg)
+        self._turn_special_msg[session_id] = sent_msg
+        if message.role == MessageRole.TOOL and message.type == MessageType.TOOL_CALL:
+            self._sent_tool_calls[message.id] = sent_msg
+
+        await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
+
+    async def handle_tool_result(self, message: Message) -> None:
+        """Update the status of a previously executed tool to Success or Error emoji in the special messages list."""
+        tool_call_msg_id = message.parent_id
+        session_id = message.session_id
+        if session_id in self._turn_special_items:
+            items = self._turn_special_items[session_id]
+            tc_item = None
+            for item in items:
+                if item["type"] == "tool_call" and item["id"] == tool_call_msg_id:
+                    tc_item = item
+                    break
+
+            if tc_item:
+                emoji = "❌" if message.metadata.get("tool_error") else "✅"
+                tc_item["status"] = emoji
+
+                # Re-render the combined statuses of all special messages
+                lines = []
+                for item in items:
+                    if item["type"] == "thought":
+                        lines.append(f"💭 {item['content']}")
+                    elif item["type"] == "tool_call":
+                        lines.append(f"🛠️ **{item['tool_name']}**{item['arg_suffix']} {item['status']}")
+                    elif item["type"] == "system":
+                        lines.append(f"⚙️ *System Message:* {item['content']}")
+                new_content = "\n".join(lines)
+                if len(new_content) > DISCORD_MAX_CONTENT_LENGTH:
+                    new_content = new_content[:DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
+
+                discord_msg = self._turn_special_msg.get(session_id)
+                if discord_msg:
+                    try:
+                        await discord_msg.edit(content=new_content)
+                    except Exception as ee:
+                        logger.warning(f"Failed to edit single special message: {ee}")
 
                 await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
                 return
 
-            output_text = new_content
-
-        if not output_text:
-            output_text = message.content
-
-        # Send the MessageHeaderView at the start of the turn if it's a special message
-        if is_special_message:
-            turn_id = message.parent_id or message.session_id
-            if turn_id not in self._header_views:
-                try:
-                    is_thread = isinstance(channel, discord.Thread)
-                    header_view = MessageHeaderView(
-                        self.gateway,
-                        message.session_id,
-                        chatbot=self,
-                        is_thread=is_thread,
-                    )
-                    header_msg = await channel.send(view=header_view)
-                    self._header_views[turn_id] = (header_msg, header_view)
-                except Exception as he:
-                    logger.warning(f"Failed to send message header: {he}")
-
-        # Parse output text into segments (handling [file: <path>] blocks)
-        segments = parse_message_content(output_text)
-
-        for segment in segments:
-            if segment["type"] == "text":
-                text_content = segment["content"]
-                # Only send if the text chunk is not empty and contains non-whitespace characters
-                if text_content.strip():
-                    # Newline Chunking (<= DISCORD_MAX_CONTENT_LENGTH chars) for Discord compatibility
-                    lines = text_content.splitlines(keepends=True)
-                    current_chunk = ""
-                    for line in lines:
-                        if len(line) > DISCORD_MAX_CONTENT_LENGTH:
-                            if current_chunk:
-                                sent_msg = await channel.send(current_chunk)
-                                if is_special_message:
-                                    self._intermediate_messages[message.channel_id].append(sent_msg)
-                                current_chunk = ""
-                            for i in range(0, len(line), DISCORD_MAX_CONTENT_LENGTH):
-                                sent_msg = await channel.send(line[i : i + DISCORD_MAX_CONTENT_LENGTH])
-                                if is_special_message:
-                                    self._intermediate_messages[message.channel_id].append(sent_msg)
-                        elif len(current_chunk) + len(line) > DISCORD_MAX_CONTENT_LENGTH:
-                            sent_msg = await channel.send(current_chunk)
-                            if is_special_message:
-                                self._intermediate_messages[message.channel_id].append(sent_msg)
-                            current_chunk = line
-                        else:
-                            current_chunk += line
-
-                    if current_chunk and current_chunk.strip():
-                        sent_msg = await channel.send(current_chunk)
-                        if is_special_message:
-                            self._intermediate_messages[message.channel_id].append(sent_msg)
-
-                        # Cache the sent message object if it's a special message for future editing
-                        if is_special_message:
-                            self._turn_special_msg[message.session_id] = sent_msg
-                            if message.role == MessageRole.TOOL and message.type == MessageType.TOOL_CALL:
-                                self._sent_tool_calls[message.id] = sent_msg
-            elif segment["type"] == "file":
-                file_path = segment["path"]
-                if not os.path.exists(file_path):  # noqa: ASYNC240
-                    logger.error(f"File not found: {file_path}")
-                    await channel.send(f"⚠️ File not found: {file_path}")
-                else:
-                    try:
-                        discord_file = discord.File(file_path)
-                        await channel.send(file=discord_file)
-                    except Exception as e:
-                        logger.error(f"Failed to send file {file_path} to Discord: {e}", exc_info=True)
-                        await channel.send(f"⚠️ Failed to send file {file_path}: {e}")
-            elif segment["type"] == "voice":
-                file_path = segment["path"]
-                if not os.path.exists(file_path):  # noqa: ASYNC240
-                    logger.error(f"Voice file not found: {file_path}")
-                    await channel.send(f"⚠️ Voice file not found: {file_path}")
-                else:
-                    try:
-                        await send_voice_message(channel, file_path)
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to send native voice message for {file_path}: {e}. "
-                            "Falling back to standard file attachment."
-                        )
-                        try:
-                            discord_file = discord.File(file_path)
-                            await channel.send(file=discord_file)
-                        except Exception as fe:
-                            logger.error(f"Failed to send voice file fallback for {file_path}: {fe}", exc_info=True)
-                            await channel.send(f"⚠️ Failed to send voice file {file_path}: {fe}")
-            elif segment["type"] == "question":
-                question_text = segment["question"]
-                choices = segment["choices"]
-                try:
-                    question_view = QuestionView(
-                        gateway=self.gateway,
-                        session_id=message.session_id,
-                        chatbot=self,
-                        question=question_text,
-                        choices=choices,
-                    )
-                    embed = discord.Embed(
-                        title=f"❓ {question_text}",
-                        color=discord.Color.blurple(),
-                    )
-                    await channel.send(embed=embed, view=question_view)
-                except Exception as qe:
-                    logger.error(f"Failed to send question view to Discord: {qe}", exc_info=True)
-                    await channel.send(f"⚠️ Failed to send question: {question_text}")
+        if tool_call_msg_id and tool_call_msg_id in self._sent_tool_calls:
+            discord_msg = self._sent_tool_calls.pop(tool_call_msg_id)
+            try:
+                emoji = "❌" if message.metadata.get("tool_error") else "✅"
+                content = discord_msg.content.replace("⏳", emoji)
+                if len(content) > DISCORD_MAX_CONTENT_LENGTH:
+                    content = content[:DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
+                await discord_msg.edit(content=content)
+            except Exception as ee:
+                logger.warning(f"Failed to edit tool call message in-place: {ee}")
 
         await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
 
-        # Stop typing status and clean up intermediate special messages
-        # when the final assistant response is successfully delivered
+    async def send_text_chunks(self, channel_id: str, chunks: list[str], message: Message) -> None:
+        """Deliver formatted text chunks sequentially to the target channel."""
+        channel = await self._get_discord_channel_with_abort(message)
+        if not channel:
+            return
+
+        is_special = self.is_intermediate_message(message)
+        for chunk in chunks:
+            if chunk.strip():
+                sent_msg = await channel.send(chunk)
+                if is_special:
+                    self._intermediate_messages[message.channel_id].append(sent_msg)
+                    self._turn_special_msg[message.session_id] = sent_msg
+                    if message.role == MessageRole.TOOL and message.type == MessageType.TOOL_CALL:
+                        self._sent_tool_calls[message.id] = sent_msg
+
+    async def send_file_segment(self, channel_id: str, file_path: str, message: Message) -> None:
+        """Deliver a file attachment segment to the target Discord thread."""
+        channel = await self._get_discord_channel_with_abort(message)
+        if not channel:
+            return
+
+        if not os.path.exists(file_path):  # noqa: ASYNC240
+            logger.error(f"File not found: {file_path}")
+            await channel.send(f"⚠️ File not found: {file_path}")
+        else:
+            try:
+                discord_file = discord.File(file_path)
+                await channel.send(file=discord_file)
+            except Exception as e:
+                logger.error(f"Failed to send file {file_path} to Discord: {e}", exc_info=True)
+                await channel.send(f"⚠️ Failed to send file {file_path}: {e}")
+
+    async def send_voice_segment(self, channel_id: str, file_path: str, message: Message) -> None:
+        """Deliver a voice segment to the target Discord thread (falling back to standard attachment if failed)."""
+        channel = await self._get_discord_channel_with_abort(message)
+        if not channel:
+            return
+
+        if not os.path.exists(file_path):  # noqa: ASYNC240
+            logger.error(f"Voice file not found: {file_path}")
+            await channel.send(f"⚠️ Voice file not found: {file_path}")
+        else:
+            try:
+                await send_voice_message(channel, file_path)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to send native voice message for {file_path}: {e}. "
+                    "Falling back to standard file attachment."
+                )
+                try:
+                    discord_file = discord.File(file_path)
+                    await channel.send(file=discord_file)
+                except Exception as fe:
+                    logger.error(f"Failed to send voice file fallback for {file_path}: {fe}", exc_info=True)
+                    await channel.send(f"⚠️ Failed to send voice file {file_path}: {fe}")
+
+    async def send_question_segment(self, channel_id: str, question: str, choices: list[str], message: Message) -> None:
+        """Deliver a multiple choice question block as a dynamic action button view embed."""
+        channel = await self._get_discord_channel_with_abort(message)
+        if not channel:
+            return
+
+        try:
+            question_view = QuestionView(
+                gateway=self.gateway,
+                session_id=message.session_id,
+                chatbot=self,
+                question=question,
+                choices=choices,
+            )
+            embed = discord.Embed(
+                title=f"❓ {question}",
+                color=discord.Color.blurple(),
+            )
+            await channel.send(embed=embed, view=question_view)
+        except Exception as qe:
+            logger.error(f"Failed to send question view to Discord: {qe}", exc_info=True)
+            await channel.send(f"⚠️ Failed to send question: {question}")
+
+    async def on_message_delivered(self, message: Message) -> None:
+        """Post-delivery lifecycle callback: clean up typing indicator, intermediate lists, and update metrics."""
         if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT:
             task = self._typing_tasks.pop(message.channel_id, None)
             if task:
@@ -812,8 +785,6 @@ class DiscordChatbot(Chatbot):
                 except Exception as ee:
                     logger.warning(f"Failed to update header view with metrics: {ee}")
 
-
-
     async def trigger_cronjob(
         self,
         channel_id: str,
@@ -854,7 +825,6 @@ class DiscordChatbot(Chatbot):
         channel_id_str = str(channel.id)
         channel_name = getattr(channel, "name", "") or ""
 
-        # Check override
         auto_thread = True
         if not is_thread:
             override = self._resolve_channel_override(channel_id_str, channel_name)
@@ -878,35 +848,13 @@ class DiscordChatbot(Chatbot):
             except Exception as e:
                 logger.error(f"Failed to auto-create thread for cronjob in channel {channel.id}: {e}", exc_info=True)
         elif target_channel == channel and mention_user_id:
-            # Send mention starter to direct channel/thread if not auto-threading
             try:
                 await channel.send(f"<@{mention_user_id}> Scheduled job starting.")
             except Exception as e:
                 logger.warning(f"Failed to send mention in channel {channel.id}: {e}")
 
         target_channel_id_str = str(target_channel.id)
-        session = await self.gateway.get_session_by_channel(self.chatbot_id, target_channel_id_str)
-
-        if not session:
-            custom_prompt = _build_discord_custom_prompt(target_channel, self.bot.user)
-            session_title = getattr(target_channel, "name", None) or f"Scheduled Job {target_channel_id_str}"
-            session = await self.gateway.create_session(
-                title=session_title,
-                custom_prompt=custom_prompt,
-            )
-            session_id = session.id
-        else:
-            session_id = session.id
-            await self.gateway.update_session_updated_at(session_id)
-
-        tz_name = _get_local_timezone_name()
-        now_dt = datetime.datetime.now()
-        now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
-
-        discord_msg_content = (
-            f"`System` at `{now_str} {tz_name}`:\n"
-            f"{prompt_content}"
-        )
+        custom_prompt = _build_discord_custom_prompt(target_channel, self.bot.user)
 
         # Construct metadata with parent/thread identifiers
         channel_name = getattr(target_channel, "name", "") or ""
@@ -919,7 +867,6 @@ class DiscordChatbot(Chatbot):
                 parent_channel_name = getattr(parent, "name", "") or ""
 
         msg_metadata = {
-            "is_cronjob": True,
             "channel_name": channel_name,
         }
         if parent_channel_id:
@@ -927,19 +874,13 @@ class DiscordChatbot(Chatbot):
         if parent_channel_name:
             msg_metadata["parent_channel_name"] = parent_channel_name
 
-        msg = Message(
-            session_id=session_id,
-            chatbot_id=self.chatbot_id,
+        await self.trigger_cronjob_message(
             channel_id=target_channel_id_str,
-            sender="System",
-            role=MessageRole.USER,
-            type=MessageType.TEXT,
-            content=discord_msg_content,
-            timestamp=now_dt.timestamp(),
-            status=MessageStatus.PENDING_AGENT,
+            prompt_content=prompt_content,
+            sender_name="System",
+            custom_prompt=custom_prompt,
             metadata=msg_metadata,
         )
-        await self.gateway.post(msg)
 
         # Trigger typing status for the thread/channel while agent is thinking
         if target_channel_id_str not in self._typing_tasks:

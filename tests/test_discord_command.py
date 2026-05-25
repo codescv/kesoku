@@ -7,16 +7,35 @@ import discord
 import pytest
 from discord import app_commands
 
-from kesoku.gateway.chatbot.discord_command import _get_kesoku_executable, setup_discord_commands
+from kesoku.gateway.chatbot.discord_command import setup_discord_commands
 
 
 @pytest.fixture
 def mock_chatbot() -> MagicMock:
-    """Provide a mock DiscordChatbot instance."""
+    """Provide a mock DiscordChatbot instance with real CommandRegistry and restart_service bound."""
+    from kesoku.gateway.chatbot.base import Chatbot, CommandRegistry
+
     chatbot = MagicMock()
+    chatbot.chatbot_id = "discord_test"
+    chatbot.gateway = MagicMock()
     chatbot.bot = MagicMock()
     chatbot.bot._connection._command_tree = None
     chatbot.stop = MagicMock()
+
+    # Bind real methods
+    chatbot.restart_service = Chatbot.restart_service.__get__(chatbot, Chatbot)
+    chatbot._get_kesoku_executable = Chatbot._get_kesoku_executable.__get__(chatbot, Chatbot)
+
+    # Bind real CommandRegistry containing default commands
+    registry = CommandRegistry()
+
+    async def handle_restart(reply_func):
+        await reply_func("🔄 Restarting service...")
+        await chatbot.restart_service()
+
+    registry.register("restart", "Restart the Kesoku service.", handle_restart)
+    chatbot.commands = registry
+
     if hasattr(chatbot, "tree"):
         delattr(chatbot, "tree")
     return chatbot
@@ -58,8 +77,9 @@ async def test_restart_command_success(mock_chatbot: MagicMock) -> None:
 
     interaction.response = AsyncMock()
     interaction.followup = AsyncMock()
+    interaction.followup.send = AsyncMock()
 
-    kesoku_bin = _get_kesoku_executable()
+    kesoku_bin = mock_chatbot._get_kesoku_executable()
 
     # Case 1: Default behavior without specific service env variables (defaults to --user, no name)
     with (
@@ -70,8 +90,8 @@ async def test_restart_command_success(mock_chatbot: MagicMock) -> None:
     ):
         await restart_cmd.callback(interaction)
 
-        # Assert first message was sent
-        interaction.response.send_message.assert_called_once_with("🔄 Restarting service...")
+        # Assert first message was sent via followup
+        interaction.followup.send.assert_any_call("🔄 Restarting service...")
 
         # Assert Popen was called with correct parameters
         mock_popen.assert_called_once_with(
@@ -84,7 +104,7 @@ async def test_restart_command_success(mock_chatbot: MagicMock) -> None:
         mock_execv.assert_not_called()
 
     # Reset mocks
-    interaction.response.send_message.reset_mock()
+    interaction.followup.send.reset_mock()
     mock_chatbot.stop.reset_mock()
 
     # Case 2: Service is configured as a system service with an instance suffix name
@@ -127,6 +147,7 @@ async def test_restart_command_fallback_to_execv(mock_chatbot: MagicMock) -> Non
 
     interaction.response = AsyncMock()
     interaction.followup = AsyncMock()
+    interaction.followup.send = AsyncMock()
 
     # Mock subprocess.Popen to raise an OSError (e.g. command not found)
     with (
@@ -138,8 +159,8 @@ async def test_restart_command_fallback_to_execv(mock_chatbot: MagicMock) -> Non
     ):
         await restart_cmd.callback(interaction)
 
-        # Assert first message was sent
-        interaction.response.send_message.assert_called_once_with("🔄 Restarting service...")
+        # Assert first message was sent via followup
+        interaction.followup.send.assert_any_call("🔄 Restarting service...")
 
         # Popen was called
         mock_popen.assert_called_once()
@@ -169,6 +190,7 @@ async def test_restart_command_total_failure(mock_chatbot: MagicMock) -> None:
 
     interaction.response = AsyncMock()
     interaction.followup = AsyncMock()
+    interaction.followup.send = AsyncMock()
 
     # Both Popen and execv raise exceptions
     with (
@@ -181,10 +203,7 @@ async def test_restart_command_total_failure(mock_chatbot: MagicMock) -> None:
         await restart_cmd.callback(interaction)
 
         # Verify initial message
-        interaction.response.send_message.assert_called_once_with("🔄 Restarting service...")
+        interaction.followup.send.assert_any_call("🔄 Restarting service...")
 
         # Verify followup error message is sent
-        interaction.followup.send.assert_called_once_with(
-            "Failed to restart service: Command not found",
-            ephemeral=True
-        )
+        interaction.followup.send.assert_any_call("Failed to restart service: Command not found")
