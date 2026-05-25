@@ -9,6 +9,7 @@ from kesoku.agent.llm import BaseLLM, LLMResponse, ToolCallRequest
 from kesoku.agent.turn_executor import TurnExecutor
 from kesoku.agent.turn_logger import TurnLogger
 from kesoku.config import KesokuConfig, WorkspaceConfig
+from kesoku.context import KesokuContext
 from kesoku.db import DatabaseManager, Message
 from kesoku.gateway.gateway import Gateway
 
@@ -23,7 +24,8 @@ def temp_db(tmp_path: Any) -> str:
 async def test_turn_executor_successful_turn(temp_db: str) -> None:
     """Verify that TurnExecutor handles a standard text-only conversational turn successfully."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
     await gw.create_session("sess_1", title="Success Session")
 
     # Post a pending user message
@@ -55,7 +57,8 @@ async def test_turn_executor_successful_turn(temp_db: str) -> None:
     tool_runner.tool_registry.get_tools_list.return_value = []
     turn_logger = MagicMock(spec=TurnLogger)
 
-    executor = TurnExecutor("sess_1", gw, llm, tool_runner, turn_logger)
+    context = KesokuContext(llm=llm)
+    executor = TurnExecutor("sess_1", gw, tool_runner, turn_logger, context=context)
 
     # Configure mock worker
     worker = MagicMock()
@@ -68,7 +71,7 @@ async def test_turn_executor_successful_turn(temp_db: str) -> None:
     cfg = KesokuConfig()
     cfg.agent.raw_llm_logs = True
 
-    with patch("kesoku.agent.turn_executor.get_config", return_value=cfg):
+    with patch("kesoku.context.get_config", return_value=cfg):
         await executor.process_turn(
             current_msg=user_msg,
             worker=worker,
@@ -91,7 +94,8 @@ async def test_turn_executor_successful_turn(temp_db: str) -> None:
 async def test_turn_executor_nudging(temp_db: str) -> None:
     """Verify that TurnExecutor nudges the LLM once if it returns an empty content response."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
     await gw.create_session("sess_nudge", title="Nudge Session")
 
     user_msg = Message(
@@ -125,7 +129,8 @@ async def test_turn_executor_nudging(temp_db: str) -> None:
     tool_runner = MagicMock()
     tool_runner.tool_registry.get_tools_list.return_value = []
     turn_logger = MagicMock(spec=TurnLogger)
-    executor = TurnExecutor("sess_nudge", gw, llm, tool_runner, turn_logger)
+    context = KesokuContext(llm=llm)
+    executor = TurnExecutor("sess_nudge", gw, tool_runner, turn_logger, context=context)
 
     # Configure mock worker
     worker = MagicMock()
@@ -138,7 +143,7 @@ async def test_turn_executor_nudging(temp_db: str) -> None:
     cfg = KesokuConfig()
     cfg.agent.raw_llm_logs = False
 
-    with patch("kesoku.agent.turn_executor.get_config", return_value=cfg):
+    with patch("kesoku.context.get_config", return_value=cfg):
         await executor.process_turn(
             current_msg=user_msg,
             worker=worker,
@@ -159,7 +164,8 @@ async def test_turn_executor_nudging(temp_db: str) -> None:
 async def test_turn_executor_tool_calls(temp_db: str) -> None:
     """Verify that TurnExecutor schedules and logs tool calls, executes them via ToolRunner, and continues turn."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
     await gw.create_session("sess_tools", title="Tools Session")
 
     user_msg = Message(
@@ -221,7 +227,8 @@ async def test_turn_executor_tool_calls(temp_db: str) -> None:
     tool_runner.tool_registry.get_tools_list.return_value = []
 
     turn_logger = MagicMock(spec=TurnLogger)
-    executor = TurnExecutor("sess_tools", gw, llm, tool_runner, turn_logger)
+    context = KesokuContext(llm=llm)
+    executor = TurnExecutor("sess_tools", gw, tool_runner, turn_logger, context=context)
 
     # Configure mock worker
     worker = MagicMock()
@@ -234,7 +241,7 @@ async def test_turn_executor_tool_calls(temp_db: str) -> None:
     cfg = KesokuConfig()
     cfg.agent.raw_llm_logs = False
 
-    with patch("kesoku.agent.turn_executor.get_config", return_value=cfg):
+    with patch("kesoku.context.get_config", return_value=cfg):
         await executor.process_turn(
             current_msg=user_msg,
             worker=worker,

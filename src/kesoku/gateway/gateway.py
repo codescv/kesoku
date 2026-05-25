@@ -13,14 +13,14 @@ from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 from kesoku.agent.prompt import build_sys_prompt
-from kesoku.config import WorkspaceConfig, get_config
 from kesoku.constants import (
     ROLE_SYSTEM,
     STATUS_PROCESSED,
     STATUS_RESPONDED,
     TYPE_TEXT,
 )
-from kesoku.db import DatabaseManager, Message, Session
+from kesoku.context import KesokuContext
+from kesoku.db import Message, Session
 from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -38,18 +38,21 @@ class Listener:
 class Gateway:
     """Manages message ingestion, routing, and persistence across chatbots using a stateless broker pattern."""
 
-    def __init__(self, workspace_config: WorkspaceConfig | None = None) -> None:
+    def __init__(
+        self,
+        context: KesokuContext | None = None,
+    ) -> None:
         """Initialize the Gateway.
 
         Args:
-            workspace_config: Configuration settings for the workspace database and paths.
+            context: Runtime context container.
         """
-        if workspace_config is None:
-            workspace_config = get_config().workspace
-        self.workspace_config = workspace_config
+        self.context = context or KesokuContext()
+        self.workspace_config = self.context.config.workspace
+        self.db = self.context.db
+
         self.db_path = self.workspace_config.db_path
         self._listeners: list[Listener] = []
-        self.db = DatabaseManager(self.db_path)
         self.db.verify_db()
         self.agent: Any | None = None
 

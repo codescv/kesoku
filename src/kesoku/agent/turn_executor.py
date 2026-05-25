@@ -6,10 +6,10 @@ import time
 from typing import TYPE_CHECKING
 
 from kesoku.agent.history import build_clean_history
-from kesoku.agent.llm import BaseLLM, get_llm
+from kesoku.agent.llm import BaseLLM
 from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.turn_logger import TurnLogger
-from kesoku.config import get_config
+from kesoku.context import KesokuContext
 
 if TYPE_CHECKING:
     from kesoku.agent.agent import SessionWorker
@@ -39,24 +39,24 @@ class TurnExecutor:
         self,
         session_id: str,
         gateway: Gateway,
-        default_llm: BaseLLM,
         tool_runner: ToolRunner,
         turn_logger: TurnLogger | None = None,
+        context: KesokuContext | None = None,
     ) -> None:
         """Initialize TurnExecutor.
 
         Args:
             session_id: Unique conversational session identifier.
             gateway: Gateway instance.
-            default_llm: Default LLM backend interface.
             tool_runner: Tool runner handling actual tool execution.
             turn_logger: Optional logger to output detailed YAML logs of the turns.
+            context: Optional runtime context container.
         """
         self.session_id = session_id
         self.gateway = gateway
-        self.default_llm = default_llm
         self.tool_runner = tool_runner
         self.turn_logger = turn_logger
+        self.context = context or getattr(gateway, "context", KesokuContext())
 
     async def _get_session_turns_count(self) -> int:
         """Retrieve the count of user turns in the current session.
@@ -82,7 +82,7 @@ class TurnExecutor:
             parent_id = current_msg.metadata.get("parent_channel_id")
             parent_name = current_msg.metadata.get("parent_channel_name")
 
-            cfg = get_config()
+            cfg = self.context.config
             for override in cfg.discord.channels:
                 identifiers = {channel_id, channel_name}
                 if parent_id:
@@ -96,11 +96,11 @@ class TurnExecutor:
                             f"('{channel_name}')"
                         )
                         try:
-                            return get_llm(override.llm)
+                            return self.context.get_llm(provider=override.llm)
                         except Exception as e:
                             logger.error(f"Failed to get override LLM provider '{override.llm}': {e}")
 
-        return self.default_llm
+        return self.context.get_llm()
 
     async def process_turn(
         self,
@@ -118,7 +118,7 @@ class TurnExecutor:
         chatbot_id = current_msg.chatbot_id
         channel_id = current_msg.channel_id
 
-        cfg = get_config()
+        cfg = self.context.config
         start_time = time.time()
         turn_tool_calls = 0
         turn_tokens = 0

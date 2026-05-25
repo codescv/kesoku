@@ -14,7 +14,7 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
-from kesoku.config import ClaudeConfig, GeminiConfig, get_config
+from kesoku.config import ClaudeConfig, GeminiConfig, KesokuConfig, get_config
 from kesoku.constants import (
     ROLE_ASSISTANT,
     ROLE_SYSTEM,
@@ -656,11 +656,12 @@ class MockLLM(BaseLLM):
         return LLMResponse(content=self.mock_response, tool_calls=self.mock_tools)
 
 
-def get_llm(provider: str | None = None) -> BaseLLM:
+def get_llm(provider: str | None = None, config: KesokuConfig | None = None) -> BaseLLM:
     """Get an LLM instance based on config or specified provider.
 
     Args:
         provider: Optional provider name ('gemini', 'claude', or 'mock'). If None, uses agent.llm from config.
+        config: Optional configuration container. If None, uses get_config().
 
     Returns:
         An instance of BaseLLM (GeminiLLM, ClaudeLLM, or MockLLM).
@@ -668,14 +669,16 @@ def get_llm(provider: str | None = None) -> BaseLLM:
     Raises:
         ValueError: If an unsupported LLM provider is specified.
     """
+    if config is None:
+        config = get_config()
     if provider is None:
-        provider = get_config().agent.llm
+        provider = config.agent.llm
 
     provider_lower = provider.lower()
     if provider_lower == "gemini":
-        return GeminiLLM()
+        return GeminiLLM(config=config.gemini)
     elif provider_lower == "claude":
-        return ClaudeLLM()
+        return ClaudeLLM(config=config.claude)
     elif provider_lower == "mock":
         return MockLLM()
     else:

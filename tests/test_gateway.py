@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from kesoku.config import WorkspaceConfig
+from kesoku.config import KesokuConfig, WorkspaceConfig
 from kesoku.constants import (
     ROLE_ASSISTANT,
     ROLE_SYSTEM,
@@ -16,6 +16,7 @@ from kesoku.constants import (
     STATUS_RESPONDED,
     TYPE_TEXT,
 )
+from kesoku.context import KesokuContext
 from kesoku.db import DatabaseManager, Message
 from kesoku.gateway.chatbot.base import Chatbot
 from kesoku.gateway.gateway import Gateway
@@ -43,7 +44,8 @@ def temp_db(tmp_path: Any) -> str:
 async def test_gateway_init_db(temp_db: str) -> None:
     """Verify SQLite database schema is initialized correctly."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
 
     conn = sqlite3.connect(temp_db)
     cursor = conn.cursor()
@@ -63,7 +65,8 @@ async def test_gateway_init_db(temp_db: str) -> None:
 async def test_gateway_routing(temp_db: str) -> None:
     """Test routing outgoing response back to registered chatbot."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
     bot = DummyChatbot("dummy_bot", gw)
     bot_task = asyncio.create_task(bot.start())
 
@@ -90,7 +93,8 @@ async def test_gateway_routing(temp_db: str) -> None:
 async def test_gateway_history(temp_db: str) -> None:
     """Test retrieving historical messages for a session."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
     await gw.post(
         Message(
             session_id="sess1",
@@ -138,7 +142,8 @@ async def test_gateway_history(temp_db: str) -> None:
 async def test_gateway_sessions(temp_db: str) -> None:
     """Test session creation, retrieval, update, and listing."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
 
     # Initial state: no sessions
     assert await gw.list_sessions() == []
@@ -168,7 +173,8 @@ async def test_gateway_sessions(temp_db: str) -> None:
 async def test_gateway_get_session_by_channel(temp_db: str) -> None:
     """Test retrieving session by chatbot and channel identifier."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
 
     session = await gw.create_session("sess_chan_1", "Chan Session")
     await gw.post(
@@ -196,7 +202,8 @@ async def test_gateway_get_session_by_channel(temp_db: str) -> None:
 async def test_gateway_create_session_created_at(temp_db: str) -> None:
     """Test creating a session with explicit created_at ensures correct system prompt ordering."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
 
     hist_timestamp = 1500000000.0
     session = await gw.create_session(title="Historical", created_at=hist_timestamp)
@@ -228,7 +235,8 @@ async def test_gateway_create_session_created_at(temp_db: str) -> None:
 async def test_chatbot_ignore_completed_messages(temp_db: str) -> None:
     """Test that Chatbot.start() ignores messages already marked as STATUS_DELIVERED."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
 
     # Post a message that is already completed
     await gw.post(
@@ -263,12 +271,13 @@ async def test_gateway_delete_session(temp_db: str, tmp_path: Any) -> None:
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
 
-    gw = Gateway(
-        workspace_config=WorkspaceConfig(
+    cfg = KesokuConfig(
+        workspace=WorkspaceConfig(
             db_path=temp_db,
             sessions_dir=str(sessions_dir),
         )
     )
+    gw = Gateway(context=KesokuContext(config=cfg))
 
     # Create session
     session = await gw.create_session("del_sess_1", "Delete Session Test")

@@ -7,14 +7,11 @@ anti-stall mechanisms.
 
 import asyncio
 import os
-from typing import Any
 
-from kesoku.agent.llm import BaseLLM, get_llm
 from kesoku.agent.tool_runner import ToolRunner
-from kesoku.agent.tools import ToolContext, ToolRegistry, default_registry
+from kesoku.agent.tools import ToolContext
 from kesoku.agent.turn_executor import TurnExecutor
 from kesoku.agent.turn_logger import TurnLogger
-from kesoku.config import get_config
 from kesoku.constants import (
     ROLE_USER,
     STATUS_ERROR,
@@ -23,6 +20,7 @@ from kesoku.constants import (
     STATUS_PENDING_AGENT,
     STATUS_PROCESSING,
 )
+from kesoku.context import KesokuContext
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
@@ -37,24 +35,18 @@ class SessionWorker:
         self,
         session_id: str,
         gateway: Gateway,
-        llm: BaseLLM,
-        tool_registry: ToolRegistry,
-        dispatcher: Any,
+        context: KesokuContext | None = None,
     ) -> None:
         """Initialize SessionWorker.
 
         Args:
             session_id: Internal session identifier.
             gateway: Gateway instance.
-            llm: LLM backend interface.
-            tool_registry: Tool/skill registry.
-            dispatcher: Parent Agent dispatcher reference.
+            context: Optional runtime context container.
         """
         self.session_id = session_id
         self.gateway = gateway
-        self.default_llm = llm
-        self.tool_registry = tool_registry
-        self.dispatcher = dispatcher
+        self.context = context or getattr(gateway, "context", KesokuContext())
         self.queue: asyncio.Queue[Message] = asyncio.Queue()
         self._running = False
         self.task: asyncio.Task[None] | None = None
@@ -150,20 +142,20 @@ class SessionWorker:
         folder_name = session.workspace_name
         tool_context = ToolContext(session_id=self.session_id, session_workspace=folder_name)
 
-        cfg = get_config()
+        cfg = self.context.config
         session_staging_dir = os.path.realpath(  # noqa: ASYNC240
             os.path.join(cfg.workspace.sessions_dir, folder_name)
         )
         os.makedirs(session_staging_dir, exist_ok=True)  # noqa: ASYNC240
 
-        tool_runner = ToolRunner(self.tool_registry, tool_context)
+        tool_runner = ToolRunner(self.context.tool_registry, tool_context)
         turn_logger = TurnLogger(self.session_id, session_staging_dir)
         turn_executor = TurnExecutor(
             session_id=self.session_id,
             gateway=self.gateway,
-            default_llm=self.default_llm,
             tool_runner=tool_runner,
             turn_logger=turn_logger,
+            context=self.context,
         )
 
         await turn_executor.process_turn(
@@ -179,24 +171,16 @@ class Agent:
     def __init__(
         self,
         gateway: Gateway,
-        llm: BaseLLM | None = None,
-        tool_registry: ToolRegistry | None = None,
+        context: KesokuContext | None = None,
     ) -> None:
         """Initialize the Agent dispatcher.
 
         Args:
             gateway: The Gateway instance providing message queues and persistence.
-            llm: The LLM backend interface. If None, initializes via get_llm().
-            tool_registry: Registry of available tools/skills. If None, initializes default_registry.
+            context: Optional runtime context container.
         """
-        if llm is None:
-            llm = get_llm()
-        if tool_registry is None:
-            tool_registry = default_registry
-
+        self.context = context or getattr(gateway, "context", None) or KesokuContext()
         self.gateway = gateway
-        self.llm = llm
-        self.tool_registry = tool_registry
         self.workers: dict[str, SessionWorker] = {}
         self._running = False
         self._master_task: asyncio.Task[None] | None = None
@@ -221,9 +205,7 @@ class Agent:
                         worker = SessionWorker(
                             session_id=msg.session_id,
                             gateway=self.gateway,
-                            llm=self.llm,
-                            tool_registry=self.tool_registry,
-                            dispatcher=self,
+                            context=self.context,
                         )
                         self.workers[msg.session_id] = worker
                         worker.start()

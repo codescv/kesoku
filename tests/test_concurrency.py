@@ -8,7 +8,7 @@ import pytest
 from kesoku.agent.agent import Agent
 from kesoku.agent.llm import MockLLM
 from kesoku.agent.tools import ToolRegistry
-from kesoku.config import WorkspaceConfig
+from kesoku.config import KesokuConfig, WorkspaceConfig
 from kesoku.constants import (
     ROLE_ASSISTANT,
     ROLE_USER,
@@ -17,6 +17,7 @@ from kesoku.constants import (
     STATUS_PROCESSED,
     TYPE_TEXT,
 )
+from kesoku.context import KesokuContext
 from kesoku.db import DatabaseManager, Message
 from kesoku.gateway.gateway import Gateway
 
@@ -30,7 +31,8 @@ def temp_db(tmp_path: Any) -> str:
 async def test_pure_broker_pubsub(temp_db: str) -> None:
     """Test that Gateway post() correctly broadcasts messages to active matching listeners."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
 
     received_user = []
     received_model = []
@@ -72,7 +74,8 @@ async def test_pure_broker_pubsub(temp_db: str) -> None:
 async def test_multi_user_simultaneous(temp_db: str) -> None:
     """Test that Agent spawns separate SessionWorkers for simultaneous user sessions."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
     reg = ToolRegistry()
 
     @reg.register
@@ -81,7 +84,8 @@ async def test_multi_user_simultaneous(temp_db: str) -> None:
 
     llm = MockLLM()
 
-    agent = Agent(gw, llm, reg)
+    context = KesokuContext(llm=llm, tool_registry=reg)
+    agent = Agent(gw, context=context)
     agent_task = asyncio.create_task(agent.start())
 
     # Ingest messages from two separate sessions simultaneously
@@ -128,7 +132,8 @@ async def test_multi_user_simultaneous(temp_db: str) -> None:
 async def test_user_thought_interruption(temp_db: str) -> None:
     """Test sending an interruption message while a session is processing."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
     reg = ToolRegistry()
 
     @reg.register
@@ -137,7 +142,8 @@ async def test_user_thought_interruption(temp_db: str) -> None:
 
     llm = MockLLM()
 
-    agent = Agent(gw, llm, reg)
+    context = KesokuContext(llm=llm, tool_registry=reg)
+    agent = Agent(gw, context=context)
     agent_task = asyncio.create_task(agent.start())
 
     # Send first message

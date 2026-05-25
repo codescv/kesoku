@@ -11,6 +11,7 @@ from kesoku.agent.history import build_clean_history
 from kesoku.agent.llm import GeminiLLM, MockLLM, ToolCallRequest, get_llm
 from kesoku.agent.tools import ToolContext, ToolRegistry, run_shell_command
 from kesoku.config import KesokuConfig, WorkspaceConfig
+from kesoku.context import KesokuContext
 from kesoku.db import DatabaseManager, Message
 from kesoku.gateway.gateway import Gateway
 
@@ -40,7 +41,8 @@ def temp_db(tmp_path: Any) -> str:
 async def test_agent_execution_loop(temp_db: str) -> None:
     """Test agent processing a message using MockLLM and tool calling."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
     reg = ToolRegistry()
 
     @reg.register
@@ -63,7 +65,8 @@ async def test_agent_execution_loop(temp_db: str) -> None:
     )
 
     llm = MockLLM()
-    agent = Agent(gw, llm, reg)
+    context = KesokuContext(llm=llm, tool_registry=reg)
+    agent = Agent(gw, context=context)
 
     # Start agent loop in background
     agent_task = asyncio.create_task(agent.start())
@@ -141,7 +144,8 @@ def test_workspace_name() -> None:
 async def test_agent_parallel_tool_calls(temp_db: str) -> None:
     """Test that agent processes parallel tool calls and batches TC and TR messages."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
     reg = ToolRegistry()
 
     @reg.register
@@ -167,7 +171,8 @@ async def test_agent_parallel_tool_calls(temp_db: str) -> None:
         ToolCallRequest(name="dummy_search", arguments={"query": "B"}, thought_signature=None),
     ]
     llm = MockLLM(mock_tools=mock_tools)
-    agent = Agent(gw, llm, reg)
+    context = KesokuContext(llm=llm, tool_registry=reg)
+    agent = Agent(gw, context=context)
 
     agent_task = asyncio.create_task(agent.start())
     await asyncio.sleep(0.5)
@@ -216,7 +221,8 @@ def test_gemini_llm_thinking_level() -> None:
 async def test_orphaned_tool_call_healing(temp_db: str) -> None:
     """Verify that orphaned tool calls are healed with synthesized interruption messages."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
 
     # Create session
     await gw.create_session("sess_heal", title="Healing Session")
@@ -262,7 +268,8 @@ async def test_orphaned_tool_call_healing(temp_db: str) -> None:
 async def test_system_prompt_and_pinned_turns_turn_based(temp_db: str) -> None:
     """Verify that system prompt and the first K turns are always pinned under turn-based logic."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
 
     await gw.create_session("sess_pin", title="Pinning Session")
 
@@ -314,7 +321,8 @@ async def test_system_prompt_and_pinned_turns_turn_based(temp_db: str) -> None:
 async def test_skill_pinning_and_parallel_safety_turn_based(temp_db: str) -> None:
     """Verify that use_skill calls and their entire parallel turn batch are never truncated under turn-based logic."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
 
     await gw.create_session("sess_skill", title="Skill Session")
 
@@ -465,7 +473,8 @@ async def test_skill_pinning_and_parallel_safety_turn_based(temp_db: str) -> Non
 async def test_priority_based_dropping_and_atomic_batches_turn_based(temp_db: str) -> None:
     """Verify that older resolved tool turns and thoughts are dropped under turn-based logic."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
 
     await gw.create_session("sess_drop", title="Dropping Session")
 
@@ -624,19 +633,18 @@ async def test_priority_based_dropping_and_atomic_batches_turn_based(temp_db: st
 async def test_clean_history_config_loading(temp_db: str) -> None:
     """Verify that build_clean_history loads default parameters from global config when arguments are None."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
 
     await gw.create_session("sess_cfg", title="Config Session")
 
-    from kesoku.config import KesokuConfig
+    mock_cfg = KesokuConfig()
+    mock_cfg.agent.history.max_turns = 42
+    mock_cfg.agent.history.pin_initial_turns = 7
+    mock_cfg.agent.history.pin_recent_turns = 13
 
-    cfg = KesokuConfig()
-    cfg.agent.history.max_turns = 42
-    cfg.agent.history.pin_initial_turns = 7
-    cfg.agent.history.pin_recent_turns = 13
-
-    with patch("kesoku.agent.agent.get_config", return_value=cfg), \
-         patch("kesoku.agent.history.get_config", return_value=cfg):
+    with patch("kesoku.context.get_config", return_value=mock_cfg), \
+         patch("kesoku.agent.history.get_config", return_value=mock_cfg):
         history = await build_clean_history(gateway=gw, session_id="sess_cfg")
         assert len(history) == 1
         assert history[0].role == "system"
@@ -646,7 +654,8 @@ async def test_clean_history_config_loading(temp_db: str) -> None:
 async def test_session_worker_dynamic_llm(temp_db: str) -> None:
     """Verify that SessionWorker resolves the correct LLM based on channel overrides."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
 
     await gw.create_session("sess_override", title="Override Session")
 
@@ -664,31 +673,32 @@ async def test_session_worker_dynamic_llm(temp_db: str) -> None:
     await gw.post(msg)
 
     from kesoku.agent.turn_executor import TurnExecutor
-    from kesoku.config import DiscordChannelOverride, KesokuConfig
+    from kesoku.config import DiscordChannelOverride
 
-    cfg = KesokuConfig()
-    cfg.discord.channels = [
+    mock_cfg = KesokuConfig()
+    mock_cfg.discord.channels = [
         DiscordChannelOverride(
             channels=["announcements"],
             llm="claude",
         )
     ]
 
-    with patch("kesoku.agent.turn_executor.get_config", return_value=cfg), \
-         patch("kesoku.agent.turn_executor.get_llm") as mock_get_llm:
+    with patch("kesoku.context.get_config", return_value=mock_cfg), \
+         patch("kesoku.context.KesokuContext.get_llm") as mock_get_llm:
         mock_claude = MagicMock()
         mock_get_llm.return_value = mock_claude
 
+        context = KesokuContext(llm=MockLLM())
         executor = TurnExecutor(
             session_id="sess_override",
             gateway=gw,
-            default_llm=MockLLM(),
             tool_runner=MagicMock(),
+            context=context,
         )
 
         resolved_llm = executor._resolve_llm(msg)
         assert resolved_llm == mock_claude
-        mock_get_llm.assert_called_once_with("claude")
+        mock_get_llm.assert_called_once_with(provider="claude")
 
 
 @pytest.mark.asyncio
@@ -697,7 +707,8 @@ async def test_agent_empty_response_nudge(temp_db: str) -> None:
     from kesoku.agent.llm import BaseLLM, LLMResponse
 
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
     reg = ToolRegistry()
 
     await gw.create_session("sess_nudge", title="Nudge Session")
@@ -734,7 +745,8 @@ async def test_agent_empty_response_nudge(temp_db: str) -> None:
                 return LLMResponse(content="Hello! Here is the reply after nudge.")
 
     llm = NudgeLLM()
-    agent = Agent(gw, llm, reg)
+    context = KesokuContext(llm=llm, tool_registry=reg)
+    agent = Agent(gw, context=context)
 
     agent_task = asyncio.create_task(agent.start())
     await asyncio.sleep(0.6)
@@ -767,7 +779,8 @@ async def test_llm_turn_logging(temp_db: str, tmp_path: Any) -> None:
     import yaml
 
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
     reg = ToolRegistry()
 
     @reg.register
@@ -776,15 +789,13 @@ async def test_llm_turn_logging(temp_db: str, tmp_path: Any) -> None:
         return "4.0"
 
     # Configure workspaces directory to temp_path / "sessions"
-    with patch("kesoku.agent.agent.get_config") as mock_get_config, \
-         patch("kesoku.agent.history.get_config") as mock_get_history_config, \
-         patch("kesoku.agent.turn_executor.get_config") as mock_get_executor_config:
+    with patch("kesoku.context.get_config") as mock_get_context_config, \
+         patch("kesoku.agent.history.get_config") as mock_get_history_config:
         cfg = KesokuConfig()
         cfg.workspace.db_path = temp_db
         cfg.workspace.sessions_dir = str(tmp_path / "sessions")
-        mock_get_config.return_value = cfg
+        mock_get_context_config.return_value = cfg
         mock_get_history_config.return_value = cfg
-        mock_get_executor_config.return_value = cfg
 
         # Create a session and post a user message
         session = await gw.create_session("sess_log", title="Logging Session")
@@ -805,7 +816,8 @@ async def test_llm_turn_logging(temp_db: str, tmp_path: Any) -> None:
             ToolCallRequest(name="dummy_calculator", arguments={"expression": "dummy"}),
         ]
         llm = MockLLM(mock_tools=mock_tools)
-        agent = Agent(gw, llm, reg)
+        context = KesokuContext(llm=llm, tool_registry=reg)
+        agent = Agent(gw, context=context)
 
         # Start agent loop to process the turn
         agent_task = asyncio.create_task(agent.start())
@@ -856,7 +868,8 @@ async def test_llm_turn_logging_disabled(temp_db: str, tmp_path: Any) -> None:
     import os
 
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
     reg = ToolRegistry()
 
     @reg.register
@@ -865,16 +878,14 @@ async def test_llm_turn_logging_disabled(temp_db: str, tmp_path: Any) -> None:
         return "4.0"
 
     # Configure workspaces directory to temp_path / "sessions"
-    with patch("kesoku.agent.agent.get_config") as mock_get_config, \
-         patch("kesoku.agent.history.get_config") as mock_get_history_config, \
-         patch("kesoku.agent.turn_executor.get_config") as mock_get_executor_config:
+    with patch("kesoku.context.get_config") as mock_get_context_config, \
+         patch("kesoku.agent.history.get_config") as mock_get_history_config:
         cfg = KesokuConfig()
         cfg.workspace.db_path = temp_db
         cfg.workspace.sessions_dir = str(tmp_path / "sessions")
         cfg.agent.raw_llm_logs = False
-        mock_get_config.return_value = cfg
+        mock_get_context_config.return_value = cfg
         mock_get_history_config.return_value = cfg
-        mock_get_executor_config.return_value = cfg
 
         # Create a session and post a user message
         session = await gw.create_session("sess_log_disabled", title="No Logging Session")
@@ -895,7 +906,8 @@ async def test_llm_turn_logging_disabled(temp_db: str, tmp_path: Any) -> None:
             ToolCallRequest(name="dummy_calculator", arguments={"expression": "dummy"}),
         ]
         llm = MockLLM(mock_tools=mock_tools)
-        agent = Agent(gw, llm, reg)
+        context = KesokuContext(llm=llm, tool_registry=reg)
+        agent = Agent(gw, context=context)
 
         # Start agent loop to process the turn
         agent_task = asyncio.create_task(agent.start())
@@ -916,9 +928,10 @@ async def test_context_optimization_tool_serialization(temp_db: str, tmp_path: A
     """Verify that tool results are serialized and truncated under the context optimization settings."""
     import os
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
 
-    with patch("kesoku.agent.agent.get_config") as mock_get_config, \
+    with patch("kesoku.context.get_config") as mock_get_context_config, \
          patch("kesoku.agent.history.get_config") as mock_get_history_config:
         cfg = KesokuConfig()
         cfg.workspace.db_path = temp_db
@@ -926,7 +939,7 @@ async def test_context_optimization_tool_serialization(temp_db: str, tmp_path: A
         cfg.agent.history.active_turn_keep_tool_results_for_k_recent_calls = 1
         cfg.agent.history.serialize_historical_tool_results = True
         cfg.agent.history.serialize_tool_results_threshold = 200
-        mock_get_config.return_value = cfg
+        mock_get_context_config.return_value = cfg
         mock_get_history_config.return_value = cfg
 
         session = await gw.create_session("sess_opt", title="Optimization Session")
@@ -1067,7 +1080,8 @@ async def test_context_optimization_tool_serialization(temp_db: str, tmp_path: A
 async def test_agent_llm_error_handling(temp_db: str) -> None:
     """Verify that agent turn processing catches LLM exceptions, posts error message, and marks msg as error."""
     DatabaseManager(temp_db).init_tables()
-    gw = Gateway(workspace_config=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
     reg = ToolRegistry()
 
     # Ingest user message
@@ -1097,7 +1111,8 @@ async def test_agent_llm_error_handling(temp_db: str) -> None:
             raise RuntimeError("LLM API Connection Failed")
 
     llm = FailingLLM()
-    agent = Agent(gw, llm, reg)
+    context = KesokuContext(llm=llm, tool_registry=reg)
+    agent = Agent(gw, context=context)
 
     agent_task = asyncio.create_task(agent.start())
     await asyncio.sleep(0.5)
