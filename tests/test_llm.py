@@ -438,3 +438,30 @@ def test_history_to_turns_conversion() -> None:
     assert turns[3].blocks[0].text == "Continuing prompt"
 
 
+def test_image_resizing_and_compression() -> None:
+    """Verify that _resize_and_compress_image resizes large images and outputs WebP."""
+    import io
+
+    from PIL import Image
+
+    from kesoku.agent.llm import _resize_and_compress_image
+
+    # Create a large dummy image in memory (2000x1000)
+    img = Image.new("RGB", (2000, 1000), color="blue")
+    img_byte_arr = io.BytesIO()
+    img.save(img_byte_arr, format="PNG")
+    large_png_bytes = img_byte_arr.getvalue()
+
+    # Resize and compress to WebP
+    processed_bytes, mime_type = _resize_and_compress_image(large_png_bytes, max_size=1024)
+
+    assert mime_type == "image/webp"
+    # Verify the new image dimensions by loading it
+    result_img = Image.open(io.BytesIO(processed_bytes))
+    width, height = result_img.size
+    # Should be scaled down such that max dimension is 1024
+    assert width == 1024
+    assert height == 512
+
+
+

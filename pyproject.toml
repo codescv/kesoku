@@ -17,6 +17,7 @@ dependencies = [
     "google-cloud-pubsub>=2.38.0",
     "google-api-python-client>=2.196.0",
     "qrcode>=8.2",
+    "pillow>=12.2.0",
 ]
 
 [project.scripts]

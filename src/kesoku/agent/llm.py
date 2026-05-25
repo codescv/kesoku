@@ -115,6 +115,54 @@ class LLMTurn(BaseModel):
     blocks: list[LLMBlock] = Field(default_factory=list)
 
 
+def _resize_and_compress_image(file_bytes: bytes, max_size: int = 1024) -> tuple[bytes, str]:
+    """Resize image to have max_size as maximum dimension and compress to WebP.
+
+    Args:
+        file_bytes: Original image file bytes.
+        max_size: Maximum allowed width or height.
+
+    Returns:
+        Tuple of (processed_image_bytes, mime_type).
+    """
+    try:
+        import io
+
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(file_bytes))
+
+        # Convert palette or other modes to RGB/RGBA to support WebP format
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGBA")
+
+        width, height = img.size
+        if width > max_size or height > max_size:
+            if width > height:
+                new_width = max_size
+                new_height = int(height * (max_size / width))
+            else:
+                new_height = max_size
+                new_width = int(width * (max_size / height))
+
+            img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            logger.info(f"Resized image from {width}x{height} to {new_width}x{new_height}")
+
+        out_io = io.BytesIO()
+        img.save(out_io, format="WEBP", quality=80)
+        compressed_bytes = out_io.getvalue()
+
+        # Only use compressed bytes if it actually saves space
+        if len(compressed_bytes) < len(file_bytes):
+            logger.info(f"Compressed image using WebP: {len(file_bytes)} -> {len(compressed_bytes)} bytes")
+            return compressed_bytes, "image/webp"
+
+        return file_bytes, "image/webp"
+    except Exception as e:
+        logger.error(f"Failed to resize and compress image: {e}")
+        return file_bytes, "image/webp"
+
+
 def _load_attachments(attachments: list[dict[str, Any]]) -> list[ImageBlock | DocumentBlock]:
     """Load local attachments from paths and wrap them in ImageBlock or DocumentBlock.
 
@@ -135,6 +183,11 @@ def _load_attachments(attachments: list[dict[str, Any]]) -> list[ImageBlock | Do
                 corrected_mime = mime_type
                 if mime_type.startswith("image/"):
                     corrected_mime = _detect_image_mime_type(file_bytes, fallback_mime=mime_type)
+                    # Resize and compress image using WebP
+                    processed_bytes, processed_mime = _resize_and_compress_image(file_bytes, max_size=1024)
+                    if processed_bytes != file_bytes:
+                        corrected_mime = processed_mime
+                        file_bytes = processed_bytes
                     blocks.append(ImageBlock(media_type=corrected_mime, data=file_bytes))
                     logger.info(f"Loaded native image part: {path} ({corrected_mime})")
                 elif mime_type == "application/pdf":

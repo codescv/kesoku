@@ -1245,6 +1245,85 @@ async def test_graceful_shutdown_and_orphaned_recovery(temp_db: str) -> None:
     assert db_recent_msg.status == "processing"
 
 
+@pytest.mark.asyncio
+async def test_history_attachment_stripping(temp_db: str) -> None:
+    """Verify that build_clean_history strips attachments from older user messages while keeping the latest."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    await gw.create_session("sess_attach_strip", title="Attachment Stripping Session")
+
+    # Turn 1 (Historical, user message with attachments)
+    msg1 = Message(
+        session_id="sess_attach_strip",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        content="Please look at my first file.",
+        status="processed",
+        metadata={
+            "attachments": [
+                {
+                    "path": "/tmp/file1.png",
+                    "mime_type": "image/png",
+                }
+            ]
+        },
+    )
+    await gw.post(msg1)
+    await gw.post(
+        Message(
+            session_id="sess_attach_strip",
+            chatbot_id="cli",
+            channel_id="ch1",
+            sender="Kesoku",
+            role="assistant",
+            content="I see the first file.",
+            status="responded",
+        )
+    )
+
+    # Turn 2 (Latest active turn, user message with attachments)
+    msg2 = Message(
+        session_id="sess_attach_strip",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        content="Please look at my second file.",
+        status="processed",
+        metadata={
+            "attachments": [
+                {
+                    "path": "/tmp/file2.png",
+                    "mime_type": "image/png",
+                }
+            ]
+        },
+    )
+    await gw.post(msg2)
+
+    # Call build clean history
+    history = await build_clean_history(
+        gateway=gw, session_id="sess_attach_strip", max_turns=10, pin_initial_turns=0, pin_recent_turns=2
+    )
+
+    # Retrieve and inspect the historical message
+    hist_msg = next(m for m in history if m.id == msg1.id)
+    # Attachments should be stripped and placeholder appended
+    assert "attachments" not in hist_msg.metadata
+    assert "[Attachments stripped from history: file1.png]" in hist_msg.content
+
+    # Retrieve and inspect the latest message
+    latest_msg = next(m for m in history if m.id == msg2.id)
+    # Attachments must be kept in full detail for the active turn
+    assert "attachments" in latest_msg.metadata
+    assert latest_msg.metadata["attachments"][0]["path"] == "/tmp/file2.png"
+
+
+
 
 
 

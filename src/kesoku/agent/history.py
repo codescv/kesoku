@@ -263,6 +263,19 @@ async def build_clean_history(
             clean_turn = [m for m in turn if m.id not in dropped_ids]
             cleaned_turns.append(clean_turn)
 
+        # Strip attachments for historical user turns to optimize context size
+        if not is_latest:
+            for m in cleaned_turns[-1]:
+                if m.role == ROLE_USER:
+                    attachments = m.metadata.get("attachments")
+                    if attachments:
+                        filenames = [os.path.basename(att.get("path", "file")) for att in attachments]
+                        placeholder = f"\n\n[Attachments stripped from history: {', '.join(filenames)}]"
+                        if placeholder not in m.content:
+                            m.content += placeholder
+                        m.metadata.pop("attachments", None)
+
+
     # 9. Flatten turns and construct the final chronological context history.
     final_history = []
     if system_msg:
