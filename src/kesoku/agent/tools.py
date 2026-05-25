@@ -1,11 +1,12 @@
 """Tool registry and MVP skills for Kesoku AI Agent."""
+# ruff: noqa: ASYNC230, ASYNC240
 
+import asyncio
 import functools
 import inspect
 import os
 import re
 import shlex
-import subprocess
 import time
 from collections.abc import Callable
 from typing import Any
@@ -131,7 +132,7 @@ class WebSearchTool:
                 logger.warning("GEMINI_API_KEY is not set. WebSearchTool calls may fail if not authenticated.")
             return genai.Client(api_key=key)
 
-    def web_search(self, query: str, context: ToolContext | None = None) -> str:
+    async def web_search(self, query: str, context: ToolContext | None = None) -> str:
         """Search the web for current information on a given topic using Google Search grounding.
 
         Args:
@@ -148,7 +149,7 @@ class WebSearchTool:
 
             generate_config = types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())])
 
-            res = client.models.generate_content(
+            res = await client.aio.models.generate_content(
                 model=config.model_name,
                 contents=query,
                 config=generate_config,
@@ -184,7 +185,7 @@ web_search_tool = WebSearchTool()
 
 
 @default_registry.register
-def web_search(query: str, context: ToolContext | None = None) -> str:
+async def web_search(query: str, context: ToolContext | None = None) -> str:
     """Search the web for current information on a given topic.
 
     Args:
@@ -194,7 +195,7 @@ def web_search(query: str, context: ToolContext | None = None) -> str:
     Returns:
         Search results summary with grounding sources.
     """
-    return web_search_tool.web_search(query, context)
+    return await web_search_tool.web_search(query, context)
 
 
 class ShellCommandError(RuntimeError):
@@ -204,7 +205,7 @@ class ShellCommandError(RuntimeError):
 
 
 @default_registry.register
-def run_shell_command(
+async def run_shell_command(
     command: str,
     cwd: str | None = None,
     context: ToolContext | None = None,
@@ -286,43 +287,66 @@ def run_shell_command(
 
     logger.info(f"Executing shell command in '{exec_dir}': {command}")
 
+    proc = None
     try:
         if config.shell.use_shell:
-            res = subprocess.run(
+            proc = await asyncio.create_subprocess_shell(
                 command,
-                shell=True,
                 cwd=exec_dir,
                 env=env,
-                capture_output=True,
-                text=True,
-                timeout=TIMEOUT_SECONDS,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
         else:
             tokens = shlex.split(command)
-            res = subprocess.run(
-                tokens,
-                shell=False,
+            proc = await asyncio.create_subprocess_exec(
+                *tokens,
                 cwd=exec_dir,
                 env=env,
-                capture_output=True,
-                text=True,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(),
                 timeout=TIMEOUT_SECONDS,
             )
-    except subprocess.TimeoutExpired as e:
-        out = e.output.decode("utf-8", errors="replace") if isinstance(e.output, bytes) else (e.output or "")
-        err = (
-            e.stderr.decode("utf-8", errors="replace")
-            if getattr(e, "stderr", None) and isinstance(e.stderr, bytes)
-            else (getattr(e, "stderr", None) or "")
-        )
-        raise ShellCommandError(
-            f"Command timed out after {TIMEOUT_SECONDS} seconds.\n=== STDOUT ===\n{out}\n=== STDERR ===\n{err}"
-        ) from e
+            stdout = stdout_bytes.decode("utf-8", errors="replace")
+            stderr = stderr_bytes.decode("utf-8", errors="replace")
+        except TimeoutError as e:
+            try:
+                proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except Exception:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+            raise ShellCommandError(
+                f"Command timed out after {TIMEOUT_SECONDS} seconds."
+            ) from e
+    except asyncio.CancelledError:
+        if proc:
+            try:
+                proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except Exception:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+        logger.info(f"Shell command execution cancelled: {command}")
+        raise
     except Exception as ex:
-        logger.error(f"Failed to execute command '{command}': {ex}")
-        raise ShellCommandError(f"Error executing command: {ex}") from ex
+        if not isinstance(ex, ShellCommandError) and not isinstance(ex, asyncio.CancelledError):
+            logger.error(f"Failed to execute command '{command}': {ex}")
+            raise ShellCommandError(f"Error executing command: {ex}") from ex
+        raise
 
-    out_str = f"=== STDOUT ===\n{res.stdout}\n=== STDERR ===\n{res.stderr}"
+    out_str = f"=== STDOUT ===\n{stdout}\n=== STDERR ===\n{stderr}"
 
     # Unified truncation logic
     final_output = out_str
@@ -351,8 +375,8 @@ def run_shell_command(
                 f"Preview:\n{out_str[:MAX_TOOL_OUTPUT_LENGTH]}"
             )
 
-    if res.returncode != 0:
-        raise ShellCommandError(f"Command failed with exit code {res.returncode}.\n{final_output}")
+    if proc.returncode != 0:
+        raise ShellCommandError(f"Command failed with exit code {proc.returncode}.\n{final_output}")
 
     return final_output
 

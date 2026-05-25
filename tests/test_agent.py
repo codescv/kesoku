@@ -64,7 +64,14 @@ async def test_agent_execution_loop(temp_db: str) -> None:
         )
     )
 
-    llm = MockLLM()
+    from kesoku.agent.llm import LLMResponse
+    llm = MockLLM(responses=[
+        LLMResponse(
+            content="Let me calculate that.",
+            tool_calls=[ToolCallRequest(name="calculator", arguments={"expression": "25 + 10"})]
+        ),
+        LLMResponse(content="The calculation result is 35.", tool_calls=[])
+    ])
     context = KesokuContext(llm=llm, tool_registry=reg)
     agent = Agent(gw, context=context)
 
@@ -98,7 +105,8 @@ def test_get_llm() -> None:
         assert isinstance(get_llm(), MockLLM)
 
 
-def test_run_shell_command(tmp_path: Any) -> None:
+@pytest.mark.asyncio
+async def test_run_shell_command(tmp_path: Any) -> None:
     """Test secure shell command execution tool."""
     ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
     with patch("kesoku.agent.tools.get_config") as mock_get_config:
@@ -106,18 +114,18 @@ def test_run_shell_command(tmp_path: Any) -> None:
         cfg.workspace.sessions_dir = str(tmp_path / "sessions")
         cfg.shell.enabled = False
         mock_get_config.return_value = cfg
-        assert "disabled" in run_shell_command("echo hello", context=ctx)
+        assert "disabled" in await run_shell_command("echo hello", context=ctx)
 
         cfg.shell.enabled = True
         cfg.shell.mode = "blocklist"
-        res = run_shell_command("echo test_hello", context=ctx)
+        res = await run_shell_command("echo test_hello", context=ctx)
         assert "test_hello" in res
 
-        assert "Execution denied" in run_shell_command("rm -rf /", context=ctx)
+        assert "Execution denied" in await run_shell_command("rm -rf /", context=ctx)
 
         cfg.shell.mode = "allowlist"
-        assert "Execution denied" in run_shell_command("unknown_binary_test", context=ctx)
-        assert "test_allow" in run_shell_command("echo test_allow", context=ctx)
+        assert "Execution denied" in await run_shell_command("unknown_binary_test", context=ctx)
+        assert "test_allow" in await run_shell_command("echo test_allow", context=ctx)
 
 
 def test_workspace_name() -> None:

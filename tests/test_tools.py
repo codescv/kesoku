@@ -2,11 +2,16 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from kesoku.agent.tools import ShellCommandError, ToolContext, WebSearchTool, run_shell_command
 
 
-def test_web_search_tool_success() -> None:
+@pytest.mark.asyncio
+async def test_web_search_tool_success() -> None:
     """Test WebSearchTool successfully executes search and formats grounding sources."""
+    from unittest.mock import AsyncMock
+
     mock_client = MagicMock()
     mock_res = MagicMock()
     mock_res.text = "The weather in Tokyo is sunny."
@@ -24,12 +29,12 @@ def test_web_search_tool_success() -> None:
     mock_candidate.grounding_metadata.grounding_chunks = [mock_chunk1, mock_chunk2]
     mock_res.candidates = [mock_candidate]
 
-    mock_client.models.generate_content.return_value = mock_res
+    mock_client.aio.models.generate_content = AsyncMock(return_value=mock_res)
 
     # Explicitly inject mock client
     tool = WebSearchTool(client=mock_client)
     ctx = ToolContext(session_id="s1", session_workspace="workspace1")
-    result = tool.web_search("What is the weather in Tokyo?", ctx)
+    result = await tool.web_search("What is the weather in Tokyo?", ctx)
 
     assert "The weather in Tokyo is sunny." in result
     assert "Sources:" in result
@@ -38,18 +43,22 @@ def test_web_search_tool_success() -> None:
     assert result.count("https://weather.com/tokyo") == 1
 
 
-def test_web_search_tool_api_failure() -> None:
+@pytest.mark.asyncio
+async def test_web_search_tool_api_failure() -> None:
     """Test WebSearchTool handles API call exceptions gracefully."""
+    from unittest.mock import AsyncMock
+
     mock_client = MagicMock()
-    mock_client.models.generate_content.side_effect = Exception("API Quota Exceeded")
+    mock_client.aio.models.generate_content = AsyncMock(side_effect=Exception("API Quota Exceeded"))
 
     tool = WebSearchTool(client=mock_client)
-    result = tool.web_search("Test query", None)
+    result = await tool.web_search("Test query", None)
 
     assert "Web search failed: API Quota Exceeded" in result
 
 
-def test_run_shell_command_default_cwd(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_run_shell_command_default_cwd(tmp_path) -> None:
     """Test that run_shell_command defaults to executing inside the AWD."""
     import kesoku.config
     from kesoku.config import init_config, load_config
@@ -65,7 +74,7 @@ def test_run_shell_command_default_cwd(tmp_path) -> None:
         ctx = ToolContext(session_id="test_sess", session_workspace="test_workspace")
 
         # Execute pwd command
-        res = run_shell_command("pwd", context=ctx)
+        res = await run_shell_command("pwd", context=ctx)
 
         assert "=== STDOUT ===" in res
         # Output of pwd should match the AWD (tmp_path)
@@ -74,7 +83,8 @@ def test_run_shell_command_default_cwd(tmp_path) -> None:
         kesoku.config._global_config = original_config
 
 
-def test_run_shell_command_custom_cwd(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_run_shell_command_custom_cwd(tmp_path) -> None:
     """Test that run_shell_command executes in custom cwd if supplied."""
     import kesoku.config
     from kesoku.config import init_config, load_config
@@ -93,20 +103,21 @@ def test_run_shell_command_custom_cwd(tmp_path) -> None:
         ctx = ToolContext(session_id="test_sess", session_workspace="test_workspace")
 
         # Execute pwd command inside custom cwd (relative)
-        res = run_shell_command("pwd", cwd="subfolder", context=ctx)
+        res = await run_shell_command("pwd", cwd="subfolder", context=ctx)
         assert "=== STDOUT ===" in res
         assert str(subfolder) in res
 
         # Execute pwd command inside custom cwd (absolute)
         another_folder = tmp_path / "another"
         another_folder.mkdir()
-        res_abs = run_shell_command("pwd", cwd=str(another_folder), context=ctx)
+        res_abs = await run_shell_command("pwd", cwd=str(another_folder), context=ctx)
         assert str(another_folder) in res_abs
     finally:
         kesoku.config._global_config = original_config
 
 
-def test_run_shell_command_env_variables(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_run_shell_command_env_variables(tmp_path) -> None:
     """Test that run_shell_command injects AWD and STAGING_DIR environment variables."""
     import os
 
@@ -123,20 +134,19 @@ def test_run_shell_command_env_variables(tmp_path) -> None:
         ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
 
         # Execute command to print env variables
-        res = run_shell_command("echo $AWD && echo $STAGING_DIR", context=ctx)
+        res = await run_shell_command("echo $AWD && echo $STAGING_DIR", context=ctx)
 
         assert "=== STDOUT ===" in res
         assert str(tmp_path) in res
-        expected_staging = os.path.realpath(os.path.join(cfg.workspace.sessions_dir, "test_ws"))
+        expected_staging = os.path.realpath(os.path.join(cfg.workspace.sessions_dir, "test_ws"))  # noqa: ASYNC240
         assert expected_staging in res
     finally:
         kesoku.config._global_config = original_config
 
 
-def test_run_shell_command_failure(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_run_shell_command_failure(tmp_path) -> None:
     """Test that run_shell_command raises ShellCommandError on non-zero exit code."""
-    import pytest
-
     import kesoku.config
     from kesoku.config import init_config, load_config
 
@@ -150,7 +160,7 @@ def test_run_shell_command_failure(tmp_path) -> None:
         ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
 
         with pytest.raises(ShellCommandError) as exc_info:
-            run_shell_command("echo 'error occurred' >&2 && exit 5", context=ctx)
+            await run_shell_command("echo 'error occurred' >&2 && exit 5", context=ctx)
 
         assert "Command failed with exit code 5" in str(exc_info.value)
         assert "error occurred" in str(exc_info.value)
@@ -158,12 +168,10 @@ def test_run_shell_command_failure(tmp_path) -> None:
         kesoku.config._global_config = original_config
 
 
-def test_run_shell_command_timeout(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_run_shell_command_timeout(tmp_path) -> None:
     """Test that run_shell_command raises ShellCommandError on timeout."""
-    import subprocess
     from unittest.mock import patch
-
-    import pytest
 
     import kesoku.config
     from kesoku.config import init_config, load_config
@@ -177,24 +185,18 @@ def test_run_shell_command_timeout(tmp_path) -> None:
 
         ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.TimeoutExpired(
-                cmd="sleep 10", timeout=5, output=b"stdout data", stderr=b"stderr data"
-            )
+        with patch("kesoku.agent.tools.TIMEOUT_SECONDS", 0.1):
             with pytest.raises(ShellCommandError) as exc_info:
-                run_shell_command("sleep 10", context=ctx)
+                await run_shell_command("sleep 10", context=ctx)
 
             assert "Command timed out after" in str(exc_info.value)
-            assert "stdout data" in str(exc_info.value)
-            assert "stderr data" in str(exc_info.value)
     finally:
         kesoku.config._global_config = original_config
 
 
-def test_run_shell_command_start_failure(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_run_shell_command_start_failure(tmp_path) -> None:
     """Test that run_shell_command raises ShellCommandError on starting non-existent command."""
-    import pytest
-
     import kesoku.config
     from kesoku.config import init_config, load_config
 
@@ -210,18 +212,18 @@ def test_run_shell_command_start_failure(tmp_path) -> None:
         ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
 
         with pytest.raises(ShellCommandError) as exc_info:
-            run_shell_command("non_existent_command_xyz", context=ctx)
+            await run_shell_command("non_existent_command_xyz", context=ctx)
 
         assert "Error executing command" in str(exc_info.value)
     finally:
         kesoku.config._global_config = original_config
 
 
-def test_run_shell_command_failure_truncation(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_run_shell_command_failure_truncation(tmp_path) -> None:
     """Test that run_shell_command truncates extremely long failed outputs and saves to a file."""
     import os
-
-    import pytest
+    import re
 
     import kesoku.config
     from kesoku.config import init_config, load_config
@@ -238,7 +240,7 @@ def test_run_shell_command_failure_truncation(tmp_path) -> None:
         # Generate extremely long output (more than 10000 characters)
         long_cmd = "python3 -c 'print(\"a\" * 12000); exit(1)'"
         with pytest.raises(ShellCommandError) as exc_info:
-            run_shell_command(long_cmd, context=ctx)
+            await run_shell_command(long_cmd, context=ctx)
 
         err_msg = str(exc_info.value)
         assert "Command failed with exit code 1" in err_msg
@@ -246,13 +248,11 @@ def test_run_shell_command_failure_truncation(tmp_path) -> None:
         assert "Full output saved to session workspace file:" in err_msg
 
         # Extract output file path from message to verify it was written
-        import re
-
         match = re.search(r"Full output saved to session workspace file: `([^`]+)`", err_msg)
         assert match is not None
         filepath = match.group(1)
-        assert os.path.exists(filepath)
-        with open(filepath, encoding="utf-8") as f:
+        assert os.path.exists(filepath)  # noqa: ASYNC240
+        with open(filepath, encoding="utf-8") as f:  # noqa: ASYNC230
             content = f.read()
             assert "a" * 12000 in content
     finally:

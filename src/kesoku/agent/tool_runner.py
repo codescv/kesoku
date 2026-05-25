@@ -87,7 +87,12 @@ class ToolRunner:
                 call_kwargs["context"] = self.tool_context
 
             # Atomic tool execution
-            result = await asyncio.to_thread(tool_func, **call_kwargs)
+            if inspect.iscoroutinefunction(tool_func):
+                # a function defined with async
+                result = await tool_func(**call_kwargs)
+            else:
+                # a normal function
+                result = await asyncio.to_thread(tool_func, **call_kwargs)
             return Message(
                 session_id=tc_msg.session_id,
                 chatbot_id=tc_msg.chatbot_id,

@@ -630,11 +630,17 @@ class MockLLM(BaseLLM):
     """Mock LLM implementation for unit testing and local verification."""
 
     def __init__(
-        self, mock_response: str = "Hello! I am Kesoku Agent.", mock_tools: list[ToolCallRequest] | None = None
+        self,
+        responses: list[LLMResponse] | None = None,
+        mock_response: str = "Hello! I am Kesoku Agent.",
+        mock_tools: list[ToolCallRequest] | None = None,
     ) -> None:
         """Initialize MockLLM with canned responses."""
+        self.responses = responses
+        self._current_response_idx = 0
         self.mock_response = mock_response
         self.mock_tools = mock_tools or []
+        self._returned_tools = False
 
     async def generate(
         self,
@@ -645,15 +651,18 @@ class MockLLM(BaseLLM):
     ) -> LLMResponse:
         """Return canned mock response."""
         logger.debug(f"MockLLM received prompt: {prompt}, history count: {len(history or [])}")
-        prompt_str = prompt or (history[-1].content if history else "")
-        if history and history[-1].role == "tool" and history[-1].type == "tool_result":
-            return LLMResponse(content="The calculation result is 35.", tool_calls=[])
-        if "calculate" in prompt_str.lower() or "+" in prompt_str:
-            return LLMResponse(
-                content="Let me calculate that.",
-                tool_calls=[ToolCallRequest(name="calculator", arguments={"expression": "25 + 10"})],
-            )
-        return LLMResponse(content=self.mock_response, tool_calls=self.mock_tools)
+        if self.responses is not None:
+            if self._current_response_idx < len(self.responses):
+                res = self.responses[self._current_response_idx]
+                self._current_response_idx += 1
+                return res
+            return LLMResponse(content="No more mocked responses available.", tool_calls=[])
+
+        if self.mock_tools and not self._returned_tools:
+            self._returned_tools = True
+            return LLMResponse(content=self.mock_response, tool_calls=self.mock_tools)
+
+        return LLMResponse(content=self.mock_response, tool_calls=[])
 
 
 def get_llm(provider: str | None = None, config: KesokuConfig | None = None) -> BaseLLM:

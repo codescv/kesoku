@@ -82,7 +82,19 @@ async def test_multi_user_simultaneous(temp_db: str) -> None:
     def calculator(expression: str, context: Any = None) -> str:
         return "Result = 20.0"
 
-    llm = MockLLM()
+    from kesoku.agent.llm import LLMResponse, ToolCallRequest
+    llm = MockLLM(responses=[
+        LLMResponse(
+            content="Let me calculate that.",
+            tool_calls=[ToolCallRequest(name="calculator", arguments={"expression": "10 + 10"})]
+        ),
+        LLMResponse(
+            content="Let me calculate that.",
+            tool_calls=[ToolCallRequest(name="calculator", arguments={"expression": "20 + 20"})]
+        ),
+        LLMResponse(content="Result = 20.0", tool_calls=[]),
+        LLMResponse(content="Result = 20.0", tool_calls=[])
+    ])
 
     context = KesokuContext(llm=llm, tool_registry=reg)
     agent = Agent(gw, context=context)
@@ -140,7 +152,18 @@ async def test_user_thought_interruption(temp_db: str) -> None:
     def calculator(expression: str, context: Any = None) -> str:
         return "Result = 2.0"
 
-    llm = MockLLM()
+    from kesoku.agent.llm import LLMResponse, ToolCallRequest
+    llm = MockLLM(responses=[
+        LLMResponse(
+            content="Let me calculate that.",
+            tool_calls=[ToolCallRequest(name="calculator", arguments={"expression": "1 + 1"})]
+        ),
+        LLMResponse(
+            content="Let me calculate that.",
+            tool_calls=[ToolCallRequest(name="calculator", arguments={"expression": "2 + 2"})]
+        ),
+        LLMResponse(content="Result = 4.0", tool_calls=[])
+    ])
 
     context = KesokuContext(llm=llm, tool_registry=reg)
     agent = Agent(gw, context=context)
