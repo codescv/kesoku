@@ -4,16 +4,7 @@ import logging
 import os
 
 from kesoku.config import get_config
-from kesoku.constants import (
-    ROLE_ASSISTANT,
-    ROLE_SYSTEM,
-    ROLE_TOOL,
-    ROLE_USER,
-    STATUS_RESPONDED,
-    TYPE_THOUGHT,
-    TYPE_TOOL_CALL,
-    TYPE_TOOL_RESULT,
-)
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
 
@@ -23,10 +14,10 @@ logger = logging.getLogger(__name__)
 def group_tool_results_by_llm_call(turn_msgs: list[Message]) -> list[list[Message]]:
     """Group tool result messages in the active turn by their corresponding LLM call."""
     # 1. Map each tool call id to its message
-    tc_map = {m.id: m for m in turn_msgs if m.type == TYPE_TOOL_CALL}
+    tc_map = {m.id: m for m in turn_msgs if m.type == MessageType.TOOL_CALL}
 
     # 2. Get all tool results sorted by parent tool call timestamp
-    tr_msgs = [m for m in turn_msgs if m.type == TYPE_TOOL_RESULT]
+    tr_msgs = [m for m in turn_msgs if m.type == MessageType.TOOL_RESULT]
     tr_msgs.sort(key=lambda m: tc_map[m.parent_id].timestamp if m.parent_id in tc_map else m.timestamp)
 
     # 3. Group by parent tool call timestamp threshold (e.g., 0.5 seconds)
@@ -110,10 +101,10 @@ async def build_clean_history(
             chatbot_id=tc.chatbot_id,
             channel_id=tc.channel_id,
             sender=tool_name,
-            role=ROLE_TOOL,
-            type=TYPE_TOOL_RESULT,
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
             content=f"Tool `{tool_name}` execution was interrupted due to service restart.",
-            status=STATUS_RESPONDED,
+            status=MessageStatus.RESPONDED,
             parent_id=tc.id,
             metadata={
                 "tool_name": tool_name,
@@ -124,8 +115,8 @@ async def build_clean_history(
 
     # 2. Retrieve chronological turn anchors and identify relevant turn segments
     anchors = await gateway.get_session_turn_anchors(session_id)
-    system_anchors = [a for a in anchors if a["role"] == ROLE_SYSTEM]
-    user_anchors = [a for a in anchors if a["role"] == ROLE_USER]
+    system_anchors = [a for a in anchors if a["role"] == MessageRole.SYSTEM]
+    user_anchors = [a for a in anchors if a["role"] == MessageRole.USER]
 
     # 3. Retrieve completed skill turn anchors
     skill_anchor_ids = set(await gateway.get_session_skill_anchor_ids(session_id))
@@ -155,7 +146,7 @@ async def build_clean_history(
     # 6. Always preserves the initial system message(s) at the start.
     system_msg = None
     for m in raw_history:
-        if m.role == ROLE_SYSTEM:
+        if m.role == MessageRole.SYSTEM:
             system_msg = m
             break
 
@@ -165,7 +156,7 @@ async def build_clean_history(
     turns: list[list[Message]] = []
     current_turn: list[Message] = []
     for m in conv_msgs:
-        if m.role in (ROLE_USER, ROLE_SYSTEM):
+        if m.role in (MessageRole.USER, MessageRole.SYSTEM):
             if current_turn:
                 turns.append(current_turn)
             current_turn = [m]
@@ -180,12 +171,12 @@ async def build_clean_history(
     # 8. Resolve resolved intermediate tool call/result status for older turns
     tc_to_tr = {}
     for m in raw_history:
-        if m.type == TYPE_TOOL_RESULT and m.parent_id:
+        if m.type == MessageType.TOOL_RESULT and m.parent_id:
             tc_to_tr[m.parent_id] = m
 
     turn_to_tcs = {}
     for m in raw_history:
-        if m.type == TYPE_TOOL_CALL and m.parent_id:
+        if m.type == MessageType.TOOL_CALL and m.parent_id:
             turn_to_tcs.setdefault(m.parent_id, []).append(m)
 
     resolved_turns_without_skill = set()
@@ -202,7 +193,7 @@ async def build_clean_history(
 
     cleaned_turns = []
     for turn in turns:
-        user_prompt = next((m for m in turn if m.role in (ROLE_USER, ROLE_SYSTEM)), None)
+        user_prompt = next((m for m in turn if m.role in (MessageRole.USER, MessageRole.SYSTEM)), None)
         user_prompt_id = user_prompt.id if user_prompt else None
 
         is_latest = (user_prompt_id == latest_anchor_id)
@@ -214,7 +205,7 @@ async def build_clean_history(
         # Deduplicate duplicate/orphaned interrupted tool results for the same tool call
         tc_results = {}
         for m in turn:
-            if m.type == TYPE_TOOL_RESULT and m.parent_id:
+            if m.type == MessageType.TOOL_RESULT and m.parent_id:
                 tc_results.setdefault(m.parent_id, []).append(m)
 
         for parent_id, results in tc_results.items():
@@ -238,10 +229,10 @@ async def build_clean_history(
             # Pinned and recent turns: keep user, assistant, system, and all tool messages (serialize if needed).
             # Thoughts must be dropped.
             for m in turn:
-                if m.type == TYPE_THOUGHT:
+                if m.type == MessageType.THOUGHT:
                     dropped_ids.add(m.id)
                     continue
-                if m.role in (ROLE_USER, ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_TOOL):
+                if m.role in (MessageRole.USER, MessageRole.ASSISTANT, MessageRole.SYSTEM, MessageRole.TOOL):
                     continue
                 dropped_ids.add(m.id)
             clean_turn = [m for m in turn if m.id not in dropped_ids]
@@ -249,13 +240,17 @@ async def build_clean_history(
         else:
             # in-between other turns: drop thoughts, resolved intermediate tool calls/results
             for m in turn:
-                if m.role == ROLE_ASSISTANT and m.type == TYPE_THOUGHT:
+                if m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT:
                     dropped_ids.add(m.id)
                     continue
-                if m.type == TYPE_TOOL_CALL and user_prompt_id and user_prompt_id in resolved_turns_without_skill:
+                if (
+                    m.type == MessageType.TOOL_CALL
+                    and user_prompt_id
+                    and user_prompt_id in resolved_turns_without_skill
+                ):
                     dropped_ids.add(m.id)
                     continue
-                if m.type == TYPE_TOOL_RESULT and m.parent_id:
+                if m.type == MessageType.TOOL_RESULT and m.parent_id:
                     parent_tc = next((tc for tcs in turn_to_tcs.values() for tc in tcs if tc.id == m.parent_id), None)
                     if parent_tc and parent_tc.parent_id in resolved_turns_without_skill:
                         dropped_ids.add(m.id)
@@ -266,7 +261,7 @@ async def build_clean_history(
         # Strip attachments for historical user turns to optimize context size
         if not is_latest:
             for m in cleaned_turns[-1]:
-                if m.role == ROLE_USER:
+                if m.role == MessageRole.USER:
                     attachments = m.metadata.get("attachments")
                     if attachments:
                         filenames = [os.path.basename(att.get("path", "file")) for att in attachments]
@@ -286,7 +281,7 @@ async def build_clean_history(
     # 10. Context Optimization: Serialize tool outputs to files and replace with pointer messages
     last_user_idx = -1
     for i, msg in enumerate(final_history):
-        if msg.role == ROLE_USER:
+        if msg.role == MessageRole.USER:
             last_user_idx = i
 
     if last_user_idx != -1:
@@ -304,7 +299,7 @@ async def build_clean_history(
             # Optimize historical turns
             if cfg.serialize_historical_tool_results:
                 for msg in historical_msgs:
-                    if msg.type == TYPE_TOOL_RESULT:
+                    if msg.type == MessageType.TOOL_RESULT:
                         if msg.metadata.get("tool_name") == "use_skill":
                             continue
                         raw_output = (

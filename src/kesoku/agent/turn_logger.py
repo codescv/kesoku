@@ -76,13 +76,13 @@ class TurnLogger:
         for msg in history:
             formatted_history.append({
                 "id": msg.id,
-                "role": msg.role,
+                "role": str(msg.role),
                 "sender": msg.sender,
-                "type": msg.type,
+                "type": str(msg.type),
                 "content": msg.content,
                 "metadata": msg.metadata,
                 "timestamp": msg.timestamp,
-                "status": msg.status,
+                "status": str(msg.status),
                 "parent_id": msg.parent_id,
             })
 

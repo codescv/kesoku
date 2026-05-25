@@ -12,16 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from kesoku.constants import (
-    ROLE_ASSISTANT,
-    ROLE_TOOL,
-    ROLE_USER,
-    STATUS_PENDING,
-    TYPE_TEXT,
-    TYPE_THOUGHT,
-    TYPE_TOOL_CALL,
-    TYPE_TOOL_RESULT,
-)
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +25,11 @@ class Message(BaseModel):
     chatbot_id: str = Field(..., description="Unique identifier of the chatbot platform/instance (e.g., 'cli')")
     channel_id: str = Field(..., description="External platform-specific channel or room identifier")
     sender: str = Field(..., description="Sender identifier or username")
-    role: Literal["user", "assistant", "tool", "system"] = Field(
-        default=ROLE_USER, description="Role of the message sender"
+    role: MessageRole = Field(
+        default=MessageRole.USER, description="Role of the message sender"
     )
-    type: Literal["text", "thought", "tool_call", "tool_result"] = Field(
-        default=TYPE_TEXT, description="Type of message content or action"
+    type: MessageType = Field(
+        default=MessageType.TEXT, description="Type of message content or action"
     )
     content: str = Field(..., description="Text content of the message")
     metadata: dict[str, Any] = Field(
@@ -46,9 +37,7 @@ class Message(BaseModel):
         description="Extensible metadata for platform-specific attributes (e.g., attachments, guild_id)",
     )
     timestamp: float = Field(default_factory=time.time, description="Unix timestamp of when the message was created")
-    status: Literal[
-        "pending", "processing", "processed", "delivered", "interrupted", "pending_agent", "responded", "error"
-    ] = Field(default=STATUS_PENDING, description="Current lifecycle status of the message")
+    status: MessageStatus = Field(default=MessageStatus.PENDING, description="Current lifecycle status of the message")
     parent_id: str | None = Field(default=None, description="Links tool results or followups to specific message/call")
 
 
@@ -509,18 +498,18 @@ class DatabaseManager:
                 return curr.timestamp
 
             def get_sorting_phase(m: Message) -> int:
-                if m.role == ROLE_TOOL and m.type == TYPE_TOOL_CALL:
+                if m.role == MessageRole.TOOL and m.type == MessageType.TOOL_CALL:
                     return 1
-                elif m.role == ROLE_TOOL and m.type == TYPE_TOOL_RESULT:
+                elif m.role == MessageRole.TOOL and m.type == MessageType.TOOL_RESULT:
                     return 2
-                elif m.role == ROLE_ASSISTANT and m.type != TYPE_THOUGHT:
+                elif m.role == MessageRole.ASSISTANT and m.type != MessageType.THOUGHT:
                     return 3
                 return 0
 
             def get_tool_group_timestamp(m: Message) -> float:
                 if m.parent_id and m.parent_id in msg_map:
                     parent_msg = msg_map[m.parent_id]
-                    if parent_msg.role == ROLE_TOOL and parent_msg.type == TYPE_TOOL_CALL:
+                    if parent_msg.role == MessageRole.TOOL and parent_msg.type == MessageType.TOOL_CALL:
                         return parent_msg.timestamp
                 return m.timestamp
 
@@ -615,7 +604,8 @@ class DatabaseManager:
             with conn:
                 cutoff = time.time() - threshold_seconds
                 cursor = conn.execute(
-                    "UPDATE messages SET status = 'pending_agent' WHERE status = 'processing' AND timestamp < ?",
+                    f"UPDATE messages SET status = '{MessageStatus.PENDING_AGENT}' "
+                    f"WHERE status = '{MessageStatus.PROCESSING}' AND timestamp < ?",
                     (cutoff,),
                 )
                 return cursor.rowcount
@@ -635,7 +625,7 @@ class DatabaseManager:
         try:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT COUNT(*) FROM messages WHERE session_id = ? AND role = 'user'",
+                f"SELECT COUNT(*) FROM messages WHERE session_id = ? AND role = '{MessageRole.USER}'",
                 (session_id,),
             )
             return cursor.fetchone()[0]
@@ -655,9 +645,9 @@ class DatabaseManager:
         try:
             cursor = conn.cursor()
             cursor.execute(
-                """
+                f"""
                 SELECT id, role, timestamp FROM messages
-                WHERE session_id = ? AND role IN ('user', 'system')
+                WHERE session_id = ? AND role IN ('{MessageRole.USER}', '{MessageRole.SYSTEM}')
                 ORDER BY timestamp ASC
                 """,
                 (session_id,),
@@ -680,12 +670,12 @@ class DatabaseManager:
         try:
             cursor = conn.cursor()
             cursor.execute(
-                """
+                f"""
                 SELECT DISTINCT tc.parent_id FROM messages tr
                 JOIN messages tc ON tr.parent_id = tc.id
                 WHERE tr.session_id = ?
-                  AND tr.role = 'tool'
-                  AND tr.type = 'tool_result'
+                  AND tr.role = '{MessageRole.TOOL}'
+                  AND tr.type = '{MessageType.TOOL_RESULT}'
                   AND json_extract(tr.metadata, '$.tool_name') = 'use_skill'
                   AND json_extract(tr.metadata, '$.tool_error') IS NULL
                 """,
@@ -708,14 +698,14 @@ class DatabaseManager:
         try:
             cursor = conn.cursor()
             cursor.execute(
-                """
+                f"""
                 SELECT * FROM messages
                 WHERE session_id = ?
-                  AND type = 'tool_call'
+                  AND type = '{MessageType.TOOL_CALL}'
                   AND id NOT IN (
                       SELECT parent_id FROM messages
                       WHERE session_id = ?
-                        AND type = 'tool_result'
+                        AND type = '{MessageType.TOOL_RESULT}'
                         AND parent_id IS NOT NULL
                   )
                 """,
@@ -806,18 +796,18 @@ class DatabaseManager:
                 return curr.timestamp
 
             def get_sorting_phase(m: Message) -> int:
-                if m.role == ROLE_TOOL and m.type == TYPE_TOOL_CALL:
+                if m.role == MessageRole.TOOL and m.type == MessageType.TOOL_CALL:
                     return 1
-                elif m.role == ROLE_TOOL and m.type == TYPE_TOOL_RESULT:
+                elif m.role == MessageRole.TOOL and m.type == MessageType.TOOL_RESULT:
                     return 2
-                elif m.role == ROLE_ASSISTANT and m.type != TYPE_THOUGHT:
+                elif m.role == MessageRole.ASSISTANT and m.type != MessageType.THOUGHT:
                     return 3
                 return 0
 
             def get_tool_group_timestamp(m: Message) -> float:
                 if m.parent_id and m.parent_id in msg_map:
                     parent_msg = msg_map[m.parent_id]
-                    if parent_msg.role == ROLE_TOOL and parent_msg.type == TYPE_TOOL_CALL:
+                    if parent_msg.role == MessageRole.TOOL and parent_msg.type == MessageType.TOOL_CALL:
                         return parent_msg.timestamp
                 return m.timestamp
 

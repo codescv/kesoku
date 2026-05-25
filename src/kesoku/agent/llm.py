@@ -19,15 +19,7 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from kesoku.config import ClaudeConfig, GeminiConfig, KesokuConfig, get_config
-from kesoku.constants import (
-    ROLE_ASSISTANT,
-    ROLE_SYSTEM,
-    ROLE_TOOL,
-    ROLE_USER,
-    TYPE_THOUGHT,
-    TYPE_TOOL_CALL,
-    TYPE_TOOL_RESULT,
-)
+from kesoku.constants import MessageRole, MessageType
 from kesoku.db import Message
 from kesoku.logger import setup_logger
 
@@ -111,7 +103,7 @@ LLMBlock = TextBlock | ThoughtBlock | ImageBlock | DocumentBlock | ToolCallBlock
 class LLMTurn(BaseModel):
     """Represents a single conversational turn with one role."""
 
-    role: Literal["user", "assistant", "tool"]
+    role: MessageRole
     blocks: list[LLMBlock] = Field(default_factory=list)
 
 
@@ -220,7 +212,7 @@ def history_to_turns(
     turns: list[LLMTurn] = []
     resolved_system_prompt = system_prompt
 
-    def add_blocks(role: Literal["user", "assistant", "tool"], blocks: list[LLMBlock]) -> None:
+    def add_blocks(role: MessageRole, blocks: list[LLMBlock]) -> None:
         """Append blocks to the last turn if roles match; otherwise start a new turn."""
         if not blocks:
             return
@@ -233,41 +225,41 @@ def history_to_turns(
     tool_call_ids = {}
     if history:
         for msg in history:
-            if msg.role == ROLE_TOOL and msg.type == TYPE_TOOL_CALL:
+            if msg.role == MessageRole.TOOL and msg.type == MessageType.TOOL_CALL:
                 tool_call_id = msg.metadata.get("tool_call_id") or msg.id
                 tool_call_ids[msg.id] = tool_call_id
 
     if history:
         for msg in history:
-            if msg.role == ROLE_SYSTEM:
+            if msg.role == MessageRole.SYSTEM:
                 if not resolved_system_prompt:
                     resolved_system_prompt = msg.content
                 elif msg != history[0]:
                     notification = f"[System Notification]\n{msg.content}"
-                    add_blocks("user", [TextBlock(text=notification)])
+                    add_blocks(MessageRole.USER, [TextBlock(text=notification)])
                 continue
 
-            if msg.role == ROLE_USER:
+            if msg.role == MessageRole.USER:
                 blocks: list[LLMBlock] = [TextBlock(text=msg.content)]
                 attachments = msg.metadata.get("attachments", [])
                 if attachments:
                     blocks.extend(_load_attachments(attachments))
-                add_blocks("user", blocks)
+                add_blocks(MessageRole.USER, blocks)
 
-            elif msg.role == ROLE_ASSISTANT:
-                if msg.type == TYPE_THOUGHT:
-                    add_blocks("assistant", [ThoughtBlock(text=msg.content)])
+            elif msg.role == MessageRole.ASSISTANT:
+                if msg.type == MessageType.THOUGHT:
+                    add_blocks(MessageRole.ASSISTANT, [ThoughtBlock(text=msg.content)])
                 else:
-                    add_blocks("assistant", [TextBlock(text=msg.content)])
+                    add_blocks(MessageRole.ASSISTANT, [TextBlock(text=msg.content)])
 
-            elif msg.role == ROLE_TOOL:
-                if msg.type == TYPE_TOOL_CALL:
+            elif msg.role == MessageRole.TOOL:
+                if msg.type == MessageType.TOOL_CALL:
                     tool_name = msg.metadata.get("tool_name", "unknown_tool")
                     args = msg.metadata.get("tool_arguments", {})
                     tool_call_id = msg.metadata.get("tool_call_id") or msg.id
                     ts_hex = msg.metadata.get("thought_signature")
                     add_blocks(
-                        "assistant",
+                        MessageRole.ASSISTANT,
                         [
                             ToolCallBlock(
                                 name=tool_name,
@@ -277,7 +269,7 @@ def history_to_turns(
                             )
                         ],
                     )
-                elif msg.type == TYPE_TOOL_RESULT:
+                elif msg.type == MessageType.TOOL_RESULT:
                     tool_name = msg.metadata.get("tool_name", "unknown_tool")
                     if "tool_error" in msg.metadata:
                         res_str = f"Error: {msg.metadata['tool_error']}"
@@ -291,7 +283,7 @@ def history_to_turns(
                         tool_call_id = msg.parent_id
 
                     add_blocks(
-                        "tool",
+                        MessageRole.TOOL,
                         [
                             ToolResultBlock(
                                 name=tool_name,
@@ -303,7 +295,7 @@ def history_to_turns(
                     )
 
     if prompt:
-        add_blocks("user", [TextBlock(text=prompt)])
+        add_blocks(MessageRole.USER, [TextBlock(text=prompt)])
 
     return turns, resolved_system_prompt
 
