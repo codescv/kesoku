@@ -158,7 +158,12 @@ class SessionWorker:
             return
 
         folder_name = session.workspace_name
-        tool_context = ToolContext(session_id=self.session_id, session_workspace=folder_name)
+        tool_context = ToolContext(
+            session_id=self.session_id,
+            session_workspace=folder_name,
+            original_msg_id=current_msg.id,
+            active_jobs=self.context.active_jobs,
+        )
 
         cfg = self.context.config
         session_staging_dir = os.path.realpath(  # noqa: ASYNC240
@@ -259,6 +264,11 @@ class Agent:
             session_id: Unique identifier for the session worker.
             immediate: Whether to stop the worker immediately.
         """
+        try:
+            await self.context.active_jobs.stop_all_for_session(session_id)
+        except Exception as e:
+            logger.warning(f"Failed to clean up background jobs in stop_session_worker: {e}")
+
         worker = self.workers.get(session_id)
         if worker:
             await worker.stop(immediate=immediate)

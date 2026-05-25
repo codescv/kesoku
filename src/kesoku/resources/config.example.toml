@@ -77,6 +77,7 @@ allowlist_patterns = [
 blocklist_patterns = [
     "(\\b|^)(rm|sudo|shutdown|reboot|mkfs|dd|chmod|chown)(\\b|\\s|$)",
 ]
+background_threshold_seconds = 300.0
 
 [shell.env]
 # CUSTOM_VAR = "value"

@@ -163,6 +163,10 @@ class ShellConfig(BaseModel):
     env: dict[str, str] = Field(
         default_factory=dict, description="Custom environment variables injected into subprocesses"
     )
+    background_threshold_seconds: float = Field(
+        default=300.0,
+        description="Time limit in seconds before a shell command is transitioned to background execution",
+    )
 
 
 class GoogleChatConfig(BaseModel):

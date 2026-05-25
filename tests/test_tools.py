@@ -169,11 +169,10 @@ async def test_run_shell_command_failure(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_shell_command_timeout(tmp_path) -> None:
-    """Test that run_shell_command raises ShellCommandError on timeout."""
-    from unittest.mock import patch
-
+async def test_run_shell_command_background_transition(tmp_path) -> None:
+    """Test that run_shell_command gracefully transitions to background execution on timeout."""
     import kesoku.config
+    from kesoku.agent.tools import ActiveJobsRegistry, run_shell_command
     from kesoku.config import init_config, load_config
 
     original_config = kesoku.config._global_config
@@ -182,14 +181,25 @@ async def test_run_shell_command_timeout(tmp_path) -> None:
         init_config(str(config_path))
         cfg = load_config(str(config_path))
         cfg.agent_working_dir = str(tmp_path)
+        # Set low threshold to trigger background transition
+        cfg.shell.background_threshold_seconds = 0.1
 
-        ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
+        active_jobs = ActiveJobsRegistry()
+        ctx = ToolContext(
+            session_id="test_sess",
+            session_workspace="test_ws",
+            active_jobs=active_jobs,
+        )
 
-        with patch("kesoku.agent.tools.TIMEOUT_SECONDS", 0.1):
-            with pytest.raises(ShellCommandError) as exc_info:
-                await run_shell_command("sleep 10", context=ctx)
+        res = await run_shell_command("sleep 5 && echo 'done'", context=ctx)
 
-            assert "Command timed out after" in str(exc_info.value)
+        assert "transitioned to background execution" in res
+        assert "Background Job ID: `job_" in res
+        assert "Stdout path:" in res
+        assert "Stderr path:" in res
+
+        # Avoid process leak by stopping running jobs
+        await active_jobs.stop_all_for_session("test_sess")
     finally:
         kesoku.config._global_config = original_config
 

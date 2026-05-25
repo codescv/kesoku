@@ -280,6 +280,11 @@ class Gateway:
         Args:
             session_id: Target session ID.
         """
+        try:
+            await self.context.active_jobs.stop_all_for_session(session_id)
+        except Exception as e:
+            logger.warning(f"Failed to clean up background jobs in abort_session: {e}")
+
         if self.agent:
             logger.info(f"Aborting active session worker for session {session_id} due to lost channel.")
             await self.agent.stop_session_worker(session_id, immediate=True)
@@ -381,6 +386,11 @@ class Gateway:
         Args:
             session_id: The target session ID.
         """
+        try:
+            await self.context.active_jobs.stop_all_for_session(session_id)
+        except Exception as e:
+            logger.warning(f"Failed to clean up background jobs in delete_session: {e}")
+
         session = await self.get_session(session_id)
         if session:
             # Delete the staging session workspace folder from disk

@@ -28,8 +28,218 @@ TIMEOUT_SECONDS = 1800
 class ToolContext(BaseModel):
     """Contextual session metadata injected into executing tools."""
 
+    model_config = {"arbitrary_types_allowed": True}
+
     session_id: str = Field(..., description="Unique session identifier")
     session_workspace: str = Field(..., description="Relative folder name for the session workspace")
+    original_msg_id: str | None = Field(None, description="ID of the message initiating the turn")
+    active_jobs: Any = Field(None, exclude=True)
+
+
+class ActiveJobsRegistry:
+    """Registry of active background subprocesses to prevent zombie processes."""
+
+    def __init__(self) -> None:
+        """Initialize the registry with an empty dict and lock."""
+        self._jobs: dict[str, dict[str, Any]] = {}
+        self._lock = asyncio.Lock()
+
+    async def register(
+        self,
+        job_id: str,
+        session_id: str,
+        process: asyncio.subprocess.Process,
+        log_filepath: str,
+    ) -> None:
+        """Register a new active background process.
+
+        Args:
+            job_id: The background job identifier.
+            session_id: The session ID the job belongs to.
+            process: The asyncio subprocess instance.
+            log_filepath: Path to the log file.
+        """
+        async with self._lock:
+            self._jobs[job_id] = {
+                "session_id": session_id,
+                "process": process,
+                "log_filepath": log_filepath,
+                "creation_time": time.time(),
+            }
+            logger.info(f"Registered background job '{job_id}' for session '{session_id}'")
+
+    async def unregister(self, job_id: str) -> None:
+        """Unregister a background job.
+
+        Args:
+            job_id: The job identifier to remove.
+        """
+        async with self._lock:
+            self._jobs.pop(job_id, None)
+            logger.info(f"Unregistered background job '{job_id}'")
+
+    async def stop_all_for_session(self, session_id: str) -> None:
+        """Terminate and clean up all active background jobs for a session.
+
+        Args:
+            session_id: The session ID to clean up.
+        """
+        import signal
+
+        async with self._lock:
+            target_job_ids = [
+                jid for jid, job in self._jobs.items()
+                if job["session_id"] == session_id
+            ]
+
+            for jid in target_job_ids:
+                job = self._jobs[jid]
+                proc = job["process"]
+                logger.info(f"Force terminating background job '{jid}' for session '{session_id}'")
+                try:
+                    # Terminate the process group to kill child processes as well
+                    if os.name == "posix":
+                        import os as local_os
+                        try:
+                            local_os.killpg(local_os.getpgid(proc.pid), signal.SIGTERM)
+                        except Exception:
+                            proc.terminate()
+                    else:
+                        proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except Exception as e:
+                    logger.debug(f"Failed to gracefully terminate process group {proc.pid}: {e}")
+                    try:
+                        if os.name == "posix":
+                            import os as local_os
+                            try:
+                                local_os.killpg(local_os.getpgid(proc.pid), signal.SIGKILL)
+                            except Exception:
+                                proc.kill()
+                        else:
+                            proc.kill()
+                        await proc.wait()
+                    except Exception as ex:
+                        logger.debug(f"Failed to SIGKILL process group {proc.pid}: {ex}")
+                self._jobs.pop(jid, None)
+
+
+async def stream_to_file(
+    stream: asyncio.StreamReader | None,
+    file_path: str,
+    mode: str = "a",
+) -> None:
+    """Asynchronously streams a StreamReader stream into a target log file.
+
+    Args:
+        stream: The asyncio StreamReader instance.
+        file_path: Absolute path to the target file.
+        mode: File open mode ('w' or 'a').
+    """
+    if stream is None:
+        return
+    try:
+        with open(file_path, mode, encoding="utf-8", errors="replace") as f:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                decoded = line.decode("utf-8", errors="replace")
+                f.write(decoded)
+                f.flush()
+    except Exception as e:
+        logger.error(f"Failed to stream output to log file {file_path}: {e}")
+
+
+async def monitor_background_job(
+    job_id: str,
+    proc: asyncio.subprocess.Process,
+    log_filepath_stdout: str,
+    log_filepath_stderr: str,
+    context: ToolContext,
+    original_msg_id: str,
+    stdout_task: asyncio.Task[None],
+    stderr_task: asyncio.Task[None],
+) -> None:
+    """Monitors a background shell subprocess, posts results to gateway, and posts a system alert to wake up LLM.
+
+    Args:
+        job_id: Unique identifier for the background job.
+        proc: The asyncio Process instance.
+        log_filepath_stdout: The path to the stdout log file on disk.
+        log_filepath_stderr: The path to the stderr log file on disk.
+        context: The ToolContext containing session ID.
+        original_msg_id: The ID of the original message that triggered this command.
+        stdout_task: The background stdout streaming task.
+        stderr_task: The background stderr streaming task.
+    """
+    from kesoku.constants import ROLE_SYSTEM, STATUS_PENDING_AGENT, TYPE_TEXT
+    from kesoku.db import Message
+    from kesoku.gateway.gateway import Gateway
+
+    try:
+        # Wait for process and stream tasks to finish
+        return_code = await proc.wait()
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+
+        # Read the final output logs
+        stdout = ""
+        stderr = ""
+        if os.path.exists(log_filepath_stdout):
+            try:
+                with open(log_filepath_stdout, encoding="utf-8", errors="replace") as f:
+                    stdout = f.read()
+            except Exception as e:
+                stdout = f"Failed to read stdout log: {e}"
+        if os.path.exists(log_filepath_stderr):
+            try:
+                with open(log_filepath_stderr, encoding="utf-8", errors="replace") as f:
+                    stderr = f.read()
+            except Exception as e:
+                stderr = f"Failed to read stderr log: {e}"
+
+        output = f"=== STDOUT ===\n{stdout}\n=== STDERR ===\n{stderr}"
+
+        # Cap output to avoid blowing up context window
+        truncated_output = output
+        if len(output) > MAX_TOOL_OUTPUT_LENGTH:
+            truncated_output = (
+                f"Output truncated (total length {len(output)} bytes).\n"
+                f"Stdout saved to: `{log_filepath_stdout}`.\n"
+                f"Stderr saved to: `{log_filepath_stderr}`.\n\n"
+                f"Preview:\n{output[:MAX_TOOL_OUTPUT_LENGTH // 2]}...\n{output[-MAX_TOOL_OUTPUT_LENGTH // 2:]}"
+            )
+
+        # Post special System wakeup alert to Gateway
+        gw = Gateway()
+
+        status_str = "successfully" if return_code == 0 else f"with error code {return_code}"
+        content = (
+            f"[System Alert] Background Job `{job_id}` has finished executing {status_str}.\n"
+            f"Stdout path: `{log_filepath_stdout}`\n"
+            f"Stderr path: `{log_filepath_stderr}`\n\n"
+            f"{truncated_output}"
+        )
+
+        wakeup_msg = Message(
+            session_id=context.session_id,
+            chatbot_id="system",
+            channel_id="system",
+            sender="System",
+            role=ROLE_SYSTEM,
+            type=TYPE_TEXT,
+            content=content,
+            status=STATUS_PENDING_AGENT,  # This triggers LLM wakeup
+            parent_id=original_msg_id,
+        )
+        await gw.post(wakeup_msg)
+        logger.info(f"Background Job '{job_id}' finished. Posted wakeup message to session '{context.session_id}'")
+
+    except Exception as ex:
+        logger.error(f"Error in monitor_background_job for '{job_id}': {ex}", exc_info=True)
+    finally:
+        if context.active_jobs:
+            await context.active_jobs.unregister(job_id)
 
 
 def _create_schema_func(func: Callable) -> Callable:
@@ -285,7 +495,23 @@ async def run_shell_command(
     if context and context.session_workspace:
         env["STAGING_DIR"] = os.path.realpath(os.path.join(config.workspace.sessions_dir, context.session_workspace))
 
+    # Prepare unique background job identifiers and log paths
+    job_id = f"job_{int(time.time())}"
+    log_filename_stdout = f"background_{job_id}.stdout"
+    log_filename_stderr = f"background_{job_id}.stderr"
+    folder_name = context.session_workspace
+    session_staging_dir = os.path.realpath(os.path.join(config.workspace.sessions_dir, folder_name))
+    os.makedirs(session_staging_dir, exist_ok=True)
+    log_filepath_stdout = os.path.join(session_staging_dir, log_filename_stdout)
+    log_filepath_stderr = os.path.join(session_staging_dir, log_filename_stderr)
+
     logger.info(f"Executing shell command in '{exec_dir}': {command}")
+
+    # Configure process group on POSIX to allow clean SIGTERM/SIGKILL propagation
+    preexec_fn = None
+    if os.name == "posix":
+        import os as local_os
+        preexec_fn = local_os.setsid
 
     proc = None
     try:
@@ -296,6 +522,7 @@ async def run_shell_command(
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                preexec_fn=preexec_fn,
             )
         else:
             tokens = shlex.split(command)
@@ -305,46 +532,98 @@ async def run_shell_command(
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                preexec_fn=preexec_fn,
             )
 
+        # Start background streaming of stdout/stderr to their respective log files
+        stdout_task = asyncio.create_task(stream_to_file(proc.stdout, log_filepath_stdout, "w"))
+        stderr_task = asyncio.create_task(stream_to_file(proc.stderr, log_filepath_stderr, "w"))
+
+        # Wait up to configured foreground threshold limit
+        threshold = getattr(config.shell, "background_threshold_seconds", 300.0)
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=TIMEOUT_SECONDS,
+            await asyncio.wait_for(proc.wait(), timeout=threshold)
+            # Process finished successfully within threshold. Ensure all pipe reads complete.
+            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        except TimeoutError:
+            # Command exceeded foreground threshold. Transition to background job.
+            if context.active_jobs:
+                await context.active_jobs.register(job_id, context.session_id, proc, log_filepath_stdout)
+
+            # Spin off background monitor task
+            asyncio.create_task(
+                monitor_background_job(
+                    job_id=job_id,
+                    proc=proc,
+                    log_filepath_stdout=log_filepath_stdout,
+                    log_filepath_stderr=log_filepath_stderr,
+                    context=context,
+                    original_msg_id=context.original_msg_id or "",
+                    stdout_task=stdout_task,
+                    stderr_task=stderr_task,
+                )
             )
-            stdout = stdout_bytes.decode("utf-8", errors="replace")
-            stderr = stderr_bytes.decode("utf-8", errors="replace")
-        except TimeoutError as e:
-            try:
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=2.0)
-            except Exception:
-                try:
-                    proc.kill()
-                    await proc.wait()
-                except Exception:
-                    pass
-            raise ShellCommandError(
-                f"Command timed out after {TIMEOUT_SECONDS} seconds."
-            ) from e
+
+            return (
+                f"The command took longer than {threshold} seconds and has been transitioned to background execution.\n"
+                f"Background Job ID: `{job_id}`\n"
+                f"Stdout path: `{log_filepath_stdout}`\n"
+                f"Stderr path: `{log_filepath_stderr}`\n\n"
+                "Please inform the user that the task is running in the background. "
+                "You will be automatically notified and your turn resumed when it finishes. "
+                "You must stop your current turn now."
+            )
+
     except asyncio.CancelledError:
         if proc:
             try:
-                proc.terminate()
+                if os.name == "posix":
+                    import os as local_os
+                    import signal
+                    try:
+                        local_os.killpg(local_os.getpgid(proc.pid), signal.SIGTERM)
+                    except Exception:
+                        proc.terminate()
+                else:
+                    proc.terminate()
                 await asyncio.wait_for(proc.wait(), timeout=2.0)
             except Exception:
                 try:
-                    proc.kill()
+                    if os.name == "posix":
+                        import os as local_os
+                        import signal
+                        try:
+                            local_os.killpg(local_os.getpgid(proc.pid), signal.SIGKILL)
+                        except Exception:
+                            proc.kill()
+                    else:
+                        proc.kill()
                     await proc.wait()
                 except Exception:
                     pass
         logger.info(f"Shell command execution cancelled: {command}")
         raise
     except Exception as ex:
-        if not isinstance(ex, ShellCommandError) and not isinstance(ex, asyncio.CancelledError):
+        if not isinstance(ex, asyncio.CancelledError):
             logger.error(f"Failed to execute command '{command}': {ex}")
             raise ShellCommandError(f"Error executing command: {ex}") from ex
         raise
+
+    # Read the written log file contents
+    stdout = ""
+    stderr = ""
+    if os.path.exists(log_filepath_stdout):
+        try:
+            with open(log_filepath_stdout, encoding="utf-8", errors="replace") as f:
+                stdout = f.read()
+        except Exception as e:
+            stdout = f"Failed to read stdout logs: {e}"
+    if os.path.exists(log_filepath_stderr):
+        try:
+            with open(log_filepath_stderr, encoding="utf-8", errors="replace") as f:
+                stderr = f.read()
+        except Exception as e:
+            stderr = f"Failed to read stderr logs: {e}"
 
     out_str = f"=== STDOUT ===\n{stdout}\n=== STDERR ===\n{stderr}"
 
@@ -353,9 +632,6 @@ async def run_shell_command(
     if len(out_str) > MAX_TOOL_OUTPUT_LENGTH:
         timestamp = int(time.time())
         output_filename = f"cmd_output_{timestamp}.txt"
-        folder_name = context.session_workspace
-        session_staging_dir = os.path.realpath(os.path.join(config.workspace.sessions_dir, folder_name))
-        os.makedirs(session_staging_dir, exist_ok=True)
         output_filepath = os.path.join(session_staging_dir, output_filename)
         try:
             with open(output_filepath, "w", encoding="utf-8") as f:
