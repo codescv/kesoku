@@ -134,6 +134,19 @@ class DatabaseManager:
         """
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+
+        # Enable WAL (Write-Ahead Logging) mode for high concurrent read/write
+        conn.execute("PRAGMA journal_mode=WAL;")
+
+        # Use NORMAL synchronous mode for faster WAL writes while maintaining app-level crash safety
+        conn.execute("PRAGMA synchronous=NORMAL;")
+
+        # Enforce foreign key constraints
+        conn.execute("PRAGMA foreign_keys=ON;")
+
+        # Set busy timeout to 5000ms to avoid database locked exceptions
+        conn.execute("PRAGMA busy_timeout=5000;")
+
         return conn
 
     def init_tables(self, overwrite: bool = False) -> None:
