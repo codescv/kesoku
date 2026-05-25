@@ -7,6 +7,7 @@
 - [x] Run shell command
 - [x] Search tool
 - [x] Use skills
+- [ ] Add message hint when command is killed due to timeout. design how to perform "long background tasks".
 
 # Sub Agent
 - [ ] Support sub agent

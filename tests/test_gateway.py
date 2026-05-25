@@ -324,3 +324,100 @@ async def test_gateway_delete_session(temp_db: str, tmp_path: Any) -> None:
 
     # Verify workspace deleted from disk
     assert not workspace_folder.exists()
+
+
+@pytest.mark.asyncio
+async def test_gateway_queue_backpressure_full(temp_db: str) -> None:
+    """Test that when a listener queue is full, messages are dropped without blocking."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    from kesoku.gateway.gateway import Listener
+    # Create a listener with maxsize = 2
+    listener = Listener(lambda msg: True, maxsize=2)
+    gw._listeners.add(listener)
+
+    # Post 3 messages
+    msg1 = Message(
+        session_id="sess_bp",
+        chatbot_id="bot",
+        channel_id="chan",
+        sender="User",
+        role=ROLE_USER,
+        type=TYPE_TEXT,
+        content="Msg 1",
+        status=STATUS_PENDING,
+    )
+    msg2 = Message(
+        session_id="sess_bp",
+        chatbot_id="bot",
+        channel_id="chan",
+        sender="User",
+        role=ROLE_USER,
+        type=TYPE_TEXT,
+        content="Msg 2",
+        status=STATUS_PENDING,
+    )
+    msg3 = Message(
+        session_id="sess_bp",
+        chatbot_id="bot",
+        channel_id="chan",
+        sender="User",
+        role=ROLE_USER,
+        type=TYPE_TEXT,
+        content="Msg 3",
+        status=STATUS_PENDING,
+    )
+
+    # This should not block and should successfully finish posting
+    await gw.post(msg1)
+    await gw.post(msg2)
+    await gw.post(msg3)
+
+    # The queue should be full with exactly 2 messages
+    assert listener.queue.full()
+    assert listener.queue.qsize() == 2
+    
+    # The messages in queue should be msg1 and msg2 (msg3 dropped)
+    m1 = listener.queue.get_nowait()
+    m2 = listener.queue.get_nowait()
+    assert m1.content == "Msg 1"
+    assert m2.content == "Msg 2"
+
+
+@pytest.mark.asyncio
+async def test_gateway_listener_mutation_during_post(temp_db: str) -> None:
+    """Test that mutating listeners set during post() doesn't cause issues."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    from kesoku.gateway.gateway import Listener
+
+    # Create a listener that removes itself from gw._listeners when receiving a message
+    listener = None
+    def filter_func(msg: Message) -> bool:
+        nonlocal listener
+        # Remove itself during post processing
+        gw._listeners.discard(listener)
+        return True
+
+    listener = Listener(filter_func)
+    gw._listeners.add(listener)
+
+    msg = Message(
+        session_id="sess_mut",
+        chatbot_id="bot",
+        channel_id="chan",
+        sender="User",
+        role=ROLE_USER,
+        type=TYPE_TEXT,
+        content="Trigger",
+        status=STATUS_PENDING,
+    )
+
+    # This should not crash and should safely process
+    await gw.post(msg)
+    assert len(gw._listeners) == 0
+

@@ -29,9 +29,9 @@ logger = setup_logger(__name__)
 class Listener:
     """Internal container for an active subscriber to the Gateway broker."""
 
-    def __init__(self, filter_func: Callable[[Message], bool]) -> None:
+    def __init__(self, filter_func: Callable[[Message], bool], maxsize: int = 1000) -> None:
         """Initialize a listener with an async queue and filter function."""
-        self.queue: asyncio.Queue[Message] = asyncio.Queue()
+        self.queue: asyncio.Queue[Message] = asyncio.Queue(maxsize=maxsize)
         self.filter_func = filter_func
 
 
@@ -52,7 +52,7 @@ class Gateway:
         self.db = self.context.db
 
         self.db_path = self.workspace_config.db_path
-        self._listeners: list[Listener] = []
+        self._listeners: set[Listener] = set()
         self.db.verify_db()
         self.agent: Any | None = None
 
@@ -168,9 +168,16 @@ class Gateway:
         await asyncio.to_thread(self.db.save_message, message)
         logger.debug(f"Gateway posted message {message.id} ({message.role}:{message.sender})")
 
-        for listener in self._listeners:
-            if listener.filter_func(message):
-                await listener.queue.put(message)
+        for listener in list(self._listeners):
+            if listener in self._listeners:
+                if listener.filter_func(message):
+                    try:
+                        listener.queue.put_nowait(message)
+                    except asyncio.QueueFull:
+                        logger.warning(
+                            f"Listener queue is full (maxsize={listener.queue.maxsize}). "
+                            f"Dropping message {message.id} for this listener."
+                        )
 
         return message
 
@@ -201,7 +208,7 @@ class Gateway:
             return True
 
         listener = Listener(filter_func)
-        self._listeners.append(listener)
+        self._listeners.add(listener)
         seen_ids = set()
 
         # Offline recovery / initial pending fetch
@@ -209,7 +216,9 @@ class Gateway:
             self.db.get_messages_by_filters, filters, exclude_statuses, exclude_roles
         )
         for msg in pending_messages:
-            await listener.queue.put(msg)
+            if msg.id not in seen_ids:
+                seen_ids.add(msg.id)
+                yield msg
 
         try:
             while True:
@@ -218,8 +227,7 @@ class Gateway:
                     seen_ids.add(msg.id)
                     yield msg
         finally:
-            if listener in self._listeners:
-                self._listeners.remove(listener)
+            self._listeners.discard(listener)
 
     async def mark_message_processed(self, message_id: str) -> None:
         """Mark a completed user prompt as 'processed' in SQLite storage.
