@@ -6,36 +6,22 @@ anti-stall mechanisms.
 """
 
 import asyncio
-import datetime
-import inspect
-import json
 import os
-import re
-import time
-from collections.abc import Callable
 from typing import Any
 
-import yaml
-
-from kesoku.agent.history import build_clean_history
-from kesoku.agent.llm import BaseLLM, LLMResponse, get_llm
+from kesoku.agent.llm import BaseLLM, get_llm
+from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.tools import ToolContext, ToolRegistry, default_registry
+from kesoku.agent.turn_executor import TurnExecutor
+from kesoku.agent.turn_logger import TurnLogger
 from kesoku.config import get_config
 from kesoku.constants import (
-    ROLE_ASSISTANT,
-    ROLE_SYSTEM,
-    ROLE_TOOL,
     ROLE_USER,
     STATUS_ERROR,
     STATUS_INTERRUPTED,
     STATUS_PENDING,
     STATUS_PENDING_AGENT,
     STATUS_PROCESSING,
-    STATUS_RESPONDED,
-    TYPE_TEXT,
-    TYPE_THOUGHT,
-    TYPE_TOOL_CALL,
-    TYPE_TOOL_RESULT,
 )
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
@@ -70,12 +56,21 @@ class SessionWorker:
         self.tool_registry = tool_registry
         self.dispatcher = dispatcher
         self.queue: asyncio.Queue[Message] = asyncio.Queue()
-        self.running = False
+        self._running = False
         self.task: asyncio.Task[None] | None = None
+
+    @property
+    def running(self) -> bool:
+        """Check if the session worker is currently running.
+
+        Returns:
+            True if running, False otherwise.
+        """
+        return self._running
 
     def start(self) -> None:
         """Start the session worker background processing loop."""
-        self.running = True
+        self._running = True
         self.task = asyncio.create_task(self._worker_loop())
         logger.info(f"Started SessionWorker for session {self.session_id}")
 
@@ -89,11 +84,19 @@ class SessionWorker:
 
     def stop(self) -> None:
         """Stop the worker loop and cancel pending tasks."""
-        self.running = False
+        self._running = False
         if self.task and not self.task.done():
             self.task.cancel()
 
-    async def _drain_queue_and_pivot(self, current_msg: Message) -> Message:
+    def queue_empty(self) -> bool:
+        """Check if the message queue is empty.
+
+        Returns:
+            True if empty, False otherwise.
+        """
+        return self.queue.empty()
+
+    async def drain_queue_and_pivot(self, current_msg: Message) -> Message:
         """Drain pending messages from the queue and pivot to the latest one.
 
         Marks earlier messages in the queue as interrupted.
@@ -123,66 +126,21 @@ class SessionWorker:
         return latest_msg
 
     async def _worker_loop(self) -> None:
-        while self.running:
+        while self._running:
             try:
                 msg = await self.queue.get()
                 await self.gateway.update_message_status(msg.id, STATUS_PROCESSING)
                 await self._process_turn(msg)
             except asyncio.CancelledError:
-                self.running = False
+                self._running = False
                 break
             except Exception as e:
                 logger.error(f"Error in SessionWorker for session {self.session_id}: {e}", exc_info=True)
                 await asyncio.sleep(1.0)
 
-    async def _get_session_turns_count(self) -> int:
-        """Get the number of conversational turns (user messages) in the current session.
 
-        Returns:
-            The count of user messages in this session.
-        """
-        raw_history = await self.gateway.get_session_history(self.session_id, limit=0)
-        return len([m for m in raw_history if m.role == ROLE_USER])
-
-    def _resolve_llm(self, current_msg: Message) -> BaseLLM:
-        """Resolve the appropriate LLM instance for the current message, applying overrides.
-
-        Args:
-            current_msg: The active user message initiating the turn.
-
-        Returns:
-            A BaseLLM instance to use for this turn.
-        """
-        if current_msg.chatbot_id == "discord":
-            channel_id = current_msg.channel_id
-            channel_name = current_msg.metadata.get("channel_name", "")
-            parent_id = current_msg.metadata.get("parent_channel_id")
-            parent_name = current_msg.metadata.get("parent_channel_name")
-
-            cfg = get_config()
-            for override in cfg.discord.channels:
-                identifiers = {channel_id, channel_name}
-                if parent_id:
-                    identifiers.add(parent_id)
-                if parent_name:
-                    identifiers.add(parent_name)
-                if any(ident in override.channels for ident in identifiers if ident):
-                    if override.llm:
-                        logger.info(
-                            f"Applying LLM override '{override.llm}' for Discord channel {channel_id} "
-                            f"('{channel_name}')"
-                        )
-                        try:
-                            return get_llm(override.llm)
-                        except Exception as e:
-                            logger.error(f"Failed to get override LLM provider '{override.llm}': {e}")
-
-        return self.default_llm
 
     async def _process_turn(self, current_msg: Message) -> None:
-        chatbot_id = current_msg.chatbot_id
-        channel_id = current_msg.channel_id
-
         session = await self.gateway.get_session(self.session_id)
         if not session:
             logger.error(f"Session {self.session_id} not found in database. Aborting message processing.")
@@ -198,419 +156,21 @@ class SessionWorker:
         )
         os.makedirs(session_staging_dir, exist_ok=True)  # noqa: ASYNC240
 
-        start_time = time.time()
-        turn_tool_calls = 0
-        turn_tokens = 0
-        last_context_tokens = 0
-
-        nudged = False
-        try:
-            while self.running:
-                # Check-in before atomic action (Thought Interruption)
-                latest_msg = await self._drain_queue_and_pivot(current_msg)
-                if latest_msg != current_msg:
-                    current_msg = latest_msg
-
-                # Resolve LLM dynamically for the current message (applying channel overrides)
-                llm = self._resolve_llm(current_msg)
-
-                # Retrieve and build the cleaned, prioritized, and aligned session history
-                history = await self._build_clean_history()
-
-                tools_list = self.tool_registry.get_tools_list()
-
-                # LLM inference
-                res = await llm.generate(
-                    history=history,
-                    tools=tools_list,
-                )
-
-                # Log the raw LLM turn in a log file in the session staging directory
-                if cfg.agent.raw_llm_logs:
-                    try:
-                        self._log_llm_turn(
-                            session_staging_dir=session_staging_dir,
-                            llm_provider=llm.__class__.__name__,
-                            history=history,
-                            tools=tools_list,
-                            response=res,
-                        )
-                    except Exception as le:
-                        logger.error(f"Failed to log LLM turn: {le}", exc_info=True)
-
-                # Accumulate token metrics
-                if res.prompt_tokens:
-                    last_context_tokens = res.prompt_tokens
-                if res.total_tokens:
-                    turn_tokens += res.total_tokens
-
-                # Check if LLM requested tool calls
-                if res.tool_calls:
-                    turn_tool_calls += len(res.tool_calls)
-                    thought_text = res.thought or res.content
-                    if thought_text:
-                        thought_msg = Message(
-                            session_id=self.session_id,
-                            chatbot_id=chatbot_id,
-                            channel_id=channel_id,
-                            sender="Kesoku",
-                            role=ROLE_ASSISTANT,
-                            type=TYPE_THOUGHT,
-                            content=thought_text,
-                            status=STATUS_RESPONDED,
-                            parent_id=current_msg.id,
-                        )
-                        await self.gateway.post(thought_msg)
-
-                    tool_call_msgs = []
-                    for call in res.tool_calls:
-                        logger.info(f"Executing requested tool call: '{call.name}' with args {call.arguments}")
-                        call_args_json = json.dumps(call.arguments, indent=2, ensure_ascii=False)
-                        tool_call_msg = Message(
-                            session_id=self.session_id,
-                            chatbot_id=chatbot_id,
-                            channel_id=channel_id,
-                            sender="Kesoku",
-                            role=ROLE_TOOL,
-                            type=TYPE_TOOL_CALL,
-                            content=f"Calling tool `{call.name}` with arguments:\n```json\n{call_args_json}\n```",
-                            status=STATUS_RESPONDED,
-                            parent_id=current_msg.id,
-                            metadata={
-                                "tool_name": call.name,
-                                "tool_arguments": call.arguments,
-                                "thought_signature": call.thought_signature,
-                                "tool_call_id": call.tool_call_id,
-                            },
-                        )
-                        await self.gateway.post(tool_call_msg)
-                        tool_call_msgs.append((call, tool_call_msg))
-
-                    async def _exec_tool(call: Any, tc_msg: Message) -> Message:
-                        """Execute a single tool call asynchronously and return the resulting Message.
-
-                        Args:
-                            call: ToolCallRequest instance.
-                            tc_msg: The corresponding ToolCall Message.
-
-                        Returns:
-                            A Message representing either successful tool result or error.
-                        """
-                        if not self.queue.empty():
-                            logger.info(f"Interruption prior to tool '{call.name}'. Aborting tool execution.")
-                        try:
-                            tool_func = self.tool_registry.get_tool(call.name)
-                            call_kwargs = dict(call.arguments)
-                            sig = inspect.signature(tool_func)
-
-                            # Validate required parameters to handle LLM truncation gracefully
-                            missing_args = []
-                            for param in sig.parameters.values():
-                                if param.name == "context":
-                                    continue
-                                if param.default is inspect.Parameter.empty and param.name not in call_kwargs:
-                                    missing_args.append(param.name)
-                            if missing_args:
-                                raise ValueError(
-                                    "Command too long! Split your command into smaller chunks!\n"
-                                    "If you are writing a file, write at most 4000 characters per command!\n"
-                                    "Note: only emit 1 tool call in your response because it's too long!"
-                                )
-
-                            if "context" in sig.parameters:
-                                call_kwargs["context"] = tool_context
-                            # Atomic tool execution
-                            result = await asyncio.to_thread(tool_func, **call_kwargs)
-                            return Message(
-                                session_id=self.session_id,
-                                chatbot_id=chatbot_id,
-                                channel_id=channel_id,
-                                sender=call.name,
-                                role=ROLE_TOOL,
-                                type=TYPE_TOOL_RESULT,
-                                content=f"Tool `{call.name}` returned:\n```\n{result}\n```",
-                                status=STATUS_RESPONDED,
-                                parent_id=tc_msg.id,
-                                metadata={"tool_name": call.name, "tool_result": str(result)},
-                            )
-                        except Exception as te:
-                            logger.error(f"Error executing tool '{call.name}': {te}")
-                            return Message(
-                                session_id=self.session_id,
-                                chatbot_id=chatbot_id,
-                                channel_id=channel_id,
-                                sender=call.name,
-                                role=ROLE_TOOL,
-                                type=TYPE_TOOL_RESULT,
-                                content=f"Tool `{call.name}` error:\n```\n{te}\n```",
-                                status=STATUS_RESPONDED,
-                                parent_id=tc_msg.id,
-                                metadata={"tool_name": call.name, "tool_error": str(te)},
-                            )
-
-                    exec_tasks = [_exec_tool(call, tc_msg) for call, tc_msg in tool_call_msgs]
-                    if not self.queue.empty():
-                        logger.info("Interruption detected before launching concurrent tool execution.")
-                        for coro in exec_tasks:
-                            coro.close()
-                        break
-                    result_msgs = await asyncio.gather(*exec_tasks)
-                    for rm in result_msgs:
-                        await self.gateway.post(rm)
-
-                    continue
-                else:
-                    if res.thought:
-                        thought_msg = Message(
-                            session_id=self.session_id,
-                            chatbot_id=chatbot_id,
-                            channel_id=channel_id,
-                            sender="Kesoku",
-                            role=ROLE_ASSISTANT,
-                            type=TYPE_THOUGHT,
-                            content=res.thought,
-                            status=STATUS_RESPONDED,
-                            parent_id=current_msg.id,
-                        )
-                        await self.gateway.post(thought_msg)
-
-                    final_content = res.content
-                    if not final_content:
-                        if not nudged:
-                            logger.info(
-                                f"LLM returned empty content in session {self.session_id}. "
-                                f"Nudging model."
-                            )
-                            nudge_msg = Message(
-                                session_id=self.session_id,
-                                chatbot_id=chatbot_id,
-                                channel_id=channel_id,
-                                sender="System",
-                                role=ROLE_SYSTEM,
-                                type=TYPE_TEXT,
-                                content=(
-                                    "Your previous response had empty content. Please provide a final "
-                                    "user-facing response summarizing your results/actions."
-                                ),
-                                status=STATUS_RESPONDED,
-                                parent_id=current_msg.id,
-                            )
-                            await self.gateway.post(nudge_msg)
-                            nudged = True
-                            continue
-                        else:
-                            logger.warning(
-                                f"LLM returned empty content again after nudge in session "
-                                f"{self.session_id}. Using fallback."
-                            )
-                            final_content = "Processed request successfully."
-
-                    final_msg = Message(
-                        session_id=self.session_id,
-                        chatbot_id=chatbot_id,
-                        channel_id=channel_id,
-                        sender="Kesoku",
-                        role=ROLE_ASSISTANT,
-                        type=TYPE_TEXT,
-                        content=final_content,
-                        status=STATUS_PENDING,
-                        parent_id=current_msg.id,
-                        metadata={
-                            "turn_metrics": {
-                                "session_turns": await self._get_session_turns_count(),
-                                "context_tokens": last_context_tokens,
-                                "turn_tool_calls": turn_tool_calls,
-                                "turn_tokens": turn_tokens,
-                                "turn_time": time.time() - start_time,
-                                "status": "finished",
-                            }
-                        },
-                    )
-                    await self.gateway.post(final_msg)
-                    await self.gateway.mark_message_processed(current_msg.id)
-                    break
-        except asyncio.CancelledError:
-            # Interrupted turn: save turn metrics to the initiating user message
-            turn_metrics = {
-                "session_turns": await self._get_session_turns_count(),
-                "context_tokens": last_context_tokens,
-                "turn_tool_calls": turn_tool_calls,
-                "turn_tokens": turn_tokens,
-                "turn_time": time.time() - start_time,
-                "status": "interrupted",
-            }
-            history = await self.gateway.get_session_history(self.session_id, limit=20)
-            user_msg = None
-            for msg in reversed(history):
-                if msg.role == ROLE_USER:
-                    user_msg = msg
-                    break
-            if user_msg:
-                user_msg.metadata["turn_metrics"] = turn_metrics
-                await self.gateway.update_message_metadata(user_msg.id, user_msg.metadata)
-            raise
-        except Exception as e:
-            logger.error(f"Error in session turn {self.session_id}: {e}", exc_info=True)
-            error_msg = Message(
-                session_id=self.session_id,
-                chatbot_id=chatbot_id,
-                channel_id=channel_id,
-                sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_TEXT,
-                content=f"⚠️ An error occurred while processing your request: {e}",
-                status=STATUS_PENDING,
-                parent_id=current_msg.id,
-            )
-            await self.gateway.post(error_msg)
-            await self.gateway.update_message_status(current_msg.id, STATUS_ERROR)
-
-
-    async def _build_clean_history(
-        self,
-        max_turns: int | None = None,
-        pin_initial_turns: int | None = None,
-        pin_recent_turns: int | None = None,
-    ) -> list[Message]:
-        """Retrieve, clean up, and format the conversational history for the LLM.
-
-        Resolves orphaned tool calls, handles initial turns pinning, applies priority-based turn dropping,
-        recovers loaded skills, and slides the turn window.
-
-        Args:
-            max_turns: Maximum logical turns allowed in context history. If None, uses config setting.
-            pin_initial_turns: Number of initial turns to pin at the start. If None, uses config setting.
-            pin_recent_turns: Number of latest turns to keep in full detail. If None, uses config setting.
-
-        Returns:
-            A list of cleanly structured, prioritized, and aligned Message objects for the LLM.
-        """
-        return await build_clean_history(
-            gateway=self.gateway,
+        tool_runner = ToolRunner(self.tool_registry, tool_context)
+        turn_logger = TurnLogger(self.session_id, session_staging_dir)
+        turn_executor = TurnExecutor(
             session_id=self.session_id,
-            max_turns=max_turns,
-            pin_initial_turns=pin_initial_turns,
-            pin_recent_turns=pin_recent_turns,
+            gateway=self.gateway,
+            default_llm=self.default_llm,
+            tool_runner=tool_runner,
+            turn_logger=turn_logger,
         )
 
-    def _get_next_llm_turn_idx(self, staging_dir: str) -> int:
-        """Determine the next turn index by scanning the staging directory for existing log.yaml files.
-
-        Args:
-            staging_dir: Absolute path to the session staging directory.
-
-        Returns:
-            The next turn index starting from 1.
-        """
-        if not os.path.exists(staging_dir):
-            return 1
-        max_idx = 0
-        try:
-            # Scan directory and find the maximum existing turn index
-            for filename in os.listdir(staging_dir):
-                match = re.match(r"llm-turn-(\d+)\.log\.yaml", filename)
-                if match:
-                    idx = int(match.group(1))
-                    if idx > max_idx:
-                        max_idx = idx
-        except Exception as e:
-            logger.warning(f"Error scanning staging directory for turn logs: {e}")
-        return max_idx + 1
-
-    def _log_llm_turn(
-        self,
-        session_staging_dir: str,
-        llm_provider: str,
-        history: list[Message],
-        tools: list[Callable],
-        response: LLMResponse,
-    ) -> None:
-        """Log the raw LLM turn inputs and outputs to a YAML file in the session staging directory.
-
-        Args:
-            session_staging_dir: Path to the session staging directory.
-            llm_provider: Name of the LLM provider.
-            history: Conversational history sent to the LLM.
-            tools: List of tools passed to the LLM.
-            response: LLMResponse object returned by the LLM.
-        """
-        os.makedirs(session_staging_dir, exist_ok=True)
-        idx = self._get_next_llm_turn_idx(session_staging_dir)
-        log_filename = f"llm-turn-{idx}.log.yaml"
-        log_filepath = os.path.join(session_staging_dir, log_filename)
-
-        # Format history messages into dict representation
-        formatted_history = []
-        for msg in history:
-            formatted_history.append({
-                "id": msg.id,
-                "role": msg.role,
-                "sender": msg.sender,
-                "type": msg.type,
-                "content": msg.content,
-                "metadata": msg.metadata,
-                "timestamp": msg.timestamp,
-                "status": msg.status,
-                "parent_id": msg.parent_id,
-            })
-
-        # Format tools with signature details
-        formatted_tools = []
-        for func in tools:
-            doc = inspect.getdoc(func) or ""
-            description = doc.split("\n\n")[0] if doc else ""
-            sig = inspect.signature(func)
-            parameters = {
-                p_name: str(p.annotation)
-                for p_name, p in sig.parameters.items()
-                if p_name != "context"
-            }
-            formatted_tools.append({
-                "name": func.__name__,
-                "description": description,
-                "parameters": parameters,
-            })
-
-        # Format response tool calls
-        formatted_tool_calls = []
-        for tc in response.tool_calls:
-            formatted_tool_calls.append({
-                "name": tc.name,
-                "arguments": tc.arguments,
-                "thought_signature": tc.thought_signature,
-                "tool_call_id": tc.tool_call_id,
-            })
-
-        now = datetime.datetime.fromtimestamp(time.time(), datetime.UTC)
-
-        log_data = {
-            "metadata": {
-                "timestamp": time.time(),
-                "timestamp_iso": now.isoformat(),
-                "session_id": self.session_id,
-                "turn_index": idx,
-                "llm_provider": llm_provider,
-            },
-            "history": formatted_history,
-            "tools": formatted_tools,
-            "response": {
-                "content": response.content,
-                "thought": response.thought,
-                "tool_calls": formatted_tool_calls,
-                "raw_response": response.raw_response,
-                "metrics": {
-                    "prompt_tokens": response.prompt_tokens,
-                    "candidates_tokens": response.candidates_tokens,
-                    "total_tokens": response.total_tokens,
-                },
-            },
-        }
-
-        # Write to target YAML file
-        with open(log_filepath, "w", encoding="utf-8") as f:
-            yaml.safe_dump(log_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
-
-        logger.info(f"Logged raw LLM turn {idx} to {log_filepath}")
+        await turn_executor.process_turn(
+            current_msg=current_msg,
+            worker=self,
+            session_staging_dir=session_staging_dir,
+        )
 
 
 class Agent:

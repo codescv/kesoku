@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from kesoku.agent.agent import Agent
+from kesoku.agent.history import build_clean_history
 from kesoku.agent.llm import GeminiLLM, MockLLM, ToolCallRequest, get_llm
 from kesoku.agent.tools import ToolContext, ToolRegistry, run_shell_command
 from kesoku.config import KesokuConfig, WorkspaceConfig
@@ -246,14 +247,8 @@ async def test_orphaned_tool_call_healing(temp_db: str) -> None:
     )
     await gw.post(tc_msg)
 
-    # Create worker and build clean history
-    from kesoku.agent.agent import SessionWorker
-
-    worker = SessionWorker(
-        session_id="sess_heal", gateway=gw, llm=MockLLM(), tool_registry=ToolRegistry(), dispatcher=None
-    )
-
-    history = await worker._build_clean_history(max_turns=10)
+    # Call build clean history directly
+    history = await build_clean_history(gateway=gw, session_id="sess_heal", max_turns=10)
 
     # Verify a tool result was synthesized and exists in history
     tr_msgs = [m for m in history if m.type == "tool_result"]
@@ -297,14 +292,10 @@ async def test_system_prompt_and_pinned_turns_turn_based(temp_db: str) -> None:
             )
         )
 
-    from kesoku.agent.agent import SessionWorker
-
-    worker = SessionWorker(
-        session_id="sess_pin", gateway=gw, llm=MockLLM(), tool_registry=ToolRegistry(), dispatcher=None
+    # Call build clean history directly
+    history = await build_clean_history(
+        gateway=gw, session_id="sess_pin", max_turns=4, pin_initial_turns=2, pin_recent_turns=2
     )
-
-    # Call build clean history with turn counts that force Turn 3 and Turn 4 to truncate
-    history = await worker._build_clean_history(max_turns=4, pin_initial_turns=2, pin_recent_turns=2)
 
     # 1. System prompt is at index 0
     assert history[0].role == "system"
@@ -456,14 +447,10 @@ async def test_skill_pinning_and_parallel_safety_turn_based(temp_db: str) -> Non
         )
     )
 
-    from kesoku.agent.agent import SessionWorker
-
-    worker = SessionWorker(
-        session_id="sess_skill", gateway=gw, llm=MockLLM(), tool_registry=ToolRegistry(), dispatcher=None
-    )
-
     # Retrieve clean history with limit that forces Turn 2 to truncate
-    history = await worker._build_clean_history(max_turns=2, pin_initial_turns=1, pin_recent_turns=1)
+    history = await build_clean_history(
+        gateway=gw, session_id="sess_skill", max_turns=2, pin_initial_turns=1, pin_recent_turns=1
+    )
 
     # Let's assert all messages of Turn 2 are present!
     history_ids = {m.id for m in history}
@@ -610,14 +597,10 @@ async def test_priority_based_dropping_and_atomic_batches_turn_based(temp_db: st
     )
     await gw.post(resp2)
 
-    from kesoku.agent.agent import SessionWorker
-
-    worker = SessionWorker(
-        session_id="sess_drop", gateway=gw, llm=MockLLM(), tool_registry=ToolRegistry(), dispatcher=None
+    # Call history building directly
+    history = await build_clean_history(
+        gateway=gw, session_id="sess_drop", max_turns=10, pin_initial_turns=0, pin_recent_turns=1
     )
-
-    # Call history building with max_turns = 10, pin_initial_turns = 0, pin_recent_turns = 1
-    history = await worker._build_clean_history(max_turns=10, pin_initial_turns=0, pin_recent_turns=1)
     history_ids = {m.id for m in history}
 
     # Turn 1 checks:
@@ -645,7 +628,6 @@ async def test_clean_history_config_loading(temp_db: str) -> None:
 
     await gw.create_session("sess_cfg", title="Config Session")
 
-    from kesoku.agent.agent import SessionWorker
     from kesoku.config import KesokuConfig
 
     cfg = KesokuConfig()
@@ -655,10 +637,7 @@ async def test_clean_history_config_loading(temp_db: str) -> None:
 
     with patch("kesoku.agent.agent.get_config", return_value=cfg), \
          patch("kesoku.agent.history.get_config", return_value=cfg):
-        worker = SessionWorker(
-            session_id="sess_cfg", gateway=gw, llm=MockLLM(), tool_registry=ToolRegistry(), dispatcher=None
-        )
-        history = await worker._build_clean_history()
+        history = await build_clean_history(gateway=gw, session_id="sess_cfg")
         assert len(history) == 1
         assert history[0].role == "system"
 
@@ -684,7 +663,7 @@ async def test_session_worker_dynamic_llm(temp_db: str) -> None:
     )
     await gw.post(msg)
 
-    from kesoku.agent.agent import SessionWorker
+    from kesoku.agent.turn_executor import TurnExecutor
     from kesoku.config import DiscordChannelOverride, KesokuConfig
 
     cfg = KesokuConfig()
@@ -695,21 +674,19 @@ async def test_session_worker_dynamic_llm(temp_db: str) -> None:
         )
     ]
 
-    with patch("kesoku.agent.agent.get_config", return_value=cfg), \
-         patch("kesoku.agent.history.get_config", return_value=cfg), \
-         patch("kesoku.agent.agent.get_llm") as mock_get_llm:
+    with patch("kesoku.agent.turn_executor.get_config", return_value=cfg), \
+         patch("kesoku.agent.turn_executor.get_llm") as mock_get_llm:
         mock_claude = MagicMock()
         mock_get_llm.return_value = mock_claude
 
-        worker = SessionWorker(
+        executor = TurnExecutor(
             session_id="sess_override",
             gateway=gw,
-            llm=MockLLM(),
-            tool_registry=ToolRegistry(),
-            dispatcher=None,
+            default_llm=MockLLM(),
+            tool_runner=MagicMock(),
         )
 
-        resolved_llm = worker._resolve_llm(msg)
+        resolved_llm = executor._resolve_llm(msg)
         assert resolved_llm == mock_claude
         mock_get_llm.assert_called_once_with("claude")
 
@@ -800,12 +777,14 @@ async def test_llm_turn_logging(temp_db: str, tmp_path: Any) -> None:
 
     # Configure workspaces directory to temp_path / "sessions"
     with patch("kesoku.agent.agent.get_config") as mock_get_config, \
-         patch("kesoku.agent.history.get_config") as mock_get_history_config:
+         patch("kesoku.agent.history.get_config") as mock_get_history_config, \
+         patch("kesoku.agent.turn_executor.get_config") as mock_get_executor_config:
         cfg = KesokuConfig()
         cfg.workspace.db_path = temp_db
         cfg.workspace.sessions_dir = str(tmp_path / "sessions")
         mock_get_config.return_value = cfg
         mock_get_history_config.return_value = cfg
+        mock_get_executor_config.return_value = cfg
 
         # Create a session and post a user message
         session = await gw.create_session("sess_log", title="Logging Session")
@@ -887,13 +866,15 @@ async def test_llm_turn_logging_disabled(temp_db: str, tmp_path: Any) -> None:
 
     # Configure workspaces directory to temp_path / "sessions"
     with patch("kesoku.agent.agent.get_config") as mock_get_config, \
-         patch("kesoku.agent.history.get_config") as mock_get_history_config:
+         patch("kesoku.agent.history.get_config") as mock_get_history_config, \
+         patch("kesoku.agent.turn_executor.get_config") as mock_get_executor_config:
         cfg = KesokuConfig()
         cfg.workspace.db_path = temp_db
         cfg.workspace.sessions_dir = str(tmp_path / "sessions")
         cfg.agent.raw_llm_logs = False
         mock_get_config.return_value = cfg
         mock_get_history_config.return_value = cfg
+        mock_get_executor_config.return_value = cfg
 
         # Create a session and post a user message
         session = await gw.create_session("sess_log_disabled", title="No Logging Session")
@@ -1044,13 +1025,10 @@ async def test_context_optimization_tool_serialization(temp_db: str, tmp_path: A
         )
         await gw.post(tr2_2)
 
-        # Instantiate worker and build clean history
-        from kesoku.agent.agent import SessionWorker
-        worker = SessionWorker(
-            session_id="sess_opt", gateway=gw, llm=MockLLM(), tool_registry=ToolRegistry(), dispatcher=None
+        # Call build clean history directly
+        history = await build_clean_history(
+            gateway=gw, session_id="sess_opt", max_turns=10, pin_initial_turns=2, pin_recent_turns=2
         )
-
-        history = await worker._build_clean_history(max_turns=10, pin_initial_turns=2, pin_recent_turns=2)
 
         # 1. Check that historical long tr1 was serialized
         tr1_msg = next(m for m in history if m.id == tr1.id)
