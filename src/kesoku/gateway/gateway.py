@@ -286,6 +286,66 @@ class Gateway:
         """
         return await asyncio.to_thread(self.db.get_session_history, session_id, limit, order)
 
+    async def get_session_turns_count(self, session_id: str) -> int:
+        """Retrieve the count of user turns in the current session.
+
+        Args:
+            session_id: Target session identifier.
+
+        Returns:
+            The count of user messages.
+        """
+        return await asyncio.to_thread(self.db.get_session_turns_count, session_id)
+
+    async def get_session_turn_anchors(self, session_id: str) -> list[dict[str, Any]]:
+        """Retrieve list of user and system messages with their ID, role and timestamp.
+
+        Args:
+            session_id: Target session ID.
+
+        Returns:
+            List of dicts containing message id, role and timestamp.
+        """
+        return await asyncio.to_thread(self.db.get_session_turn_anchors, session_id)
+
+    async def get_session_skill_anchor_ids(self, session_id: str) -> list[str]:
+        """Retrieve the user message IDs of turns that loaded a skill successfully.
+
+        Args:
+            session_id: Target session ID.
+
+        Returns:
+            List of turn anchor message IDs.
+        """
+        return await asyncio.to_thread(self.db.get_session_skill_anchor_ids, session_id)
+
+    async def get_orphaned_tool_calls(self, session_id: str) -> list[Message]:
+        """Retrieve all orphaned tool call messages in a session.
+
+        Args:
+            session_id: Target session ID.
+
+        Returns:
+            List of orphaned tool call Message objects.
+        """
+        return await asyncio.to_thread(self.db.get_orphaned_tool_calls, session_id)
+
+    async def get_session_history_by_ranges(
+        self, session_id: str, ranges: list[tuple[float, float | None]], order: str = "phased"
+    ) -> list[Message]:
+        """Retrieve historical messages for specific timestamp ranges in a session, sorted logically.
+
+        Args:
+            session_id: Session ID to query.
+            ranges: List of (start_timestamp, end_timestamp_or_None) tuples.
+            order: Sorting order ("phased" or "grouped").
+
+        Returns:
+            List of Message objects, logically ordered.
+        """
+        return await asyncio.to_thread(self.db.get_session_history_by_ranges, session_id, ranges, order)
+
+
     async def delete_session(self, session_id: str) -> None:
         """Delete a session, its message history from database, and its workspace from disk.
 

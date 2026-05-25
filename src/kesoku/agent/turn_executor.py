@@ -64,8 +64,7 @@ class TurnExecutor:
         Returns:
             The count of user messages.
         """
-        raw_history = await self.gateway.get_session_history(self.session_id, limit=0)
-        return len([m for m in raw_history if m.role == ROLE_USER])
+        return await self.gateway.get_session_turns_count(self.session_id)
 
     def _resolve_llm(self, current_msg: Message) -> BaseLLM:
         """Resolve the appropriate LLM instance for the current message, applying overrides.

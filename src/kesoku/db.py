@@ -617,3 +617,219 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def get_session_turns_count(self, session_id: str) -> int:
+        """Count the number of user turns in a session.
+
+        Args:
+            session_id: The target session identifier.
+
+        Returns:
+            The count of user messages.
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ? AND role = 'user'",
+                (session_id,),
+            )
+            return cursor.fetchone()[0]
+        finally:
+            conn.close()
+
+    def get_session_turn_anchors(self, session_id: str) -> list[dict[str, Any]]:
+        """Retrieve list of user and system messages with their ID, role and timestamp.
+
+        Args:
+            session_id: Target session ID.
+
+        Returns:
+            List of dicts containing message id, role and timestamp.
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, role, timestamp FROM messages
+                WHERE session_id = ? AND role IN ('user', 'system')
+                ORDER BY timestamp ASC
+                """,
+                (session_id,),
+            )
+            rows = cursor.fetchall()
+            return [{"id": r["id"], "role": r["role"], "timestamp": r["timestamp"]} for r in rows]
+        finally:
+            conn.close()
+
+    def get_session_skill_anchor_ids(self, session_id: str) -> list[str]:
+        """Retrieve the user message IDs of turns that loaded a skill successfully.
+
+        Args:
+            session_id: Target session ID.
+
+        Returns:
+            List of turn anchor message IDs.
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT DISTINCT tc.parent_id FROM messages tr
+                JOIN messages tc ON tr.parent_id = tc.id
+                WHERE tr.session_id = ?
+                  AND tr.role = 'tool'
+                  AND tr.type = 'tool_result'
+                  AND json_extract(tr.metadata, '$.tool_name') = 'use_skill'
+                  AND json_extract(tr.metadata, '$.tool_error') IS NULL
+                """,
+                (session_id,),
+            )
+            return [r[0] for r in cursor.fetchall() if r[0]]
+        finally:
+            conn.close()
+
+    def get_orphaned_tool_calls(self, session_id: str) -> list[Message]:
+        """Retrieve all orphaned tool call messages in a session.
+
+        Args:
+            session_id: Target session ID.
+
+        Returns:
+            List of orphaned tool call Message objects.
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM messages
+                WHERE session_id = ?
+                  AND type = 'tool_call'
+                  AND id NOT IN (
+                      SELECT parent_id FROM messages
+                      WHERE session_id = ?
+                        AND type = 'tool_result'
+                        AND parent_id IS NOT NULL
+                  )
+                """,
+                (session_id, session_id),
+            )
+            rows = cursor.fetchall()
+            return [
+                Message(
+                    id=row["id"],
+                    session_id=row["session_id"],
+                    chatbot_id=row["chatbot_id"],
+                    channel_id=row["channel_id"],
+                    sender=row["sender"],
+                    role=row["role"],
+                    type=row["type"],
+                    content=row["content"],
+                    metadata=json.loads(row["metadata"]),
+                    timestamp=row["timestamp"],
+                    status=row["status"],  # type: ignore
+                    parent_id=row["parent_id"],
+                )
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    def get_session_history_by_ranges(
+        self, session_id: str, ranges: list[tuple[float, float | None]], order: Literal["phased", "grouped"] = "phased"
+    ) -> list[Message]:
+        """Retrieve historical messages for specific timestamp ranges in a session, sorted logically.
+
+        Args:
+            session_id: Session ID to query.
+            ranges: List of (start_timestamp, end_timestamp_or_None) tuples.
+            order: The sorting order. "phased" or "grouped".
+
+        Returns:
+            List of Message objects, logically ordered.
+        """
+        if not ranges:
+            return []
+
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            clauses = []
+            params: list[Any] = [session_id]
+            for start, end in ranges:
+                if end is None:
+                    clauses.append("(timestamp >= ?)")
+                    params.append(start)
+                else:
+                    clauses.append("(timestamp >= ? AND timestamp < ?)")
+                    params.extend([start, end])
+
+            query = f"""
+                SELECT * FROM messages
+                WHERE session_id = ?
+                  AND ({' OR '.join(clauses)})
+            """
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            all_msgs = [
+                Message(
+                    id=row["id"],
+                    session_id=row["session_id"],
+                    chatbot_id=row["chatbot_id"],
+                    channel_id=row["channel_id"],
+                    sender=row["sender"],
+                    role=row["role"],
+                    type=row["type"],
+                    content=row["content"],
+                    metadata=json.loads(row["metadata"]),
+                    timestamp=row["timestamp"],
+                    status=row["status"],  # type: ignore
+                    parent_id=row["parent_id"],
+                )
+                for row in rows
+            ]
+
+            # Sort logically by turn root timestamp, then by the requested ordering
+            msg_map = {m.id: m for m in all_msgs}
+
+            def get_root_timestamp(m: Message) -> float:
+                curr = m
+                while curr.parent_id and curr.parent_id in msg_map:
+                    curr = msg_map[curr.parent_id]
+                return curr.timestamp
+
+            def get_sorting_phase(m: Message) -> int:
+                if m.role == ROLE_TOOL and m.type == TYPE_TOOL_CALL:
+                    return 1
+                elif m.role == ROLE_TOOL and m.type == TYPE_TOOL_RESULT:
+                    return 2
+                elif m.role == ROLE_ASSISTANT and m.type != TYPE_THOUGHT:
+                    return 3
+                return 0
+
+            def get_tool_group_timestamp(m: Message) -> float:
+                if m.parent_id and m.parent_id in msg_map:
+                    parent_msg = msg_map[m.parent_id]
+                    if parent_msg.role == ROLE_TOOL and parent_msg.type == TYPE_TOOL_CALL:
+                        return parent_msg.timestamp
+                return m.timestamp
+
+            if order == "phased":
+                all_msgs.sort(
+                    key=lambda m: (
+                        get_root_timestamp(m),
+                        get_sorting_phase(m),
+                        get_tool_group_timestamp(m),
+                        m.timestamp,
+                    )
+                )
+            else:
+                all_msgs.sort(key=lambda m: (get_root_timestamp(m), get_tool_group_timestamp(m), m.timestamp))
+
+            return all_msgs
+        finally:
+            conn.close()
+
+

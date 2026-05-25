@@ -65,19 +65,6 @@ async def build_clean_history(
     Resolves orphaned tool calls, deduplicates duplicate interrupted tool results, handles initial turns
     pinning, applies priority-based turn dropping, recovers loaded skills, and slides the turn window.
 
-    Example Turn-Based Truncation for 100 Turns (max_turns=30, pin_initial_turns=3, pin_recent_turns=10):
-    - System Prompt (kept at history[0])
-    - Pinned initial Turns 1, 2, and 3 (retains user, assistant, system, and all tool
-      calls/results; thoughts are dropped)
-    - Pinned recovered skill Turns (e.g., Turn 5 that loaded 'role-playing', recovered in
-      full, use_skill not serialized)
-    - Candidate Turns 74 to 89 (drops thoughts, drops resolved intermediate tool
-      calls/results; keeps user/assistant/system text)
-    - Completed Recent Turns 90 to 98 (retains user, assistant, system, and all
-      tool calls/results; thoughts are dropped)
-    - Absolute Latest Turn 99 (kept in 100% full execution detail: prompts,
-      thoughts, tool calls/results)
-
     Args:
         gateway: Gateway instance to interact with storage.
         session_id: Unique conversational session identifier.
@@ -97,41 +84,62 @@ async def build_clean_history(
     if pin_recent_turns is None:
         pin_recent_turns = cfg.pin_recent_turns
 
-    # 1. Detects and heals orphaned tool calls by posting a synthesized interruption result.
-    raw_history = await gateway.get_session_history(session_id, limit=0)
-    tool_calls = [m for m in raw_history if m.type == TYPE_TOOL_CALL]
-    tool_results_parent_ids = {m.parent_id for m in raw_history if m.type == TYPE_TOOL_RESULT and m.parent_id}
+    # 1. Detects and heals orphaned tool calls using optimized database query.
+    orphaned_calls = await gateway.get_orphaned_tool_calls(session_id)
+    for tc in orphaned_calls:
+        logger.warning(
+            f"Found orphaned tool call {tc.id} (tool: {tc.metadata.get('tool_name')}). "
+            "Synthesizing interruption response."
+        )
+        tool_name = tc.metadata.get("tool_name", "unknown_tool")
+        interrupted_msg = Message(
+            session_id=session_id,
+            chatbot_id=tc.chatbot_id,
+            channel_id=tc.channel_id,
+            sender=tool_name,
+            role=ROLE_TOOL,
+            type=TYPE_TOOL_RESULT,
+            content=f"Tool `{tool_name}` execution was interrupted due to service restart.",
+            status=STATUS_RESPONDED,
+            parent_id=tc.id,
+            metadata={
+                "tool_name": tool_name,
+                "tool_error": "Tool execution was interrupted due to service restart.",
+            },
+        )
+        await gateway.post(interrupted_msg)
 
-    healed = False
-    for tc in tool_calls:
-        if tc.id not in tool_results_parent_ids:
-            logger.warning(
-                f"Found orphaned tool call {tc.id} (tool: {tc.metadata.get('tool_name')}). "
-                "Synthesizing interruption response."
-            )
-            tool_name = tc.metadata.get("tool_name", "unknown_tool")
-            interrupted_msg = Message(
-                session_id=session_id,
-                chatbot_id=tc.chatbot_id,
-                channel_id=tc.channel_id,
-                sender=tool_name,
-                role=ROLE_TOOL,
-                type=TYPE_TOOL_RESULT,
-                content=f"Tool `{tool_name}` execution was interrupted due to service restart.",
-                status=STATUS_RESPONDED,
-                parent_id=tc.id,
-                metadata={
-                    "tool_name": tool_name,
-                    "tool_error": "Tool execution was interrupted due to service restart.",
-                },
-            )
-            await gateway.post(interrupted_msg)
-            healed = True
+    # 2. Retrieve chronological turn anchors and identify relevant turn segments
+    anchors = await gateway.get_session_turn_anchors(session_id)
+    system_anchors = [a for a in anchors if a["role"] == ROLE_SYSTEM]
+    user_anchors = [a for a in anchors if a["role"] == ROLE_USER]
 
-    if healed:
-        raw_history = await gateway.get_session_history(session_id, limit=0)
+    # 3. Retrieve completed skill turn anchors
+    skill_anchor_ids = set(await gateway.get_session_skill_anchor_ids(session_id))
 
-    # 2. Always preserves the initial system message(s) at the start.
+    # 4. Determine the exact subset of anchors we want to load in full detail
+    selected_anchor_ids = set()
+    selected_anchor_ids.update(a["id"] for a in system_anchors)
+    selected_anchor_ids.update(a["id"] for a in user_anchors[:pin_initial_turns])
+    selected_anchor_ids.update(a["id"] for a in user_anchors if a["id"] in skill_anchor_ids)
+
+    # Include suffix sliding window turns (up to max_turns - pin_initial_turns)
+    suffix_limit = max(0, max_turns - pin_initial_turns)
+    if suffix_limit > 0:
+        selected_anchor_ids.update(a["id"] for a in user_anchors[-suffix_limit:])
+
+    # 5. Construct ranges for the selected anchors
+    ranges = []
+    for idx, anchor in enumerate(anchors):
+        if anchor["id"] in selected_anchor_ids:
+            start = anchor["timestamp"]
+            end = anchors[idx + 1]["timestamp"] if idx + 1 < len(anchors) else None
+            ranges.append((start, end))
+
+    # 6. Load messages only for the selected turn anchors using timestamp ranges
+    raw_history = await gateway.get_session_history_by_ranges(session_id, ranges)
+
+    # 6. Always preserves the initial system message(s) at the start.
     system_msg = None
     for m in raw_history:
         if m.role == ROLE_SYSTEM:
@@ -140,7 +148,7 @@ async def build_clean_history(
 
     conv_msgs = [m for m in raw_history if (not system_msg or m.id != system_msg.id)]
 
-    # 3. Groups messages into complete logical turns (User prompt -> ... -> before next user prompt).
+    # 7. Groups messages into complete logical turns (User prompt -> ... -> before next user prompt).
     turns: list[list[Message]] = []
     current_turn: list[Message] = []
     for m in conv_msgs:
@@ -156,7 +164,7 @@ async def build_clean_history(
     if current_turn:
         turns.append(current_turn)
 
-    # 4. Clean each turn logically based on its position (pinned, latest, or in-between other turns).
+    # 8. Resolve resolved intermediate tool call/result status for older turns
     tc_to_tr = {}
     for m in raw_history:
         if m.type == TYPE_TOOL_RESULT and m.parent_id:
@@ -174,16 +182,23 @@ async def build_clean_history(
         if is_resolved and not has_skill:
             resolved_turns_without_skill.add(user_msg_id)
 
+    # 9. Clean each turn logically based on its position
+    pinned_anchor_ids = {a["id"] for a in user_anchors[:pin_initial_turns]}
+    recent_anchor_ids = {a["id"] for a in user_anchors[-pin_recent_turns:]}
+    latest_anchor_id = user_anchors[-1]["id"] if user_anchors else None
+
     cleaned_turns = []
-    for idx, turn in enumerate(turns):
-        is_pinned = (idx < pin_initial_turns)
-        is_latest = (idx == len(turns) - 1)
-        is_recent = (idx >= len(turns) - pin_recent_turns)
+    for turn in turns:
+        user_prompt = next((m for m in turn if m.role in (ROLE_USER, ROLE_SYSTEM)), None)
+        user_prompt_id = user_prompt.id if user_prompt else None
+
+        is_latest = (user_prompt_id == latest_anchor_id)
+        is_pinned = (user_prompt_id in pinned_anchor_ids)
+        is_recent = (user_prompt_id in recent_anchor_ids)
 
         dropped_ids = set()
 
         # Deduplicate duplicate/orphaned interrupted tool results for the same tool call
-        # If a tool call has both an interrupted result and a valid result, drop the interrupted one.
         tc_results = {}
         for m in turn:
             if m.type == TYPE_TOOL_RESULT and m.parent_id:
@@ -203,13 +218,12 @@ async def build_clean_history(
                     dropped_ids.add(interrupted_msg.id)
 
         if is_latest:
-            # Latest turn: full details (retains all details but drops duplicate interrupted tool results)
+            # Latest turn: keep full details (thoughts, tool calls/results)
             clean_turn = [m for m in turn if m.id not in dropped_ids]
             cleaned_turns.append(clean_turn)
-            continue
-        if is_pinned or is_recent:
+        elif is_pinned or is_recent:
             # Pinned and recent turns: keep user, assistant, system, and all tool messages (serialize if needed).
-            # Thoughts must be dropped (thoughts: only in absolute latest turn).
+            # Thoughts must be dropped.
             for m in turn:
                 if m.type == TYPE_THOUGHT:
                     dropped_ids.add(m.id)
@@ -217,11 +231,10 @@ async def build_clean_history(
                 if m.role in (ROLE_USER, ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_TOOL):
                     continue
                 dropped_ids.add(m.id)
+            clean_turn = [m for m in turn if m.id not in dropped_ids]
+            cleaned_turns.append(clean_turn)
         else:
             # in-between other turns: drop thoughts, resolved intermediate tool calls/results
-            user_prompt = next((m for m in turn if m.role in (ROLE_USER, ROLE_SYSTEM)), None)
-            user_prompt_id = user_prompt.id if user_prompt else None
-
             for m in turn:
                 if m.role == ROLE_ASSISTANT and m.type == TYPE_THOUGHT:
                     dropped_ids.add(m.id)
@@ -234,50 +247,17 @@ async def build_clean_history(
                     if parent_tc and parent_tc.parent_id in resolved_turns_without_skill:
                         dropped_ids.add(m.id)
                         continue
+            clean_turn = [m for m in turn if m.id not in dropped_ids]
+            cleaned_turns.append(clean_turn)
 
-        clean_turn = [m for m in turn if m.id not in dropped_ids]
-        cleaned_turns.append(clean_turn)
-
-    # 5. Partitions pinned turns vs candidate turns
-    pinned_turns = cleaned_turns[:pin_initial_turns]
-
-    # 6. Trims/aligns history strictly by turn count, naturally preserving user-message start.
-    allowed_turns = max_turns - pin_initial_turns
-    if allowed_turns <= 0:
-        suffix_turns = []
-        discarded_candidate_turns = cleaned_turns[pin_initial_turns:]
-    else:
-        suffix_idx = max(0, len(cleaned_turns) - pin_initial_turns - allowed_turns)
-        suffix_turns = cleaned_turns[pin_initial_turns + suffix_idx:]
-        discarded_candidate_turns = cleaned_turns[pin_initial_turns:pin_initial_turns + suffix_idx]
-
-    # 7. Recovers any pinned skill use (use_skill) turns completely and atomically.
-    recovered_turns = []
-    for turn in discarded_candidate_turns:
-        has_completed_skill = False
-        for m in turn:
-            if (
-                m.type == TYPE_TOOL_RESULT
-                and m.metadata.get("tool_name") == "use_skill"
-                and "tool_error" not in m.metadata
-            ):
-                has_completed_skill = True
-                break
-        if has_completed_skill:
-            recovered_turns.append(turn)
-
-    # 8. Flatten turns and construct the final chronological context history.
+    # 9. Flatten turns and construct the final chronological context history.
     final_history = []
     if system_msg:
         final_history.append(system_msg)
-    for turn in pinned_turns:
-        final_history.extend(turn)
-    for turn in recovered_turns:
-        final_history.extend(turn)
-    for turn in suffix_turns:
+    for turn in cleaned_turns:
         final_history.extend(turn)
 
-    # 9. Context Optimization: Serialize tool outputs to files and replace with pointer messages
+    # 10. Context Optimization: Serialize tool outputs to files and replace with pointer messages
     last_user_idx = -1
     for i, msg in enumerate(final_history):
         if msg.role == ROLE_USER:
@@ -348,3 +328,4 @@ async def build_clean_history(
                                     msg.metadata["tool_error"] = f"tool output in {file_path}"
 
     return final_history
+
