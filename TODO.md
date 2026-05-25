@@ -1,5 +1,6 @@
 # Agent Features
 - [x] History / context management (compaction etc)
+  - [ ] attachment handling
 - [x] System Prompt Design
   - Inject current date, time, timezone etc.
 

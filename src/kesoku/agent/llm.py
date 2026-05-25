@@ -4,12 +4,16 @@ Provides an abstract base class BaseLLM and a concrete GeminiLLM implementation.
 """
 
 import asyncio
+import base64
+import inspect
 import os
 import re
-from abc import ABC, abstractmethod
+import typing
+from abc import ABC
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
+from anthropic import AnthropicVertex
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -39,7 +43,6 @@ class ToolCallRequest(BaseModel):
     tool_call_id: str | None = None
 
 
-
 class LLMResponse(BaseModel):
     """Standardized response from any LLM provider."""
 
@@ -52,6 +55,206 @@ class LLMResponse(BaseModel):
     raw_response: str | None = None  # Raw model response representation
 
 
+class TextBlock(BaseModel):
+    """Represents a standard text segment in the conversational turn."""
+
+    type: Literal["text"] = "text"
+    text: str
+
+
+class ThoughtBlock(BaseModel):
+    """Represents a structured thought process / reasoning segment."""
+
+    type: Literal["thought"] = "thought"
+    text: str
+
+
+class ImageBlock(BaseModel):
+    """Represents an image attachment containing raw bytes."""
+
+    type: Literal["image"] = "image"
+    media_type: str
+    data: bytes
+
+
+class DocumentBlock(BaseModel):
+    """Represents a document attachment (e.g., PDF) containing raw bytes."""
+
+    type: Literal["document"] = "document"
+    media_type: str
+    data: bytes
+
+
+class ToolCallBlock(BaseModel):
+    """Represents a requested tool call from the assistant."""
+
+    type: Literal["tool_call"] = "tool_call"
+    name: str
+    arguments: dict[str, Any]
+    tool_call_id: str
+    thought_signature: str | None = None
+
+
+class ToolResultBlock(BaseModel):
+    """Represents the output result of an executed tool call."""
+
+    type: Literal["tool_result"] = "tool_result"
+    name: str
+    tool_call_id: str
+    result: str
+    is_error: bool = False
+
+
+LLMBlock = TextBlock | ThoughtBlock | ImageBlock | DocumentBlock | ToolCallBlock | ToolResultBlock
+
+
+class LLMTurn(BaseModel):
+    """Represents a single conversational turn with one role."""
+
+    role: Literal["user", "assistant", "tool"]
+    blocks: list[LLMBlock] = Field(default_factory=list)
+
+
+def _load_attachments(attachments: list[dict[str, Any]]) -> list[ImageBlock | DocumentBlock]:
+    """Load local attachments from paths and wrap them in ImageBlock or DocumentBlock.
+
+    Args:
+        attachments: List of dictionaries containing 'path' and 'mime_type'.
+
+    Returns:
+        List of loaded blocks.
+    """
+    blocks: list[ImageBlock | DocumentBlock] = []
+    for att in attachments:
+        path = att.get("path")
+        mime_type = att.get("mime_type", "application/octet-stream")
+        if path and os.path.exists(path):
+            try:
+                with open(path, "rb") as f:
+                    file_bytes = f.read()
+                corrected_mime = mime_type
+                if mime_type.startswith("image/"):
+                    corrected_mime = _detect_image_mime_type(file_bytes, fallback_mime=mime_type)
+                    blocks.append(ImageBlock(media_type=corrected_mime, data=file_bytes))
+                    logger.info(f"Loaded native image part: {path} ({corrected_mime})")
+                elif mime_type == "application/pdf":
+                    blocks.append(DocumentBlock(media_type="application/pdf", data=file_bytes))
+                    logger.info(f"Loaded native document part: {path} ({mime_type})")
+                else:
+                    logger.warning(f"Unsupported attachment type: {mime_type}")
+            except Exception as ex:
+                logger.error(f"Failed to load attachment {path}: {ex}")
+    return blocks
+
+
+def history_to_turns(
+    history: list[Message] | None,
+    prompt: str | None = None,
+    system_prompt: str | None = None,
+) -> tuple[list[LLMTurn], str | None]:
+    """Convert flat database Message history + latest prompt to structured LLMTurn IR.
+
+    Also extracts and resolves the initial system prompt.
+
+    Args:
+        history: Sequential list of database Messages.
+        prompt: Optional latest user prompt string.
+        system_prompt: Optional system prompt string override.
+
+    Returns:
+        Tuple of (list of LLMTurns, resolved system prompt).
+    """
+    turns: list[LLMTurn] = []
+    resolved_system_prompt = system_prompt
+
+    def add_blocks(role: Literal["user", "assistant", "tool"], blocks: list[LLMBlock]) -> None:
+        """Append blocks to the last turn if roles match; otherwise start a new turn."""
+        if not blocks:
+            return
+        if turns and turns[-1].role == role:
+            turns[-1].blocks.extend(blocks)
+        else:
+            turns.append(LLMTurn(role=role, blocks=blocks))
+
+    # Pre-pass: Map tool call message IDs to tool_call_ids
+    tool_call_ids = {}
+    if history:
+        for msg in history:
+            if msg.role == ROLE_TOOL and msg.type == TYPE_TOOL_CALL:
+                tool_call_id = msg.metadata.get("tool_call_id") or msg.id
+                tool_call_ids[msg.id] = tool_call_id
+
+    if history:
+        for msg in history:
+            if msg.role == ROLE_SYSTEM:
+                if not resolved_system_prompt:
+                    resolved_system_prompt = msg.content
+                elif msg != history[0]:
+                    notification = f"[System Notification]\n{msg.content}"
+                    add_blocks("user", [TextBlock(text=notification)])
+                continue
+
+            if msg.role == ROLE_USER:
+                blocks: list[LLMBlock] = [TextBlock(text=msg.content)]
+                attachments = msg.metadata.get("attachments", [])
+                if attachments:
+                    blocks.extend(_load_attachments(attachments))
+                add_blocks("user", blocks)
+
+            elif msg.role == ROLE_ASSISTANT:
+                if msg.type == TYPE_THOUGHT:
+                    add_blocks("assistant", [ThoughtBlock(text=msg.content)])
+                else:
+                    add_blocks("assistant", [TextBlock(text=msg.content)])
+
+            elif msg.role == ROLE_TOOL:
+                if msg.type == TYPE_TOOL_CALL:
+                    tool_name = msg.metadata.get("tool_name", "unknown_tool")
+                    args = msg.metadata.get("tool_arguments", {})
+                    tool_call_id = msg.metadata.get("tool_call_id") or msg.id
+                    ts_hex = msg.metadata.get("thought_signature")
+                    add_blocks(
+                        "assistant",
+                        [
+                            ToolCallBlock(
+                                name=tool_name,
+                                arguments=args,
+                                tool_call_id=tool_call_id,
+                                thought_signature=ts_hex,
+                            )
+                        ],
+                    )
+                elif msg.type == TYPE_TOOL_RESULT:
+                    tool_name = msg.metadata.get("tool_name", "unknown_tool")
+                    if "tool_error" in msg.metadata:
+                        res_str = f"Error: {msg.metadata['tool_error']}"
+                        is_error = True
+                    else:
+                        res_str = msg.metadata.get("tool_result", msg.content)
+                        is_error = False
+
+                    tool_call_id = tool_call_ids.get(msg.parent_id)
+                    if not tool_call_id:
+                        tool_call_id = msg.parent_id
+
+                    add_blocks(
+                        "tool",
+                        [
+                            ToolResultBlock(
+                                name=tool_name,
+                                tool_call_id=tool_call_id,
+                                result=res_str,
+                                is_error=is_error,
+                            )
+                        ],
+                    )
+
+    if prompt:
+        add_blocks("user", [TextBlock(text=prompt)])
+
+    return turns, resolved_system_prompt
+
+
 def function_to_anthropic_tool(func: Callable) -> dict[str, Any]:
     """Convert a Python function with type hints and docstrings to an Anthropic tool schema.
 
@@ -61,7 +264,6 @@ def function_to_anthropic_tool(func: Callable) -> dict[str, Any]:
     Returns:
         A dict matching the Anthropic tool schema format.
     """
-    import inspect
     sig = inspect.signature(func)
 
     # Get description from docstring
@@ -91,7 +293,6 @@ def function_to_anthropic_tool(func: Callable) -> dict[str, Any]:
         annotation = param.annotation
 
         # Handle Optional or Union types (like str | None or typing.Optional)
-        import typing
         origin = typing.get_origin(annotation)
         if origin is typing.Union or str(origin) == "<class 'union'>":
             args = typing.get_args(annotation)
@@ -150,7 +351,6 @@ def _detect_image_mime_type(file_bytes: bytes, fallback_mime: str = "image/jpeg"
 class BaseLLM(ABC):
     """Abstract base class defining the interface for LLM providers."""
 
-    @abstractmethod
     async def generate(
         self,
         prompt: str | None = None,
@@ -169,7 +369,27 @@ class BaseLLM(ABC):
         Returns:
             An LLMResponse containing text and/or requested tool calls.
         """
-        pass
+        turns, resolved_system_prompt = history_to_turns(history, prompt, system_prompt)
+        native_input = self._build_native_input(turns, resolved_system_prompt, tools)
+        raw_res = await self._call_llm(native_input)
+        return self._parse_native_response(raw_res)
+
+    def _build_native_input(
+        self,
+        turns: list[LLMTurn],
+        system_prompt: str | None,
+        tools: list[Callable] | None,
+    ) -> Any:
+        """Translate provider-neutral LLMTurns and tools into provider-native input structures."""
+        raise NotImplementedError()
+
+    async def _call_llm(self, native_input: Any) -> Any:
+        """Call the underlying LLM client with the native input structures."""
+        raise NotImplementedError()
+
+    def _parse_native_response(self, raw_response: Any) -> LLMResponse:
+        """Translate the provider-native response into a standardized LLMResponse."""
+        raise NotImplementedError()
 
 
 class GeminiLLM(BaseLLM):
@@ -207,87 +427,42 @@ class GeminiLLM(BaseLLM):
             logger.error("google-genai package is not installed.")
             raise
 
-    async def generate(
+    def _build_native_input(
         self,
-        prompt: str | None = None,
-        system_prompt: str | None = None,
-        history: list[Message] | None = None,
-        tools: list[Callable] | None = None,
-    ) -> LLMResponse:
-        """Generate content using Google GenAI client."""
+        turns: list[LLMTurn],
+        system_prompt: str | None,
+        tools: list[Callable] | None,
+    ) -> dict[str, Any]:
         contents: list[types.Content] = []
-        if history:
-            for msg in history:
-                if msg.role == ROLE_SYSTEM:
-                    if not system_prompt:
-                        system_prompt = msg.content
-                    elif msg != history[0]:
-                        part = types.Part.from_text(text=f"[System Notification]\n{msg.content}")
-                        if contents and contents[-1].role == "user":
-                            contents[-1].parts.append(part)
-                        else:
-                            contents.append(types.Content(role="user", parts=[part]))
-                    continue
-
-                role = "user"
-                parts = []
-
-                if msg.role == ROLE_USER:
-                    role = "user"
-                    parts.append(types.Part.from_text(text=msg.content))
-                    attachments = msg.metadata.get("attachments", [])
-                    for att in attachments:
-                        path = att.get("path")
-                        mime_type = att.get("mime_type", "application/octet-stream")
-                        if path and os.path.exists(path):  # noqa: ASYNC240
-                            try:
-                                with open(path, "rb") as f:  # noqa: ASYNC230
-                                    file_bytes = f.read()
-                                corrected_mime = mime_type
-                                if mime_type.startswith("image/"):
-                                    corrected_mime = _detect_image_mime_type(file_bytes, fallback_mime=mime_type)
-                                parts.append(types.Part.from_bytes(data=file_bytes, mime_type=corrected_mime))
-                                logger.info(f"Loaded native Gemini attachment part: {path} ({corrected_mime})")
-                            except Exception as ex:
-                                logger.error(f"Failed to load attachment {path} for Gemini: {ex}")
-                elif msg.role == ROLE_ASSISTANT:
-                    role = "model"
-                    part = types.Part.from_text(text=msg.content)
-                    if msg.type == TYPE_THOUGHT:
-                        part.thought = True
+        for turn in turns:
+            role = "model" if turn.role == "assistant" else turn.role
+            parts = []
+            for block in turn.blocks:
+                if isinstance(block, TextBlock):
+                    parts.append(types.Part.from_text(text=block.text))
+                elif isinstance(block, ThoughtBlock):
+                    part = types.Part.from_text(text=block.text)
+                    part.thought = True
                     parts.append(part)
-                elif msg.role == ROLE_TOOL:
-                    if msg.type == TYPE_TOOL_CALL:
-                        role = "model"
-                        tool_name = msg.metadata.get("tool_name", "unknown_tool")
-                        args = msg.metadata.get("tool_arguments", {})
-                        part = types.Part.from_function_call(name=tool_name, args=args)
-                        ts_hex = msg.metadata.get("thought_signature")
-                        if ts_hex:
-                            part.thought_signature = bytes.fromhex(ts_hex)
-                        parts.append(part)
-                    elif msg.type == TYPE_TOOL_RESULT:
-                        role = "tool"
-                        tool_name = msg.metadata.get("tool_name", "unknown_tool")
-                        if "tool_error" in msg.metadata:
-                            res_dict = {"error": msg.metadata["tool_error"]}
-                        else:
-                            res_dict = {"result": msg.metadata.get("tool_result", msg.content)}
-                        part = types.Part.from_function_response(name=tool_name, response=res_dict)
-                        parts.append(part)
+                elif isinstance(block, ImageBlock):
+                    parts.append(types.Part.from_bytes(data=block.data, mime_type=block.media_type))
+                elif isinstance(block, DocumentBlock):
+                    parts.append(types.Part.from_bytes(data=block.data, mime_type=block.media_type))
+                elif isinstance(block, ToolCallBlock):
+                    part = types.Part.from_function_call(name=block.name, args=block.arguments)
+                    if block.thought_signature:
+                        part.thought_signature = bytes.fromhex(block.thought_signature)
+                    parts.append(part)
+                elif isinstance(block, ToolResultBlock):
+                    res_dict = {"error": block.result} if block.is_error else {"result": block.result}
+                    part = types.Part.from_function_response(name=block.name, response=res_dict)
+                    parts.append(part)
 
-                if parts:
-                    if contents and contents[-1].role == role:
-                        contents[-1].parts.extend(parts)
-                    else:
-                        contents.append(types.Content(role=role, parts=parts))
-
-        if prompt:
-            part = types.Part.from_text(text=prompt)
-            if contents and contents[-1].role == "user":
-                contents[-1].parts.append(part)
-            else:
-                contents.append(types.Content(role="user", parts=[part]))
+            if parts:
+                if contents and contents[-1].role == role:
+                    contents[-1].parts.extend(parts)
+                else:
+                    contents.append(types.Content(role=role, parts=parts))
 
         config = types.GenerateContentConfig()
         if system_prompt:
@@ -301,6 +476,9 @@ class GeminiLLM(BaseLLM):
                 include_thoughts=True,
             )
 
+        return {"contents": contents, "config": config}
+
+    async def _call_llm(self, native_input: dict[str, Any]) -> Any:
         def _call() -> Any:
             if self.config.auth_mode == "vertex":
                 client = genai.Client(
@@ -314,52 +492,53 @@ class GeminiLLM(BaseLLM):
 
             return client.models.generate_content(
                 model=self.model_name,
-                contents=contents,
-                config=config,
+                contents=native_input["contents"],
+                config=native_input["config"],
             )
 
         try:
-            res = await asyncio.to_thread(_call)
-            tool_calls = []
-            text_parts = []
-            thought_parts = []
-
-            if res.parts:
-                for part in res.parts:
-                    if isinstance(part.text, str):
-                        if part.thought:
-                            thought_parts.append(part.text)
-                        else:
-                            text_parts.append(part.text)
-                    if part.function_call:
-                        call = part.function_call
-                        args_dict = dict(call.args) if call.args else {}
-                        ts = part.thought_signature.hex() if part.thought_signature else None
-                        tool_calls.append(ToolCallRequest(name=call.name, arguments=args_dict, thought_signature=ts))
-
-            text_content = "".join(text_parts)
-            thought_content = "".join(thought_parts) if thought_parts else None
-
-            prompt_tokens = None
-            candidates_tokens = None
-            total_tokens = None
-            if getattr(res, "usage_metadata", None):
-                prompt_tokens = res.usage_metadata.prompt_token_count
-                candidates_tokens = res.usage_metadata.candidates_token_count
-                total_tokens = res.usage_metadata.total_token_count
-
-            return LLMResponse(
-                content=text_content,
-                thought=thought_content,
-                tool_calls=tool_calls,
-                prompt_tokens=prompt_tokens,
-                candidates_tokens=candidates_tokens,
-                total_tokens=total_tokens,
-            )
-
+            return await asyncio.to_thread(_call)
         except Exception as e:
             logger.error(f"GeminiLLM generation failed: {e}")
             raise
+
+    def _parse_native_response(self, raw_response: Any) -> LLMResponse:
+        tool_calls = []
+        text_parts = []
+        thought_parts = []
+
+        if raw_response.parts:
+            for part in raw_response.parts:
+                if isinstance(part.text, str):
+                    if part.thought:
+                        thought_parts.append(part.text)
+                    else:
+                        text_parts.append(part.text)
+                if part.function_call:
+                    call = part.function_call
+                    args_dict = dict(call.args) if call.args else {}
+                    ts = part.thought_signature.hex() if part.thought_signature else None
+                    tool_calls.append(ToolCallRequest(name=call.name, arguments=args_dict, thought_signature=ts))
+
+        text_content = "".join(text_parts)
+        thought_content = "".join(thought_parts) if thought_parts else None
+
+        prompt_tokens = None
+        candidates_tokens = None
+        total_tokens = None
+        if getattr(raw_response, "usage_metadata", None):
+            prompt_tokens = raw_response.usage_metadata.prompt_token_count
+            candidates_tokens = raw_response.usage_metadata.candidates_token_count
+            total_tokens = raw_response.usage_metadata.total_token_count
+
+        return LLMResponse(
+            content=text_content,
+            thought=thought_content,
+            tool_calls=tool_calls,
+            prompt_tokens=prompt_tokens,
+            candidates_tokens=candidates_tokens,
+            total_tokens=total_tokens,
+        )
 
 
 class ClaudeLLM(BaseLLM):
@@ -377,156 +556,83 @@ class ClaudeLLM(BaseLLM):
         self.model_name = config.model_name
         logger.info(f"Using ClaudeLLM backend ({self.model_name}).")
 
-        try:
-            from anthropic import AnthropicVertex
+        logger.info(
+            f"Initializing Claude client in Vertex AI mode "
+            f"(Project: {config.project_id}, Region: {config.location})"
+        )
+        self.client = AnthropicVertex(
+            project_id=config.project_id,
+            region=config.location,
+        )
 
-            logger.info(
-                f"Initializing Claude client in Vertex AI mode "
-                f"(Project: {config.project_id}, Region: {config.location})"
-            )
-            self.client = AnthropicVertex(
-                project_id=config.project_id,
-                region=config.location,
-            )
-        except ImportError:
-            logger.error("anthropic package is not installed.")
-            raise
-
-    async def generate(
+    def _build_native_input(
         self,
-        prompt: str | None = None,
-        system_prompt: str | None = None,
-        history: list[Message] | None = None,
-        tools: list[Callable] | None = None,
-    ) -> LLMResponse:
-        """Generate content using Anthropic Vertex client."""
+        turns: list[LLMTurn],
+        system_prompt: str | None,
+        tools: list[Callable] | None,
+    ) -> dict[str, Any]:
         messages = []
-
         anthropic_tools = []
         if tools:
             for t in tools:
                 anthropic_tools.append(function_to_anthropic_tool(t))
 
-        if history:
-            merged_messages = []
+        for turn in turns:
+            role = "user" if turn.role == "tool" else turn.role
+            blocks = []
+            for block in turn.blocks:
+                if isinstance(block, TextBlock):
+                    blocks.append({"type": "text", "text": block.text})
+                elif isinstance(block, ThoughtBlock):
+                    blocks.append({"type": "text", "text": f"<thought>\n{block.text}\n</thought>"})
+                elif isinstance(block, ImageBlock):
+                    data_b64 = base64.b64encode(block.data).decode("utf-8")
+                    blocks.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": block.media_type,
+                            "data": data_b64,
+                        },
+                    })
+                elif isinstance(block, DocumentBlock):
+                    data_b64 = base64.b64encode(block.data).decode("utf-8")
+                    blocks.append({
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": data_b64,
+                        },
+                    })
+                elif isinstance(block, ToolCallBlock):
+                    tool_call_id = block.tool_call_id
+                    if not tool_call_id.startswith("toolu_"):
+                        tool_call_id = f"toolu_{tool_call_id}"
+                    blocks.append({
+                        "type": "tool_use",
+                        "id": tool_call_id,
+                        "name": block.name,
+                        "input": block.arguments,
+                    })
+                elif isinstance(block, ToolResultBlock):
+                    tool_call_id = block.tool_call_id
+                    if not tool_call_id.startswith("toolu_"):
+                        tool_call_id = f"toolu_{tool_call_id}"
+                    tc_block = {
+                        "type": "tool_result",
+                        "tool_use_id": tool_call_id,
+                        "content": block.result,
+                    }
+                    if block.is_error:
+                        tc_block["is_error"] = True
+                    blocks.append(tc_block)
 
-            for msg in history:
-                if msg.role == ROLE_SYSTEM:
-                    if not system_prompt:
-                        system_prompt = msg.content
-                    elif msg != history[0]:
-                        # Subsequent system messages as user message
-                        block = {"type": "text", "text": f"[System Notification]\n{msg.content}"}
-                        if merged_messages and merged_messages[-1]["role"] == "user":
-                            merged_messages[-1]["content"].append(block)
-                        else:
-                            merged_messages.append({"role": "user", "content": [block]})
-                    continue
-
-                role = "user"
-                blocks = []
-
-                if msg.role == ROLE_USER:
-                    role = "user"
-                    blocks.append({"type": "text", "text": msg.content})
-                    attachments = msg.metadata.get("attachments", [])
-                    for att in attachments:
-                        path = att.get("path")
-                        mime_type = att.get("mime_type", "application/octet-stream")
-                        if path and os.path.exists(path):  # noqa: ASYNC240
-                            try:
-                                import base64
-                                with open(path, "rb") as f:  # noqa: ASYNC230
-                                    file_bytes = f.read()
-                                data_b64 = base64.b64encode(file_bytes).decode("utf-8")
-
-                                if mime_type.startswith("image/"):
-                                    corrected_mime = _detect_image_mime_type(file_bytes, fallback_mime=mime_type)
-                                    blocks.append({
-                                        "type": "image",
-                                        "source": {
-                                            "type": "base64",
-                                            "media_type": corrected_mime,
-                                            "data": data_b64,
-                                        },
-                                    })
-                                    logger.info(f"Loaded native Claude image part: {path} ({corrected_mime})")
-                                elif mime_type == "application/pdf":
-                                    blocks.append({
-                                        "type": "document",
-                                        "source": {
-                                            "type": "base64",
-                                            "media_type": "application/pdf",
-                                            "data": data_b64,
-                                        },
-                                    })
-                                    logger.info(f"Loaded native Claude document part: {path} ({mime_type})")
-                                else:
-                                    logger.warning(f"Unsupported attachment type for Claude: {mime_type}")
-                            except Exception as ex:
-                                logger.error(f"Failed to load attachment {path} for Claude: {ex}")
-                elif msg.role == ROLE_ASSISTANT:
-                    role = "assistant"
-                    if msg.type == TYPE_THOUGHT:
-                        blocks.append({"type": "text", "text": f"<thought>\n{msg.content}\n</thought>"})
-                    else:
-                        blocks.append({"type": "text", "text": msg.content})
-                elif msg.role == ROLE_TOOL:
-                    if msg.type == TYPE_TOOL_CALL:
-                        role = "assistant"
-                        tool_name = msg.metadata.get("tool_name", "unknown_tool")
-                        args = msg.metadata.get("tool_arguments", {})
-                        tool_call_id = msg.metadata.get("tool_call_id") or msg.id
-                        if not tool_call_id.startswith("toolu_"):
-                            tool_call_id = f"toolu_{tool_call_id}"
-                        blocks.append({
-                            "type": "tool_use",
-                            "id": tool_call_id,
-                            "name": tool_name,
-                            "input": args,
-                        })
-                    elif msg.type == TYPE_TOOL_RESULT:
-                        role = "user"
-                        tool_name = msg.metadata.get("tool_name", "unknown_tool")
-                        if "tool_error" in msg.metadata:
-                            res_str = f"Error: {msg.metadata['tool_error']}"
-                            is_error = True
-                        else:
-                            res_str = msg.metadata.get("tool_result", msg.content)
-                            is_error = False
-
-                        parent_tc = next((m for m in history if m.id == msg.parent_id), None)
-                        tool_call_id = None
-                        if parent_tc:
-                            tool_call_id = parent_tc.metadata.get("tool_call_id")
-                        if not tool_call_id:
-                            tool_call_id = msg.parent_id
-                        if not tool_call_id.startswith("toolu_"):
-                            tool_call_id = f"toolu_{tool_call_id}"
-
-                        block = {
-                            "type": "tool_result",
-                            "tool_use_id": tool_call_id,
-                            "content": res_str,
-                        }
-                        if is_error:
-                            block["is_error"] = True
-                        blocks.append(block)
-
-                if blocks:
-                    if merged_messages and merged_messages[-1]["role"] == role:
-                        merged_messages[-1]["content"].extend(blocks)
-                    else:
-                        merged_messages.append({"role": role, "content": blocks})
-
-            messages = merged_messages
-
-        if prompt:
-            block = {"type": "text", "text": prompt}
-            if messages and messages[-1]["role"] == "user":
-                messages[-1]["content"].append(block)
-            else:
-                messages.append({"role": "user", "content": [block]})
+            if blocks:
+                if messages and messages[-1]["role"] == role:
+                    messages[-1]["content"].extend(blocks)
+                else:
+                    messages.append({"role": role, "content": blocks})
 
         if not messages:
             messages = [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}]
@@ -541,89 +647,87 @@ class ClaudeLLM(BaseLLM):
             else:
                 final_messages.append(m)
 
+        kwargs = {
+            "model": self.model_name,
+            "messages": final_messages,
+            "max_tokens": 4096,
+        }
+        if system_prompt:
+            kwargs["system"] = system_prompt
+        if anthropic_tools:
+            kwargs["tools"] = anthropic_tools
+
+        return kwargs
+
+    async def _call_llm(self, native_input: dict[str, Any]) -> Any:
         def _call() -> Any:
-            from anthropic import AnthropicVertex
-
-            client = AnthropicVertex(
-                project_id=self.config.project_id,
-                region=self.config.location,
-            )
-
-            kwargs = {
-                "model": self.model_name,
-                "messages": final_messages,
-                "max_tokens": 4096,
-            }
-            if system_prompt:
-                kwargs["system"] = system_prompt
-            if anthropic_tools:
-                kwargs["tools"] = anthropic_tools
-
-            return client.messages.create(**kwargs)
+            return self.client.messages.create(**native_input)
 
         try:
-            res = await asyncio.to_thread(_call)
-            tool_calls = []
-            text_parts = []
-            thought_parts = []
-
-            if res.content:
-                for block in res.content:
-                    if block.type == "text":
-                        text = block.text
-                        thought_match = re.search(r"<thought>(.*?)</thought>", text, re.DOTALL)
-                        if thought_match:
-                            thought_parts.append(thought_match.group(1).strip())
-                            text = re.sub(r"<thought>.*?</thought>", "", text, flags=re.DOTALL).strip()
-                        text_parts.append(text)
-                    elif block.type == "tool_use":
-                        tool_calls.append(
-                            ToolCallRequest(
-                                name=block.name,
-                                arguments=dict(block.input) if block.input else {},
-                                thought_signature=None,
-                                tool_call_id=block.id,
-                            )
-                        )
-
-            text_content = "\n".join(text_parts).strip()
-            thought_content = "\n".join(thought_parts).strip() if thought_parts else None
-
-            prompt_tokens = None
-            candidates_tokens = None
-            total_tokens = None
-            if getattr(res, "usage", None):
-                prompt_tokens = res.usage.input_tokens
-                candidates_tokens = res.usage.output_tokens
-                total_tokens = prompt_tokens + candidates_tokens
-
-            raw_json = None
-            try:
-                if "Mock" in type(res).__name__:
-                    raw_json = str(res)
-                elif hasattr(res, "to_json"):
-                    val = res.to_json()
-                    raw_json = val if isinstance(val, str) else str(val)
-                elif hasattr(res, "model_dump_json"):
-                    val = res.model_dump_json()
-                    raw_json = val if isinstance(val, str) else str(val)
-                else:
-                    raw_json = str(res)
-            except Exception as se:
-                raw_json = f"Failed to serialize: {se}\nRaw: {repr(res)}"
-
-            return LLMResponse(
-                content=text_content,
-                thought=thought_content,
-                tool_calls=tool_calls,
-                prompt_tokens=prompt_tokens,
-                candidates_tokens=candidates_tokens,
-                total_tokens=total_tokens,
-                raw_response=raw_json,
-            )
+            return await asyncio.to_thread(_call)
         except Exception as e:
             logger.error(f"ClaudeLLM generation failed: {e}")
             raise
+
+    def _parse_native_response(self, raw_response: Any) -> LLMResponse:
+        tool_calls = []
+        text_parts = []
+        thought_parts = []
+
+        if raw_response.content:
+            for block in raw_response.content:
+                if block.type == "text":
+                    text = block.text
+                    thought_match = re.search(r"<thought>(.*?)</thought>", text, re.DOTALL)
+                    if thought_match:
+                        thought_parts.append(thought_match.group(1).strip())
+                        text = re.sub(r"<thought>.*?</thought>", "", text, flags=re.DOTALL).strip()
+                    text_parts.append(text)
+                elif block.type == "tool_use":
+                    tool_calls.append(
+                        ToolCallRequest(
+                            name=block.name,
+                            arguments=dict(block.input) if block.input else {},
+                            thought_signature=None,
+                            tool_call_id=block.id,
+                        )
+                    )
+
+        text_content = "\n".join(text_parts).strip()
+        thought_content = "\n".join(thought_parts).strip() if thought_parts else None
+
+        prompt_tokens = None
+        candidates_tokens = None
+        total_tokens = None
+        if getattr(raw_response, "usage", None):
+            prompt_tokens = raw_response.usage.input_tokens
+            candidates_tokens = raw_response.usage.output_tokens
+            total_tokens = prompt_tokens + candidates_tokens
+
+        raw_json = None
+        try:
+            if "Mock" in type(raw_response).__name__:
+                raw_json = str(raw_response)
+            elif hasattr(raw_response, "to_json"):
+                val = raw_response.to_json()
+                raw_json = val if isinstance(val, str) else str(val)
+            elif hasattr(raw_response, "model_dump_json"):
+                val = raw_response.model_dump_json()
+                raw_json = val if isinstance(val, str) else str(val)
+            else:
+                raw_json = str(raw_response)
+        except Exception as se:
+            raw_json = f"Failed to serialize: {se}\nRaw: {repr(raw_response)}"
+
+        return LLMResponse(
+            content=text_content,
+            thought=thought_content,
+            tool_calls=tool_calls,
+            prompt_tokens=prompt_tokens,
+            candidates_tokens=candidates_tokens,
+            total_tokens=total_tokens,
+            raw_response=raw_json,
+        )
 
 
 class MockLLM(BaseLLM):

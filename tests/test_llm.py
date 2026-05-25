@@ -11,9 +11,11 @@ from kesoku.agent.llm import (
     MockLLM,
     function_to_anthropic_tool,
     get_llm,
+    history_to_turns,
 )
 from kesoku.constants import (
     ROLE_ASSISTANT,
+    ROLE_SYSTEM,
     ROLE_TOOL,
     ROLE_USER,
     TYPE_TEXT,
@@ -125,7 +127,7 @@ async def test_claude_llm_generate_history_conversion() -> None:
     mock_res.usage.output_tokens = 5
     mock_client.messages.create.return_value = mock_res
 
-    with patch("anthropic.AnthropicVertex", return_value=mock_client):
+    with patch("kesoku.agent.llm.AnthropicVertex", return_value=mock_client):
         claude = ClaudeLLM()
         response = await claude.generate(
             prompt="What is 2+2?",
@@ -248,7 +250,7 @@ async def test_claude_llm_with_attachments() -> None:
     # Use patches to mock file presence and reading
     from unittest.mock import mock_open
     with (
-        patch("anthropic.AnthropicVertex", return_value=mock_client),
+        patch("kesoku.agent.llm.AnthropicVertex", return_value=mock_client),
         patch("os.path.exists", return_value=True),
         patch("builtins.open", mock_open(read_data=b"fake_pdf_bytes")),
     ):
@@ -299,7 +301,7 @@ async def test_image_mime_type_correction() -> None:
 
     from unittest.mock import mock_open
     with (
-        patch("anthropic.AnthropicVertex", return_value=mock_claude_client),
+        patch("kesoku.agent.llm.AnthropicVertex", return_value=mock_claude_client),
         patch("os.path.exists", return_value=True),
         patch("builtins.open", mock_open(read_data=png_data)),
     ):
@@ -328,4 +330,111 @@ async def test_image_mime_type_correction() -> None:
         called_contents = mock_gemini_client.models.generate_content.call_args[1]["contents"]
         # Verify image was corrected to image/png in Gemini Part inline_data
         assert called_contents[0].parts[1].inline_data.mime_type == "image/png"
+
+
+def test_history_to_turns_conversion() -> None:
+    """Verify history_to_turns correctly converts database messages to provider-neutral IR."""
+    msg_system_1 = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="System",
+        role=ROLE_SYSTEM,
+        type=TYPE_TEXT,
+        content="System Prompt 1",
+    )
+    msg_system_2 = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="System",
+        role=ROLE_SYSTEM,
+        type=TYPE_TEXT,
+        content="System Prompt 2",
+    )
+    msg_user = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="User",
+        role=ROLE_USER,
+        type=TYPE_TEXT,
+        content="Hello!",
+    )
+    msg_thought = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="Kesoku",
+        role=ROLE_ASSISTANT,
+        type=TYPE_THOUGHT,
+        content="Hmm...",
+    )
+    msg_tool_call = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="Kesoku",
+        role=ROLE_TOOL,
+        type=TYPE_TOOL_CALL,
+        content="Call calculator",
+        metadata={"tool_name": "calculator", "tool_arguments": {"expr": "1+1"}, "tool_call_id": "call_abc"},
+    )
+    msg_tool_res = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="calculator",
+        role=ROLE_TOOL,
+        type=TYPE_TOOL_RESULT,
+        content="2",
+        metadata={"tool_name": "calculator", "tool_result": "2"},
+        parent_id=msg_tool_call.id,
+    )
+
+    history = [msg_system_1, msg_system_2, msg_user, msg_thought, msg_tool_call, msg_tool_res]
+    turns, system_prompt = history_to_turns(history, prompt="Continuing prompt")
+
+    # Check system prompt resolution
+    assert system_prompt == "System Prompt 1"
+
+    # Check turn roles and merging
+    # 1. user turn containing system notification 2 + Hello!
+    # 2. assistant turn containing thought + tool call
+    # 3. tool turn containing tool result
+    # 4. user turn containing continuing prompt
+    assert len(turns) == 4
+
+    # Turn 1: User turn with System notification & User message
+    assert turns[0].role == "user"
+    assert len(turns[0].blocks) == 2
+    assert turns[0].blocks[0].type == "text"
+    assert turns[0].blocks[0].text == "[System Notification]\nSystem Prompt 2"
+    assert turns[0].blocks[1].type == "text"
+    assert turns[0].blocks[1].text == "Hello!"
+
+    # Turn 2: Assistant turn with thought and tool call
+    assert turns[1].role == "assistant"
+    assert len(turns[1].blocks) == 2
+    assert turns[1].blocks[0].type == "thought"
+    assert turns[1].blocks[0].text == "Hmm..."
+    assert turns[1].blocks[1].type == "tool_call"
+    assert turns[1].blocks[1].name == "calculator"
+    assert turns[1].blocks[1].arguments == {"expr": "1+1"}
+    assert turns[1].blocks[1].tool_call_id == "call_abc"
+
+    # Turn 3: Tool turn with tool result
+    assert turns[2].role == "tool"
+    assert len(turns[2].blocks) == 1
+    assert turns[2].blocks[0].type == "tool_result"
+    assert turns[2].blocks[0].name == "calculator"
+    assert turns[2].blocks[0].tool_call_id == "call_abc"
+    assert turns[2].blocks[0].result == "2"
+    assert not turns[2].blocks[0].is_error
+
+    # Turn 4: Continuing user prompt
+    assert turns[3].role == "user"
+    assert len(turns[3].blocks) == 1
+    assert turns[3].blocks[0].text == "Continuing prompt"
+
 
