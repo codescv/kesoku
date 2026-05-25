@@ -494,6 +494,14 @@ class DiscordChatbot(Chatbot):
         if not channel:
             try:
                 channel = await self.bot.fetch_channel(target_id)  # type: ignore
+            except (discord.NotFound, discord.Forbidden) as fe:
+                logger.warning(
+                    f"Message {message.id} Failed to fetch Discord channel {target_id} (deleted or forbidden): {fe}. "
+                    "Aborting session and marking message as delivered to stop retrying."
+                )
+                await self.gateway.abort_session(message.session_id)
+                await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+                return
             except Exception as fe:
                 logger.error(f"Failed to fetch Discord channel {target_id}: {fe}")
                 return

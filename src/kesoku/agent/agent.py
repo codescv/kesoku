@@ -75,15 +75,16 @@ class SessionWorker:
         """
         await self.queue.put(msg)
 
-    async def stop(self, grace_period: float = 5.0) -> None:
+    async def stop(self, grace_period: float = 5.0, immediate: bool = False) -> None:
         """Stop the worker loop gracefully, waiting up to grace_period seconds for the current turn.
 
         Args:
             grace_period: Maximum seconds to wait for active turn to complete.
+            immediate: Whether to cancel the worker immediately without waiting.
         """
         self._running = False
         if self.task and not self.task.done():
-            if self._processing_turn:
+            if self._processing_turn and not immediate:
                 try:
                     async with asyncio.timeout(grace_period):
                         await self._turn_finished_event.wait()
@@ -251,15 +252,16 @@ class Agent:
             self._running = False
             await self.stop_all_workers()
 
-    async def stop_session_worker(self, session_id: str) -> None:
+    async def stop_session_worker(self, session_id: str, immediate: bool = False) -> None:
         """Stop the active session worker for the given session ID.
 
         Args:
             session_id: Unique identifier for the session worker.
+            immediate: Whether to stop the worker immediately.
         """
         worker = self.workers.get(session_id)
         if worker:
-            await worker.stop()
+            await worker.stop(immediate=immediate)
             self.workers.pop(session_id, None)
 
     async def stop_all_workers(self) -> None:

@@ -15,6 +15,10 @@ from typing import Any
 from kesoku.agent.prompt import build_sys_prompt
 from kesoku.constants import (
     ROLE_SYSTEM,
+    ROLE_USER,
+    STATUS_ERROR,
+    STATUS_PENDING,
+    STATUS_PENDING_AGENT,
     STATUS_PROCESSED,
     STATUS_RESPONDED,
     TYPE_TEXT,
@@ -212,8 +216,17 @@ class Gateway:
         seen_ids = set()
 
         # Offline recovery / initial pending fetch
+        # Agent dispatcher recovers STATUS_PENDING_AGENT user messages,
+        # while chatbot adapters recover STATUS_PENDING assistant responses.
+        is_agent_query = filters.get("role") == ROLE_USER
+        recovery_status = STATUS_PENDING_AGENT if is_agent_query else STATUS_PENDING
+
+        recovery_filters = {**filters}
+        if "status" not in recovery_filters:
+            recovery_filters["status"] = recovery_status
+
         pending_messages = await asyncio.to_thread(
-            self.db.get_messages_by_filters, filters, exclude_statuses, exclude_roles
+            self.db.get_messages_by_filters, recovery_filters, None, exclude_roles
         )
         for msg in pending_messages:
             if msg.id not in seen_ids:
@@ -260,6 +273,22 @@ class Gateway:
             True if exactly one message was updated, False otherwise.
         """
         return await asyncio.to_thread(self.db.claim_message, message_id, new_status, expected_statuses)
+
+    async def abort_session(self, session_id: str) -> None:
+        """Abort any active processing for the session (e.g. if the channel is deleted).
+
+        Args:
+            session_id: Target session ID.
+        """
+        if self.agent:
+            logger.info(f"Aborting active session worker for session {session_id} due to lost channel.")
+            await self.agent.stop_session_worker(session_id, immediate=True)
+
+        # Mark all outstanding (pending, processing, pending_agent) messages in this session as STATUS_ERROR
+        history = await self.get_session_history(session_id, limit=0)
+        for msg in history:
+            if msg.status in ("pending_agent", "processing", "pending"):
+                await self.update_message_status(msg.id, STATUS_ERROR)
 
 
     async def update_message_metadata(self, message_id: str, metadata: dict[str, Any]) -> None:

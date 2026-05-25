@@ -294,6 +294,76 @@ async def test_handle_message_with_non_existent_file(mock_config: KesokuConfig, 
 
 
 @pytest.mark.asyncio
+async def test_handle_message_fetch_channel_deleted(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test that fetching channel NotFound (404) marks message DELIVERED to avoid retries."""
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            bot.bot.get_channel = MagicMock(return_value=None)
+
+            # Mock fetch_channel to raise discord.NotFound
+            mock_response = MagicMock()
+            mock_response.status = 404
+            bot.bot.fetch_channel = AsyncMock(side_effect=discord.NotFound(mock_response, "Not Found"))
+
+            msg = Message(
+                id="msg123",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_ASSISTANT,
+                type=TYPE_TEXT,
+                content="Hello",
+            )
+
+            await bot.handle_message(msg)
+
+            # Verify fetch_channel was called
+            bot.bot.fetch_channel.assert_called_once_with(12345)
+            # Verify abort_session was called on the gateway
+            mock_gateway.abort_session.assert_called_once_with("thread123")
+            # Verify update_message_status was called to mark the message as delivered
+            mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+
+
+@pytest.mark.asyncio
+async def test_handle_message_fetch_channel_forbidden(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test that fetching channel Forbidden (403) marks message DELIVERED to avoid retries."""
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            bot.bot.get_channel = MagicMock(return_value=None)
+
+            # Mock fetch_channel to raise discord.Forbidden
+            mock_response = MagicMock()
+            mock_response.status = 403
+            bot.bot.fetch_channel = AsyncMock(side_effect=discord.Forbidden(mock_response, "Forbidden"))
+
+            msg = Message(
+                id="msg123",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=ROLE_ASSISTANT,
+                type=TYPE_TEXT,
+                content="Hello",
+            )
+
+            await bot.handle_message(msg)
+
+            # Verify fetch_channel was called
+            bot.bot.fetch_channel.assert_called_once_with(12345)
+            # Verify abort_session was called on the gateway
+            mock_gateway.abort_session.assert_called_once_with("thread123")
+            # Verify update_message_status was called to mark the message as delivered
+            mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+
+
+@pytest.mark.asyncio
 async def test_handle_message_with_empty_whitespace_guards(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test that empty or whitespace-only text segments are guarded and not sent."""
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
