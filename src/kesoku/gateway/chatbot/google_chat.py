@@ -831,3 +831,32 @@ class GoogleChatChatbot(Chatbot):
             "- Monospace inline code using backticks (e.g., `code`).\n"
             "- Multi-line code blocks using triple backticks (e.g., ```py\\nprint('hi')\\n```).\n"
         )
+
+    async def trigger_cronjob(
+        self,
+        channel_id: str,
+        prompt_content: str,
+        mention_user_id: str | None = None,
+    ) -> None:
+        """Trigger a scheduled cronjob in the specified Google Chat space/thread.
+
+        Args:
+            channel_id: Fully qualified space or thread resource name (e.g. 'spaces/AAAA/threads/BBBB').
+            prompt_content: The prompt message content to run.
+            mention_user_id: Optional user identifier (not natively highlighted here).
+        """
+        custom_prompt = self._build_gchat_custom_prompt({"type": "SPACE"}, "System")
+
+        msg_content = prompt_content
+        if mention_user_id:
+            # Google Chat user mention syntax: <users/USER_ID>
+            msg_content = f"<users/{mention_user_id}> {msg_content}"
+
+        await self.trigger_cronjob_message(
+            channel_id=channel_id,
+            prompt_content=msg_content,
+            sender_name="System",
+            custom_prompt=custom_prompt,
+            metadata={"is_cronjob": True},
+            title=f"Google Chat Scheduled Job {channel_id.split('/')[-1]}",
+        )

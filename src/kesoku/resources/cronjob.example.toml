@@ -21,3 +21,21 @@
 # # If set to 0.02, the job will run with a 2% chance on scheduled ticks.
 # # Omit this option to always run the job on schedule.
 # probability = 0.02
+
+# [[job]]
+# # Example: Run every Monday morning at 9:00 AM on Google Chat
+# schedule = "0 9 * * 1"
+#
+# # Path to the prompt file
+# prompt = "cronjobs/weekly_report.md"
+#
+# # Fully qualified Google Chat space or thread resource name
+# # - Space Level: "spaces/AAAAxxxx"
+# # - Thread Level: "spaces/AAAAxxxx/threads/YYYYyyyy" (Recommended to stay in thread context)
+# channel_id = "spaces/AAAAxxxx/threads/YYYYyyyy"
+#
+# # The chatbot adapter ID configured in config.toml
+# chatbot_id = "google_chat"
+#
+# # Optional: Google Chat User ID to mention (format: user ID only)
+# mention_user_id = "123456789"

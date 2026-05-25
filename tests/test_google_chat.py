@@ -818,4 +818,42 @@ async def test_incoming_message_triggers_random_reaction(
         )
 
 
+@pytest.mark.asyncio
+@patch("google.auth.default")
+@patch("google.cloud.pubsub_v1.SubscriberClient")
+@patch("kesoku.gateway.chatbot.google_chat.build")
+async def test_google_chat_trigger_cronjob(
+    mock_build: MagicMock,
+    mock_subscriber: MagicMock,
+    mock_auth_default: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+) -> None:
+    """Test that Google Chat trigger_cronjob creates session and posts cronjob message correctly."""
+    mock_auth_default.return_value = (MagicMock(), "test-project")
+    mock_chat_client = MagicMock()
+    mock_build.side_effect = [MagicMock(), mock_chat_client]
+
+    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+        bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
+
+        # Run trigger_cronjob
+        await bot.trigger_cronjob(
+            channel_id="spaces/AAAA/threads/BBBB",
+            prompt_content="Run weekly database index optimize job",
+            mention_user_id="user999",
+        )
+
+        # Verify session creation and message posting
+        mock_gateway.create_session.assert_called_once()
+        create_args = mock_gateway.create_session.call_args[1]
+        assert "Google Chat Scheduled Job BBBB" in create_args["title"]
+
+        # Verify message posted to gateway contains prompt and mention format
+        mock_gateway.post.assert_called_once()
+        posted_msg = mock_gateway.post.call_args[0][0]
+        assert "<users/user999> Run weekly database index optimize job" in posted_msg.content
+        assert posted_msg.metadata.get("is_cronjob") is True
+
+
 
