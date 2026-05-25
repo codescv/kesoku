@@ -13,16 +13,7 @@ from kesoku.agent.llm import (
     get_llm,
     history_to_turns,
 )
-from kesoku.constants import (
-    ROLE_ASSISTANT,
-    ROLE_SYSTEM,
-    ROLE_TOOL,
-    ROLE_USER,
-    TYPE_TEXT,
-    TYPE_THOUGHT,
-    TYPE_TOOL_CALL,
-    TYPE_TOOL_RESULT,
-)
+from kesoku.constants import MessageRole, MessageType
 from kesoku.db import Message
 
 
@@ -81,8 +72,8 @@ async def test_claude_llm_generate_history_conversion() -> None:
         chatbot_id="discord",
         channel_id="channel-123",
         sender="User",
-        role=ROLE_USER,
-        type=TYPE_TEXT,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
         content="Hello! Do a calculation.",
     )
 
@@ -91,8 +82,8 @@ async def test_claude_llm_generate_history_conversion() -> None:
         chatbot_id="discord",
         channel_id="channel-123",
         sender="Kesoku",
-        role=ROLE_ASSISTANT,
-        type=TYPE_THOUGHT,
+        role=MessageRole.ASSISTANT,
+        type=MessageType.THOUGHT,
         content="Thinking...",
     )
 
@@ -101,8 +92,8 @@ async def test_claude_llm_generate_history_conversion() -> None:
         chatbot_id="discord",
         channel_id="channel-123",
         sender="Kesoku",
-        role=ROLE_TOOL,
-        type=TYPE_TOOL_CALL,
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_CALL,
         content="Calling tool calculator",
         metadata={"tool_name": "calculator", "tool_arguments": {"expr": "2+2"}},
     )
@@ -112,8 +103,8 @@ async def test_claude_llm_generate_history_conversion() -> None:
         chatbot_id="discord",
         channel_id="channel-123",
         sender="calculator",
-        role=ROLE_TOOL,
-        type=TYPE_TOOL_RESULT,
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
         content="Tool returned 4",
         metadata={"tool_name": "calculator", "tool_result": "4"},
         parent_id=msg_tool_call.id,
@@ -175,8 +166,8 @@ async def test_gemini_llm_with_attachments() -> None:
         chatbot_id="discord",
         channel_id="channel-123",
         sender="User",
-        role=ROLE_USER,
-        type=TYPE_TEXT,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
         content="Look at this!",
         metadata={
             "attachments": [
@@ -226,8 +217,8 @@ async def test_claude_llm_with_attachments() -> None:
         chatbot_id="discord",
         channel_id="channel-123",
         sender="User",
-        role=ROLE_USER,
-        type=TYPE_TEXT,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
         content="Look at this PDF",
         metadata={
             "attachments": [
@@ -279,8 +270,8 @@ async def test_image_mime_type_correction() -> None:
         chatbot_id="discord",
         channel_id="channel-123",
         sender="User",
-        role=ROLE_USER,
-        type=TYPE_TEXT,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
         content="Mismatched Image",
         metadata={
             "attachments": [
@@ -339,8 +330,8 @@ def test_history_to_turns_conversion() -> None:
         chatbot_id="discord",
         channel_id="channel-123",
         sender="System",
-        role=ROLE_SYSTEM,
-        type=TYPE_TEXT,
+        role=MessageRole.SYSTEM,
+        type=MessageType.TEXT,
         content="System Prompt 1",
     )
     msg_system_2 = Message(
@@ -348,8 +339,8 @@ def test_history_to_turns_conversion() -> None:
         chatbot_id="discord",
         channel_id="channel-123",
         sender="System",
-        role=ROLE_SYSTEM,
-        type=TYPE_TEXT,
+        role=MessageRole.SYSTEM,
+        type=MessageType.TEXT,
         content="System Prompt 2",
     )
     msg_user = Message(
@@ -357,8 +348,8 @@ def test_history_to_turns_conversion() -> None:
         chatbot_id="discord",
         channel_id="channel-123",
         sender="User",
-        role=ROLE_USER,
-        type=TYPE_TEXT,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
         content="Hello!",
     )
     msg_thought = Message(
@@ -366,8 +357,8 @@ def test_history_to_turns_conversion() -> None:
         chatbot_id="discord",
         channel_id="channel-123",
         sender="Kesoku",
-        role=ROLE_ASSISTANT,
-        type=TYPE_THOUGHT,
+        role=MessageRole.ASSISTANT,
+        type=MessageType.THOUGHT,
         content="Hmm...",
     )
     msg_tool_call = Message(
@@ -375,8 +366,8 @@ def test_history_to_turns_conversion() -> None:
         chatbot_id="discord",
         channel_id="channel-123",
         sender="Kesoku",
-        role=ROLE_TOOL,
-        type=TYPE_TOOL_CALL,
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_CALL,
         content="Call calculator",
         metadata={"tool_name": "calculator", "tool_arguments": {"expr": "1+1"}, "tool_call_id": "call_abc"},
     )
@@ -385,8 +376,8 @@ def test_history_to_turns_conversion() -> None:
         chatbot_id="discord",
         channel_id="channel-123",
         sender="calculator",
-        role=ROLE_TOOL,
-        type=TYPE_TOOL_RESULT,
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
         content="2",
         metadata={"tool_name": "calculator", "tool_result": "2"},
         parent_id=msg_tool_call.id,

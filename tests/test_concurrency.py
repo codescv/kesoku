@@ -9,14 +9,7 @@ from kesoku.agent.agent import Agent
 from kesoku.agent.llm import MockLLM
 from kesoku.agent.tools import ToolRegistry
 from kesoku.config import KesokuConfig, WorkspaceConfig
-from kesoku.constants import (
-    ROLE_ASSISTANT,
-    ROLE_USER,
-    STATUS_INTERRUPTED,
-    STATUS_PENDING_AGENT,
-    STATUS_PROCESSED,
-    TYPE_TEXT,
-)
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.context import KesokuContext
 from kesoku.db import DatabaseManager, Message
 from kesoku.gateway.gateway import Gateway
@@ -38,13 +31,13 @@ async def test_pure_broker_pubsub(temp_db: str) -> None:
     received_model = []
 
     async def user_listener() -> None:
-        async for msg in gw.listen(role=ROLE_USER):
+        async for msg in gw.listen(role=MessageRole.USER):
             received_user.append(msg)
             if len(received_user) >= 1:
                 break
 
     async def model_listener() -> None:
-        async for msg in gw.listen(role=ROLE_ASSISTANT, chatbot_id="cli"):
+        async for msg in gw.listen(role=MessageRole.ASSISTANT, chatbot_id="cli"):
             received_model.append(msg)
             if len(received_model) >= 1:
                 break
@@ -58,15 +51,15 @@ async def test_pure_broker_pubsub(temp_db: str) -> None:
         chatbot_id="cli",
         channel_id="c1",
         sender="User",
-        role=ROLE_USER,
+        role=MessageRole.USER,
         content="Hi",
-        status=STATUS_PENDING_AGENT,
+        status=MessageStatus.PENDING_AGENT,
     )
     await gw.post(msg1)
 
     # Post a model message
     msg2 = Message(
-        session_id="s1", chatbot_id="cli", channel_id="c1", sender="Agent", role=ROLE_ASSISTANT, content="Resp"
+        session_id="s1", chatbot_id="cli", channel_id="c1", sender="Agent", role=MessageRole.ASSISTANT, content="Resp"
     )
     await gw.post(msg2)
 
@@ -117,10 +110,10 @@ async def test_multi_user_simultaneous(temp_db: str) -> None:
             chatbot_id="cli",
             channel_id="ch_A",
             sender="u1",
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content="Please calculate 10 + 10",
-            status=STATUS_PENDING_AGENT,
+            status=MessageStatus.PENDING_AGENT,
         )
     )
     msg_b = await gw.post(
@@ -129,10 +122,10 @@ async def test_multi_user_simultaneous(temp_db: str) -> None:
             chatbot_id="cli",
             channel_id="ch_B",
             sender="u2",
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content="Please calculate 20 + 20",
-            status=STATUS_PENDING_AGENT,
+            status=MessageStatus.PENDING_AGENT,
         )
     )
 
@@ -144,8 +137,8 @@ async def test_multi_user_simultaneous(temp_db: str) -> None:
     hist_a = await gw.get_session_history("sess_A")
     hist_b = await gw.get_session_history("sess_B")
 
-    assert any(m.status == STATUS_PROCESSED for m in hist_a)
-    assert any(m.status == STATUS_PROCESSED for m in hist_b)
+    assert any(m.status == MessageStatus.PROCESSED for m in hist_a)
+    assert any(m.status == MessageStatus.PROCESSED for m in hist_b)
 
 
 @pytest.mark.asyncio
@@ -185,10 +178,10 @@ async def test_user_thought_interruption(temp_db: str) -> None:
             chatbot_id="cli",
             channel_id="ch_int",
             sender="u1",
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content="Please calculate 1 + 1",
-            status=STATUS_PENDING_AGENT,
+            status=MessageStatus.PENDING_AGENT,
         )
     )
 
@@ -199,10 +192,10 @@ async def test_user_thought_interruption(temp_db: str) -> None:
             chatbot_id="cli",
             channel_id="ch_int",
             sender="u1",
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content="Actually, calculate 2 + 2",
-            status=STATUS_PENDING_AGENT,
+            status=MessageStatus.PENDING_AGENT,
         )
     )
 
@@ -213,5 +206,5 @@ async def test_user_thought_interruption(temp_db: str) -> None:
     hist = await gw.get_session_history("sess_int")
 
     # Verify msg1 was interrupted or msg2 was processed
-    assert any(m.status == STATUS_INTERRUPTED or m.id == msg2.id for m in hist)
-    assert any(m.status == STATUS_PROCESSED for m in hist)
+    assert any(m.status == MessageStatus.INTERRUPTED or m.id == msg2.id for m in hist)
+    assert any(m.status == MessageStatus.PROCESSED for m in hist)

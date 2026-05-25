@@ -8,13 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from kesoku.config import KesokuConfig, WechatConfig
-from kesoku.constants import (
-    ROLE_ASSISTANT,
-    ROLE_USER,
-    STATUS_DELIVERED,
-    STATUS_PENDING_AGENT,
-    TYPE_TEXT,
-)
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message, Session
 from kesoku.gateway.chatbot.wechat import (
     WechatChatbot,
@@ -194,10 +188,10 @@ async def test_wechat_chatbot_process_message(
         # Verify gateway.post
         mock_gateway.post.assert_called_once()
         posted = mock_gateway.post.call_args[0][0]
-        assert posted.role == ROLE_USER
+        assert posted.role == MessageRole.USER
         assert posted.content == "Hello from WeChat!"
         assert posted.sender == "user_alice"
-        assert posted.status == STATUS_PENDING_AGENT
+        assert posted.status == MessageStatus.PENDING_AGENT
 
 
 @pytest.mark.asyncio
@@ -271,8 +265,8 @@ async def test_wechat_chatbot_send_text(
             chatbot_id="wechat_test",
             channel_id="user_alice",
             sender="Kesoku",
-            role=ROLE_ASSISTANT,
-            type=TYPE_TEXT,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
             content="Hello from assistant!",
         )
 
@@ -288,7 +282,7 @@ async def test_wechat_chatbot_send_text(
         assert body["msg"]["item_list"][0]["text_item"]["text"] == "Hello from assistant!"
 
         # Verify status was updated to DELIVERED
-        mock_gateway.update_message_status.assert_called_once_with("msg_out_999", STATUS_DELIVERED)
+        mock_gateway.update_message_status.assert_called_once_with("msg_out_999", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -359,8 +353,8 @@ async def test_wechat_chatbot_slash_command_status(
                 chatbot_id="wechat_test",
                 channel_id="user_alice",
                 sender="Alice",
-                role=ROLE_USER,
-                type=TYPE_TEXT,
+                role=MessageRole.USER,
+                type=MessageType.TEXT,
                 content="hi",
             ),
             Message(
@@ -369,8 +363,8 @@ async def test_wechat_chatbot_slash_command_status(
                 chatbot_id="wechat_test",
                 channel_id="user_alice",
                 sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_TEXT,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
                 content="hello",
                 metadata={
                     "turn_metrics": {
@@ -440,7 +434,7 @@ async def test_wechat_chatbot_trigger_cronjob(
         # Verify gateway.post was called
         mock_gateway.post.assert_called_once()
         posted = mock_gateway.post.call_args[0][0]
-        assert posted.role == ROLE_USER
+        assert posted.role == MessageRole.USER
         assert "Execute scheduled system check" in posted.content
         assert "@12345" in posted.content
 

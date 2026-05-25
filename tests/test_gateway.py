@@ -7,20 +7,7 @@ from typing import Any
 import pytest
 
 from kesoku.config import KesokuConfig, WorkspaceConfig
-from kesoku.constants import (
-    ROLE_ASSISTANT,
-    ROLE_SYSTEM,
-    ROLE_TOOL,
-    ROLE_USER,
-    STATUS_DELIVERED,
-    STATUS_PENDING,
-    STATUS_PENDING_AGENT,
-    STATUS_RESPONDED,
-    TYPE_TEXT,
-    TYPE_THOUGHT,
-    TYPE_TOOL_CALL,
-    TYPE_TOOL_RESULT,
-)
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.context import KesokuContext
 from kesoku.db import DatabaseManager, Message
 from kesoku.gateway.chatbot.base import Chatbot
@@ -36,7 +23,7 @@ class DummyChatbot(Chatbot):
 
     async def handle_message(self, message: Message) -> None:
         self.sent_messages.append((message.channel_id, message.content))
-        await self.gateway.update_message_status(message.id, STATUS_DELIVERED)
+        await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
 
 
 @pytest.fixture
@@ -80,10 +67,10 @@ async def test_gateway_routing(temp_db: str) -> None:
         chatbot_id="dummy_bot",
         channel_id="chan99",
         sender="Kesoku",
-        role=ROLE_ASSISTANT,
-        type=TYPE_TEXT,
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
         content="Response message",
-        status=STATUS_PENDING,
+        status=MessageStatus.PENDING,
     )
     await gw.post(msg)
     await asyncio.sleep(0.05)
@@ -106,10 +93,10 @@ async def test_gateway_history(temp_db: str) -> None:
             chatbot_id="bot1",
             channel_id="ch1",
             sender="u1",
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content="Msg 1",
-            status=STATUS_RESPONDED,
+            status=MessageStatus.RESPONDED,
         )
     )
     await gw.post(
@@ -118,10 +105,10 @@ async def test_gateway_history(temp_db: str) -> None:
             chatbot_id="bot1",
             channel_id="ch1",
             sender="u2",
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content="Msg 2",
-            status=STATUS_RESPONDED,
+            status=MessageStatus.RESPONDED,
         )
     )
     await gw.post(
@@ -130,10 +117,10 @@ async def test_gateway_history(temp_db: str) -> None:
             chatbot_id="bot1",
             channel_id="ch1",
             sender="u1",
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content="Other Session",
-            status=STATUS_RESPONDED,
+            status=MessageStatus.RESPONDED,
         )
     )
 
@@ -159,11 +146,11 @@ async def test_gateway_history_phased_sorting_thought_messages(temp_db: str) -> 
             chatbot_id="bot1",
             channel_id="ch1",
             sender="u1",
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content="Prompt",
             timestamp=1000.0,
-            status=STATUS_RESPONDED,
+            status=MessageStatus.RESPONDED,
         )
     )
 
@@ -175,11 +162,11 @@ async def test_gateway_history_phased_sorting_thought_messages(temp_db: str) -> 
             chatbot_id="bot1",
             channel_id="ch1",
             sender="Kesoku",
-            role=ROLE_ASSISTANT,
-            type=TYPE_THOUGHT,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.THOUGHT,
             content="I should call a tool",
             timestamp=1001.0,
-            status=STATUS_RESPONDED,
+            status=MessageStatus.RESPONDED,
             parent_id="msg_user",
         )
     )
@@ -192,11 +179,11 @@ async def test_gateway_history_phased_sorting_thought_messages(temp_db: str) -> 
             chatbot_id="bot1",
             channel_id="ch1",
             sender="Kesoku",
-            role=ROLE_TOOL,
-            type=TYPE_TOOL_CALL,
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_CALL,
             content="Call tool",
             timestamp=1002.0,
-            status=STATUS_RESPONDED,
+            status=MessageStatus.RESPONDED,
             parent_id="msg_user",
         )
     )
@@ -209,11 +196,11 @@ async def test_gateway_history_phased_sorting_thought_messages(temp_db: str) -> 
             chatbot_id="bot1",
             channel_id="ch1",
             sender="calculator",
-            role=ROLE_TOOL,
-            type=TYPE_TOOL_RESULT,
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
             content="Result is 42",
             timestamp=1003.0,
-            status=STATUS_RESPONDED,
+            status=MessageStatus.RESPONDED,
             parent_id="msg_tool_call",
         )
     )
@@ -226,11 +213,11 @@ async def test_gateway_history_phased_sorting_thought_messages(temp_db: str) -> 
             chatbot_id="bot1",
             channel_id="ch1",
             sender="Kesoku",
-            role=ROLE_ASSISTANT,
-            type=TYPE_THOUGHT,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.THOUGHT,
             content="Tool returned 42, now answering",
             timestamp=1004.0,
-            status=STATUS_RESPONDED,
+            status=MessageStatus.RESPONDED,
             parent_id="msg_user",
         )
     )
@@ -243,11 +230,11 @@ async def test_gateway_history_phased_sorting_thought_messages(temp_db: str) -> 
             chatbot_id="bot1",
             channel_id="ch1",
             sender="Kesoku",
-            role=ROLE_ASSISTANT,
-            type=TYPE_TEXT,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
             content="The answer is 42",
             timestamp=1005.0,
-            status=STATUS_RESPONDED,
+            status=MessageStatus.RESPONDED,
             parent_id="msg_user",
         )
     )
@@ -315,10 +302,10 @@ async def test_gateway_get_session_by_channel(temp_db: str) -> None:
             chatbot_id="discord_bot",
             channel_id="thread_777",
             sender="User",
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content="Hello",
-            status=STATUS_RESPONDED,
+            status=MessageStatus.RESPONDED,
         )
     )
 
@@ -347,25 +334,25 @@ async def test_gateway_create_session_created_at(temp_db: str) -> None:
             chatbot_id="discord_bot",
             channel_id="123",
             sender="User",
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content="First msg",
             timestamp=hist_timestamp,
-            status=STATUS_RESPONDED,
+            status=MessageStatus.RESPONDED,
         )
     )
 
     history = await gw.get_session_history(session.id)
     assert len(history) == 2
     # System message should come first because its timestamp is hist_timestamp - 0.01
-    assert history[0].role == ROLE_SYSTEM
-    assert history[1].role == ROLE_USER
+    assert history[0].role == MessageRole.SYSTEM
+    assert history[1].role == MessageRole.USER
     assert history[0].timestamp < history[1].timestamp
 
 
 @pytest.mark.asyncio
 async def test_chatbot_ignore_completed_messages(temp_db: str) -> None:
-    """Test that Chatbot.start() ignores messages already marked as STATUS_DELIVERED."""
+    """Test that Chatbot.start() ignores messages already marked as MessageStatus.DELIVERED."""
     DatabaseManager(temp_db).init_tables()
     cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
     gw = Gateway(context=KesokuContext(config=cfg))
@@ -377,10 +364,10 @@ async def test_chatbot_ignore_completed_messages(temp_db: str) -> None:
             chatbot_id="dummy_bot",
             channel_id="chan_1",
             sender="Kesoku",
-            role=ROLE_ASSISTANT,
-            type=TYPE_TEXT,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
             content="Completed message",
-            status=STATUS_DELIVERED,
+            status=MessageStatus.DELIVERED,
         )
     )
 
@@ -435,10 +422,10 @@ async def test_gateway_delete_session(temp_db: str, tmp_path: Any) -> None:
             chatbot_id="discord_bot",
             channel_id="chan1",
             sender="User",
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content="Message to be deleted",
-            status=STATUS_RESPONDED,
+            status=MessageStatus.RESPONDED,
         )
     )
 
@@ -476,30 +463,30 @@ async def test_gateway_queue_backpressure_full(temp_db: str) -> None:
         chatbot_id="bot",
         channel_id="chan",
         sender="User",
-        role=ROLE_USER,
-        type=TYPE_TEXT,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
         content="Msg 1",
-        status=STATUS_PENDING_AGENT,
+        status=MessageStatus.PENDING_AGENT,
     )
     msg2 = Message(
         session_id="sess_bp",
         chatbot_id="bot",
         channel_id="chan",
         sender="User",
-        role=ROLE_USER,
-        type=TYPE_TEXT,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
         content="Msg 2",
-        status=STATUS_PENDING_AGENT,
+        status=MessageStatus.PENDING_AGENT,
     )
     msg3 = Message(
         session_id="sess_bp",
         chatbot_id="bot",
         channel_id="chan",
         sender="User",
-        role=ROLE_USER,
-        type=TYPE_TEXT,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
         content="Msg 3",
-        status=STATUS_PENDING_AGENT,
+        status=MessageStatus.PENDING_AGENT,
     )
 
     # This should not block and should successfully finish posting
@@ -543,10 +530,10 @@ async def test_gateway_listener_mutation_during_post(temp_db: str) -> None:
         chatbot_id="bot",
         channel_id="chan",
         sender="User",
-        role=ROLE_USER,
-        type=TYPE_TEXT,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
         content="Trigger",
-        status=STATUS_PENDING_AGENT,
+        status=MessageStatus.PENDING_AGENT,
     )
 
     # This should not crash and should safely process
@@ -566,15 +553,15 @@ async def test_gateway_claim_message(temp_db: str) -> None:
         chatbot_id="bot",
         channel_id="chan",
         sender="User",
-        role=ROLE_USER,
-        type=TYPE_TEXT,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
         content="Hello",
-        status=STATUS_PENDING_AGENT,
+        status=MessageStatus.PENDING_AGENT,
     )
     await gw.post(msg)
 
     # First claim should succeed
-    success = await gw.claim_message(msg.id, "processing", [STATUS_PENDING_AGENT])
+    success = await gw.claim_message(msg.id, "processing", [MessageStatus.PENDING_AGENT])
     assert success is True
 
     # The message status in DB should now be "processing"
@@ -583,7 +570,7 @@ async def test_gateway_claim_message(temp_db: str) -> None:
     assert history[0].status == "processing"
 
     # Second claim with original expected status should fail
-    success2 = await gw.claim_message(msg.id, "processing", [STATUS_PENDING_AGENT])
+    success2 = await gw.claim_message(msg.id, "processing", [MessageStatus.PENDING_AGENT])
     assert success2 is False
 
 

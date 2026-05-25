@@ -6,16 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 import pytest
 
-from kesoku.constants import (
-    ROLE_ASSISTANT,
-    ROLE_SYSTEM,
-    ROLE_TOOL,
-    ROLE_USER,
-    STATUS_INTERRUPTED,
-    TYPE_TEXT,
-    TYPE_THOUGHT,
-    TYPE_TOOL_CALL,
-)
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.chatbot.discord_ui import MessageHeaderView, QuestionView
 from kesoku.gateway.gateway import Gateway
@@ -47,8 +38,8 @@ def test_generate_html_trajectory(mock_gateway: MagicMock) -> None:
             chatbot_id="discord",
             channel_id="ch1",
             sender="System",
-            role=ROLE_SYSTEM,
-            type=TYPE_TEXT,
+            role=MessageRole.SYSTEM,
+            type=MessageType.TEXT,
             content="System prompt instruction",
             timestamp=1716120000.0,
         ),
@@ -58,8 +49,8 @@ def test_generate_html_trajectory(mock_gateway: MagicMock) -> None:
             chatbot_id="discord",
             channel_id="ch1",
             sender="User",
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content="Hello agent!",
             timestamp=1716120005.0,
         ),
@@ -69,8 +60,8 @@ def test_generate_html_trajectory(mock_gateway: MagicMock) -> None:
             chatbot_id="discord",
             channel_id="ch1",
             sender="Kesoku",
-            role=ROLE_ASSISTANT,
-            type=TYPE_THOUGHT,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.THOUGHT,
             content="Thinking process...",
             timestamp=1716120006.0,
         ),
@@ -80,8 +71,8 @@ def test_generate_html_trajectory(mock_gateway: MagicMock) -> None:
             chatbot_id="discord",
             channel_id="ch1",
             sender="Kesoku",
-            role=ROLE_ASSISTANT,
-            type=TYPE_TEXT,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
             content="Hello user, how can I help you today?",
             timestamp=1716120010.0,
         ),
@@ -91,8 +82,8 @@ def test_generate_html_trajectory(mock_gateway: MagicMock) -> None:
             chatbot_id="discord",
             channel_id="ch1",
             sender="Kesoku",
-            role=ROLE_TOOL,
-            type=TYPE_TOOL_CALL,
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_CALL,
             content="Calling shell tool...",
             timestamp=1716120012.0,
             metadata={"tool_name": "shell", "tool_arguments": {"command": "ls"}},
@@ -103,8 +94,8 @@ def test_generate_html_trajectory(mock_gateway: MagicMock) -> None:
             chatbot_id="discord",
             channel_id="ch1",
             sender="shell",
-            role=ROLE_TOOL,
-            type=TYPE_TEXT,
+            role=MessageRole.TOOL,
+            type=MessageType.TEXT,
             content="file1.txt\nfile2.txt",
             timestamp=1716120015.0,
             metadata={"tool_name": "shell"},
@@ -115,8 +106,8 @@ def test_generate_html_trajectory(mock_gateway: MagicMock) -> None:
             chatbot_id="discord",
             channel_id="ch1",
             sender="shell",
-            role=ROLE_TOOL,
-            type=TYPE_TEXT,
+            role=MessageRole.TOOL,
+            type=MessageType.TEXT,
             content="permission denied",
             timestamp=1716120018.0,
             metadata={"tool_name": "shell", "tool_error": "Permission denied"},
@@ -165,8 +156,8 @@ async def test_view_trajectory_callback_success(mock_gateway: MagicMock) -> None
             chatbot_id="discord",
             channel_id="ch1",
             sender="User",
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content="Hello",
             timestamp=1716120000.0,
         )
@@ -270,8 +261,8 @@ async def test_stop_turn_callback(mock_gateway: MagicMock) -> None:
             chatbot_id="discord",
             channel_id="chan_abc",
             sender="User",
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content="Help me",
             status="processing",
         )
@@ -289,7 +280,7 @@ async def test_stop_turn_callback(mock_gateway: MagicMock) -> None:
     # Worker should be removed from agent
     assert "s123" not in mock_agent.workers
     # Message status updated to interrupted
-    mock_gateway.update_message_status.assert_called_once_with("msg_u1", STATUS_INTERRUPTED)
+    mock_gateway.update_message_status.assert_called_once_with("msg_u1", MessageStatus.INTERRUPTED)
     # Typing task cancelled
     mock_typing_task.cancel.assert_called_once()
     # Intermediate message deleted
@@ -387,8 +378,8 @@ async def test_stop_turn_callback_with_metrics(mock_gateway: MagicMock) -> None:
             chatbot_id="discord",
             channel_id="chan_abc",
             sender="User",
-            role=ROLE_USER,
-            type=TYPE_TEXT,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
             content="Help me",
             status="processing",
             metadata={
@@ -483,7 +474,7 @@ async def test_question_view_init_and_callback(mock_gateway: MagicMock) -> None:
     # 4. Visual feedback message sent to channel
     mock_channel.send.assert_called_once_with("<@user_999> selected: **Red**")
 
-    # 5. Gateway post called to ingest ROLE_USER message
+    # 5. Gateway post called to ingest MessageRole.USER message
     mock_gateway.post.assert_called_once()
     posted_msg = mock_gateway.post.call_args[0][0]
     assert isinstance(posted_msg, Message)
@@ -491,8 +482,8 @@ async def test_question_view_init_and_callback(mock_gateway: MagicMock) -> None:
     assert posted_msg.chatbot_id == "discord"
     assert posted_msg.channel_id == "chan_abc"
     assert posted_msg.sender == "Alice"
-    assert posted_msg.role == ROLE_USER
-    assert posted_msg.type == TYPE_TEXT
+    assert posted_msg.role == MessageRole.USER
+    assert posted_msg.type == MessageType.TEXT
     assert "Red" in posted_msg.content
     assert posted_msg.metadata["discord_message_id"] == "res_123"
     assert posted_msg.metadata["discord_author_id"] == "user_999"

@@ -9,7 +9,7 @@ import discord
 import pytest
 
 from kesoku.config import DiscordChannelOverride, DiscordConfig, KesokuConfig
-from kesoku.constants import ROLE_ASSISTANT, STATUS_DELIVERED, TYPE_TEXT
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message, Session
 from kesoku.gateway.chatbot.discord import DiscordChatbot
 from kesoku.gateway.gateway import Gateway
@@ -208,15 +208,15 @@ async def test_handle_message_chunking(mock_config: KesokuConfig, mock_gateway: 
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_TEXT,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
                 content=long_content,
             )
 
             await bot.handle_message(msg)
             # Chunk 1 should contain line1 + line2 (1802 chars). Chunk 2 should contain line3 (901 chars).
             assert mock_channel.send.call_count == 2
-            mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+            mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -237,8 +237,8 @@ async def test_handle_message_with_files_split_and_upload(mock_config: KesokuCon
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_TEXT,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
                 content=content,
             )
 
@@ -258,7 +258,7 @@ async def test_handle_message_with_files_split_and_upload(mock_config: KesokuCon
                     mock_channel.send.assert_any_call(file=mock_file)
                     mock_channel.send.assert_any_call(" how are you?")
 
-                    mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+                    mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -278,8 +278,8 @@ async def test_handle_message_with_non_existent_file(mock_config: KesokuConfig, 
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_TEXT,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
                 content=content,
             )
 
@@ -313,8 +313,8 @@ async def test_handle_message_fetch_channel_deleted(mock_config: KesokuConfig, m
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_TEXT,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
                 content="Hello",
             )
 
@@ -325,7 +325,7 @@ async def test_handle_message_fetch_channel_deleted(mock_config: KesokuConfig, m
             # Verify abort_session was called on the gateway
             mock_gateway.abort_session.assert_called_once_with("thread123")
             # Verify update_message_status was called to mark the message as delivered
-            mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+            mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -348,8 +348,8 @@ async def test_handle_message_fetch_channel_forbidden(mock_config: KesokuConfig,
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_TEXT,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
                 content="Hello",
             )
 
@@ -360,7 +360,7 @@ async def test_handle_message_fetch_channel_forbidden(mock_config: KesokuConfig,
             # Verify abort_session was called on the gateway
             mock_gateway.abort_session.assert_called_once_with("thread123")
             # Verify update_message_status was called to mark the message as delivered
-            mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+            mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -381,8 +381,8 @@ async def test_handle_message_with_empty_whitespace_guards(mock_config: KesokuCo
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_TEXT,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
                 content=content,
             )
 
@@ -544,8 +544,8 @@ async def test_typing_status_lifecycle(mock_config: KesokuConfig, mock_gateway: 
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_TEXT,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
                 content="Final reply",
             )
 
@@ -588,7 +588,7 @@ async def test_typing_status_cleanup_on_stop(mock_config: KesokuConfig, mock_gat
 @pytest.mark.asyncio
 async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test refined tool display formatting with arguments in DiscordChatbot."""
-    from kesoku.constants import ROLE_TOOL, TYPE_TOOL_CALL
+    from kesoku.constants import MessageRole, MessageType
 
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
@@ -604,8 +604,8 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_TOOL,
-                type=TYPE_TOOL_CALL,
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_CALL,
                 content="Calling tool...",
                 metadata={"tool_name": "my_tool", "tool_arguments": {}},
             )
@@ -619,8 +619,8 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_TOOL,
-                type=TYPE_TOOL_CALL,
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_CALL,
                 content="Calling tool...",
                 metadata={"tool_name": "my_tool", "tool_arguments": {"query": "hello world"}},
             )
@@ -634,8 +634,8 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_TOOL,
-                type=TYPE_TOOL_CALL,
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_CALL,
                 content="Calling tool...",
                 metadata={"tool_name": "my_tool", "tool_arguments": {"query": "hello", "context": "ignored"}},
             )
@@ -650,8 +650,8 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_TOOL,
-                type=TYPE_TOOL_CALL,
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_CALL,
                 content="Calling tool...",
                 metadata={"tool_name": "my_tool", "tool_arguments": {"query": long_arg}},
             )
@@ -666,8 +666,8 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_TOOL,
-                type=TYPE_TOOL_CALL,
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_CALL,
                 content="Calling tool...",
                 metadata={"tool_name": "my_tool", "tool_arguments": {"arg1": "val1", "arg2": "val2"}},
             )
@@ -678,7 +678,7 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
 @pytest.mark.asyncio
 async def test_handle_message_tool_result_in_place_edit(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test that a tool result edits the original tool call message in-place on Discord."""
-    from kesoku.constants import ROLE_TOOL, TYPE_TOOL_RESULT
+    from kesoku.constants import MessageRole, MessageType
 
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
@@ -702,8 +702,8 @@ async def test_handle_message_tool_result_in_place_edit(mock_config: KesokuConfi
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="my_tool",
-                role=ROLE_TOOL,
-                type=TYPE_TOOL_RESULT,
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_RESULT,
                 content="Result...",
                 parent_id="parent123",
             )
@@ -721,7 +721,7 @@ async def test_handle_message_tool_result_in_place_edit(mock_config: KesokuConfi
 @pytest.mark.asyncio
 async def test_handle_message_special_message_truncation(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test that special messages exceeding 2000 characters are truncated with ' (omitted)'."""
-    from kesoku.constants import ROLE_ASSISTANT, TYPE_THOUGHT
+    from kesoku.constants import MessageRole, MessageType
 
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
@@ -742,8 +742,8 @@ async def test_handle_message_special_message_truncation(mock_config: KesokuConf
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_THOUGHT,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.THOUGHT,
                 content=massive_content,
             )
 
@@ -769,8 +769,8 @@ async def test_handle_message_special_message_truncation(mock_config: KesokuConf
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_THOUGHT,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.THOUGHT,
                 content="Thinking even more " + "B" * 2500,
             )
 
@@ -788,7 +788,7 @@ async def test_handle_message_individual_tool_call_edit_truncation(
     mock_config: KesokuConfig, mock_gateway: MagicMock
 ) -> None:
     """Test that individual tool call message edits exceeding 2000 characters are truncated."""
-    from kesoku.constants import ROLE_TOOL, TYPE_TOOL_RESULT
+    from kesoku.constants import MessageRole, MessageType
 
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
@@ -808,8 +808,8 @@ async def test_handle_message_individual_tool_call_edit_truncation(
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="my_tool",
-                role=ROLE_TOOL,
-                type=TYPE_TOOL_RESULT,
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_RESULT,
                 content="Result...",
                 parent_id="parent123",
             )
@@ -839,8 +839,8 @@ async def test_handle_message_with_voice_success(mock_config: KesokuConfig, mock
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_TEXT,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
                 content=content,
             )
 
@@ -851,7 +851,7 @@ async def test_handle_message_with_voice_success(mock_config: KesokuConfig, mock
                     mock_exists.assert_called_once_with("/tmp/voice.ogg")
                     mock_send_voice.assert_called_once_with(mock_channel, "/tmp/voice.ogg")
                     mock_channel.send.assert_called_once_with("Listen here: ")
-                    mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+                    mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -871,8 +871,8 @@ async def test_handle_message_with_voice_fallback(mock_config: KesokuConfig, moc
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_TEXT,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
                 content=content,
             )
 
@@ -885,7 +885,7 @@ async def test_handle_message_with_voice_fallback(mock_config: KesokuConfig, moc
                         mock_exists.assert_called_once_with("/tmp/voice.ogg")
                         mock_channel.send.assert_any_call("Listen here: ")
                         mock_channel.send.assert_any_call(file=mock_file)
-                        mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+                        mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -1036,7 +1036,7 @@ async def test_handle_message_intermediate_special_messages_tracking(
     mock_config: KesokuConfig, mock_gateway: MagicMock
 ) -> None:
     """Test that intermediate special messages (thoughts, tool calls, system) are tracked."""
-    from kesoku.constants import ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_TOOL, TYPE_THOUGHT, TYPE_TOOL_CALL
+    from kesoku.constants import MessageRole, MessageType
 
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
@@ -1059,8 +1059,8 @@ async def test_handle_message_intermediate_special_messages_tracking(
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_THOUGHT,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.THOUGHT,
                 content="Thinking hard...",
             )
             await bot.handle_message(thought_msg)
@@ -1075,8 +1075,8 @@ async def test_handle_message_intermediate_special_messages_tracking(
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_TOOL,
-                type=TYPE_TOOL_CALL,
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_CALL,
                 content="Calling tool...",
                 metadata={"tool_name": "my_tool", "tool_arguments": {}},
             )
@@ -1091,8 +1091,8 @@ async def test_handle_message_intermediate_special_messages_tracking(
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="System",
-                role=ROLE_SYSTEM,
-                type=TYPE_TEXT,
+                role=MessageRole.SYSTEM,
+                type=MessageType.TEXT,
                 content="System event...",
             )
             await bot.handle_message(sys_msg)
@@ -1124,8 +1124,8 @@ async def test_handle_message_intermediate_special_messages_deletion(
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_TEXT,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
                 content="Here is the final answer.",
             )
             await bot.handle_message(final_msg)
@@ -1224,8 +1224,8 @@ async def test_handle_message_removes_stop_button_on_final_response(
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_TEXT,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
                 content="Final reply",
             )
 
@@ -1236,7 +1236,7 @@ async def test_handle_message_removes_stop_button_on_final_response(
             mock_header_view.remove_item.assert_called_once_with(mock_header_view.stop_turn)
             # The header message should be edited to update the view
             mock_header_msg.edit.assert_called_once_with(view=mock_header_view)
-            mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+            mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -1256,8 +1256,8 @@ async def test_handle_message_with_question(mock_config: KesokuConfig, mock_gate
                 chatbot_id="discord_test",
                 channel_id="12345",
                 sender="Kesoku",
-                role=ROLE_ASSISTANT,
-                type=TYPE_TEXT,
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
                 content=content,
             )
 
@@ -1283,7 +1283,7 @@ async def test_handle_message_with_question(mock_config: KesokuConfig, mock_gate
                         color=discord.Color.blurple(),
                     )
                     mock_channel.send.assert_called_once_with(embed=mock_embed, view=mock_view)
-                    mock_gateway.update_message_status.assert_called_once_with("msg123", STATUS_DELIVERED)
+                    mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio

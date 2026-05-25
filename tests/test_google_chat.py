@@ -11,16 +11,7 @@ from google.cloud import pubsub_v1
 from googleapiclient.errors import HttpError
 
 from kesoku.config import GoogleChatConfig, KesokuConfig
-from kesoku.constants import (
-    ROLE_ASSISTANT,
-    ROLE_TOOL,
-    ROLE_USER,
-    STATUS_DELIVERED,
-    STATUS_PENDING_AGENT,
-    TYPE_TEXT,
-    TYPE_THOUGHT,
-    TYPE_TOOL_CALL,
-)
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message, Session
 from kesoku.gateway.chatbot.google_chat import GoogleChatChatbot
 from kesoku.gateway.gateway import Gateway
@@ -204,11 +195,11 @@ async def test_incoming_message_parsing(
         # Verify gateway.post was called with the correct user Message details
         mock_gateway.post.assert_called_once()
         posted_msg = mock_gateway.post.call_args[0][0]
-        assert posted_msg.role == ROLE_USER
+        assert posted_msg.role == MessageRole.USER
         assert posted_msg.content == "Hello Agent!"
         assert posted_msg.sender == "Test User"
         assert posted_msg.channel_id == "spaces/AAA/threads/BBB"
-        assert posted_msg.status == STATUS_PENDING_AGENT
+        assert posted_msg.status == MessageStatus.PENDING_AGENT
 
 
 @pytest.mark.asyncio
@@ -296,8 +287,8 @@ async def test_handle_outgoing_message_delivery_foldable_ui(
             chatbot_id="gchat_test",
             channel_id="spaces/AAA/threads/BBB",
             sender="Kesoku",
-            role=ROLE_ASSISTANT,
-            type=TYPE_THOUGHT,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.THOUGHT,
             content="Let me think about it",
             timestamp=time.time(),
         )
@@ -324,8 +315,8 @@ async def test_handle_outgoing_message_delivery_foldable_ui(
             chatbot_id="gchat_test",
             channel_id="spaces/AAA/threads/BBB",
             sender="Kesoku",
-            role=ROLE_ASSISTANT,
-            type=TYPE_TEXT,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
             content="Hello world reply",
             timestamp=time.time(),
             metadata={
@@ -365,8 +356,8 @@ async def test_handle_outgoing_message_delivery_foldable_ui(
         assert widget["textSyntax"] == "MARKDOWN"
 
         # Verify delivery statuses were updated
-        mock_gateway.update_message_status.assert_any_call("thought1", STATUS_DELIVERED)
-        mock_gateway.update_message_status.assert_any_call("msg999", STATUS_DELIVERED)
+        mock_gateway.update_message_status.assert_any_call("thought1", MessageStatus.DELIVERED)
+        mock_gateway.update_message_status.assert_any_call("msg999", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -403,8 +394,8 @@ async def test_handle_outgoing_message_delivery_question(
             chatbot_id="gchat_test",
             channel_id="spaces/AAA/threads/BBB",
             sender="Kesoku",
-            role=ROLE_ASSISTANT,
-            type=TYPE_TEXT,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
             content=content,
             timestamp=time.time(),
         )
@@ -781,8 +772,8 @@ async def test_incoming_message_triggers_random_reaction(
             chatbot_id="gchat_test",
             channel_id="spaces/AAA/threads/BBB",
             sender="Kesoku",
-            role=ROLE_TOOL,
-            type=TYPE_TOOL_CALL,
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_CALL,
             content="",
             timestamp=time.time(),
             metadata={"tool_name": "search_web"},
@@ -803,8 +794,8 @@ async def test_incoming_message_triggers_random_reaction(
             chatbot_id="gchat_test",
             channel_id="spaces/AAA/threads/BBB",
             sender="Kesoku",
-            role=ROLE_TOOL,
-            type=TYPE_TOOL_CALL,
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_CALL,
             content="",
             timestamp=time.time(),
             metadata={"tool_name": "run_command"},
