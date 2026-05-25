@@ -400,6 +400,30 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def claim_message(self, message_id: str, new_status: str, expected_statuses: list[str]) -> bool:
+        """Atomically update message status only if it is currently in one of expected_statuses.
+
+        Args:
+            message_id: Target message ID.
+            new_status: The new status to set.
+            expected_statuses: The list of valid current statuses.
+
+        Returns:
+            True if exactly one message was updated, False otherwise.
+        """
+        conn = self._get_connection()
+        try:
+            with conn:
+                placeholders = ", ".join("?" for _ in expected_statuses)
+                cursor = conn.execute(
+                    f"UPDATE messages SET status = ? WHERE id = ? AND status IN ({placeholders})",
+                    [new_status, message_id, *expected_statuses],
+                )
+                return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+
     def update_message_metadata(self, message_id: str, metadata: dict[str, Any]) -> None:
         """Update the metadata dictionary of a message.
 

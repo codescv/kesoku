@@ -13,6 +13,7 @@ from kesoku.constants import (
     ROLE_USER,
     STATUS_DELIVERED,
     STATUS_PENDING,
+    STATUS_PENDING_AGENT,
     STATUS_RESPONDED,
     TYPE_TEXT,
 )
@@ -347,7 +348,7 @@ async def test_gateway_queue_backpressure_full(temp_db: str) -> None:
         role=ROLE_USER,
         type=TYPE_TEXT,
         content="Msg 1",
-        status=STATUS_PENDING,
+        status=STATUS_PENDING_AGENT,
     )
     msg2 = Message(
         session_id="sess_bp",
@@ -357,7 +358,7 @@ async def test_gateway_queue_backpressure_full(temp_db: str) -> None:
         role=ROLE_USER,
         type=TYPE_TEXT,
         content="Msg 2",
-        status=STATUS_PENDING,
+        status=STATUS_PENDING_AGENT,
     )
     msg3 = Message(
         session_id="sess_bp",
@@ -367,7 +368,7 @@ async def test_gateway_queue_backpressure_full(temp_db: str) -> None:
         role=ROLE_USER,
         type=TYPE_TEXT,
         content="Msg 3",
-        status=STATUS_PENDING,
+        status=STATUS_PENDING_AGENT,
     )
 
     # This should not block and should successfully finish posting
@@ -378,7 +379,7 @@ async def test_gateway_queue_backpressure_full(temp_db: str) -> None:
     # The queue should be full with exactly 2 messages
     assert listener.queue.full()
     assert listener.queue.qsize() == 2
-    
+
     # The messages in queue should be msg1 and msg2 (msg3 dropped)
     m1 = listener.queue.get_nowait()
     m2 = listener.queue.get_nowait()
@@ -414,10 +415,44 @@ async def test_gateway_listener_mutation_during_post(temp_db: str) -> None:
         role=ROLE_USER,
         type=TYPE_TEXT,
         content="Trigger",
-        status=STATUS_PENDING,
+        status=STATUS_PENDING_AGENT,
     )
 
     # This should not crash and should safely process
     await gw.post(msg)
     assert len(gw._listeners) == 0
+
+
+@pytest.mark.asyncio
+async def test_gateway_claim_message(temp_db: str) -> None:
+    """Test that claim_message atomically updates the status and prevents concurrent claims."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    msg = Message(
+        session_id="sess_claim",
+        chatbot_id="bot",
+        channel_id="chan",
+        sender="User",
+        role=ROLE_USER,
+        type=TYPE_TEXT,
+        content="Hello",
+        status=STATUS_PENDING_AGENT,
+    )
+    await gw.post(msg)
+
+    # First claim should succeed
+    success = await gw.claim_message(msg.id, "processing", [STATUS_PENDING_AGENT])
+    assert success is True
+
+    # The message status in DB should now be "processing"
+    history = await gw.get_session_history("sess_claim")
+    assert len(history) == 1
+    assert history[0].status == "processing"
+
+    # Second claim with original expected status should fail
+    success2 = await gw.claim_message(msg.id, "processing", [STATUS_PENDING_AGENT])
+    assert success2 is False
+
 

@@ -16,7 +16,6 @@ from kesoku.constants import (
     ROLE_USER,
     STATUS_ERROR,
     STATUS_INTERRUPTED,
-    STATUS_PENDING,
     STATUS_PENDING_AGENT,
     STATUS_PROCESSING,
 )
@@ -113,7 +112,6 @@ class SessionWorker:
             await self.gateway.update_message_status(m.id, STATUS_INTERRUPTED)
         await self.gateway.update_message_status(current_msg.id, STATUS_INTERRUPTED)
         latest_msg = new_msgs[-1]
-        await self.gateway.update_message_status(latest_msg.id, STATUS_PROCESSING)
         logger.info(f"Thought interruption detected in session {self.session_id}! Pivoting to {latest_msg.id}")
         return latest_msg
 
@@ -121,7 +119,6 @@ class SessionWorker:
         while self._running:
             try:
                 msg = await self.queue.get()
-                await self.gateway.update_message_status(msg.id, STATUS_PROCESSING)
                 await self._process_turn(msg)
             except asyncio.CancelledError:
                 self._running = False
@@ -197,7 +194,17 @@ class Agent:
                 if not self._running:
                     break
 
-                if msg.status in (STATUS_PENDING, STATUS_PENDING_AGENT):
+                if msg.status == STATUS_PENDING_AGENT:
+                    # Atomically claim the message to prevent duplicate delivery/processing
+                    success = await self.gateway.claim_message(
+                        msg.id, STATUS_PROCESSING, [STATUS_PENDING_AGENT]
+                    )
+                    if not success:
+                        logger.debug(
+                            f"Message {msg.id} already claimed by another process/worker or already processed."
+                        )
+                        continue
+
                     logger.debug(f"Dispatcher dispatching message {msg.id} for session {msg.session_id}")
 
                     worker = self.workers.get(msg.session_id)

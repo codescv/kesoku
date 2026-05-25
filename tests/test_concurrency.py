@@ -53,7 +53,15 @@ async def test_pure_broker_pubsub(temp_db: str) -> None:
     model_task = asyncio.create_task(model_listener())
 
     # Post a user message
-    msg1 = Message(session_id="s1", chatbot_id="cli", channel_id="c1", sender="User", role=ROLE_USER, content="Hi")
+    msg1 = Message(
+        session_id="s1",
+        chatbot_id="cli",
+        channel_id="c1",
+        sender="User",
+        role=ROLE_USER,
+        content="Hi",
+        status=STATUS_PENDING_AGENT,
+    )
     await gw.post(msg1)
 
     # Post a model message

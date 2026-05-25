@@ -248,6 +248,20 @@ class Gateway:
         await asyncio.to_thread(self.db.update_message_status, message_id, status)
         logger.debug(f"Message {message_id} status updated to {status}.")
 
+    async def claim_message(self, message_id: str, new_status: str, expected_statuses: list[str]) -> bool:
+        """Atomically update message status only if it is currently in one of expected_statuses.
+
+        Args:
+            message_id: Target message ID.
+            new_status: The new status to set.
+            expected_statuses: The list of valid current statuses.
+
+        Returns:
+            True if exactly one message was updated, False otherwise.
+        """
+        return await asyncio.to_thread(self.db.claim_message, message_id, new_status, expected_statuses)
+
+
     async def update_message_metadata(self, message_id: str, metadata: dict[str, Any]) -> None:
         """Update the metadata of a message in storage.
 
