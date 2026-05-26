@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from kesoku.config import get_config
-from kesoku.constants import MessageRole, MessageStatus, MessageType
+from kesoku.constants import SYSTEM_START_TIME, MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
@@ -83,6 +83,31 @@ def get_local_timezone_name() -> str:
         return tzlocal.get_localzone().key or "UTC"
     except Exception:
         return datetime.datetime.now().astimezone().tzname() or "UTC"
+
+
+def _format_uptime(td: datetime.timedelta) -> str:
+    """Format a timedelta into a concise string representing uptime.
+
+    Args:
+        td: The timedelta to format.
+
+    Returns:
+        A human-readable uptime string, e.g., '2d 4h 15m 3s'.
+    """
+    total_seconds = int(td.total_seconds())
+    days, remainder = divmod(total_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    parts = []
+    if days > 0:
+        parts.append(f"{days}d")
+    if hours > 0 or days > 0:
+        parts.append(f"{hours}h")
+    if minutes > 0 or hours > 0 or days > 0:
+        parts.append(f"{minutes}m")
+    parts.append(f"{seconds}s")
+    return " ".join(parts)
 
 
 class CommandRegistry:
@@ -259,8 +284,13 @@ class Chatbot(ABC):
         if cached_tokens > 0:
             context_str += f" (Cached: {cached_k})"
 
+        uptime_td = datetime.datetime.now() - SYSTEM_START_TIME
+        uptime_str = _format_uptime(uptime_td)
+        started_str = SYSTEM_START_TIME.strftime("%Y-%m-%d %H:%M:%S")
+
         return (
             f"【Current Stats】\n"
+            f"⏰ Uptime: {uptime_str} (started: {started_str})\n"
             f"⚡ Session: {session_turns} turns\n"
             f"📖 Context: {context_str}\n"
             f"⏱️ Last Turn:\n"

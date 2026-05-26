@@ -1,5 +1,6 @@
 """System-wide constants and enums for Kesoku AI Agent framework."""
 
+import datetime
 from enum import StrEnum
 
 
@@ -51,5 +52,8 @@ class MessageStatus(StrEnum):
     """Successfully delivered final assistant text response on the external chat platform."""
     RESPONDED = "responded"
     """Successfully processed internal message (system instructions, thoughts, tool calls, tool outputs)."""
+
+
+SYSTEM_START_TIME = datetime.datetime.now()
 
 
