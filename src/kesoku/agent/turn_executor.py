@@ -111,6 +111,7 @@ class TurnExecutor:
         turn_tool_calls = 0
         turn_tokens = 0
         last_context_tokens = 0
+        last_cached_tokens = 0
 
         nudged = False
         try:
@@ -150,6 +151,8 @@ class TurnExecutor:
                 # Accumulate token metrics
                 if res.prompt_tokens:
                     last_context_tokens = res.prompt_tokens
+                if res.cached_tokens:
+                    last_cached_tokens = res.cached_tokens
                 if res.total_tokens:
                     turn_tokens += res.total_tokens
 
@@ -273,6 +276,7 @@ class TurnExecutor:
                             "turn_metrics": {
                                 "session_turns": await self._get_session_turns_count(),
                                 "context_tokens": last_context_tokens,
+                                "cached_tokens": last_cached_tokens,
                                 "turn_tool_calls": turn_tool_calls,
                                 "turn_tokens": turn_tokens,
                                 "turn_time": time.time() - start_time,
@@ -288,6 +292,7 @@ class TurnExecutor:
             turn_metrics = {
                 "session_turns": await self._get_session_turns_count(),
                 "context_tokens": last_context_tokens,
+                "cached_tokens": last_cached_tokens,
                 "turn_tool_calls": turn_tool_calls,
                 "turn_tokens": turn_tokens,
                 "turn_time": time.time() - start_time,

@@ -242,6 +242,7 @@ class Chatbot(ABC):
 
         session_turns = len([m for m in history if m.role == MessageRole.USER])
         context_tokens = metrics.get("context_tokens", 0) if metrics else 0
+        cached_tokens = metrics.get("cached_tokens", 0) if metrics else 0
         turn_tool_calls = (
             metrics.get("turn_tool_calls", 0)
             if metrics
@@ -252,11 +253,16 @@ class Chatbot(ABC):
 
         context_k = f"{round(context_tokens / 1000)}K" if context_tokens else "0K"
         turn_k = f"{round(turn_tokens / 1000)}K" if turn_tokens else "0K"
+        cached_k = f"{round(cached_tokens / 1000)}K" if cached_tokens else "0K"
+
+        context_str = f"{context_k} tokens"
+        if cached_tokens > 0:
+            context_str += f" (Cached: {cached_k})"
 
         return (
             f"【Current Stats】\n"
             f"⚡ Session: {session_turns} turns\n"
-            f"📖 Context: {context_k} tokens\n"
+            f"📖 Context: {context_str}\n"
             f"⏱️ Last Turn:\n"
             f"  - Tool Calls: {turn_tool_calls}\n"
             f"  - Tokens: {turn_k}\n"

@@ -766,15 +766,21 @@ class DiscordChatbot(Chatbot):
                     if metrics:
                         session_turns = metrics.get("session_turns", 0)
                         context_tokens = metrics.get("context_tokens", 0)
+                        cached_tokens = metrics.get("cached_tokens", 0)
                         turn_tool_calls = metrics.get("turn_tool_calls", 0)
                         turn_tokens = metrics.get("turn_tokens", 0)
                         turn_time = metrics.get("turn_time", 0.0)
 
                         context_k = f"{round(context_tokens / 1000)}K"
                         turn_k = f"{round(turn_tokens / 1000)}K"
+                        cached_k = f"{round(cached_tokens / 1000)}K"
+
+                        context_str = f"{context_k} tokens"
+                        if cached_tokens > 0:
+                            context_str += f" (Cached: {cached_k})"
 
                         header_content = (
-                            f"⚡ **Session:** {session_turns} turns | **Context:** {context_k} tokens\n"
+                            f"⚡ **Session:** {session_turns} turns | **Context:** {context_str}\n"
                             f"⏱️ **Turn:** {turn_tool_calls} tool calls | {turn_k} tokens | {turn_time:.1f}s"
                         )
 
