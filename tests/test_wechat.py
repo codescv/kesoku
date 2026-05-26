@@ -559,3 +559,46 @@ async def test_wechat_inbound_image_mime_sniffing(
         assert attachments[0]["mime_type"] == "image/png"
         assert attachments[0]["filename"].endswith(".png")
 
+
+def test_compress_large_image() -> None:
+    """Verify that _compress_image successfully reduces the size of a large image."""
+    import io
+    import random
+
+    from PIL import Image, ImageDraw
+
+    from kesoku.gateway.chatbot.wechat import _compress_image
+
+    # Generate a large 2000x2000 RGBA image with random high-entropy lines to prevent PNG compression
+    img = Image.new("RGBA", (2000, 2000), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    random.seed(42)
+    for _ in range(1000):
+        x0 = random.randint(0, 2000)
+        y0 = random.randint(0, 2000)
+        x1 = random.randint(0, 2000)
+        y1 = random.randint(0, 2000)
+        draw.line(
+            [(x0, y0), (x1, y1)],
+            fill=(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255), 255),
+            width=15,
+        )
+
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    original_bytes = out.getvalue()
+
+    assert len(original_bytes) > 500_000  # Ensure it's > 500KB
+
+    # Compress the image using our helper to be under 200KB
+    compressed_bytes = _compress_image(original_bytes, max_size=200_000)
+
+    # Verify that it was successfully compressed to under 200KB
+    assert len(compressed_bytes) < len(original_bytes)
+    assert len(compressed_bytes) <= 200_000
+
+    # Verify the compressed image is a valid JPEG
+    compressed_img = Image.open(io.BytesIO(compressed_bytes))
+    assert compressed_img.format == "JPEG"
+
+

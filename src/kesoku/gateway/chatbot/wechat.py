@@ -7,6 +7,7 @@ Provides command-line pairing via barcode and supports text and media messages.
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import mimetypes
 import os
@@ -24,6 +25,7 @@ import aiohttp
 import qrcode
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from PIL import Image
 
 from kesoku.config import get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
@@ -275,6 +277,58 @@ def _guess_chat_type(message: dict[str, Any], account_id: str) -> tuple[str, str
     if is_group:
         return "group", room_id or to_user_id or str(message.get("from_user_id") or "")
     return "dm", str(message.get("from_user_id") or "")
+
+
+def _compress_image(data: bytes, max_size: int = 1024 * 1024) -> bytes:
+    """Compress an image to be under max_size bytes.
+
+    Converts the image to RGB and saves it as a JPEG with compression. Resizes
+    the dimensions if the file size remains too large after initial compression.
+
+    Args:
+        data: The original image bytes.
+        max_size: The target maximum file size in bytes.
+
+    Returns:
+        The compressed image bytes, or original bytes if compression fails.
+    """
+    try:
+        img = Image.open(io.BytesIO(data))
+
+        # Convert RGBA or Palette (P) images to RGB for JPEG compatibility
+        if img.mode in ("RGBA", "P"):
+            background = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode == "RGBA":
+                background.paste(img, mask=img.split()[3])
+            else:
+                background.paste(img)
+            img = background
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+
+        # Try initial saving with high quality
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=85)
+        compressed = out.getvalue()
+
+        # Loop to downscale/compress iteratively until it fits max_size
+        attempts = 0
+        while len(compressed) > max_size and attempts < 4:
+            attempts += 1
+            w, h = img.size
+            # Scale down by 0.7x each time to aggressively reduce resolution
+            img = img.resize((int(w * 0.7), int(h * 0.7)), Image.Resampling.LANCZOS)
+
+            # Reduce quality iteratively
+            quality = max(30, 75 - attempts * 10)
+            out = io.BytesIO()
+            img.save(out, format="JPEG", quality=quality)
+            compressed = out.getvalue()
+
+        return compressed
+    except Exception as exc:
+        logger.warning("WeChat: failed to compress image, sending original: %s", exc)
+        return data
 
 
 async def _api_post(
@@ -1545,7 +1599,7 @@ You are interacting with the user via WeChat (Weixin).
                 context_token=context_token,
             )
         except Exception as e:
-            logger.error("WeChat: failed to send outbound file: %s", e)
+            logger.error("WeChat: failed to send outbound file: %s", e, exc_info=True)
 
     async def send_voice_segment(self, channel_id: str, file_path: str, message: Message) -> None:
         """Deliver a voice segment (WeChat delegates to generic file sending)."""
@@ -1581,6 +1635,17 @@ You are interacting with the user via WeChat (Weixin).
         plaintext = Path(path).read_bytes()  # noqa: ASYNC240
         mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
 
+        # Compress outbound images if they are too large to prevent CDN upload 500 errors
+        if mime.startswith("image/") and len(plaintext) > 1024 * 1024:
+            logger.info(
+                "WeChat: Outbound image %s is large (%d bytes), compressing...",
+                Path(path).name,
+                len(plaintext),
+            )
+            plaintext = _compress_image(plaintext)
+            mime = "image/jpeg"
+            logger.info("WeChat: Compressed image size: %d bytes", len(plaintext))
+
         # Determine media type
         if mime.startswith("image/"):
             media_type = MEDIA_IMAGE
@@ -1595,6 +1660,8 @@ You are interacting with the user via WeChat (Weixin).
         aes_key = secrets.token_bytes(16)
         rawsize = len(plaintext)
         rawfilemd5 = hashlib.md5(plaintext).hexdigest()
+
+        logger.info("WeChat: Initiating send_file for path=%s, mime=%s, size=%d", path, mime, rawsize)
 
         upload_response = await _get_upload_url(
             self._send_session,
