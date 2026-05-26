@@ -119,6 +119,10 @@ def chat_cmd(
         str | None,
         typer.Option("-s", "--show-history", metavar="SESSION_ID", help="Show full chat history of a session"),
     ] = None,
+    grouped: Annotated[
+        bool,
+        typer.Option("-g", "--grouped", help="Sort history by grouping tool call and result together"),
+    ] = False,
 ) -> None:
     """Chat with Kesoku Agent in one-shot session mode."""
     load_config(config)
@@ -130,6 +134,7 @@ def chat_cmd(
                 resume=resume,
                 resume_latest=resume_latest,
                 show_history=show_history,
+                grouped=grouped,
             )
         )
     except KeyboardInterrupt:

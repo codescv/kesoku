@@ -138,7 +138,8 @@ def test_generate_html_trajectory(mock_gateway: MagicMock) -> None:
 
 
 @pytest.mark.asyncio
-async def test_view_trajectory_callback_success(mock_gateway: MagicMock) -> None:
+@patch("kesoku.gateway.chatbot.discord_ui.build_clean_history", new_callable=AsyncMock)
+async def test_view_trajectory_callback_success(mock_build: AsyncMock, mock_gateway: MagicMock) -> None:
     """Test successful click of the 'View Trajectory' button."""
     view = MessageHeaderView(gateway=mock_gateway, session_id="session_123")
 
@@ -148,7 +149,7 @@ async def test_view_trajectory_callback_success(mock_gateway: MagicMock) -> None
     mock_interaction.followup = AsyncMock()
     mock_button = MagicMock(spec=discord.ui.Button)
 
-    # Mock get_session_history to return dummy messages
+    # Mock build_clean_history to return dummy messages
     history = [
         Message(
             id="msg1",
@@ -162,7 +163,7 @@ async def test_view_trajectory_callback_success(mock_gateway: MagicMock) -> None
             timestamp=1716120000.0,
         )
     ]
-    mock_gateway.get_session_history.return_value = history
+    mock_build.return_value = history
 
     with patch("discord.File") as mock_file_class:
         mock_file = MagicMock()
@@ -171,7 +172,7 @@ async def test_view_trajectory_callback_success(mock_gateway: MagicMock) -> None
         await view.view_trajectory.callback(mock_interaction)
 
         mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
-        mock_gateway.get_session_history.assert_called_once_with("session_123", limit=200, order="grouped")
+        mock_build.assert_called_once_with(gateway=mock_gateway, session_id="session_123", order="grouped")
         mock_file_class.assert_called_once()
 
         # Check followup send was called with the file
@@ -183,8 +184,9 @@ async def test_view_trajectory_callback_success(mock_gateway: MagicMock) -> None
 
 
 @pytest.mark.asyncio
-async def test_view_trajectory_callback_failure(mock_gateway: MagicMock) -> None:
-    """Test click of the 'View Trajectory' button when gateway history fetch fails."""
+@patch("kesoku.gateway.chatbot.discord_ui.build_clean_history", new_callable=AsyncMock)
+async def test_view_trajectory_callback_failure(mock_build: AsyncMock, mock_gateway: MagicMock) -> None:
+    """Test click of the 'View Trajectory' button when history fetch fails."""
     view = MessageHeaderView(gateway=mock_gateway, session_id="session_123")
 
     mock_interaction = AsyncMock(spec=discord.Interaction)
@@ -194,7 +196,7 @@ async def test_view_trajectory_callback_failure(mock_gateway: MagicMock) -> None
     mock_button = MagicMock(spec=discord.ui.Button)
 
     # Mock failure
-    mock_gateway.get_session_history.side_effect = Exception("Database error")
+    mock_build.side_effect = Exception("Database error")
 
     await view.view_trajectory.callback(mock_interaction)
 

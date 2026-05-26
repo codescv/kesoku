@@ -258,6 +258,192 @@ async def test_gateway_history_phased_sorting_thought_messages(temp_db: str) -> 
 
 
 @pytest.mark.asyncio
+async def test_gateway_history_phased_sorting_multi_iteration(temp_db: str) -> None:
+    """Verify phased sorting preserves multi-iteration conversational waves correctly."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    # 1. USER prompt
+    await gw.post(
+        Message(
+            id="msg_user",
+            session_id="sess_multi",
+            chatbot_id="bot1",
+            channel_id="ch1",
+            sender="u1",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="Prompt",
+            timestamp=1000.0,
+            status=MessageStatus.RESPONDED,
+        )
+    )
+
+    # 2. Iteration 1 Tool Call 1 & 2
+    await gw.post(
+        Message(
+            id="tc_1",
+            session_id="sess_multi",
+            chatbot_id="bot1",
+            channel_id="ch1",
+            sender="Kesoku",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_CALL,
+            content="Call 1",
+            timestamp=1001.0,
+            status=MessageStatus.RESPONDED,
+            parent_id="msg_user",
+        )
+    )
+    await gw.post(
+        Message(
+            id="tc_2",
+            session_id="sess_multi",
+            chatbot_id="bot1",
+            channel_id="ch1",
+            sender="Kesoku",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_CALL,
+            content="Call 2",
+            timestamp=1001.1,
+            status=MessageStatus.RESPONDED,
+            parent_id="msg_user",
+        )
+    )
+
+    # 3. Iteration 1 Tool Result 1 & 2
+    await gw.post(
+        Message(
+            id="tr_1",
+            session_id="sess_multi",
+            chatbot_id="bot1",
+            channel_id="ch1",
+            sender="calculator",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content="Result 1",
+            timestamp=1002.0,
+            status=MessageStatus.RESPONDED,
+            parent_id="tc_1",
+        )
+    )
+    await gw.post(
+        Message(
+            id="tr_2",
+            session_id="sess_multi",
+            chatbot_id="bot1",
+            channel_id="ch1",
+            sender="calculator",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content="Result 2",
+            timestamp=1002.1,
+            status=MessageStatus.RESPONDED,
+            parent_id="tc_2",
+        )
+    )
+
+    # 4. Iteration 2 Thought 1 & Tool Call 3
+    await gw.post(
+        Message(
+            id="thought_1",
+            session_id="sess_multi",
+            chatbot_id="bot1",
+            channel_id="ch1",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.THOUGHT,
+            content="I need to call another tool",
+            timestamp=1003.0,
+            status=MessageStatus.RESPONDED,
+            parent_id="msg_user",
+        )
+    )
+    await gw.post(
+        Message(
+            id="tc_3",
+            session_id="sess_multi",
+            chatbot_id="bot1",
+            channel_id="ch1",
+            sender="Kesoku",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_CALL,
+            content="Call 3",
+            timestamp=1004.0,
+            status=MessageStatus.RESPONDED,
+            parent_id="msg_user",
+        )
+    )
+
+    # 5. Iteration 2 Tool Result 3
+    await gw.post(
+        Message(
+            id="tr_3",
+            session_id="sess_multi",
+            chatbot_id="bot1",
+            channel_id="ch1",
+            sender="calculator",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content="Result 3",
+            timestamp=1005.0,
+            status=MessageStatus.RESPONDED,
+            parent_id="tc_3",
+        )
+    )
+
+    # 6. Iteration 3 Thought 2 & Final response
+    await gw.post(
+        Message(
+            id="thought_2",
+            session_id="sess_multi",
+            chatbot_id="bot1",
+            channel_id="ch1",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.THOUGHT,
+            content="Almost done",
+            timestamp=1006.0,
+            status=MessageStatus.RESPONDED,
+            parent_id="msg_user",
+        )
+    )
+    await gw.post(
+        Message(
+            id="assistant_final",
+            session_id="sess_multi",
+            chatbot_id="bot1",
+            channel_id="ch1",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="Final Answer",
+            timestamp=1007.0,
+            status=MessageStatus.RESPONDED,
+            parent_id="msg_user",
+        )
+    )
+
+    history = await gw.get_session_history("sess_multi", limit=20)
+    assert len(history) == 10
+
+    expected_order = [
+        "msg_user",
+        "tc_1",
+        "tc_2",
+        "tr_1",
+        "tr_2",
+        "thought_1",
+        "tc_3",
+        "tr_3",
+        "thought_2",
+        "assistant_final",
+    ]
+    assert [m.id for m in history] == expected_order
+
+
+@pytest.mark.asyncio
 async def test_gateway_sessions(temp_db: str) -> None:
     """Test session creation, retrieval, update, and listing."""
     DatabaseManager(temp_db).init_tables()

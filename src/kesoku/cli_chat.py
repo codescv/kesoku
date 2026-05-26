@@ -103,19 +103,21 @@ async def _list_chat_sessions(gateway: Gateway, console: Console) -> None:
     console.print(table)
 
 
-async def _show_session_history(gateway: Gateway, console: Console, session_id: str) -> None:
+async def _show_session_history(gateway: Gateway, console: Console, session_id: str, grouped: bool = False) -> None:
     """Retrieve and display the full formatted conversation history for a session.
 
     Args:
         gateway: Gateway instance.
         console: Rich console instance.
         session_id: Target session ID.
+        grouped: True to sort history by grouping tool call and result together.
     """
     session = await gateway.get_session(session_id)
     if not session:
         logger.error(f"Session '{session_id}' not found.")
         sys.exit(1)
-    history = await build_clean_history(gateway=gateway, session_id=session_id)
+    order = "grouped" if grouped else "phased"
+    history = await build_clean_history(gateway=gateway, session_id=session_id, order=order)
     if not history:
         logger.warning(f"Session '{session_id}' has no recorded messages.")
         return
@@ -130,6 +132,7 @@ async def run_cli_chat_async(
     resume: str | None,
     resume_latest: bool,
     show_history: str | None,
+    grouped: bool = False,
 ) -> None:
     """Asynchronous runner for one-shot CLI chat session.
 
@@ -139,6 +142,7 @@ async def run_cli_chat_async(
         resume: Session ID string to resume or None.
         resume_latest: True if resuming latest session.
         show_history: Session ID string to view history or None.
+        grouped: True to sort history by grouping tool call and result together.
     """
     gateway = Gateway()
 
@@ -147,7 +151,7 @@ async def run_cli_chat_async(
         return
 
     if show_history:
-        await _show_session_history(gateway, console, show_history)
+        await _show_session_history(gateway, console, show_history, grouped=grouped)
         return
 
     if not message:
@@ -187,7 +191,8 @@ async def run_cli_chat_async(
     agent = Agent(gateway=gateway)
     agent_task = asyncio.create_task(agent.start())
 
-    history = await build_clean_history(gateway=gateway, session_id=session_id)
+    order = "grouped" if grouped else "phased"
+    history = await build_clean_history(gateway=gateway, session_id=session_id, order=order)
     if is_resumed:
         logger.info(f"Resuming Session '{session_id}' History:")
         for m in history:

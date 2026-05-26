@@ -12,6 +12,7 @@ from typing import Any
 import discord
 import tzlocal
 
+from kesoku.agent.history import build_clean_history
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
@@ -52,8 +53,8 @@ class MessageHeaderView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
 
         try:
-            # Fetch entire historical context up to 200 messages in grouped user-facing order
-            history = await self.gateway.get_session_history(self.session_id, limit=200, order="grouped")
+            # Fetch entire clean historical context in grouped user-facing order
+            history = await build_clean_history(gateway=self.gateway, session_id=self.session_id, order="grouped")
 
             # Generate beautiful HTML trajectory content
             html_content = self._generate_html_trajectory(history)

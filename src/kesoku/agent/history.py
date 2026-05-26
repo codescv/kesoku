@@ -2,6 +2,7 @@
 
 import logging
 import os
+from typing import Literal
 
 from kesoku.config import get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
@@ -50,6 +51,7 @@ async def build_clean_history(
     max_turns: int | None = None,
     pin_initial_turns: int | None = None,
     pin_recent_turns: int | None = None,
+    order: Literal["phased", "grouped"] = "phased",
 ) -> list[Message]:
     """Retrieve, clean up, and format the conversational history for the LLM.
 
@@ -75,6 +77,7 @@ async def build_clean_history(
         max_turns: Maximum logical turns allowed in context history. If None, uses config setting.
         pin_initial_turns: Number of initial turns to pin at the start. If None, uses config setting.
         pin_recent_turns: Number of latest turns to keep in full detail. If None, uses config setting.
+        order: Sorting mechanism ("phased" or "grouped").
 
     Returns:
         A list of cleanly structured, prioritized, and aligned Message objects for the LLM.
@@ -141,7 +144,7 @@ async def build_clean_history(
             ranges.append((start, end))
 
     # 6. Load messages only for the selected turn anchors using timestamp ranges
-    raw_history = await gateway.get_session_history_by_ranges(session_id, ranges)
+    raw_history = await gateway.get_session_history_by_ranges(session_id, ranges, order=order)
 
     # 6. Always preserves the initial system message(s) at the start.
     system_msg = None
