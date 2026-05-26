@@ -297,6 +297,15 @@ class Gateway:
         await asyncio.to_thread(self.db.update_message_metadata, message_id, metadata)
         logger.debug(f"Message {message_id} metadata updated.")
 
+    async def update_session_system_prompt(self, session_id: str, system_prompt: str) -> None:
+        """Update the main system prompt message for an existing session in the database.
+
+        Args:
+            session_id: Unique conversational session identifier.
+            system_prompt: New system prompt content.
+        """
+        await asyncio.to_thread(self.db.update_session_system_prompt, session_id, system_prompt)
+        logger.debug(f"Session {session_id} system prompt updated.")
 
     async def get_session_history(self, session_id: str, limit: int = 20, order: str = "phased") -> list[Message]:
         """Retrieve historical messages for a specific internal session.

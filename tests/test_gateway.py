@@ -760,3 +760,47 @@ async def test_gateway_claim_message(temp_db: str) -> None:
     assert success2 is False
 
 
+@pytest.mark.asyncio
+async def test_gateway_update_system_prompt(temp_db: str) -> None:
+    """Verify that update_session_system_prompt successfully updates only the main system prompt in the session."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    # Create a new session which saves the initial system prompt
+    session = await gw.create_session("sess_update_sys", "Test Session", system_prompt="Initial prompt")
+
+    # Add a system nudge message with different chatbot_id to ensure it is NOT updated
+    nudge = Message(
+        session_id="sess_update_sys",
+        chatbot_id="discord_bot",
+        channel_id="chan_1",
+        sender="System",
+        role=MessageRole.SYSTEM,
+        type=MessageType.TEXT,
+        content="System nudge",
+        status=MessageStatus.RESPONDED,
+    )
+    await gw.post(nudge)
+
+    # Verify initial state
+    history = await gw.get_session_history("sess_update_sys", limit=10)
+    assert len(history) == 2
+    assert history[0].role == MessageRole.SYSTEM and history[0].chatbot_id == "system"
+    assert history[0].content == "Initial prompt"
+    assert history[1].role == MessageRole.SYSTEM and history[1].chatbot_id == "discord_bot"
+    assert history[1].content == "System nudge"
+
+    # Update system prompt
+    await gw.update_session_system_prompt("sess_update_sys", "Updated prompt")
+
+    # Verify updated state
+    history_after = await gw.get_session_history("sess_update_sys", limit=10)
+    assert len(history_after) == 2
+    assert history_after[0].role == MessageRole.SYSTEM and history_after[0].chatbot_id == "system"
+    assert history_after[0].content == "Updated prompt"  # Updated successfully!
+    assert history_after[1].role == MessageRole.SYSTEM and history_after[1].chatbot_id == "discord_bot"
+    assert history_after[1].content == "System nudge"  # Left untouched!
+
+
+

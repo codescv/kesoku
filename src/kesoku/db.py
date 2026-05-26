@@ -565,6 +565,23 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def update_session_system_prompt(self, session_id: str, content: str) -> None:
+        """Update the main system prompt message content for an existing session.
+
+        Args:
+            session_id: Target session ID.
+            content: New system prompt content string.
+        """
+        conn = self._get_connection()
+        try:
+            with conn:
+                conn.execute(
+                    "UPDATE messages SET content = ? "
+                    "WHERE session_id = ? AND role = 'system' AND chatbot_id = 'system'",
+                    (content, session_id),
+                )
+        finally:
+            conn.close()
 
     def get_session_history(
         self, session_id: str, limit: int = 20, order: Literal["phased", "grouped"] = "phased"

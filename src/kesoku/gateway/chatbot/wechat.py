@@ -27,6 +27,7 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from PIL import Image
 
+from kesoku.agent.prompt import build_sys_prompt
 from kesoku.config import get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
@@ -1390,6 +1391,27 @@ You are interacting with the user via WeChat (Weixin).
             )
         else:
             await self.gateway.update_session_updated_at(session.id)
+
+            # Rebuild and update the system prompt with the latest custom instructions
+            custom_prompt = self._build_wechat_custom_prompt(channel_id, chat_type)
+
+            # Read custom configurable system prompt file if present
+            if self.config.sys_prompt_file:
+                sys_file = self.config.sys_prompt_file
+                cfg = get_config()
+                if not os.path.isabs(sys_file) and cfg.agent_working_dir:
+                    sys_file = os.path.join(cfg.agent_working_dir, sys_file)  # noqa: ASYNC240
+                if os.path.exists(sys_file):  # noqa: ASYNC240
+                    try:
+                        with open(sys_file, encoding="utf-8") as f:  # noqa: ASYNC230
+                            custom_sys_prompt = f.read().strip()
+                        if custom_sys_prompt:
+                            custom_prompt = f"{custom_prompt}\n\n{custom_sys_prompt}"
+                    except Exception as e:
+                        logger.error(f"WeChat: Failed to read system prompt file {sys_file}: {e}")
+
+            new_sys_prompt = build_sys_prompt(custom_prompt=custom_prompt, session=session)
+            await self.gateway.update_session_system_prompt(session.id, new_sys_prompt)
 
         attachments_metadata = []
         session_staging_dir = os.path.realpath(  # noqa: ASYNC240

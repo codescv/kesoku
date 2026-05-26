@@ -11,6 +11,7 @@ from typing import Any
 
 import discord
 
+from kesoku.agent.prompt import build_sys_prompt
 from kesoku.config import DiscordChannelOverride, get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
@@ -353,6 +354,12 @@ class DiscordChatbot(Chatbot):
         else:
             session_id = session.id
             await self.gateway.update_session_updated_at(session_id)
+
+            # Rebuild and update the system prompt with the latest Discord channel topic,
+            # members list, and custom instructions
+            custom_prompt = _build_discord_custom_prompt(target_channel, message.author)
+            new_sys_prompt = build_sys_prompt(custom_prompt=custom_prompt, session=session)
+            await self.gateway.update_session_system_prompt(session_id, new_sys_prompt)
 
             # Clean up any active previous turn UI elements if a new turn is started (thought interruption)
             task = self._typing_tasks.pop(channel_id, None)
