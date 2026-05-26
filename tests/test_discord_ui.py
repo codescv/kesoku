@@ -172,7 +172,12 @@ async def test_view_trajectory_callback_success(mock_build: AsyncMock, mock_gate
         await view.view_trajectory.callback(mock_interaction)
 
         mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
-        mock_build.assert_called_once_with(gateway=mock_gateway, session_id="session_123", order="grouped")
+        mock_build.assert_called_once_with(
+            gateway=mock_gateway,
+            session_id="session_123",
+            order="grouped",
+            heal_orphans=False,
+        )
         mock_file_class.assert_called_once()
 
         # Check followup send was called with the file

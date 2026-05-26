@@ -52,6 +52,7 @@ async def build_clean_history(
     pin_initial_turns: int | None = None,
     pin_recent_turns: int | None = None,
     order: Literal["phased", "grouped"] = "phased",
+    heal_orphans: bool = True,
 ) -> list[Message]:
     """Retrieve, clean up, and format the conversational history for the LLM.
 
@@ -78,6 +79,7 @@ async def build_clean_history(
         pin_initial_turns: Number of initial turns to pin at the start. If None, uses config setting.
         pin_recent_turns: Number of latest turns to keep in full detail. If None, uses config setting.
         order: Sorting mechanism ("phased" or "grouped").
+        heal_orphans: If True, heals orphaned tool calls in the database.
 
     Returns:
         A list of cleanly structured, prioritized, and aligned Message objects for the LLM.
@@ -92,29 +94,30 @@ async def build_clean_history(
         pin_recent_turns = cfg.pin_recent_turns
 
     # 1. Detects and heals orphaned tool calls using optimized database query.
-    orphaned_calls = await gateway.get_orphaned_tool_calls(session_id)
-    for tc in orphaned_calls:
-        logger.warning(
-            f"Found orphaned tool call {tc.id} (tool: {tc.metadata.get('tool_name')}). "
-            "Synthesizing interruption response."
-        )
-        tool_name = tc.metadata.get("tool_name", "unknown_tool")
-        interrupted_msg = Message(
-            session_id=session_id,
-            chatbot_id=tc.chatbot_id,
-            channel_id=tc.channel_id,
-            sender=tool_name,
-            role=MessageRole.TOOL,
-            type=MessageType.TOOL_RESULT,
-            content=f"Tool `{tool_name}` execution was interrupted due to service restart.",
-            status=MessageStatus.RESPONDED,
-            parent_id=tc.id,
-            metadata={
-                "tool_name": tool_name,
-                "tool_error": "Tool execution was interrupted due to service restart.",
-            },
-        )
-        await gateway.post(interrupted_msg)
+    if heal_orphans:
+        orphaned_calls = await gateway.get_orphaned_tool_calls(session_id)
+        for tc in orphaned_calls:
+            logger.warning(
+                f"Found orphaned tool call {tc.id} (tool: {tc.metadata.get('tool_name')}). "
+                "Synthesizing interruption response."
+            )
+            tool_name = tc.metadata.get("tool_name", "unknown_tool")
+            interrupted_msg = Message(
+                session_id=session_id,
+                chatbot_id=tc.chatbot_id,
+                channel_id=tc.channel_id,
+                sender=tool_name,
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_RESULT,
+                content=f"Tool `{tool_name}` execution was interrupted due to service restart.",
+                status=MessageStatus.RESPONDED,
+                parent_id=tc.id,
+                metadata={
+                    "tool_name": tool_name,
+                    "tool_error": "Tool execution was interrupted due to service restart.",
+                },
+            )
+            await gateway.post(interrupted_msg)
 
     # 2. Retrieve chronological turn anchors and identify relevant turn segments
     anchors = await gateway.get_session_turn_anchors(session_id)

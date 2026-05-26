@@ -273,6 +273,50 @@ async def test_orphaned_tool_call_healing(temp_db: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_orphaned_tool_call_healing_disabled(temp_db: str) -> None:
+    """Verify that orphaned tool calls are NOT healed when heal_orphans is False."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    # Create session
+    await gw.create_session("sess_no_heal", title="No Healing Session")
+
+    # Post a user message and an orphaned tool call
+    await gw.post(
+        Message(
+            session_id="sess_no_heal",
+            chatbot_id="cli",
+            channel_id="ch1",
+            sender="u1",
+            role="user",
+            content="Do something",
+            status="processed",
+        )
+    )
+
+    tc_msg = Message(
+        session_id="sess_no_heal",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role="tool",
+        type="tool_call",
+        content="Calling tool...",
+        status="responded",
+        metadata={"tool_name": "some_tool"},
+    )
+    await gw.post(tc_msg)
+
+    # Call build clean history directly with heal_orphans=False
+    history = await build_clean_history(gateway=gw, session_id="sess_no_heal", max_turns=10, heal_orphans=False)
+
+    # Verify no tool result was synthesized/added to history
+    tr_msgs = [m for m in history if m.type == "tool_result"]
+    assert len(tr_msgs) == 0
+
+
+@pytest.mark.asyncio
 async def test_system_prompt_and_pinned_turns_turn_based(temp_db: str) -> None:
     """Verify that system prompt and the first K turns are always pinned under turn-based logic."""
     DatabaseManager(temp_db).init_tables()

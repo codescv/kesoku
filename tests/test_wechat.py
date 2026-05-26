@@ -602,3 +602,86 @@ def test_compress_large_image() -> None:
     assert compressed_img.format == "JPEG"
 
 
+@pytest.mark.asyncio
+@patch("aiohttp.ClientSession")
+async def test_wechat_chatbot_send_file_retry_success(
+    mock_session_cls: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+    tmp_path,
+) -> None:
+    """Test that send_file_segment retries and succeeds if a later attempt is successful."""
+    mock_session = MagicMock()
+    mock_session_cls.return_value = mock_session
+
+    # Create dummy outbound file
+    dummy_file = tmp_path / "test.png"
+    dummy_file.write_bytes(b"dummy_content")
+
+    with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
+        bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
+        bot._poll_session = mock_session
+        bot._send_session = mock_session
+
+        # Mock _send_file to fail on first attempt and succeed on second
+        call_count = 0
+        async def mock_send_file_side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("Temporary CDN error")
+            return "msg_ok"
+
+        bot._send_file = AsyncMock(side_effect=mock_send_file_side_effect)
+
+        outbound_msg = Message(
+            id="msg_file_1",
+            session_id="sess123",
+            chatbot_id="wechat_test",
+            channel_id="user_alice",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="image.png",
+        )
+
+        # We patch asyncio.sleep to speed up the test execution
+        with patch("asyncio.sleep", AsyncMock()) as mock_sleep:
+            await bot.send_file_segment("user_alice", str(dummy_file), outbound_msg)
+
+            # Verify asyncio.sleep was called once (after first failure)
+            mock_sleep.assert_called_once_with(2)
+
+        # Verify _send_file was called twice
+        assert call_count == 2
+
+
+@pytest.mark.asyncio
+@patch("aiohttp.ClientSession")
+async def test_wechat_chatbot_send_voice_reverted(
+    mock_session_cls: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+) -> None:
+    """Test that send_voice_segment delegates directly to send_file_segment."""
+    mock_session = MagicMock()
+    mock_session_cls.return_value = mock_session
+
+    with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
+        bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
+        bot._poll_session = mock_session
+        bot._send_session = mock_session
+
+        bot.send_file_segment = AsyncMock()
+        outbound_msg = Message(
+            id="msg_v1",
+            session_id="s1",
+            chatbot_id="wechat_test",
+            channel_id="u1",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="voice.wav",
+        )
+        await bot.send_voice_segment("u1", "voice.wav", outbound_msg)
+        bot.send_file_segment.assert_called_once_with("u1", "voice.wav", outbound_msg)

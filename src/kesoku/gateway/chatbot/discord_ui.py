@@ -54,7 +54,12 @@ class MessageHeaderView(discord.ui.View):
 
         try:
             # Fetch entire clean historical context in grouped user-facing order
-            history = await build_clean_history(gateway=self.gateway, session_id=self.session_id, order="grouped")
+            history = await build_clean_history(
+                gateway=self.gateway,
+                session_id=self.session_id,
+                order="grouped",
+                heal_orphans=False,
+            )
 
             # Generate beautiful HTML trajectory content
             html_content = self._generate_html_trajectory(history)

@@ -117,7 +117,7 @@ async def _show_session_history(gateway: Gateway, console: Console, session_id: 
         logger.error(f"Session '{session_id}' not found.")
         sys.exit(1)
     order = "grouped" if grouped else "phased"
-    history = await build_clean_history(gateway=gateway, session_id=session_id, order=order)
+    history = await build_clean_history(gateway=gateway, session_id=session_id, order=order, heal_orphans=False)
     if not history:
         logger.warning(f"Session '{session_id}' has no recorded messages.")
         return
@@ -192,7 +192,7 @@ async def run_cli_chat_async(
     agent_task = asyncio.create_task(agent.start())
 
     order = "grouped" if grouped else "phased"
-    history = await build_clean_history(gateway=gateway, session_id=session_id, order=order)
+    history = await build_clean_history(gateway=gateway, session_id=session_id, order=order, heal_orphans=False)
     if is_resumed:
         logger.info(f"Resuming Session '{session_id}' History:")
         for m in history:

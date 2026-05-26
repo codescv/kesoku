@@ -1585,24 +1585,67 @@ You are interacting with the user via WeChat (Weixin).
                 except Exception as e:
                     logger.error("WeChat: failed to send text: %s", e)
 
-    async def send_file_segment(self, channel_id: str, file_path: str, message: Message) -> None:
-        """Deliver a file attachment segment via WeChat media API."""
+    async def send_file_segment(
+        self,
+        channel_id: str,
+        file_path: str,
+        message: Message,
+    ) -> None:
+        """Deliver a file attachment segment via WeChat media API with retry mechanism and logging."""
         if not os.path.exists(file_path):  # noqa: ASYNC240
             logger.error("WeChat: Outbound file not found: %s", file_path)
             return
 
         context_token = self._token_store.get(self._account_id, channel_id)
-        try:
-            await self._send_file(
-                chat_id=channel_id,
-                path=file_path,
-                context_token=context_token,
-            )
-        except Exception as e:
-            logger.error("WeChat: failed to send outbound file: %s", e, exc_info=True)
+        logger.info("WeChat: Starting file transmission for %s to channel %s...", Path(file_path).name, channel_id)
+
+        max_attempts = 4  # 1 original attempt + 3 retries
+        attempt = 0
+        while attempt < max_attempts:
+            attempt += 1
+            if attempt > 1:
+                logger.info(
+                    "WeChat: Retrying file transmission for %s [Attempt %d/%d]...",
+                    Path(file_path).name,
+                    attempt,
+                    max_attempts,
+                )
+            try:
+                await self._send_file(
+                    chat_id=channel_id,
+                    path=file_path,
+                    context_token=context_token,
+                )
+                logger.info(
+                    "WeChat: File transmission completed successfully for %s to channel %s on attempt %d/%d.",
+                    Path(file_path).name,
+                    channel_id,
+                    attempt,
+                    max_attempts,
+                )
+                return
+            except Exception as e:
+                err_msg = "timeout" if isinstance(e, asyncio.TimeoutError) else str(e)
+                if attempt < max_attempts:
+                    logger.warning(
+                        "WeChat: File transmission failed on attempt %d/%d due to %s. Retrying in 2 seconds...",
+                        attempt,
+                        max_attempts,
+                        err_msg,
+                    )
+                    await asyncio.sleep(2)
+                else:
+                    logger.error(
+                        "WeChat: File transmission failed completely for %s to channel %s after %d attempts: %s",
+                        Path(file_path).name,
+                        channel_id,
+                        max_attempts,
+                        e,
+                        exc_info=True,
+                    )
 
     async def send_voice_segment(self, channel_id: str, file_path: str, message: Message) -> None:
-        """Deliver a voice segment (WeChat delegates to generic file sending)."""
+        """Deliver a voice segment, routing it directly as a generic file attachment."""
         await self.send_file_segment(channel_id, file_path, message)
 
     async def send_question_segment(self, channel_id: str, question: str, choices: list[str], message: Message) -> None:
@@ -1631,6 +1674,7 @@ You are interacting with the user via WeChat (Weixin).
         chat_id: str,
         path: str,
         context_token: str | None,
+        playtime_sec: int | None = None,
     ) -> str:
         plaintext = Path(path).read_bytes()  # noqa: ASYNC240
         mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
@@ -1728,6 +1772,7 @@ You are interacting with the user via WeChat (Weixin).
                     "encode_type": 6,
                     "sample_rate": 24000,
                     "bits_per_sample": 16,
+                    **({"playtime": playtime_sec} if playtime_sec is not None else {}),
                 },
             }
         else:
