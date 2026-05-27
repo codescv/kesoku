@@ -1235,7 +1235,9 @@ async def test_handle_message_removes_stop_button_on_final_response(
             # remove_item should be called on the header view with the stop_turn button
             mock_header_view.remove_item.assert_called_once_with(mock_header_view.stop_turn)
             # The header message should be edited to update the view
-            mock_header_msg.edit.assert_called_once_with(view=mock_header_view)
+            mock_header_msg.edit.assert_called_once_with(
+                content="🔍 **Session ID:** `thread123`", view=mock_header_view
+            )
             mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 

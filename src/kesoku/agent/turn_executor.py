@@ -328,6 +328,9 @@ class TurnExecutor:
                             )
                             final_content = "Processed request successfully."
 
+                    limit = getattr(llm, "context_window_limit", 1048576)
+                    context_percent = (last_context_tokens / limit) * 100 if limit else 0.0
+
                     final_msg = Message(
                         session_id=self.session_id,
                         chatbot_id=chatbot_id,
@@ -343,6 +346,8 @@ class TurnExecutor:
                                 "session_turns": await self._get_session_turns_count(),
                                 "context_tokens": last_context_tokens,
                                 "cached_tokens": last_cached_tokens,
+                                "context_limit": limit,
+                                "context_percent": context_percent,
                                 "turn_tool_calls": turn_tool_calls,
                                 "turn_tokens": turn_tokens,
                                 "turn_time": time.time() - start_time,

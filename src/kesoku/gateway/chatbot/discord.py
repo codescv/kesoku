@@ -587,7 +587,10 @@ class DiscordChatbot(Chatbot):
                     chatbot=self,
                     is_thread=is_thread,
                 )
-                header_msg = await channel.send(view=header_view)
+                header_msg = await channel.send(
+                    content=f"🔍 **Session ID:** `{message.session_id}`",
+                    view=header_view,
+                )
                 self._header_views[turn_id] = (header_msg, header_view)
             except Exception as he:
                 logger.warning(f"Failed to send message header: {he}")
@@ -770,12 +773,13 @@ class DiscordChatbot(Chatbot):
                 try:
                     header_view.remove_item(header_view.stop_turn)
 
-                    header_content = None
+                    header_content = f"🔍 **Session ID:** `{message.session_id}`"
                     metrics = message.metadata.get("turn_metrics")
                     if metrics:
                         session_turns = metrics.get("session_turns", 0)
                         context_tokens = metrics.get("context_tokens", 0)
                         cached_tokens = metrics.get("cached_tokens", 0)
+                        context_percent = metrics.get("context_percent", 0.0)
                         turn_tool_calls = metrics.get("turn_tool_calls", 0)
                         turn_tokens = metrics.get("turn_tokens", 0)
                         turn_time = metrics.get("turn_time", 0.0)
@@ -789,7 +793,9 @@ class DiscordChatbot(Chatbot):
                             context_str += f" (Cached: {cached_k})"
 
                         header_content = (
-                            f"⚡ **Session:** {session_turns} turns | **Context:** {context_str}\n"
+                            f"🔍 **Session ID:** `{message.session_id}`\n"
+                            f"⚡ **Session:** {session_turns} turns | "
+                            f"**Context:** {context_str} ({context_percent:.1f}% of window)\n"
                             f"⏱️ **Turn:** {turn_tool_calls} tool calls | {turn_k} tokens | {turn_time:.1f}s"
                         )
 
