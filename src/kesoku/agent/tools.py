@@ -856,3 +856,212 @@ async def compact_history(summary: str, context: ToolContext) -> str:
 
     logger.info(f"Compacted history successfully. Transitioned '{context.session_id}' -> '{new_session_id}'")
     return f"Conversation history successfully compacted and transitioned to new session: {new_session_id}."
+
+
+# Memory System Helpers and Tools
+def get_allowed_categories(db: Any) -> set[str]:
+    """Retrieves the set of all currently permitted or existing memory categories."""
+    categories = {"user_profile", "learnings", "progress"}
+    try:
+        memories = db.get_agent_memories()
+        for m in memories:
+            categories.add(m["category"])
+    except Exception as e:
+        logger.warning(f"Failed to fetch existing categories from database: {e}")
+    return categories
+
+
+def sanitize_key(input_key: str) -> str:
+    """Sanitizes key by lowercasing, stripping, and replacing invalid characters with underscores."""
+    clean_key = re.sub(r"[^a-z0-9_]", "_", input_key.lower().strip())
+    clean_key = re.sub(r"_+", "_", clean_key).strip("_")
+    return clean_key
+
+
+def validate_key(key: str) -> bool:
+    """Verifies if the key strictly contains only lowercase letters, underscores, and numbers."""
+    return bool(re.match(r"^[a-z0-9_]+$", key))
+
+
+@default_registry.register
+def list_memories(category: str, role: str = "global", context: ToolContext | None = None) -> str:
+    """List all active memory keys and titles under the specified category for a given role scope.
+
+    Args:
+        category: The memory category (e.g., 'progress', 'user_profile', 'learnings').
+        role: Optional roleplay persona scope (defaults to 'global').
+        context: Injected tool execution context.
+
+    Returns:
+        A clean list of active keys, titles, and their last updated timestamps.
+    """
+    if not context:
+        return "Error: ToolContext is missing."
+
+    db = context.gateway.db
+    try:
+        memories = db.get_agent_memories(category=category, role=role)
+        if not memories:
+            return f"No memories found in category '{category}' for role scope '{role}'."
+
+        lines = [f"=== Memories in '{category}' (scope: {role}) ==="]
+        for m in memories:
+            updated_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m["updated_at"]))
+            lines.append(f"- key: `{m['key']}` | title: \"{m['title']}\" | updated: {updated_str} | scope: {m['role']}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"Failed to list memories: {e}", exc_info=True)
+        return f"Error listing memories: {e}"
+
+
+@default_registry.register
+def view_memory(category: str, key: str | None = None, role: str = "global", context: ToolContext | None = None) -> str:
+    """Retrieve detailed content for a specific memory key, or dynamically render all memories in a category.
+
+    If `key` is provided, returns the content of that specific record.
+    If `key` is None (or omitted), dynamically aggregates all entries inside that category under the specified
+    role/global scope and formats them into a beautiful, readable Markdown block.
+
+    Args:
+        category: The memory category (e.g., 'progress', 'user_profile', 'learnings').
+        key: Optional unique snake_case key. If omitted, renders all entries.
+        role: Optional roleplay persona scope (defaults to 'global').
+        context: Injected tool execution context.
+
+    Returns:
+        The content of the specific memory entry, or a compiled Markdown text block of all entries.
+    """
+    if not context:
+        return "Error: ToolContext is missing."
+
+    db = context.gateway.db
+    try:
+        if key:
+            if not validate_key(key):
+                return (
+                    f"Error: Invalid Key '{key}'.\n"
+                    "Memory keys must strictly contain only lowercase letters, "
+                    "underscores, and numbers (regex: ^[a-z0-9_]+$)."
+                )
+            sanitized = sanitize_key(key)
+            mem = db.get_agent_memory(category=category, key=sanitized, role=role)
+            if not mem:
+                return f"No memory found for category='{category}', key='{sanitized}', role='{role}'."
+            return f"=== Memory: {mem['title']} (key: {mem['key']}, scope: {mem['role']}) ===\n{mem['content']}"
+
+        memories = db.get_agent_memories(category=category, role=role)
+        if not memories:
+            return f"No memories found in category '{category}' for role scope '{role}'."
+
+        lines = [f"# Category: {category} (scope: {role})"]
+        for m in memories:
+            lines.append(f"\n## {m['title']} (key: `{m['key']}`, scope: `{m['role']}`)")
+            lines.append(m["content"].strip())
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"Failed to view memory: {e}", exc_info=True)
+        return f"Error viewing memory: {e}"
+
+
+@default_registry.register
+def update_memory(
+    category: str,
+    key: str,
+    title: str,
+    content: str,
+    role: str = "global",
+    create_category: bool = False,
+    context: ToolContext | None = None,
+) -> str:
+    """Insert or atomically replace a memory record in the SQLite database.
+
+    This executes a transactionally isolated UPSERT SQL statement, completely protecting other keys.
+
+    Args:
+        category: The memory category (e.g., 'progress', 'user_profile', 'learnings').
+        key: The unique snake_case key.
+        title: Human-readable label or title for the entry.
+        content: Detailed markdown or JSON content payload.
+        role: Optional roleplay persona scope (defaults to 'global').
+        create_category: True if permission was granted to initialize a new category.
+        context: Injected tool execution context.
+
+    Returns:
+        A success message confirming the sanitized key, title, and role scope.
+    """
+    if not context:
+        return "Error: ToolContext is missing."
+
+    db = context.gateway.db
+    try:
+        allowed = get_allowed_categories(db)
+        if category not in allowed and not create_category:
+            return (
+                f"Write Denied: Category '{category}' is not recognized.\n"
+                f"Permitted categories: {sorted(list(allowed))}.\n"
+                "If you need to create a new category, you MUST ask the user for explicit permission "
+                "first, and then invoke this tool with `create_category=True`."
+            )
+
+        if not validate_key(key):
+            return (
+                f"Error: Invalid Key '{key}'.\n"
+                "Memory keys must strictly contain only lowercase letters, "
+                "underscores, and numbers (regex: ^[a-z0-9_]+$)."
+            )
+
+        sanitized_key = sanitize_key(key)
+        db.upsert_agent_memory(
+            category=category,
+            key=sanitized_key,
+            title=title,
+            content=content,
+            role=role,
+        )
+        return (
+            f"Memory successfully saved!\n"
+            f"  Category: `{category}`\n"
+            f"  Key: `{sanitized_key}`\n"
+            f"  Title: \"{title}\"\n"
+            f"  Scope: `{role}`"
+        )
+    except Exception as e:
+        logger.error(f"Failed to update memory: {e}", exc_info=True)
+        return f"Error updating memory: {e}"
+
+
+@default_registry.register
+def delete_memory(category: str, key: str, role: str = "global", context: ToolContext | None = None) -> str:
+    """Atomically delete a specific memory entry under a category and role scope.
+
+    Args:
+        category: The memory category (e.g., 'progress', 'user_profile', 'learnings').
+        key: The unique snake_case key to delete.
+        role: Optional roleplay persona scope (defaults to 'global').
+        context: Injected tool execution context.
+
+    Returns:
+        A confirmation message.
+    """
+    if not context:
+        return "Error: ToolContext is missing."
+
+    db = context.gateway.db
+    try:
+        if not validate_key(key):
+            return (
+                f"Error: Invalid Key '{key}'.\n"
+                "Memory keys must strictly contain only lowercase letters, "
+                "underscores, and numbers (regex: ^[a-z0-9_]+$)."
+            )
+
+        sanitized = sanitize_key(key)
+        mem = db.get_agent_memory(category=category, key=sanitized, role=role)
+        if not mem:
+            return f"No memory entry found for category='{category}', key='{sanitized}', role='{role}' to delete."
+
+        db.delete_agent_memory(category=category, key=sanitized, role=role)
+        return f"Memory successfully deleted: category='{category}', key='{sanitized}', role='{role}'."
+    except Exception as e:
+        logger.error(f"Failed to delete memory: {e}", exc_info=True)
+        return f"Error deleting memory: {e}"

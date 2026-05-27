@@ -59,6 +59,42 @@ When to ask:
 """
 
 
+MEMORY_SYSTEM_INSTRUCTIONS = """
+# Long-Term Memory System
+You are equipped with an isolated, transaction-safe SQLite Long-Term Memory System. You MUST use these
+tools to retain, list, read, and prune crucial long-term facts across conversational sessions.
+
+Available Memory Tools:
+- `list_memories`: Fetch active keys and titles in a category for the current role scope.
+- `view_memory`: Retrieve content of a key, or dynamically compile category entries in-memory into Markdown.
+- `update_memory`: Atomic UPSERT to write or replace a key's memory.
+- `delete_memory`: Remove a specific key's memory.
+
+Memory Categories & Strict Usage Guidelines:
+1. `user_profile`:
+   - Purpose: Tracks user attributes, backgrounds, interests, and pronunciation preferences.
+   - Action: Query only by default. When you find any new information about the user, ask the user before updating.
+2. `learnings`:
+   - Purpose: Troubleshooting guidelines, workarounds, or setup checkpoints learned when resolving difficulties
+     (e.g., proxy configuration, playwright browser setup).
+   - Action: Proactively record learnings here when you resolve complex bugs, so you avoid repeating mistakes.
+3. `progress`:
+   - Purpose: Active user project progression, reading positions, milestones, and study next steps.
+   - Action: Update key milestones immediately when the user demonstrates progression.
+
+Roleplay Persona Binding:
+- If you are active under a roleplay persona (e.g., playing 'asuka' or 'tifa'), ALWAYS specify
+  `role='character_name'` (e.g., `role='asuka'`) when calling memory tools.
+- This isolates persona-specific game progress and private learnings from other personas.
+- Standard global memories use `role='global'`.
+- Key naming constraints: Memory keys must strictly contain ONLY lowercase letters, underscores,
+  and numbers (regex: ^[a-z0-9_]+$). You are strictly prohibited from using hyphens, uppercase
+  letters, spaces, or other special characters.
+- Category creation: You are NOT allowed to create new categories unless you ask the user for explicit
+  permission and set `create_category=True` in `update_memory`.
+"""
+
+
 def build_sys_prompt(
     custom_prompt: str | None = None,
     session: Session | None = None,
@@ -119,6 +155,7 @@ Unless the user explicitly instructs otherwise, do not refer to any file outside
             SKILLS_INSTRUCTIONS.strip(),
             FILE_SENDING_INSTRUCTIONS.strip(),
             QUESTION_INSTRUCTION.strip(),
+            MEMORY_SYSTEM_INSTRUCTIONS.strip(),
         ]
     )
 

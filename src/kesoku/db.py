@@ -67,6 +67,18 @@ class Session(BaseModel):
         return f"{ts_str}_{title_escaped}_{self.id}"
 
 
+class AgentMemory(BaseModel):
+    """Represents a structured agent memory record in the SQLite database."""
+
+    id: int | None = Field(default=None, description="Database autoincrement primary key")
+    category: str = Field(..., description="Category: 'progress', 'user_profile', 'learnings' etc.")
+    key: str = Field(..., description="snake_case unique identifier")
+    title: str = Field(..., description="Human-readable label or title for the entry")
+    content: str = Field(..., description="Markdown text or structured content payload")
+    updated_at: float = Field(default_factory=time.time, description="Unix timestamp of last update")
+    role: str = Field(default="global", description="Optional roleplay-specific character persona binding")
+
+
 def _sort_session_messages(all_msgs: list[Message], order: Literal["phased", "grouped"]) -> list[Message]:
     """Sort historical messages for a specific session ordered logically.
 
@@ -224,6 +236,24 @@ class DatabaseManager:
                         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
                     );
                     """
+                )
+                # Ensure agent_memories table exists
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_memories (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        category TEXT NOT NULL,
+                        key TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        updated_at REAL NOT NULL,
+                        role TEXT NOT NULL DEFAULT 'global',
+                        UNIQUE(category, key, role)
+                    );
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_agent_memories_category_role ON agent_memories(category, role);"
                 )
         except Exception as e:
             logger.error(f"Failed to apply database schema migrations: {e}")
@@ -940,6 +970,81 @@ class DatabaseManager:
             all_msgs = _sort_session_messages(all_msgs, order)
 
             return all_msgs
+        finally:
+            conn.close()
+
+    # Agent Memory CRUD
+    def upsert_agent_memory(self, category: str, key: str, title: str, content: str, role: str = "global") -> None:
+        """Atomically insert or replace an agent memory record."""
+        conn = self._get_connection()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO agent_memories
+                    (category, key, title, content, updated_at, role)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (category, key, title, content, time.time(), role),
+                )
+        finally:
+            conn.close()
+
+    def get_agent_memory(self, category: str, key: str, role: str = "global") -> dict[str, Any] | None:
+        """Retrieve a specific agent memory record."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM agent_memories WHERE category = ? AND key = ? AND role = ?",
+                (category, key, role),
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+        finally:
+            conn.close()
+
+    def get_agent_memories(self, category: str | None = None, role: str | None = None) -> list[dict[str, Any]]:
+        """Retrieve agent memories, optionally filtered by category and/or role.
+
+        If role is provided, retrieves both global memories and role-specific memories.
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            query = "SELECT * FROM agent_memories"
+            params = []
+            clauses = []
+
+            if category:
+                clauses.append("category = ?")
+                params.append(category)
+
+            if role:
+                clauses.append("(role = 'global' OR role = ?)")
+                params.append(role)
+
+            if clauses:
+                query += " WHERE " + " AND ".join(clauses)
+            query += " ORDER BY key ASC"
+
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def delete_agent_memory(self, category: str, key: str, role: str = "global") -> None:
+        """Delete a specific agent memory record."""
+        conn = self._get_connection()
+        try:
+            with conn:
+                conn.execute(
+                    "DELETE FROM agent_memories WHERE category = ? AND key = ? AND role = ?",
+                    (category, key, role),
+                )
         finally:
             conn.close()
 
