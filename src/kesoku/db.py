@@ -213,6 +213,18 @@ class DatabaseManager:
                     conn.execute("ALTER TABLE messages ADD COLUMN parent_id TEXT")
                 # Clean up redundant single-column session index since idx_messages_session_timestamp supersedes it
                 conn.execute("DROP INDEX IF EXISTS idx_messages_session")
+                # Ensure channel_sessions table exists
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS channel_sessions (
+                        chatbot_id TEXT NOT NULL,
+                        channel_id TEXT NOT NULL,
+                        session_id TEXT NOT NULL,
+                        PRIMARY KEY (chatbot_id, channel_id),
+                        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                    );
+                    """
+                )
         except Exception as e:
             logger.error(f"Failed to apply database schema migrations: {e}")
             raise RuntimeError(f"Database schema migration error: {e}") from e
@@ -307,6 +319,17 @@ class DatabaseManager:
                         created_at REAL NOT NULL,
                         updated_at REAL NOT NULL,
                         system_prompt TEXT NOT NULL DEFAULT ''
+                    );
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS channel_sessions (
+                        chatbot_id TEXT NOT NULL,
+                        channel_id TEXT NOT NULL,
+                        session_id TEXT NOT NULL,
+                        PRIMARY KEY (chatbot_id, channel_id),
+                        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
                     );
                     """
                 )
@@ -449,9 +472,8 @@ class DatabaseManager:
             cursor.execute(
                 """
                 SELECT s.* FROM sessions s
-                JOIN messages m ON s.id = m.session_id
-                WHERE m.chatbot_id = ? AND m.channel_id = ?
-                ORDER BY m.timestamp DESC LIMIT 1
+                JOIN channel_sessions cs ON s.id = cs.session_id
+                WHERE cs.chatbot_id = ? AND cs.channel_id = ?
                 """,
                 (chatbot_id, channel_id),
             )
@@ -465,6 +487,29 @@ class DatabaseManager:
                     system_prompt=row["system_prompt"],
                 )
             return None
+        finally:
+            conn.close()
+
+    def set_active_session_for_channel(self, chatbot_id: str, channel_id: str, session_id: str) -> None:
+        """Bind a session as the active session for a chatbot channel (UPSERT).
+
+        Args:
+            chatbot_id: Unique chatbot platform identifier.
+            channel_id: External channel or thread identifier.
+            session_id: Unique session identifier to bind.
+        """
+        conn = self._get_connection()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO channel_sessions (chatbot_id, channel_id, session_id)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(chatbot_id, channel_id) DO UPDATE SET session_id=excluded.session_id
+                    """,
+                    (chatbot_id, channel_id, session_id),
+                )
+                logger.info(f"Explicitly bound channel '{chatbot_id}:{channel_id}' to active session '{session_id}'")
         finally:
             conn.close()
 

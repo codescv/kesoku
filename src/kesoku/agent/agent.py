@@ -157,6 +157,7 @@ class SessionWorker:
             session_workspace=folder_name,
             original_msg_id=current_msg.id,
             active_jobs=self.context.active_jobs,
+            gateway=self.gateway,
         )
 
         cfg = self.context.config

@@ -481,7 +481,12 @@ async def test_gateway_get_session_by_channel(temp_db: str) -> None:
     cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
     gw = Gateway(context=KesokuContext(config=cfg))
 
-    session = await gw.create_session("sess_chan_1", "Chan Session")
+    session = await gw.create_session(
+        "sess_chan_1",
+        "Chan Session",
+        chatbot_id="discord_bot",
+        channel_id="thread_777",
+    )
     await gw.post(
         Message(
             session_id="sess_chan_1",

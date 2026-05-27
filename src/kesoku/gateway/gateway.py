@@ -66,6 +66,8 @@ class Gateway:
         system_prompt: str | None = None,
         custom_prompt: str | None = None,
         created_at: float | None = None,
+        chatbot_id: str | None = None,
+        channel_id: str | None = None,
     ) -> Session:
         """Create a new chat session record in SQLite and initialize system instructions.
 
@@ -75,6 +77,8 @@ class Gateway:
             system_prompt: Optional defining system prompt instructions (pre-built).
             custom_prompt: Optional custom instructions to include in the built system prompt.
             created_at: Optional initial creation timestamp float.
+            chatbot_id: Optional chatbot platform/instance identifier.
+            channel_id: Optional external channel identifier.
 
         Returns:
             The created Session instance.
@@ -91,6 +95,11 @@ class Gateway:
 
         await asyncio.to_thread(self.db.create_session, sess)
         logger.debug(f"Created new chat session: {session_id} ({title})")
+
+        # If chatbot/channel parameters are provided, explicitly bind the active session mapping
+        if chatbot_id and channel_id:
+            await self.set_active_session_for_channel(chatbot_id, channel_id, session_id)
+
         return sess
 
     async def get_session(self, session_id: str) -> Session | None:
@@ -115,6 +124,16 @@ class Gateway:
             The Session object if found, None otherwise.
         """
         return await asyncio.to_thread(self.db.get_session_by_channel, chatbot_id, channel_id)
+
+    async def set_active_session_for_channel(self, chatbot_id: str, channel_id: str, session_id: str) -> None:
+        """Bind a session as the active session for a chatbot channel.
+
+        Args:
+            chatbot_id: Unique chatbot platform identifier.
+            channel_id: External channel or thread identifier.
+            session_id: Unique session identifier to bind.
+        """
+        await asyncio.to_thread(self.db.set_active_session_for_channel, chatbot_id, channel_id, session_id)
 
     async def update_session_updated_at(self, session_id: str) -> None:
         """Update the updated_at timestamp for a session.

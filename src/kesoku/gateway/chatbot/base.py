@@ -182,10 +182,15 @@ class Chatbot(ABC):
             status_msg = await self.get_session_status_by_channel(channel_id)
             await reply_func(status_msg)
 
+        async def handle_compact(reply_func: Callable[[str], Awaitable[None]], channel_id: str) -> None:
+            status_msg = await self.manual_compact_session_by_channel(channel_id)
+            await reply_func(status_msg)
+
         self.commands.register("restart", "Restart the Kesoku service.", handle_restart)
         self.commands.register("clear", "Clear the active conversation session.", handle_clear)
         self.commands.register("reset", "Clear the active conversation session.", handle_clear)
         self.commands.register("status", "Get conversation and performance statistics.", handle_status)
+        self.commands.register("compact", "Manually compact conversation history.", handle_compact)
 
     def _get_kesoku_executable(self) -> str:
         import shutil
@@ -252,6 +257,34 @@ class Chatbot(ABC):
             return "♻️ Session successfully cleared. The next message will initiate a new session."
         return "⚠️ No active session found for this chat."
 
+    async def manual_compact_session_by_channel(self, channel_id: str) -> str:
+        """Manually trigger conversation compaction by posting a trigger system user message."""
+        session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
+        if not session:
+            return "⚠️ No active session found for this chat."
+
+        # Create system trigger user message
+        # Note: MUST use MessageRole.USER so the agent dispatcher listens to and picks it up to run the turn!
+        trigger_content = (
+            "[System Notification] The user has manually requested session compaction.\n"
+            "Please write a comprehensive summary of the conversation history so far "
+            "using the defined structured template (including the 'Key Commands & Executions' section "
+            "with the most commonly used/successful shell commands under active skills), "
+            "and call the 'compact_history' tool immediately to transition this channel to a clean session."
+        )
+        trigger_msg = Message(
+            session_id=session.id,
+            chatbot_id=self.chatbot_id,
+            channel_id=channel_id,
+            sender="System",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content=trigger_content,
+            status=MessageStatus.PENDING_AGENT,
+        )
+        await self.gateway.post(trigger_msg)
+        return "🔄 Initiating history compaction. Please wait a moment..."
+
     async def get_session_status_by_channel(self, channel_id: str) -> str:
         """Get session statistics for the channel."""
         session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
@@ -291,7 +324,7 @@ class Chatbot(ABC):
         return (
             f"【Current Stats】\n"
             f"⏰ Uptime: {uptime_str} (started: {started_str})\n"
-            f"⚡ Session: {session_turns} turns\n"
+            f"⚡ Session: {session_turns} turns (ID: {session.id})\n"
             f"📖 Context: {context_str}\n"
             f"⏱️ Last Turn:\n"
             f"  - Tool Calls: {turn_tool_calls}\n"
@@ -303,7 +336,7 @@ class Chatbot(ABC):
         self,
         channel_id: str,
         prompt_content: str,
-        sender_name: str = "System",
+        sender_name: str = "Cronjob",
         custom_prompt: str | None = None,
         metadata: dict[str, Any] | None = None,
         title: str | None = None,
@@ -320,6 +353,8 @@ class Chatbot(ABC):
                 session_id=None,
                 title=session_title,
                 custom_prompt=custom_prompt,
+                chatbot_id=self.chatbot_id,
+                channel_id=channel_id,
             )
         else:
             await self.gateway.update_session_updated_at(session.id)

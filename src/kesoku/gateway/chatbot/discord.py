@@ -349,6 +349,8 @@ class DiscordChatbot(Chatbot):
                 title=session_title,
                 custom_prompt=custom_prompt,
                 created_at=message.created_at.timestamp(),
+                chatbot_id=self.chatbot_id,
+                channel_id=channel_id,
             )
             session_id = session.id
         else:
@@ -890,7 +892,7 @@ class DiscordChatbot(Chatbot):
         await self.trigger_cronjob_message(
             channel_id=target_channel_id_str,
             prompt_content=prompt_content,
-            sender_name="System",
+            sender_name="Cronjob",
             custom_prompt=custom_prompt,
             metadata=msg_metadata,
         )

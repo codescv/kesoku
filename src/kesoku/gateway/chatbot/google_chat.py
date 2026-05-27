@@ -282,6 +282,8 @@ class GoogleChatChatbot(Chatbot):
                 session_id=None,
                 title=title,
                 custom_prompt=self._build_gchat_custom_prompt(space_data, sender_name),
+                chatbot_id=self.chatbot_id,
+                channel_id=channel_id,
             )
             # Save session metadata
             await self.gateway.update_session_updated_at(session.id)
@@ -855,7 +857,7 @@ class GoogleChatChatbot(Chatbot):
         await self.trigger_cronjob_message(
             channel_id=channel_id,
             prompt_content=msg_content,
-            sender_name="System",
+            sender_name="Cronjob",
             custom_prompt=custom_prompt,
             metadata={"is_cronjob": True},
             title=f"Google Chat Scheduled Job {channel_id.split('/')[-1]}",

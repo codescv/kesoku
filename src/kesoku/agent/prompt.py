@@ -105,7 +105,7 @@ Unless the user explicitly instructs otherwise, do not refer to any file outside
         with open(resolved_path, encoding="utf-8") as f:
             content = f.read()
         base_name = os.path.basename(resolved_path)
-        user_prompts_sections.append(f"=== BEGIN {base_name} ===\n{content.strip()}\n=== END {base_name} ===")
+        user_prompts_sections.append(f"=== BEGIN {base_name} ===\n{content.strip()}\n\n=== END {base_name} ===")
 
     sections = [
         PREAMBLE.strip(),

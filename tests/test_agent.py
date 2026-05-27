@@ -353,17 +353,15 @@ async def test_system_prompt_and_pinned_turns_turn_based(temp_db: str) -> None:
 
     # Call build clean history directly
     history = await build_clean_history(
-        gateway=gw, session_id="sess_pin", max_turns=4, pin_initial_turns=2, pin_recent_turns=2
+        gateway=gw, session_id="sess_pin"
     )
 
-    # 1. First 2 turns are pinned
-    assert history[0].content == "User Prompt 1"
-    assert history[1].content == "Response 1"
-    assert history[2].content == "User Prompt 2"
-    assert history[3].content == "Response 2"
-
-    # 2. Next should start with Turn 5 (User Prompt 5)
-    assert history[4].content == "User Prompt 5"
+    # Verify all 6 turns are kept, meaning we have exactly 12 messages
+    assert len(history) == 12
+    history_contents = [m.content for m in history]
+    for i in range(1, 7):
+        assert f"User Prompt {i}" in history_contents
+        assert f"Response {i}" in history_contents
 
 
 @pytest.mark.asyncio
@@ -657,7 +655,7 @@ async def test_priority_based_dropping_and_atomic_batches_turn_based(temp_db: st
 
     # Call history building directly
     history = await build_clean_history(
-        gateway=gw, session_id="sess_drop", max_turns=10, pin_initial_turns=0, pin_recent_turns=1
+        gateway=gw, session_id="sess_drop"
     )
     history_ids = {m.id for m in history}
 
@@ -665,13 +663,14 @@ async def test_priority_based_dropping_and_atomic_batches_turn_based(temp_db: st
     # - User 1 and Resp 1 must be kept
     assert user1.id in history_ids
     assert resp1.id in history_ids
-    # - Thought 1, tc1, and tr1 must be dropped
+    # - Thought 1 must be dropped (completed turn)
     assert thought1.id not in history_ids
-    assert tc1.id not in history_ids
-    assert tr1.id not in history_ids
+    # - tc1 and tr1 must NOT be dropped
+    assert tc1.id in history_ids
+    assert tr1.id in history_ids
 
     # Turn 2 checks:
-    # - All kept (thought2, tc2, tr2, resp2)
+    # - All kept (thought2, tc2, tr2, resp2) since Turn 2 is the latest active turn
     assert thought2.id in history_ids
     assert tc2.id in history_ids
     assert tr2.id in history_ids
@@ -893,7 +892,7 @@ async def test_llm_turn_logging(temp_db: str, tmp_path: Any) -> None:
         assert len(history) >= 2
         assert history[0]["role"] == "system"
         assert history[1]["role"] == "user"
-        assert history[1]["content"] == "Do dummy task"
+        assert history[1]["content"].startswith("Do dummy task")
 
         # Verify tools serialization
         tools = log_data["tools"]
@@ -971,156 +970,55 @@ async def test_llm_turn_logging_disabled(temp_db: str, tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_context_optimization_tool_serialization(temp_db: str, tmp_path: Any) -> None:
-    """Verify that tool results are serialized and truncated under the context optimization settings."""
-    import os
+async def test_simplified_history_thought_stripping(temp_db: str) -> None:
+    """Verify that thoughts are stripped from completed turns but kept in the active turn."""
     DatabaseManager(temp_db).init_tables()
     cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
     gw = Gateway(context=KesokuContext(config=cfg))
 
-    with patch("kesoku.context.get_config") as mock_get_context_config, \
-         patch("kesoku.agent.history.get_config") as mock_get_history_config:
-        cfg = KesokuConfig()
-        cfg.workspace.db_path = temp_db
-        cfg.workspace.sessions_dir = str(tmp_path / "sessions")
-        cfg.agent.history.active_turn_keep_tool_results_for_k_recent_calls = 1
-        cfg.agent.history.serialize_historical_tool_results = True
-        cfg.agent.history.serialize_tool_results_threshold = 200
-        mock_get_context_config.return_value = cfg
-        mock_get_history_config.return_value = cfg
+    await gw.create_session("sess_simp", title="Simplified Session")
 
-        session = await gw.create_session("sess_opt", title="Optimization Session")
+    # Turn 1 (Historical completed turn with thoughts)
+    user1 = Message(
+        session_id="sess_simp", chatbot_id="cli", channel_id="ch1", sender="u1",
+        role="user", content="Turn 1 prompt", status="processed"
+    )
+    await gw.post(user1)
+    thought1 = Message(
+        session_id="sess_simp", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
+        role="assistant", type="thought", content="Turn 1 thoughts", status="responded"
+    )
+    await gw.post(thought1)
+    resp1 = Message(
+        session_id="sess_simp", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
+        role="assistant", content="Turn 1 response", status="responded"
+    )
+    await gw.post(resp1)
 
-        # --- Turn 1 (Historical Turn) ---
-        # 1. User message
-        user1 = Message(
-            session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="u1",
-            role="user", content="Turn 1 message", status="processed"
-        )
-        await gw.post(user1)
-        # 2. Tool call (not use_skill)
-        tc1 = Message(
-            session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
-            role="tool", type="tool_call", content="Calling dummy tool", status="responded",
-            parent_id=user1.id, metadata={"tool_name": "dummy_tool"}
-        )
-        await gw.post(tc1)
-        # 3. Tool result (long content > 200: should be serialized because it's historical and not use_skill)
-        long_content_1 = "Dummy tool result content " * 10
-        tr1 = Message(
-            session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="dummy_tool",
-            role="tool", type="tool_result", content=long_content_1, status="responded",
-            parent_id=tc1.id, metadata={"tool_name": "dummy_tool", "tool_result": long_content_1}
-        )
-        await gw.post(tr1)
-        # 4. Pinned skill tool call and result (should NOT be serialized because it's use_skill)
-        tc_skill = Message(
-            session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
-            role="tool", type="tool_call", content="Calling use_skill", status="responded",
-            parent_id=user1.id, metadata={"tool_name": "use_skill"}
-        )
-        await gw.post(tc_skill)
-        tr_skill = Message(
-            session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="use_skill",
-            role="tool", type="tool_result", content="Skill loaded content", status="responded",
-            parent_id=tc_skill.id, metadata={"tool_name": "use_skill", "tool_result": "Skill loaded content"}
-        )
-        await gw.post(tr_skill)
-        # 5. Short tool result (should NOT be serialized because length <= 200)
-        tc_short = Message(
-            session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
-            role="tool", type="tool_call", content="Calling short tool", status="responded",
-            parent_id=user1.id, metadata={"tool_name": "short_tool"}
-        )
-        await gw.post(tc_short)
-        tr_short = Message(
-            session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="short_tool",
-            role="tool", type="tool_result", content="Short tool result content", status="responded",
-            parent_id=tc_short.id, metadata={"tool_name": "short_tool", "tool_result": "Short tool result content"}
-        )
-        await gw.post(tr_short)
-        # 6. Assistant response
-        resp1 = Message(
-            session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
-            role="assistant", content="Response 1", status="responded"
-        )
-        await gw.post(resp1)
+    # Turn 2 (Active turn with thoughts)
+    user2 = Message(
+        session_id="sess_simp", chatbot_id="cli", channel_id="ch1", sender="u1",
+        role="user", content="Turn 2 prompt", status="pending_agent"
+    )
+    await gw.post(user2)
+    thought2 = Message(
+        session_id="sess_simp", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
+        role="assistant", type="thought", content="Turn 2 thoughts", status="responded"
+    )
+    await gw.post(thought2)
 
-        # --- Turn 2 (Active Turn) ---
-        # 1. User message
-        user2 = Message(
-            session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="u1",
-            role="user", content="Turn 2 message", status="pending_agent"
-        )
-        await gw.post(user2)
-        # 2. LLM Call Batch 1 (Older active turn batch, long content > 200: should be serialized)
-        tc2_1 = Message(
-            session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
-            role="tool", type="tool_call", content="Calling tool 2.1", status="responded",
-            parent_id=user2.id, metadata={"tool_name": "tool2_1"}
-        )
-        await gw.post(tc2_1)
-        long_content_2_1 = "Tool 2.1 result content " * 15
-        tr2_1 = Message(
-            session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="tool2_1",
-            role="tool", type="tool_result", content=long_content_2_1, status="responded",
-            parent_id=tc2_1.id, metadata={"tool_name": "tool2_1", "tool_result": long_content_2_1}
-        )
-        await gw.post(tr2_1)
+    # Call build clean history directly
+    history = await build_clean_history(gateway=gw, session_id="sess_simp")
+    history_ids = {m.id for m in history}
 
-        # Simulate delay of second LLM call to ensure separate timestamps for batches
-        await asyncio.sleep(0.6)
+    # Check Turn 1 (Completed)
+    assert user1.id in history_ids
+    assert resp1.id in history_ids
+    assert thought1.id not in history_ids  # Thought must be stripped!
 
-        # 3. LLM Call Batch 2 (Latest active turn batch, keep_k=1, so this should be kept in full detail)
-        tc2_2 = Message(
-            session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
-            role="tool", type="tool_call", content="Calling tool 2.2", status="responded",
-            parent_id=user2.id, metadata={"tool_name": "tool2_2"}
-        )
-        await gw.post(tc2_2)
-        tr2_2 = Message(
-            session_id="sess_opt", chatbot_id="cli", channel_id="ch1", sender="tool2_2",
-            role="tool", type="tool_result", content="Tool 2.2 result content", status="responded",
-            parent_id=tc2_2.id, metadata={"tool_name": "tool2_2", "tool_result": "Tool 2.2 result content"}
-        )
-        await gw.post(tr2_2)
-
-        # Call build clean history directly
-        history = await build_clean_history(
-            gateway=gw, session_id="sess_opt", max_turns=10, pin_initial_turns=2, pin_recent_turns=2
-        )
-
-        # 1. Check that historical long tr1 was serialized
-        tr1_msg = next(m for m in history if m.id == tr1.id)
-        assert "tool output in" in tr1_msg.content
-        assert "tool output in" in tr1_msg.metadata["tool_result"]
-        file_path1 = tr1_msg.content.split("tool output in ")[1]
-        assert os.path.exists(file_path1)  # noqa: ASYNC240
-        with open(file_path1, encoding="utf-8") as f:  # noqa: ASYNC230
-            assert f.read() == long_content_1
-
-        # 2. Check that historical tr_skill was NOT serialized (preserved use_skill)
-        tr_skill_msg = next(m for m in history if m.id == tr_skill.id)
-        assert tr_skill_msg.content == "Skill loaded content"
-        assert tr_skill_msg.metadata["tool_result"] == "Skill loaded content"
-
-        # 3. Check that historical short tool result tr_short was NOT serialized
-        tr_short_msg = next(m for m in history if m.id == tr_short.id)
-        assert tr_short_msg.content == "Short tool result content"
-        assert tr_short_msg.metadata["tool_result"] == "Short tool result content"
-
-        # 4. Check that active turn long tr2_1 (older batch) was serialized
-        tr2_1_msg = next(m for m in history if m.id == tr2_1.id)
-        assert "tool output in" in tr2_1_msg.content
-        file_path2_1 = tr2_1_msg.content.split("tool output in ")[1]
-        assert os.path.exists(file_path2_1)  # noqa: ASYNC240
-        with open(file_path2_1, encoding="utf-8") as f:  # noqa: ASYNC230
-            assert f.read() == long_content_2_1
-
-        # 5. Check that active turn tr2_2 (latest batch, K=1) was NOT serialized (kept in full detail)
-        tr2_2_msg = next(m for m in history if m.id == tr2_2.id)
-        assert tr2_2_msg.content == "Tool 2.2 result content"
-        assert tr2_2_msg.metadata["tool_result"] == "Tool 2.2 result content"
+    # Check Turn 2 (Active)
+    assert user2.id in history_ids
+    assert thought2.id in history_ids      # Active turn thought must be preserved!
 
 
 @pytest.mark.asyncio

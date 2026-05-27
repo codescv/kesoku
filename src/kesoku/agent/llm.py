@@ -437,6 +437,33 @@ class BaseLLM(ABC):
         """Translate the provider-native response into a standardized LLMResponse."""
         raise NotImplementedError()
 
+    def count_tokens(
+        self,
+        prompt: str | None = None,
+        system_prompt: str | None = None,
+        history: list[Message] | None = None,
+        tools: list[Callable] | None = None,
+    ) -> int:
+        """Estimate or count the total input tokens for a generation payload."""
+        return self.estimate_tokens_fallback(prompt, system_prompt, history)
+
+    def estimate_tokens_fallback(
+        self,
+        prompt: str | None = None,
+        system_prompt: str | None = None,
+        history: list[Message] | None = None,
+    ) -> int:
+        """Fallback character-based token estimation (roughly 4 characters per token)."""
+        total_chars = 0
+        if prompt:
+            total_chars += len(prompt)
+        if system_prompt:
+            total_chars += len(system_prompt)
+        if history:
+            for m in history:
+                total_chars += len(m.content)
+        return max(1, total_chars // 4)
+
 
 class GeminiLLM(BaseLLM):
     """Google GenAI (Gemini) implementation of BaseLLM supporting API Key and Vertex AI."""
@@ -451,6 +478,7 @@ class GeminiLLM(BaseLLM):
             config = get_config().gemini
         self.config = config
         self.model_name = config.model_name
+        self.context_window_limit = 1048576  # 1M tokens context limit for Gemini Flash
         logger.info(f"Using GeminiLLM backend ({self.model_name}).")
 
         try:
@@ -589,6 +617,26 @@ class GeminiLLM(BaseLLM):
             cached_tokens=cached_tokens,
         )
 
+    def count_tokens(
+        self,
+        prompt: str | None = None,
+        system_prompt: str | None = None,
+        history: list[Message] | None = None,
+        tools: list[Callable] | None = None,
+    ) -> int:
+        """Count exact input tokens of the context payload using the Gemini API."""
+        try:
+            turns, resolved_system_prompt = history_to_turns(history, prompt, system_prompt)
+            native_input = self._build_native_input(turns, resolved_system_prompt, tools)
+            res = self.client.models.count_tokens(
+                model=self.model_name,
+                contents=native_input["contents"],
+            )
+            return res.total_tokens
+        except Exception as e:
+            logger.warning(f"Failed to count tokens via Gemini API: {e}. Falling back to estimation.")
+            return self.estimate_tokens_fallback(prompt, resolved_system_prompt or system_prompt, history)
+
 
 class ClaudeLLM(BaseLLM):
     """Anthropic Claude implementation of BaseLLM supporting Vertex AI."""
@@ -603,6 +651,7 @@ class ClaudeLLM(BaseLLM):
             config = get_config().claude
         self.config = config
         self.model_name = config.model_name
+        self.context_window_limit = 200000  # 200K tokens context limit for Claude
         logger.info(f"Using ClaudeLLM backend ({self.model_name}).")
 
         logger.info(

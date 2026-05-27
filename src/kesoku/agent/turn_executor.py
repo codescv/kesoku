@@ -134,6 +134,47 @@ class TurnExecutor:
 
                 tools_list = self.tool_runner.tool_registry.get_tools_list()
 
+                # Calculate/estimate context tokens asynchronously to avoid blocking the event loop
+                try:
+                    context_tokens = await asyncio.to_thread(
+                        llm.count_tokens,
+                        prompt=None,
+                        system_prompt=system_prompt,
+                        history=history,
+                        tools=tools_list,
+                    )
+                except Exception as te:
+                    logger.warning(f"Failed to count context tokens: {te}")
+                    context_tokens = llm.estimate_tokens_fallback(None, system_prompt, history)
+
+                limit = getattr(llm, "context_window_limit", 1048576)
+                percentage = (context_tokens / limit) * 100
+
+                # Inject context monitor warning into the latest user message in history
+                latest_user_msg = None
+                for msg in reversed(history):
+                    if msg.role == MessageRole.USER:
+                        latest_user_msg = msg
+                        break
+
+                if latest_user_msg:
+                    monitor_suffix = (
+                        f"\n\n[Context Monitor: Currently using {context_tokens:,} tokens, "
+                        f"which is {percentage:.1f}% of your {limit:,} window limit. "
+                        f"Please call 'compact_history' tool if you are close to the limit "
+                        f"to reset the context window.]"
+                    )
+                    if "[Context Monitor:" not in latest_user_msg.content:
+                        # Clone the user message to avoid mutating shared database/cached states in place
+                        msg_idx = history.index(latest_user_msg)
+                        copied_msg = latest_user_msg.model_copy()
+                        copied_msg.content += monitor_suffix
+                        history[msg_idx] = copied_msg
+                        logger.info(
+                            f"Injected context monitor warning into user message {copied_msg.id}: "
+                            f"{context_tokens} tokens ({percentage:.1f}%)"
+                        )
+
                 # LLM inference
                 res = await llm.generate(
                     system_prompt=system_prompt,
@@ -220,6 +261,25 @@ class TurnExecutor:
                     result_msgs = await asyncio.gather(*exec_tasks)
                     for rm in result_msgs:
                         await self.gateway.post(rm)
+
+                    # Check if history was compacted and session was transitioned
+                    tool_ctx = self.tool_runner.tool_context
+                    val = getattr(tool_ctx, "transitioned_to_session", None)
+                    if isinstance(val, str):
+                        new_session_id = val
+                        logger.info(
+                            f"Session '{self.session_id}' transitioned to '{new_session_id}'. "
+                            "Aborting remaining turn steps and stopping old session worker."
+                        )
+                        # Mark the initiating message as processed
+                        await self.gateway.mark_message_processed(current_msg.id)
+
+                        # Schedule worker stop task in the background so the current execution exits cleanly first
+                        if self.gateway.agent:
+                            asyncio.create_task(
+                                self.gateway.agent.stop_session_worker(self.session_id, immediate=True)
+                            )
+                        break
 
                     continue
                 else:

@@ -17,6 +17,8 @@ from pydantic import BaseModel, Field
 
 from kesoku.agent.skills import SkillManager
 from kesoku.config import get_config
+from kesoku.constants import MessageRole, MessageStatus, MessageType
+from kesoku.db import Message
 from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -34,6 +36,8 @@ class ToolContext(BaseModel):
     session_workspace: str = Field(..., description="Relative folder name for the session workspace")
     original_msg_id: str | None = Field(None, description="ID of the message initiating the turn")
     active_jobs: Any = Field(None, exclude=True)
+    transitioned_to_session: str | None = Field(None, description="New session ID if history was compacted")
+    gateway: Any = Field(None, exclude=True)
 
 
 class ActiveJobsRegistry:
@@ -173,10 +177,7 @@ async def monitor_background_job(
         stdout_task: The background stdout streaming task.
         stderr_task: The background stderr streaming task.
     """
-    from kesoku.constants import MessageRole, MessageStatus, MessageType
-    from kesoku.db import Message
     from kesoku.gateway.gateway import Gateway
-
     try:
         # Wait for process and stream tasks to finish
         return_code = await proc.wait()
@@ -695,3 +696,163 @@ def use_skill(skill_name: str, context: ToolContext | None = None) -> str:
         return content
     except Exception as e:
         return f"Failed to load skill '{skill_name}': {e}"
+
+
+@default_registry.register
+async def compact_history(summary: str, context: ToolContext) -> str:
+    """Compact the active conversation history and transition this channel to a clean new session.
+
+    Use this tool when your context token usage is high or you are close to your context limit,
+    to summarize the conversation history so far and start fresh.
+
+    Args:
+        summary: The comprehensive chronological summary of the conversation so far.
+                 You MUST follow this strict Markdown format:
+                 ### 1. Completed & Ongoing Goals
+                 - **Completed**: [List of tasks successfully resolved so far]
+                 - **In Progress**: [List of tasks currently being worked on]
+
+                 ### 2. Critical States & Facts
+                 - **Key Facts / Constraints**: [Important facts or constraints mentioned by the user]
+                 - **Generated Assets / Paths**: [Paths of created files, staging outputs, or scripts]
+
+                 ### 3. User Preferences
+                 - **Custom Rules**: [User-defined preferences, language choice, coding styles, or formatting rules]
+
+                 ### 4. Key Commands & Executions
+                 - **Successful Commands**: [List of most commonly used or successfully executed shell
+                                            commands, build scripts, or test execution lines under
+                                            active/loaded skills, to avoid re-exploring them in
+                                            the new session]
+        context: The tool execution context (injected automatically).
+
+    Returns:
+        Confirmation message indicating compaction status.
+    """
+    logger.info(f"Initiating history compaction for session '{context.session_id}'")
+
+    gw = context.gateway
+    if not gw:
+        raise ValueError("Gateway instance must be injected in ToolContext to compact history.")
+
+    # 1. Retrieve the old session to copy its configuration
+    old_session = await gw.get_session(context.session_id)
+    if not old_session:
+        raise RuntimeError(f"Active session '{context.session_id}' not found.")
+
+    # 2. Find the real initiating user message and platform identifiers
+    old_history = await gw.get_session_history(context.session_id, limit=100)
+
+    # A. Find the real user message for summary/content copying (skipping System triggers)
+    initiating_msg = None
+    for msg in reversed(old_history):
+        is_cron = msg.metadata.get("is_cronjob") or msg.metadata.get("wechat_cronjob") or msg.sender == "Cronjob"
+        if msg.role == MessageRole.USER and (msg.sender != "System" or is_cron):
+            initiating_msg = msg
+            break
+
+    # B. Find the latest user/system message to resolve external channel identifiers reliably
+    meta_msg = None
+    for msg in reversed(old_history):
+        if msg.role == MessageRole.USER:
+            meta_msg = msg
+            break
+    if not meta_msg:
+        meta_msg = old_history[-1] if old_history else None
+
+    if not meta_msg:
+        raise RuntimeError("Could not find any historical message for external channel mapping.")
+
+    chatbot_id = meta_msg.chatbot_id
+    channel_id = meta_msg.channel_id
+    sender_name = initiating_msg.sender if initiating_msg else "System"
+
+    # 3. Create the new session record
+    new_session_title = f"Compacted {old_session.title[:15]}"
+    new_session = await gw.create_session(
+        title=new_session_title,
+        system_prompt=old_session.system_prompt,
+        chatbot_id=chatbot_id,
+        channel_id=channel_id,
+    )
+    new_session_id = new_session.id
+
+    # 4. Retrieve the latest raw user message content (empty if no real user prompt exists)
+    latest_user_msg_content = initiating_msg.content if initiating_msg else ""
+    if latest_user_msg_content and "\n\n[Context Monitor:" in latest_user_msg_content:
+        latest_user_msg_content = latest_user_msg_content.split("\n\n[Context Monitor:")[0]
+
+    # Check if the assistant has already completed and responded to this initiating user message in old_history
+    is_turn_completed = False
+    completed_assistant_reply = None
+    if initiating_msg:
+        initiating_idx = old_history.index(initiating_msg)
+        for msg in old_history[initiating_idx + 1:]:
+            if msg.role == MessageRole.ASSISTANT and msg.type == MessageType.TEXT:
+                completed_assistant_reply = msg
+                break
+        is_turn_completed = (completed_assistant_reply is not None)
+
+    # 5. Construct the compacted starting message
+    compacted_content = (
+        f"[Conversation History Summary]\n"
+        f"{summary}\n\n"
+        f"[Latest User Message]\n"
+        f"{latest_user_msg_content}"
+    )
+
+    # 6. Post the compacted message under the new session ID to the channel
+    # If the turn was already completed, save it as PROCESSED so it doesn't trigger a new worker run
+    compacted_msg_status = MessageStatus.PROCESSED if is_turn_completed else MessageStatus.PENDING_AGENT
+    compacted_msg = Message(
+        session_id=new_session_id,
+        chatbot_id=chatbot_id,
+        channel_id=channel_id,
+        sender=sender_name,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content=compacted_content,
+        status=compacted_msg_status,
+        metadata=dict(initiating_msg.metadata),
+    )
+
+    # 7. Post a system notification assistant message to inform the user of the background transition
+    notification_msg = Message(
+        session_id=new_session_id,
+        chatbot_id=chatbot_id,
+        channel_id=channel_id,
+        sender="Notification",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="🔄 Conversation history has been automatically compacted to optimize response speed.",
+        status=MessageStatus.PENDING,
+    )
+
+    # Save messages to the database
+    await gw.post(compacted_msg)
+    await gw.post(notification_msg)
+
+    # 8. If the previous turn was already completed, also copy the assistant's final response to the new session
+    if is_turn_completed and completed_assistant_reply:
+        # Strip turn_metrics from copied metadata to avoid stats inconsistency in the new session
+        copied_metadata = dict(completed_assistant_reply.metadata)
+        copied_metadata.pop("turn_metrics", None)
+
+        copied_reply = Message(
+            session_id=new_session_id,
+            chatbot_id=chatbot_id,
+            channel_id=channel_id,
+            sender=completed_assistant_reply.sender,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content=completed_assistant_reply.content,
+            status=MessageStatus.DELIVERED,
+            metadata=copied_metadata,
+        )
+        await gw.post(copied_reply)
+
+    # 8. Record transition in context so TurnExecutor knows to abort cleanly
+    context.transitioned_to_session = new_session_id
+
+    logger.info(f"Compacted history successfully. Transitioned '{context.session_id}' -> '{new_session_id}'")
+    return f"Conversation history successfully compacted and transitioned to new session: {new_session_id}."

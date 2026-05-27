@@ -1238,7 +1238,7 @@ You are interacting with the user via WeChat (Weixin).
                 logger.error(f"WeChat: failed to send command reply: {e}")
 
         try:
-            if command in {"clear", "reset", "status"}:
+            if command in {"clear", "reset", "status", "compact"}:
                 await self.commands.execute(command, reply_func, channel_id=chat_id)
             elif command == "restart":
                 await self.commands.execute(command, reply_func)
@@ -1308,7 +1308,7 @@ You are interacting with the user via WeChat (Weixin).
         await self.trigger_cronjob_message(
             channel_id=channel_id,
             prompt_content=msg_content,
-            sender_name="System Scheduler",
+            sender_name="Cronjob",
             custom_prompt=custom_prompt,
             metadata={"wechat_cronjob": True},
             title=f"WeChat Scheduled Job {channel_id}",
@@ -1388,6 +1388,8 @@ You are interacting with the user via WeChat (Weixin).
                 session_id=None,
                 title=title,
                 custom_prompt=custom_prompt,
+                chatbot_id=self.chatbot_id,
+                channel_id=channel_id,
             )
         else:
             await self.gateway.update_session_updated_at(session.id)

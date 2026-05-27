@@ -83,7 +83,7 @@ async def test_get_session_status_by_channel() -> None:
 
     assert "【Current Stats】" in status_str
     assert "⏰ Uptime: 1h 0m 0s (started: 2026-05-26 11:00:00)" in status_str
-    assert "⚡ Session: 1 turns" in status_str
+    assert "⚡ Session: 1 turns (ID: session123)" in status_str
     assert "📖 Context: 1K tokens (Cached: 1K)" in status_str
     assert "  - Tool Calls: 3" in status_str
     assert "  - Tokens: 0K" in status_str

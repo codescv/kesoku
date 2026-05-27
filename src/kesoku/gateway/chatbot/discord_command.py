@@ -46,7 +46,7 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
                     await interaction.followup.send(text)
 
                 try:
-                    if c_name in {"clear", "reset", "status"}:
+                    if c_name in {"clear", "reset", "status", "compact"}:
                         await chatbot.commands.execute(c_name, reply_func, channel_id=str(interaction.channel_id))
                     else:
                         await chatbot.commands.execute(c_name, reply_func)
