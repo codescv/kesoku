@@ -265,3 +265,95 @@ async def test_turn_executor_tool_calls(temp_db: str) -> None:
     final_reply = [m for m in history if m.role == "assistant" and m.type == "text"]
     assert len(final_reply) == 1
     assert final_reply[0].content == "The calculated value is 10."
+
+
+@pytest.mark.asyncio
+async def test_turn_executor_pivot_resets_nudged(temp_db: str) -> None:
+    """Verify that when a pivot happens inside the loop, turn metrics and nudge state are reset."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.create_session("sess_pivot", title="Pivot Session")
+
+    msg1 = Message(
+        session_id="sess_pivot", chatbot_id="cli", channel_id="ch1", sender="u1",
+        role="user", content="First prompt", status="pending_agent",
+    )
+    await gw.post(msg1)
+
+    msg2 = Message(
+        session_id="sess_pivot", chatbot_id="cli", channel_id="ch1", sender="u1",
+        role="user", content="Pivoted prompt", status="pending_agent",
+    )
+    await gw.post(msg2)
+
+    class NudgeAndPivotLLM(BaseLLM):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+        ) -> LLMResponse:
+            self.calls += 1
+            if self.calls == 1:
+                # First prompt: return empty to trigger nudge
+                return LLMResponse(content="", thought="Empty on first")
+            # After pivot (which resets nudge state!):
+            # 1. First generation after pivot (call 2): return empty content to trigger nudge on Pivoted prompt too!
+            if self.calls == 2:
+                return LLMResponse(content="", thought="Empty on second")
+            # 2. Second generation after pivot (call 3): return success response
+            return LLMResponse(content="Pivoted response success!")
+
+    llm = NudgeAndPivotLLM()
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    turn_logger = MagicMock(spec=TurnLogger)
+    context = KesokuContext(llm=llm)
+    executor = TurnExecutor("sess_pivot", gw, tool_runner, turn_logger, context=context)
+
+    # Configure mock worker that returns msg1 in first loop, but pivots to msg2 in second loop
+    worker = MagicMock()
+    type(worker).running = PropertyMock(side_effect=[True, True, True, False])
+
+    loop_count = 0
+    async def mock_pivot(m: Message) -> Message:
+        nonlocal loop_count
+        loop_count += 1
+        if loop_count == 2:
+            # Pivot to msg2 on second loop iteration!
+            return msg2
+        return m
+
+    worker.drain_queue_and_pivot.side_effect = mock_pivot
+    worker.queue_empty.return_value = True
+
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor.process_turn(
+            current_msg=msg1,
+            worker=worker,
+            session_staging_dir="/tmp/sess_pivot",
+        )
+
+    # Check messages in session
+    history = await gw.get_session_history("sess_pivot")
+
+    # We expect:
+    # 1. First WeChat prompt
+    # 2. Nudge message on the first WeChat prompt (parent is msg1)
+    # 3. Pivoted prompt
+    # 4. Nudge message on the pivoted prompt (parent is msg2)
+    # 5. Success response to pivoted prompt (parent is msg2)
+
+    nudges = [m for m in history if m.role == "system" and "empty content" in m.content]
+    assert len(nudges) == 2
+    assert nudges[0].parent_id == msg1.id
+    assert nudges[1].parent_id == msg2.id
+
+    final_replies = [m for m in history if m.role == "assistant" and m.content == "Pivoted response success!"]
+    assert len(final_replies) == 1
+    assert final_replies[0].parent_id == msg2.id

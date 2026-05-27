@@ -117,7 +117,19 @@ class TurnExecutor:
         try:
             while worker.running:
                 # Check-in before atomic action (Thought Interruption)
+                prev_msg_id = current_msg.id
                 current_msg = await worker.drain_queue_and_pivot(current_msg)
+                if current_msg.id != prev_msg_id:
+                    logger.info(
+                        f"Pivoted from message {prev_msg_id} to {current_msg.id} during turn loop. "
+                        f"Resetting turn metrics and nudge flag."
+                    )
+                    nudged = False
+                    turn_tool_calls = 0
+                    turn_tokens = 0
+                    last_context_tokens = 0
+                    last_cached_tokens = 0
+                    start_time = time.time()
 
                 # Resolve LLM dynamically for the current message
                 llm = self._resolve_llm(current_msg)
