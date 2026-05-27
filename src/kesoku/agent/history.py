@@ -149,14 +149,7 @@ async def build_clean_history(
     # 6. Load messages only for the selected turn anchors using timestamp ranges
     raw_history = await gateway.get_session_history_by_ranges(session_id, ranges, order=order)
 
-    # 6. Always preserves the initial system message(s) at the start.
-    system_msg = None
-    for m in raw_history:
-        if m.role == MessageRole.SYSTEM:
-            system_msg = m
-            break
-
-    conv_msgs = [m for m in raw_history if (not system_msg or m.id != system_msg.id)]
+    conv_msgs = raw_history
 
     # 7. Groups messages into complete logical turns (User prompt -> ... -> before next user prompt).
     turns: list[list[Message]] = []
@@ -279,8 +272,6 @@ async def build_clean_history(
 
     # 9. Flatten turns and construct the final chronological context history.
     final_history = []
-    if system_msg:
-        final_history.append(system_msg)
     for turn in cleaned_turns:
         final_history.extend(turn)
 

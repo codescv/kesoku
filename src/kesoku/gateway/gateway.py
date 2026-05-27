@@ -13,7 +13,7 @@ from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 from kesoku.agent.prompt import build_sys_prompt
-from kesoku.constants import MessageRole, MessageStatus, MessageType
+from kesoku.constants import MessageRole, MessageStatus
 from kesoku.context import KesokuContext
 from kesoku.db import Message, Session
 from kesoku.logger import setup_logger
@@ -83,22 +83,13 @@ class Gateway:
             session_id = uuid.uuid4().hex[:8]
         now = created_at if created_at is not None else time.time()
         sess = Session(id=session_id, title=title, created_at=now, updated_at=now)
-        await asyncio.to_thread(self.db.create_session, sess)
 
-        # Save initial system prompt as the first message in the session
-        sys_msg = Message(
-            session_id=session_id,
-            chatbot_id="system",
-            channel_id="system",
-            sender="System",
-            role=MessageRole.SYSTEM,
-            type=MessageType.TEXT,
-            content=system_prompt or build_sys_prompt(custom_prompt=custom_prompt, session=sess),
-            status=MessageStatus.RESPONDED,
-            # Use a timestamp slightly in the past to ensure system message always comes first
-            timestamp=now - 0.01,
-        )
-        await asyncio.to_thread(self.db.save_message, sys_msg)
+        # Build system prompt if not provided
+        if system_prompt is None:
+            system_prompt = build_sys_prompt(custom_prompt=custom_prompt, session=sess)
+        sess.system_prompt = system_prompt
+
+        await asyncio.to_thread(self.db.create_session, sess)
         logger.debug(f"Created new chat session: {session_id} ({title})")
         return sess
 

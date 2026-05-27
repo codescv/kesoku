@@ -48,6 +48,7 @@ class Session(BaseModel):
     title: str = Field(..., description="Summary title or first message snippet")
     created_at: float = Field(default_factory=time.time, description="Creation unix timestamp")
     updated_at: float = Field(default_factory=time.time, description="Last updated unix timestamp")
+    system_prompt: str = Field(default="", description="The main system prompt instructions for the session")
 
     @property
     def workspace_name(self) -> str:
@@ -304,7 +305,8 @@ class DatabaseManager:
                         id TEXT PRIMARY KEY,
                         title TEXT NOT NULL,
                         created_at REAL NOT NULL,
-                        updated_at REAL NOT NULL
+                        updated_at REAL NOT NULL,
+                        system_prompt TEXT NOT NULL DEFAULT ''
                     );
                     """
                 )
@@ -336,10 +338,10 @@ class DatabaseManager:
                 conn.execute(
                     """
                     INSERT INTO sessions
-                    (id, title, created_at, updated_at)
-                    VALUES (?, ?, ?, ?)
+                    (id, title, created_at, updated_at, system_prompt)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
-                    (session.id, session.title, session.created_at, session.updated_at),
+                    (session.id, session.title, session.created_at, session.updated_at, session.system_prompt),
                 )
         finally:
             conn.close()
@@ -364,6 +366,7 @@ class DatabaseManager:
                     title=row["title"],
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
+                    system_prompt=row["system_prompt"],
                 )
             return None
         finally:
@@ -400,6 +403,7 @@ class DatabaseManager:
                     title=row["title"],
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
+                    system_prompt=row["system_prompt"],
                 )
                 for row in rows
             ]
@@ -423,6 +427,7 @@ class DatabaseManager:
                     title=row["title"],
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
+                    system_prompt=row["system_prompt"],
                 )
             return None
         finally:
@@ -457,6 +462,7 @@ class DatabaseManager:
                     title=row["title"],
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
+                    system_prompt=row["system_prompt"],
                 )
             return None
         finally:
@@ -566,7 +572,7 @@ class DatabaseManager:
             conn.close()
 
     def update_session_system_prompt(self, session_id: str, content: str) -> None:
-        """Update the main system prompt message content for an existing session.
+        """Update the main system prompt content for an existing session.
 
         Args:
             session_id: Target session ID.
@@ -576,8 +582,7 @@ class DatabaseManager:
         try:
             with conn:
                 conn.execute(
-                    "UPDATE messages SET content = ? "
-                    "WHERE session_id = ? AND role = 'system' AND chatbot_id = 'system'",
+                    "UPDATE sessions SET system_prompt = ? WHERE id = ?",
                     (content, session_id),
                 )
         finally:

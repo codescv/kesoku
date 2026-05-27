@@ -356,17 +356,14 @@ async def test_system_prompt_and_pinned_turns_turn_based(temp_db: str) -> None:
         gateway=gw, session_id="sess_pin", max_turns=4, pin_initial_turns=2, pin_recent_turns=2
     )
 
-    # 1. System prompt is at index 0
-    assert history[0].role == "system"
+    # 1. First 2 turns are pinned
+    assert history[0].content == "User Prompt 1"
+    assert history[1].content == "Response 1"
+    assert history[2].content == "User Prompt 2"
+    assert history[3].content == "Response 2"
 
-    # 2. First 2 turns are pinned
-    assert history[1].content == "User Prompt 1"
-    assert history[2].content == "Response 1"
-    assert history[3].content == "User Prompt 2"
-    assert history[4].content == "Response 2"
-
-    # 3. Next should start with Turn 5 (User Prompt 5)
-    assert history[5].content == "User Prompt 5"
+    # 2. Next should start with Turn 5 (User Prompt 5)
+    assert history[4].content == "User Prompt 5"
 
 
 @pytest.mark.asyncio
@@ -698,8 +695,7 @@ async def test_clean_history_config_loading(temp_db: str) -> None:
     with patch("kesoku.context.get_config", return_value=mock_cfg), \
          patch("kesoku.agent.history.get_config", return_value=mock_cfg):
         history = await build_clean_history(gateway=gw, session_id="sess_cfg")
-        assert len(history) == 1
-        assert history[0].role == "system"
+        assert len(history) == 0
 
 
 @pytest.mark.asyncio
@@ -808,12 +804,11 @@ async def test_agent_empty_response_nudge(temp_db: str) -> None:
     history = await gw.get_session_history("sess_nudge")
 
     # We expect:
-    # 1. System prompt (from create_session)
-    # 2. User Prompt ("Hello!")
-    # 3. Thought ("I thought about it...")
-    # 4. System nudge message ("[System Notification: Your previous response had empty content...]")
-    # 5. Final Assistant Response ("Hello! Here is the reply after nudge.")
-    assert len(history) >= 5
+    # 1. User Prompt ("Hello!")
+    # 2. Thought ("I thought about it...")
+    # 3. System nudge message ("[System Notification: Your previous response had empty content...]")
+    # 4. Final Assistant Response ("Hello! Here is the reply after nudge.")
+    assert len(history) >= 4
 
     nudge_msgs = [m for m in history if m.sender == "System" and "empty content" in m.content]
     assert len(nudge_msgs) == 1

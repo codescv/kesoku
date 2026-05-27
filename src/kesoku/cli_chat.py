@@ -122,6 +122,21 @@ async def _show_session_history(gateway: Gateway, console: Console, session_id: 
         logger.warning(f"Session '{session_id}' has no recorded messages.")
         return
     logger.info(f"Chat History for Session '{session_id}' ({session.title}):")
+
+    if session.system_prompt:
+        sys_msg = Message(
+            session_id=session_id,
+            chatbot_id="system",
+            channel_id="system",
+            sender="System",
+            role=MessageRole.SYSTEM,
+            type=MessageType.TEXT,
+            content=session.system_prompt,
+            status=MessageStatus.RESPONDED,
+            timestamp=session.created_at - 0.01,
+        )
+        _render_message(console, sys_msg)
+
     for msg in history:
         _render_message(console, msg)
 
@@ -193,15 +208,39 @@ async def run_cli_chat_async(
 
     order = "grouped" if grouped else "phased"
     history = await build_clean_history(gateway=gateway, session_id=session_id, order=order, heal_orphans=False)
+    session = await gateway.get_session(session_id)
+
     if is_resumed:
         logger.info(f"Resuming Session '{session_id}' History:")
+        if session and session.system_prompt:
+            sys_msg = Message(
+                session_id=session_id,
+                chatbot_id="system",
+                channel_id="system",
+                sender="System",
+                role=MessageRole.SYSTEM,
+                type=MessageType.TEXT,
+                content=session.system_prompt,
+                status=MessageStatus.RESPONDED,
+                timestamp=session.created_at - 0.01,
+            )
+            _render_message(console, sys_msg)
         for m in history:
             _render_message(console, m)
     else:
-        for m in history:
-            if m.role == MessageRole.SYSTEM:
-                _render_message(console, m)
-                break
+        if session and session.system_prompt:
+            sys_msg = Message(
+                session_id=session_id,
+                chatbot_id="system",
+                channel_id="system",
+                sender="System",
+                role=MessageRole.SYSTEM,
+                type=MessageType.TEXT,
+                content=session.system_prompt,
+                status=MessageStatus.RESPONDED,
+                timestamp=session.created_at - 0.01,
+            )
+            _render_message(console, sys_msg)
 
     # Ingest user message
     msg = Message(

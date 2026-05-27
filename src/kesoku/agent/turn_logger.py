@@ -57,6 +57,7 @@ class TurnLogger:
         history: list[Message],
         tools: list[Callable[..., Any]],
         response: LLMResponse,
+        system_prompt: str | None = None,
     ) -> None:
         """Log the raw LLM turn inputs and outputs to a YAML file in the session staging directory.
 
@@ -65,6 +66,7 @@ class TurnLogger:
             history: Conversational history sent to the LLM.
             tools: List of tools passed to the LLM.
             response: LLMResponse object returned by the LLM.
+            system_prompt: Optional global system prompt.
         """
         os.makedirs(self.session_staging_dir, exist_ok=True)
         idx = self._get_next_llm_turn_idx()
@@ -73,6 +75,19 @@ class TurnLogger:
 
         # Format history messages into dict representation
         formatted_history = []
+        if system_prompt:
+            formatted_history.append({
+                "id": f"sys_{self.session_id}",
+                "role": "system",
+                "sender": "System",
+                "type": "text",
+                "content": system_prompt,
+                "metadata": {},
+                "timestamp": time.time() - 1000.0,
+                "status": "responded",
+                "parent_id": None,
+            })
+
         for msg in history:
             formatted_history.append({
                 "id": msg.id,

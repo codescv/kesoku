@@ -61,6 +61,22 @@ class MessageHeaderView(discord.ui.View):
                 heal_orphans=False,
             )
 
+            # Fetch system prompt directly from session and prepend as first item
+            session = await self.gateway.get_session(self.session_id)
+            if session and session.system_prompt:
+                sys_msg = Message(
+                    session_id=self.session_id,
+                    chatbot_id="system",
+                    channel_id="system",
+                    sender="System",
+                    role=MessageRole.SYSTEM,
+                    type=MessageType.TEXT,
+                    content=session.system_prompt,
+                    status=MessageStatus.RESPONDED,
+                    timestamp=session.created_at - 0.01,
+                )
+                history.insert(0, sys_msg)
+
             # Generate beautiful HTML trajectory content
             html_content = self._generate_html_trajectory(history)
 

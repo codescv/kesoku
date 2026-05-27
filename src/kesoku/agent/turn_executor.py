@@ -128,10 +128,15 @@ class TurnExecutor:
                     session_id=self.session_id,
                 )
 
+                 # Retrieve system prompt directly from session
+                session = await self.gateway.get_session(self.session_id)
+                system_prompt = session.system_prompt if session else None
+
                 tools_list = self.tool_runner.tool_registry.get_tools_list()
 
                 # LLM inference
                 res = await llm.generate(
+                    system_prompt=system_prompt,
                     history=history,
                     tools=tools_list,
                 )
@@ -144,6 +149,7 @@ class TurnExecutor:
                             history=history,
                             tools=tools_list,
                             response=res,
+                            system_prompt=system_prompt,
                         )
                     except Exception as le:
                         logger.error(f"Failed to log LLM turn: {le}", exc_info=True)

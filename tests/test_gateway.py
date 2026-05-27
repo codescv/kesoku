@@ -529,11 +529,13 @@ async def test_gateway_create_session_created_at(temp_db: str) -> None:
     )
 
     history = await gw.get_session_history(session.id)
-    assert len(history) == 2
-    # System message should come first because its timestamp is hist_timestamp - 0.01
-    assert history[0].role == MessageRole.SYSTEM
-    assert history[1].role == MessageRole.USER
-    assert history[0].timestamp < history[1].timestamp
+    assert len(history) == 1
+    assert history[0].role == MessageRole.USER
+
+    # Verify system prompt exists directly on session model
+    fetched_session = await gw.get_session(session.id)
+    assert fetched_session is not None
+    assert fetched_session.system_prompt != ""
 
 
 @pytest.mark.asyncio
@@ -785,22 +787,26 @@ async def test_gateway_update_system_prompt(temp_db: str) -> None:
 
     # Verify initial state
     history = await gw.get_session_history("sess_update_sys", limit=10)
-    assert len(history) == 2
-    assert history[0].role == MessageRole.SYSTEM and history[0].chatbot_id == "system"
-    assert history[0].content == "Initial prompt"
-    assert history[1].role == MessageRole.SYSTEM and history[1].chatbot_id == "discord_bot"
-    assert history[1].content == "System nudge"
+    assert len(history) == 1
+    assert history[0].role == MessageRole.SYSTEM and history[0].chatbot_id == "discord_bot"
+    assert history[0].content == "System nudge"
+
+    fetched_session = await gw.get_session("sess_update_sys")
+    assert fetched_session is not None
+    assert fetched_session.system_prompt == "Initial prompt"
 
     # Update system prompt
     await gw.update_session_system_prompt("sess_update_sys", "Updated prompt")
 
     # Verify updated state
     history_after = await gw.get_session_history("sess_update_sys", limit=10)
-    assert len(history_after) == 2
-    assert history_after[0].role == MessageRole.SYSTEM and history_after[0].chatbot_id == "system"
-    assert history_after[0].content == "Updated prompt"  # Updated successfully!
-    assert history_after[1].role == MessageRole.SYSTEM and history_after[1].chatbot_id == "discord_bot"
-    assert history_after[1].content == "System nudge"  # Left untouched!
+    assert len(history_after) == 1
+    assert history_after[0].role == MessageRole.SYSTEM and history_after[0].chatbot_id == "discord_bot"
+    assert history_after[0].content == "System nudge"  # Left untouched!
+
+    fetched_session_after = await gw.get_session("sess_update_sys")
+    assert fetched_session_after is not None
+    assert fetched_session_after.system_prompt == "Updated prompt"  # Updated successfully!
 
 
 
