@@ -95,6 +95,23 @@ Roleplay Persona Binding:
 """
 
 
+BACKGROUND_EXECUTION_INSTRUCTIONS = """
+# Background Execution & Long-Running Tasks
+When you execute a shell command using the `run_shell_command` tool, it might take longer than the allowed
+foreground threshold and get transitioned to a background job.
+When a command goes to the background:
+1. The tool will return a message stating that the command has been transitioned to background execution,
+   along with a Background Job ID.
+2. You MUST immediately stop executing further tools or commands in this turn.
+3. You MUST reply to the user, informing them that the task is taking longer than expected
+   and tell them that they will be notified once finished.
+4. Do NOT attempt to wait, sleep, poll the logs, or run additional commands to check on the progress
+   of that job in the same turn.
+5. Simply end your turn. Once the background execution completes, the system will automatically post a
+   `[System Alert]` message to resume your turn and provide you with the full execution logs and results.
+"""
+
+
 def build_sys_prompt(
     custom_prompt: str | None = None,
     session: Session | None = None,
@@ -156,6 +173,7 @@ Unless the user explicitly instructs otherwise, do not refer to any file outside
             FILE_SENDING_INSTRUCTIONS.strip(),
             QUESTION_INSTRUCTION.strip(),
             MEMORY_SYSTEM_INSTRUCTIONS.strip(),
+            BACKGROUND_EXECUTION_INSTRUCTIONS.strip(),
         ]
     )
 

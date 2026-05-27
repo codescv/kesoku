@@ -419,6 +419,7 @@ class ShellCommandError(RuntimeError):
 async def run_shell_command(
     command: str,
     cwd: str | None = None,
+    background_threshold_seconds: float | None = None,
     context: ToolContext | None = None,
 ) -> str:
     """Execute a CLI shell command within a target directory, defaulting to the AWD (Agent Working Directory).
@@ -444,6 +445,9 @@ async def run_shell_command(
         command: The command string to execute (e.g., 'uv run pytest' or 'echo hello').
         cwd: Optional target working directory for executing the command.
             If relative, it's relative to AWD. Defaults to AWD.
+        background_threshold_seconds: Optional foreground timeout limit (in seconds) override.
+            If the command takes longer than this limit, it transitions to background execution.
+            If not provided, defaults to configuration setting.
         context: Optional tool execution context.
 
     Returns:
@@ -541,7 +545,11 @@ async def run_shell_command(
         stderr_task = asyncio.create_task(stream_to_file(proc.stderr, log_filepath_stderr, "w"))
 
         # Wait up to configured foreground threshold limit
-        threshold = getattr(config.shell, "background_threshold_seconds", 300.0)
+        threshold = (
+            background_threshold_seconds
+            if background_threshold_seconds is not None
+            else getattr(config.shell, "background_threshold_seconds", 300.0)
+        )
         try:
             await asyncio.wait_for(proc.wait(), timeout=threshold)
             # Process finished successfully within threshold. Ensure all pipe reads complete.

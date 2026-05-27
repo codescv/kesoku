@@ -128,6 +128,24 @@ async def test_run_shell_command(tmp_path: Any) -> None:
         assert "test_allow" in await run_shell_command("echo test_allow", context=ctx)
 
 
+@pytest.mark.asyncio
+async def test_run_shell_command_background_override(tmp_path: Any) -> None:
+    """Verify background_threshold_seconds override in run_shell_command transitions to background."""
+    ctx = ToolContext(session_id="test_sess_override", session_workspace="test_ws_override")
+    with patch("kesoku.agent.tools.get_config") as mock_get_config:
+        cfg = KesokuConfig()
+        cfg.workspace.sessions_dir = str(tmp_path / "sessions")
+        cfg.shell.enabled = True
+        cfg.shell.mode = "blocklist"
+        mock_get_config.return_value = cfg
+
+        # Override threshold to 0.01 seconds, so sleep 1 command will definitely transition to background!
+        res = await run_shell_command("sleep 1", background_threshold_seconds=0.01, context=ctx)
+
+        assert "transitioned to background execution" in res
+        assert "Background Job ID" in res
+
+
 def test_workspace_name() -> None:
     """Test Session.workspace_name escaping, truncation, and prefix."""
     import time
@@ -1258,6 +1276,49 @@ async def test_history_attachment_stripping(temp_db: str) -> None:
     # Attachments must be kept in full detail for the active turn
     assert "attachments" in latest_msg.metadata
     assert latest_msg.metadata["attachments"][0]["path"] == "/tmp/file2.png"
+
+
+@pytest.mark.asyncio
+async def test_agent_wakeup_by_system_message(temp_db: str) -> None:
+    """Verify that the Agent dispatcher wakes up and processes role=SYSTEM PENDING_AGENT messages."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+    reg = ToolRegistry()
+
+    # 1. Ingest system message with status "pending_agent"
+    await gw.create_session("sess_sys_wakeup", title="System Wakeup Session")
+    msg = Message(
+        session_id="sess_sys_wakeup",
+        chatbot_id="system",
+        channel_id="system",
+        sender="System",
+        role="system",
+        type="text",
+        content="[System Alert] Background Job Finished",
+        status="pending_agent",
+    )
+    await gw.post(msg)
+
+    from kesoku.agent.llm import LLMResponse
+    llm = MockLLM(responses=[
+        LLMResponse(content="System alert processed successfully.", tool_calls=[])
+    ])
+    context = KesokuContext(llm=llm, tool_registry=reg)
+    agent = Agent(gw, context=context)
+
+    # Start agent loop
+    agent_task = asyncio.create_task(agent.start())
+
+    # Wait for the message to be processed
+    await asyncio.sleep(0.5)
+    agent.stop()
+    await asyncio.gather(agent_task, return_exceptions=True)
+
+    # Verify the system message was successfully claimed and processed
+    history = await gw.get_session_history("sess_sys_wakeup")
+    assert any(m.id == msg.id and m.status == "processed" for m in history)
+
 
 
 

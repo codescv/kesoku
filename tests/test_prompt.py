@@ -20,6 +20,10 @@ def test_build_sys_prompt_default() -> None:
     assert "# Asking the User Questions with Multiple-Choice Options" in prompt
     assert "[question: <the question> || choice1 | choice2 | ...]" in prompt
 
+    # Check background execution instructions are included
+    assert "# Background Execution & Long-Running Tasks" in prompt
+    assert "run_shell_command" in prompt
+
 
 def test_build_sys_prompt_with_custom_context() -> None:
     """Verify build_sys_prompt appends custom context instructions correctly."""

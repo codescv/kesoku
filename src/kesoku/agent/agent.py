@@ -12,7 +12,7 @@ from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.tools import ToolContext
 from kesoku.agent.turn_executor import TurnExecutor
 from kesoku.agent.turn_logger import TurnLogger
-from kesoku.constants import MessageRole, MessageStatus
+from kesoku.constants import MessageStatus
 from kesoku.context import KesokuContext
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
@@ -218,7 +218,7 @@ class Agent:
             logger.info(f"Recovered {recovered_count} orphaned processing messages back to pending_agent status.")
 
         try:
-            async for msg in self.gateway.listen(role=MessageRole.USER):
+            async for msg in self.gateway.listen(status=MessageStatus.PENDING_AGENT):
                 if not self._running:
                     break
 
