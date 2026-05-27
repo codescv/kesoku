@@ -214,6 +214,20 @@ async def monitor_background_job(
         # Post special System wakeup alert to Gateway
         gw = Gateway()
 
+        # Resolve the target chatbot_id and channel_id from the original message in database
+        chatbot_id = "system"
+        channel_id = "system"
+        if original_msg_id:
+            try:
+                orig_msgs = await asyncio.to_thread(
+                    gw.db.get_messages_by_filters, {"id": original_msg_id}
+                )
+                if orig_msgs:
+                    chatbot_id = orig_msgs[0].chatbot_id
+                    channel_id = orig_msgs[0].channel_id
+            except Exception as e:
+                logger.warning(f"Failed to resolve original message {original_msg_id} platform details: {e}")
+
         status_str = "successfully" if return_code == 0 else f"with error code {return_code}"
         content = (
             f"[System Alert] Background Job `{job_id}` has finished executing {status_str}.\n"
@@ -224,8 +238,8 @@ async def monitor_background_job(
 
         wakeup_msg = Message(
             session_id=context.session_id,
-            chatbot_id="system",
-            channel_id="system",
+            chatbot_id=chatbot_id,
+            channel_id=channel_id,
             sender="System",
             role=MessageRole.SYSTEM,
             type=MessageType.TEXT,
