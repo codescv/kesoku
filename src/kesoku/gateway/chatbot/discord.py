@@ -98,11 +98,12 @@ The time is very important to prevent your hallucination about the world status.
         )
 
     format_section = """
-## Response Format
-This format requirement only applies for your response in discord (not for writing files etc).
-- Discord doesn't support latex syntax for math, so use plain text or emojis when you want to
-show math. e.g. use "exp(x)" instead of "$e^x$", use "∞" instead of "$\\inf$".
-- Discord doesn't support level 4+ headings, so use level 3 headings at most (Start with level 1 heading).
+## (CRITICAL!!! MUST FOLLOW) Response Format
+- IMPORTANT: Only use plain text or emojis when you want to show math. e.g. use "exp(x)"
+  instead of "$e^x$", use "∞" instead of "$\\inf$".
+- IMPORTANT: You can only use up to level 3 headings (# for h1, ## for h2, ### for h3).
+  Never use #### or beyond!
+- The above formatting requirement only applies for your response, not for writing files or running commands.
     """
 
     discord_prompt = f"""
