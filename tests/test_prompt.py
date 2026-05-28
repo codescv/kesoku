@@ -1,14 +1,11 @@
 """Unit tests for the modular system prompt construction utility."""
 
-from kesoku.agent.prompt import PREAMBLE, build_sys_prompt
+from kesoku.agent.prompt import build_sys_prompt
 
 
 def test_build_sys_prompt_default() -> None:
     """Verify build_sys_prompt includes default system prompt and file-sending instructions."""
     prompt = build_sys_prompt()
-
-    # Check default system prompt is included
-    assert PREAMBLE.strip() in prompt
 
     # Check file/voice instructions header and syntax are included
     assert "# Sending Files and Voice Messages to the User" in prompt
@@ -30,7 +27,6 @@ def test_build_sys_prompt_with_custom_context() -> None:
     custom_context = "You are inside a specialized testing environment."
     prompt = build_sys_prompt(custom_prompt=custom_context)
 
-    assert PREAMBLE.strip() in prompt
     assert "# Sending Files and Voice Messages to the User" in prompt
     assert custom_context in prompt
 

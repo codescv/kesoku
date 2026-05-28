@@ -620,3 +620,55 @@ def test_cli_service_named_instances() -> None:
         assert "disable" in disable_call[1][0]
         assert "kesoku-custom-inst" in disable_call[1][0]
 
+
+def test_cli_memory_export(tmp_path: Any) -> None:
+    """Test 'kesoku memory export' subcommand using Typer runner."""
+    config_path = tmp_path / "config.toml"
+    db_path = tmp_path / "kesoku.db"
+    export_path = tmp_path / "exported_memory.toml"
+
+    # Initialize workspace
+    runner.invoke(app, ["init", "-w", str(tmp_path)])
+
+    # Seed some mock memories directly into the DB
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        INSERT INTO agent_memories (category, key, title, content, updated_at, role)
+        VALUES ('progress', 'standard_japanese', '标日', '第22课', 123.45, 'default')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO agent_memories (category, key, title, content, updated_at, role)
+        VALUES ('fun_fact', 'funny_event', 'Funny', 'Haha', 678.90, 'asuka')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    # Invoke export subcommand
+    result = runner.invoke(app, ["memory", "export", "-c", str(config_path), str(export_path)])
+    assert result.exit_code == 0
+    assert "Successfully exported 2 memory records to TOML" in strip_ansi(result.stdout)
+    assert os.path.exists(export_path)
+
+    # Verify exported TOML file contents
+    import tomllib
+    with open(export_path, "rb") as f:
+        exported_data = tomllib.load(f)
+
+    assert "default" in exported_data
+    assert "progress" in exported_data["default"]
+    assert "standard_japanese" in exported_data["default"]["progress"]
+    assert exported_data["default"]["progress"]["standard_japanese"]["title"] == "标日"
+    assert exported_data["default"]["progress"]["standard_japanese"]["content"] == "第22课"
+    assert exported_data["default"]["progress"]["standard_japanese"]["updated_at"] == 123.45
+
+    assert "asuka" in exported_data
+    assert "fun_fact" in exported_data["asuka"]
+    assert "funny_event" in exported_data["asuka"]["fun_fact"]
+    assert exported_data["asuka"]["fun_fact"]["funny_event"]["title"] == "Funny"
+    assert exported_data["asuka"]["fun_fact"]["funny_event"]["content"] == "Haha"
+    assert exported_data["asuka"]["fun_fact"]["funny_event"]["updated_at"] == 678.90
+

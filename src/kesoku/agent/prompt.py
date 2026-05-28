@@ -70,23 +70,25 @@ Available Memory Tools:
 - `update_memory`: Atomic UPSERT to write or replace a key's memory.
 - `delete_memory`: Remove a specific key's memory.
 
+IMPORTANT: When the user asks you to "remember" something, you MUST use the `update_memory` tool to write it
+to the most relevant category defined.
+
 Memory Categories & Strict Usage Guidelines:
 1. `user_profile`:
    - Purpose: Tracks user attributes, backgrounds, interests, and pronunciation preferences.
-   - Action: Query only by default. When you find any new information about the user, ask the user before updating.
+   - Note: Globally shared and ALWAYS bound to the 'default' role scope.
 2. `learnings`:
-   - Purpose: Troubleshooting guidelines, workarounds, or setup checkpoints learned when resolving difficulties
-     (e.g., proxy configuration, playwright browser setup).
-   - Action: Proactively record learnings here when you resolve complex bugs, so you avoid repeating mistakes.
+   - Purpose: Troubleshooting guidelines, workarounds, or setup checkpoints learned when resolving difficulties.
+   - Note: Globally shared and ALWAYS bound to the 'default' role scope.
 3. `progress`:
    - Purpose: Active user project progression, reading positions, milestones, and study next steps.
-   - Action: Update key milestones immediately when the user demonstrates progression.
+   - Note: Globally shared and ALWAYS bound to the 'default' role scope.
+4. `fun_fact`:
+   - Purpose: Tracks isolated funny, interesting or memorable daily events
+     that happened between the user and the active roleplay persona.
+   - Note: Role-isolated and bound to the current active roleplay persona scope.
 
-Roleplay Persona Binding:
-- If you are active under a roleplay persona (e.g., playing 'asuka' or 'tifa'), ALWAYS specify
-  `role='character_name'` (e.g., `role='asuka'`) when calling memory tools.
-- This isolates persona-specific game progress and private learnings from other personas.
-- Standard global memories use `role='global'`.
+Rules for managing memory:
 - Key naming constraints: Memory keys must strictly contain ONLY lowercase letters, underscores,
   and numbers (regex: ^[a-z0-9_]+$). You are strictly prohibited from using hyphens, uppercase
   letters, spaces, or other special characters.
@@ -115,17 +117,45 @@ When a command goes to the background:
 def build_sys_prompt(
     custom_prompt: str | None = None,
     session: Session | None = None,
+    role: str | None = None,
 ) -> str:
     """Build the complete agent system prompt including instructions on file-sending syntax and staging workspace.
 
     Args:
         custom_prompt: Optional additional context or platform-specific instructions.
         session: Optional chat session object.
+        role: Optional pre-resolved character persona binding. If not provided, resolves from the session.
 
     Returns:
         A complete, modularly constructed system prompt string.
     """
     cfg = get_config()
+
+    # Resolve current role
+    if role is None:
+        role = "default"
+        if session:
+            from kesoku.db import DatabaseManager
+            db = DatabaseManager(cfg.workspace.db_path)
+            try:
+                mapping = db.get_channel_by_session(session.id)
+                if mapping:
+                    chatbot_id, channel_id = mapping
+                    role = db.get_channel_role_with_inheritance(chatbot_id, channel_id, session.id)
+            except Exception as e:
+                logger.warning(f"Failed to retrieve session channel role in build_sys_prompt: {e}")
+
+    # Read role's intro.md
+    intro_content = ""
+    if cfg.agent_working_dir:
+        intro_path = os.path.join(cfg.agent_working_dir, "roles", role, "intro.md")
+        if os.path.exists(intro_path):
+            try:
+                with open(intro_path, encoding="utf-8") as f:
+                    intro_content = f.read().strip()
+            except Exception as e:
+                logger.warning(f"Failed to read intro.md for role '{role}': {e}")
+
     working_dir_info = f"""
 # Agent Working Directory
 > AWD='{cfg.agent_working_dir}'
@@ -160,10 +190,15 @@ Unless the user explicitly instructs otherwise, do not refer to any file outside
         base_name = os.path.basename(resolved_path)
         user_prompts_sections.append(f"=== BEGIN {base_name} ===\n{content.strip()}\n\n=== END {base_name} ===")
 
-    sections = [
-        PREAMBLE.strip(),
-        working_dir_info.strip(),
-    ]
+    sections = []
+    if intro_content:
+        role_info = f"""
+# Active Persona (Role Name): ({role})
+{intro_content}
+"""
+        sections.append(role_info.strip())
+
+    sections.append(working_dir_info.strip())
     if session_dir_info:
         sections.append(session_dir_info.strip())
 

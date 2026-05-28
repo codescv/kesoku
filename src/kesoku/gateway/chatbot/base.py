@@ -186,11 +186,24 @@ class Chatbot(ABC):
             status_msg = await self.manual_compact_session_by_channel(channel_id)
             await reply_func(status_msg)
 
+        async def handle_role(
+            reply_func: Callable[[str], Awaitable[None]],
+            channel_id: str,
+            role_name: str = "",
+        ) -> None:
+            status_msg = await self.update_role_by_channel(channel_id, role_name)
+            await reply_func(status_msg)
+
         self.commands.register("restart", "Restart the Kesoku service.", handle_restart)
         self.commands.register("clear", "Clear the active conversation session.", handle_clear)
         self.commands.register("reset", "Clear the active conversation session.", handle_clear)
         self.commands.register("status", "Get conversation and performance statistics.", handle_status)
         self.commands.register("compact", "Manually compact conversation history.", handle_compact)
+        self.commands.register(
+            "role",
+            "Update or view the active roleplay persona for the current channel.",
+            handle_role,
+        )
 
     def _get_kesoku_executable(self) -> str:
         import shutil
@@ -567,3 +580,59 @@ class Chatbot(ABC):
     async def on_message_delivered(self, message: Message) -> None:
         """Lifecycle hook triggered after a message is successfully delivered."""
         pass
+
+    async def update_role_by_channel(self, channel_id: str, role_name: str = "") -> str:
+        """Update or query the active roleplay persona for the current channel. Returns status message."""
+        role_name = role_name.strip()
+        cfg = get_config()
+
+        # List available roles
+        roles_dir = cfg.workspace.roles_dir
+
+        def list_roles(path: str) -> list[str]:
+            if os.path.exists(path):
+                try:
+                    return [
+                        d for d in os.listdir(path)
+                        if os.path.isdir(os.path.join(path, d))
+                    ]
+                except Exception as e:
+                    logger.warning(f"Failed to list roles directory: {e}")
+            return []
+
+        available_roles = await asyncio.to_thread(list_roles, roles_dir)
+        if not available_roles:
+            available_roles = ["default"]
+
+        if not role_name:
+            # Query current role
+            session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
+            session_id = session.id if session else None
+            current_role = await self.gateway.get_channel_role_with_inheritance(
+                self.chatbot_id,
+                channel_id,
+                session_id,
+            )
+            return (
+                f"🎭 **Active Persona:** `{current_role}`\n"
+                f"✨ **Available Personas:** {', '.join(f'`{r}`' for r in sorted(available_roles))}\n"
+                f"💡 Use `/role {{name}}` to switch personas."
+            )
+
+        if role_name not in available_roles:
+            return (
+                f"⚠️ **Error:** Persona `{role_name}` not found.\n"
+                f"✨ **Available Personas:** {', '.join(f'`{r}`' for r in sorted(available_roles))}"
+            )
+
+        # 1. Update in database
+        await self.gateway.set_channel_role(self.chatbot_id, channel_id, role_name)
+
+        # 2. Rebuild the active session system prompt if a session exists
+        session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
+        if session:
+            from kesoku.agent.prompt import build_sys_prompt
+            new_sys_prompt = build_sys_prompt(session=session)
+            await self.gateway.update_session_system_prompt(session.id, new_sys_prompt)
+
+        return f"🎭 Persona for this channel has been successfully changed to **`{role_name}`**."

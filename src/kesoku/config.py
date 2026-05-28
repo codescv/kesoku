@@ -32,6 +32,12 @@ def _default_skills_dir() -> str:
     return "skills"
 
 
+def _default_roles_dir() -> str:
+    if "pytest" in sys.modules:
+        return os.path.join(tempfile.gettempdir(), "kesoku_tests_roles")
+    return "roles"
+
+
 def _default_sessions_dir() -> str:
     if "pytest" in sys.modules:
         return os.path.join(tempfile.gettempdir(), "kesoku_tests_sessions")
@@ -48,6 +54,10 @@ class WorkspaceConfig(BaseModel):
     skills_dir: str = Field(
         default_factory=_default_skills_dir,
         description="Path to skills directory",
+    )
+    roles_dir: str = Field(
+        default_factory=_default_roles_dir,
+        description="Path to roles directory",
     )
     sessions_dir: str = Field(
         default_factory=_default_sessions_dir,
@@ -226,6 +236,8 @@ class KesokuConfig(BaseModel):
             self.workspace.db_path = os.path.join(base_dir, self.workspace.db_path)
         if not os.path.isabs(self.workspace.skills_dir):
             self.workspace.skills_dir = os.path.join(base_dir, self.workspace.skills_dir)
+        if not os.path.isabs(self.workspace.roles_dir):
+            self.workspace.roles_dir = os.path.join(base_dir, self.workspace.roles_dir)
         if not os.path.isabs(self.workspace.sessions_dir):
             self.workspace.sessions_dir = os.path.join(base_dir, self.workspace.sessions_dir)
 
@@ -292,6 +304,8 @@ def save_config(cfg: KesokuConfig, config_path: str) -> None:
         data["workspace"]["db_path"] = os.path.basename(data["workspace"]["db_path"])
     if os.path.isabs(data["workspace"]["skills_dir"]):
         data["workspace"]["skills_dir"] = os.path.basename(data["workspace"]["skills_dir"])
+    if os.path.isabs(data["workspace"]["roles_dir"]):
+        data["workspace"]["roles_dir"] = os.path.basename(data["workspace"]["roles_dir"])
     if os.path.isabs(data["workspace"]["sessions_dir"]):
         data["workspace"]["sessions_dir"] = os.path.basename(data["workspace"]["sessions_dir"])
 
@@ -374,3 +388,32 @@ def init_skills(skills_dir: str, overwrite: bool = False) -> None:
                         logger.info(f"Copied resource skill {item.name} to {dest}")
     except Exception as e:
         logger.error(f"Failed to copy resource skills to {skills_dir}: {e}")
+
+
+def init_roles(roles_dir: str, overwrite: bool = False) -> None:
+    """Copy default resource roles from kesoku.resources to workspace roles_dir when initializing.
+
+    Args:
+        roles_dir: Target path for workspace roles directory.
+        overwrite: Whether to overwrite existing roles in target directory.
+    """
+    os.makedirs(roles_dir, exist_ok=True)
+    try:
+        ref = importlib.resources.files("kesoku.resources") / "roles"
+        with importlib.resources.as_file(ref) as source_dir:
+            if source_dir.exists() and source_dir.is_dir():
+                for item in source_dir.iterdir():
+                    if item.is_dir():
+                        dest = os.path.join(roles_dir, item.name)
+                        if os.path.exists(dest):
+                            if not overwrite:
+                                logger.debug(f"Role {item.name} already exists at {dest}. Skipping.")
+                                continue
+                            if os.path.isdir(dest):
+                                shutil.rmtree(dest)
+                            else:
+                                os.remove(dest)
+                        shutil.copytree(item, dest)
+                        logger.info(f"Copied resource role {item.name} to {dest}")
+    except Exception as e:
+        logger.error(f"Failed to copy resource roles to {roles_dir}: {e}")

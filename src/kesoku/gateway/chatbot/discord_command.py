@@ -33,39 +33,67 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
         description = cmd_info["description"]
 
         # Define dynamic callback using a closure factory
-        def make_callback(c_name: str) -> Callable[[discord.Interaction], Awaitable[None]]:
-            async def callback(interaction: discord.Interaction) -> None:
+        if cmd_name == "role":
+            async def role_callback(interaction: discord.Interaction, role_name: str = "") -> None:
                 logger.info(
-                    f"Received /{c_name} slash command from user {interaction.user.name} "
+                    f"Received /role slash command with role_name='{role_name}' from user {interaction.user.name} "
                     f"(ID: {interaction.user.id}) in channel {interaction.channel_id}"
                 )
-                # Acknowledge the interaction first by deferring
                 await interaction.response.defer()
 
                 async def reply_func(text: str) -> None:
                     await interaction.followup.send(text)
 
                 try:
-                    if c_name in {"clear", "reset", "status", "compact"}:
-                        await chatbot.commands.execute(c_name, reply_func, channel_id=str(interaction.channel_id))
-                    else:
-                        await chatbot.commands.execute(c_name, reply_func)
+                    await chatbot.commands.execute(
+                        "role",
+                        reply_func,
+                        channel_id=str(interaction.channel_id),
+                        role_name=role_name,
+                    )
                 except Exception as e:
-                    logger.error(f"Discord command /{c_name} execution failed: {e}")
-                    if c_name == "restart":
-                        err_msg = str(e)
-                        if "Command not found" in err_msg:
-                            err_msg = "Command not found"
-                        await reply_func(f"Failed to restart service: {err_msg}")
-                    else:
-                        await reply_func(f"⚠️ Failed to execute command: {e}")
+                    logger.error(f"Discord command /role execution failed: {e}")
+                    await reply_func(f"⚠️ Failed to execute command: {e}")
 
-            return callback
+            cmd = app_commands.Command(
+                name="role",
+                description=description,
+                callback=role_callback,
+            )
+        else:
+            def make_callback(c_name: str) -> Callable[[discord.Interaction], Awaitable[None]]:
+                async def callback(interaction: discord.Interaction) -> None:
+                    logger.info(
+                        f"Received /{c_name} slash command from user {interaction.user.name} "
+                        f"(ID: {interaction.user.id}) in channel {interaction.channel_id}"
+                    )
+                    # Acknowledge the interaction first by deferring
+                    await interaction.response.defer()
 
-        cmd = app_commands.Command(
-            name=cmd_name,
-            description=description,
-            callback=make_callback(cmd_name),
-        )
+                    async def reply_func(text: str) -> None:
+                        await interaction.followup.send(text)
+
+                    try:
+                        if c_name in {"clear", "reset", "status", "compact"}:
+                            await chatbot.commands.execute(c_name, reply_func, channel_id=str(interaction.channel_id))
+                        else:
+                            await chatbot.commands.execute(c_name, reply_func)
+                    except Exception as e:
+                        logger.error(f"Discord command /{c_name} execution failed: {e}")
+                        if c_name == "restart":
+                            err_msg = str(e)
+                            if "Command not found" in err_msg:
+                                err_msg = "Command not found"
+                            await reply_func(f"Failed to restart service: {err_msg}")
+                        else:
+                            await reply_func(f"⚠️ Failed to execute command: {e}")
+
+                return callback
+
+            cmd = app_commands.Command(
+                name=cmd_name,
+                description=description,
+                callback=make_callback(cmd_name),
+            )
         chatbot.tree.add_command(cmd)
 

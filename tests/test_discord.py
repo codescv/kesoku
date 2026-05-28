@@ -1366,3 +1366,54 @@ async def test_on_message_with_attachments(mock_config: KesokuConfig, mock_gatew
 
                 # Verify message content has references
                 assert "[Attachment: test_image.png (image/png)" in posted_msg.content
+
+
+@pytest.mark.asyncio
+async def test_on_message_resolves_and_passes_role(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test that on_message resolves role (direct or via parent channel) and passes it during create_session."""
+    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+
+            # Setup mock parent channel
+            mock_parent_channel = MagicMock(spec=discord.TextChannel)
+            mock_parent_channel.id = 98765
+
+            # Setup mock thread channel under mock parent channel
+            mock_thread = AsyncMock(spec=discord.Thread)
+            mock_thread.id = 12345
+            mock_thread.name = "test_thread"
+            mock_thread.parent = mock_parent_channel
+            mock_thread.guild = MagicMock(spec=discord.Guild)
+            mock_thread.guild.name = "GuildName"
+            mock_thread.guild.members = []
+            mock_thread.join = AsyncMock()
+
+            # Setup incoming message in the thread channel
+            msg = MagicMock(spec=discord.Message)
+            allowed_author = MagicMock(spec=discord.Member, id=222, display_name="Allowed")
+            allowed_author.name = "allowed_user"
+            msg.author = allowed_author
+            msg.mentions = []
+            msg.channel = mock_thread
+            msg.content = "Hello, I am starting a new conversation"
+            msg.id = 888
+            msg.created_at = datetime.datetime.now(datetime.UTC)
+
+            # Case 1: Direct lookup of thread has no role, but parent channel is bound to "asuka"
+            mock_gateway.get_channel_role.side_effect = lambda cb_id, chan_id: (
+                "asuka" if chan_id == "98765" else None
+            )
+
+            await bot.on_message(msg)
+
+            # Verify create_session was called with the inherited role "asuka" passed correctly
+            mock_gateway.create_session.assert_called_once()
+            call_kwargs = mock_gateway.create_session.call_args[1]
+            assert call_kwargs["title"] == "test_thread"
+            assert "Discord Instructions" in call_kwargs["custom_prompt"]
+            assert call_kwargs["created_at"] == msg.created_at.timestamp()
+            assert call_kwargs["chatbot_id"] == "discord_test"
+            assert call_kwargs["channel_id"] == "12345"
+            assert call_kwargs["role"] == "asuka"

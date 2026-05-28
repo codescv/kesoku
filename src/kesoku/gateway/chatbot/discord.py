@@ -345,12 +345,24 @@ class DiscordChatbot(Chatbot):
         if not session:
             custom_prompt = _build_discord_custom_prompt(target_channel, message.author)
             session_title = getattr(target_channel, "name", None) or f"Chat with {message.author.display_name}"
+
+            # Resolve current role before session creation for accurate initial system prompt
+            role = "default"
+            db_role = await self.gateway.get_channel_role(self.chatbot_id, channel_id)
+            if db_role:
+                role = db_role
+            elif isinstance(target_channel, discord.Thread) and target_channel.parent:
+                parent_role = await self.gateway.get_channel_role(self.chatbot_id, str(target_channel.parent.id))
+                if parent_role:
+                    role = parent_role
+
             session = await self.gateway.create_session(
                 title=session_title,
                 custom_prompt=custom_prompt,
                 created_at=message.created_at.timestamp(),
                 chatbot_id=self.chatbot_id,
                 channel_id=channel_id,
+                role=role,
             )
             session_id = session.id
         else:

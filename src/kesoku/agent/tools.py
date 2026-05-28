@@ -883,7 +883,7 @@ async def compact_history(summary: str, context: ToolContext) -> str:
 # Memory System Helpers and Tools
 def get_allowed_categories(db: Any) -> set[str]:
     """Retrieves the set of all currently permitted or existing memory categories."""
-    categories = {"user_profile", "learnings", "progress"}
+    categories = {"user_profile", "learnings", "progress", "fun_fact"}
     try:
         memories = db.get_agent_memories()
         for m in memories:
@@ -905,13 +905,43 @@ def validate_key(key: str) -> bool:
     return bool(re.match(r"^[a-z0-9_]+$", key))
 
 
+def _resolve_memory_role(category: str, role_param: str | None, context: ToolContext | None) -> str:
+    """Resolve the correct role scope based on the memory category and context rules."""
+    category = category.strip().lower()
+
+    # Rule 1: Standard categories ALWAYS use "default" role
+    if category in {"progress", "user_profile", "learnings"}:
+        return "default"
+
+    # Rule 2: fun_fact category uses current channel's active role
+    if category == "fun_fact":
+        if context and context.gateway and context.original_msg_id:
+            db = context.gateway.db
+            try:
+                msg_list = db.get_messages_by_filters({"id": context.original_msg_id})
+                if msg_list:
+                    msg = msg_list[0]
+                    return db.get_channel_role_with_inheritance(msg.chatbot_id, msg.channel_id, context.session_id)
+            except Exception as e:
+                logger.warning(f"Failed to resolve active role for memory category fun_fact: {e}")
+        # Fallback
+        return role_param if role_param else "default"
+
+    # For other categories, return the passed role parameter
+    return role_param if role_param else "default"
+
+
 @default_registry.register
-def list_memories(category: str, role: str = "global", context: ToolContext | None = None) -> str:
-    """List all active memory keys and titles under the specified category for a given role scope.
+def list_memories(
+    category: str,
+    role: str | None = None,
+    context: ToolContext | None = None,
+) -> str:
+    """List all active memory keys and titles under the specified category.
 
     Args:
-        category: The memory category (e.g., 'progress', 'user_profile', 'learnings').
-        role: Optional roleplay persona scope (defaults to 'global').
+        category: The memory category (e.g., 'progress', 'user_profile', 'learnings', 'fun_fact').
+        role: Optional roleplay persona scope (defaults to None for implicit channel/default persona).
         context: Injected tool execution context.
 
     Returns:
@@ -920,13 +950,14 @@ def list_memories(category: str, role: str = "global", context: ToolContext | No
     if not context:
         return "Error: ToolContext is missing."
 
+    resolved_role = _resolve_memory_role(category, role, context)
     db = context.gateway.db
     try:
-        memories = db.get_agent_memories(category=category, role=role)
+        memories = db.get_agent_memories(category=category, role=resolved_role)
         if not memories:
-            return f"No memories found in category '{category}' for role scope '{role}'."
+            return f"No memories found in category '{category}' for role scope '{resolved_role}'."
 
-        lines = [f"=== Memories in '{category}' (scope: {role}) ==="]
+        lines = [f"=== Memories in '{category}' (scope: {resolved_role}) ==="]
         for m in memories:
             updated_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m["updated_at"]))
             lines.append(f"- key: `{m['key']}` | title: \"{m['title']}\" | updated: {updated_str} | scope: {m['role']}")
@@ -937,17 +968,22 @@ def list_memories(category: str, role: str = "global", context: ToolContext | No
 
 
 @default_registry.register
-def view_memory(category: str, key: str | None = None, role: str = "global", context: ToolContext | None = None) -> str:
+def view_memory(
+    category: str,
+    key: str | None = None,
+    role: str | None = None,
+    context: ToolContext | None = None,
+) -> str:
     """Retrieve detailed content for a specific memory key, or dynamically render all memories in a category.
 
     If `key` is provided, returns the content of that specific record.
-    If `key` is None (or omitted), dynamically aggregates all entries inside that category under the specified
-    role/global scope and formats them into a beautiful, readable Markdown block.
+    If `key` is None (or omitted), dynamically aggregates all entries inside that category under the implicit
+    correct role/default scope and formats them into a beautiful, readable Markdown block.
 
     Args:
-        category: The memory category (e.g., 'progress', 'user_profile', 'learnings').
+        category: The memory category (e.g., 'progress', 'user_profile', 'learnings', 'fun_fact').
         key: Optional unique snake_case key. If omitted, renders all entries.
-        role: Optional roleplay persona scope (defaults to 'global').
+        role: Optional roleplay persona scope (defaults to None for implicit channel/default persona).
         context: Injected tool execution context.
 
     Returns:
@@ -956,6 +992,7 @@ def view_memory(category: str, key: str | None = None, role: str = "global", con
     if not context:
         return "Error: ToolContext is missing."
 
+    resolved_role = _resolve_memory_role(category, role, context)
     db = context.gateway.db
     try:
         if key:
@@ -966,16 +1003,16 @@ def view_memory(category: str, key: str | None = None, role: str = "global", con
                     "underscores, and numbers (regex: ^[a-z0-9_]+$)."
                 )
             sanitized = sanitize_key(key)
-            mem = db.get_agent_memory(category=category, key=sanitized, role=role)
+            mem = db.get_agent_memory(category=category, key=sanitized, role=resolved_role)
             if not mem:
-                return f"No memory found for category='{category}', key='{sanitized}', role='{role}'."
+                return f"No memory found for category='{category}', key='{sanitized}', role='{resolved_role}'."
             return f"=== Memory: {mem['title']} (key: {mem['key']}, scope: {mem['role']}) ===\n{mem['content']}"
 
-        memories = db.get_agent_memories(category=category, role=role)
+        memories = db.get_agent_memories(category=category, role=resolved_role)
         if not memories:
-            return f"No memories found in category '{category}' for role scope '{role}'."
+            return f"No memories found in category '{category}' for role scope '{resolved_role}'."
 
-        lines = [f"# Category: {category} (scope: {role})"]
+        lines = [f"# Category: {category} (scope: {resolved_role})"]
         for m in memories:
             lines.append(f"\n## {m['title']} (key: `{m['key']}`, scope: `{m['role']}`)")
             lines.append(m["content"].strip())
@@ -991,7 +1028,7 @@ def update_memory(
     key: str,
     title: str,
     content: str,
-    role: str = "global",
+    role: str | None = None,
     create_category: bool = False,
     context: ToolContext | None = None,
 ) -> str:
@@ -1000,11 +1037,11 @@ def update_memory(
     This executes a transactionally isolated UPSERT SQL statement, completely protecting other keys.
 
     Args:
-        category: The memory category (e.g., 'progress', 'user_profile', 'learnings').
+        category: The memory category (e.g., 'progress', 'user_profile', 'learnings', 'fun_fact').
         key: The unique snake_case key.
         title: Human-readable label or title for the entry.
         content: Detailed markdown or JSON content payload.
-        role: Optional roleplay persona scope (defaults to 'global').
+        role: Optional roleplay persona scope (defaults to None for implicit channel/default persona).
         create_category: True if permission was granted to initialize a new category.
         context: Injected tool execution context.
 
@@ -1014,6 +1051,7 @@ def update_memory(
     if not context:
         return "Error: ToolContext is missing."
 
+    resolved_role = _resolve_memory_role(category, role, context)
     db = context.gateway.db
     try:
         allowed = get_allowed_categories(db)
@@ -1038,14 +1076,14 @@ def update_memory(
             key=sanitized_key,
             title=title,
             content=content,
-            role=role,
+            role=resolved_role,
         )
         return (
             f"Memory successfully saved!\n"
             f"  Category: `{category}`\n"
             f"  Key: `{sanitized_key}`\n"
             f"  Title: \"{title}\"\n"
-            f"  Scope: `{role}`"
+            f"  Scope: `{resolved_role}`"
         )
     except Exception as e:
         logger.error(f"Failed to update memory: {e}", exc_info=True)
@@ -1053,13 +1091,18 @@ def update_memory(
 
 
 @default_registry.register
-def delete_memory(category: str, key: str, role: str = "global", context: ToolContext | None = None) -> str:
-    """Atomically delete a specific memory entry under a category and role scope.
+def delete_memory(
+    category: str,
+    key: str,
+    role: str | None = None,
+    context: ToolContext | None = None,
+) -> str:
+    """Atomically delete a specific memory entry under a category and implicit correct role scope.
 
     Args:
-        category: The memory category (e.g., 'progress', 'user_profile', 'learnings').
+        category: The memory category (e.g., 'progress', 'user_profile', 'learnings', 'fun_fact').
         key: The unique snake_case key to delete.
-        role: Optional roleplay persona scope (defaults to 'global').
+        role: Optional roleplay persona scope (defaults to None for implicit channel/default persona).
         context: Injected tool execution context.
 
     Returns:
@@ -1068,6 +1111,7 @@ def delete_memory(category: str, key: str, role: str = "global", context: ToolCo
     if not context:
         return "Error: ToolContext is missing."
 
+    resolved_role = _resolve_memory_role(category, role, context)
     db = context.gateway.db
     try:
         if not validate_key(key):
@@ -1078,12 +1122,78 @@ def delete_memory(category: str, key: str, role: str = "global", context: ToolCo
             )
 
         sanitized = sanitize_key(key)
-        mem = db.get_agent_memory(category=category, key=sanitized, role=role)
+        mem = db.get_agent_memory(category=category, key=sanitized, role=resolved_role)
         if not mem:
-            return f"No memory entry found for category='{category}', key='{sanitized}', role='{role}' to delete."
+            return (
+                f"No memory entry found for category='{category}', "
+                f"key='{sanitized}', role='{resolved_role}' to delete."
+            )
 
-        db.delete_agent_memory(category=category, key=sanitized, role=role)
-        return f"Memory successfully deleted: category='{category}', key='{sanitized}', role='{role}'."
+        db.delete_agent_memory(category=category, key=sanitized, role=resolved_role)
+        return f"Memory successfully deleted: category='{category}', key='{sanitized}', role='{resolved_role}'."
     except Exception as e:
         logger.error(f"Failed to delete memory: {e}", exc_info=True)
         return f"Error deleting memory: {e}"
+
+
+@default_registry.register
+async def play_role(role: str, context: ToolContext) -> str:
+    """Switch the active roleplay persona for the current channel.
+
+    Switching the role automatically loads and injects the role's profile instructions (intro.md)
+    into the system prompt for the active session.
+
+    Args:
+        role: The name of the character role to play (e.g. 'default', 'tifa', 'asuka').
+        context: The tool execution context (injected automatically).
+
+    Returns:
+        A status message confirming the role switch.
+    """
+    role = role.strip()
+    cfg = get_config()
+
+    # 1. Validate role directory exists
+    roles_dir = cfg.workspace.roles_dir
+    role_dir = os.path.join(roles_dir, role)
+    if not os.path.exists(role_dir) or not os.path.isdir(role_dir):
+        # Get available roles
+        available_roles = []
+        if os.path.exists(roles_dir):
+            available_roles = [
+                d for d in os.listdir(roles_dir)
+                if os.path.isdir(os.path.join(roles_dir, d))
+            ]
+        if not available_roles:
+            available_roles = ["default"]
+        return (
+            f"⚠️ **Error:** Persona `{role}` does not exist.\n"
+            f"✨ **Available Personas:** {', '.join(f'`{r}`' for r in sorted(available_roles))}"
+        )
+
+    # 2. Query original message to find chatbot_id and channel_id
+    db = context.gateway.db
+    msg_list = db.get_messages_by_filters({"id": context.original_msg_id})
+    if not msg_list:
+        return "⚠️ **Error:** Failed to resolve current channel mapping for this tool call."
+
+    msg = msg_list[0]
+    chatbot_id = msg.chatbot_id
+    channel_id = msg.channel_id
+
+    # 3. Save binding in database
+    db.set_channel_role(chatbot_id, channel_id, role)
+
+    # 4. Rebuild active session's system prompt
+    session = await context.gateway.get_session(context.session_id)
+    if session:
+        from kesoku.agent.prompt import build_sys_prompt
+        new_sys_prompt = build_sys_prompt(session=session)
+        await context.gateway.update_session_system_prompt(context.session_id, new_sys_prompt)
+
+    return (
+        f"🎭 **Persona Switched Successfully!**\n"
+        f"Character role has been set to **`{role}`** for this channel.\n"
+        f"The instructions from `{role}/intro.md` have been successfully injected into your system prompt. "
+        f"Please adopt this persona immediately."
+    )

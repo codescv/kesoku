@@ -76,7 +76,7 @@ class AgentMemory(BaseModel):
     title: str = Field(..., description="Human-readable label or title for the entry")
     content: str = Field(..., description="Markdown text or structured content payload")
     updated_at: float = Field(default_factory=time.time, description="Unix timestamp of last update")
-    role: str = Field(default="global", description="Optional roleplay-specific character persona binding")
+    role: str = Field(default="default", description="Optional roleplay-specific character persona binding")
 
 
 def _sort_session_messages(all_msgs: list[Message], order: Literal["phased", "grouped"]) -> list[Message]:
@@ -237,6 +237,17 @@ class DatabaseManager:
                     );
                     """
                 )
+                # Ensure channel_roles table exists
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS channel_roles (
+                        chatbot_id TEXT NOT NULL,
+                        channel_id TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        PRIMARY KEY (chatbot_id, channel_id)
+                    );
+                    """
+                )
                 # Ensure agent_memories table exists
                 conn.execute(
                     """
@@ -247,11 +258,13 @@ class DatabaseManager:
                         title TEXT NOT NULL,
                         content TEXT NOT NULL,
                         updated_at REAL NOT NULL,
-                        role TEXT NOT NULL DEFAULT 'global',
+                        role TEXT NOT NULL DEFAULT 'default',
                         UNIQUE(category, key, role)
                     );
                     """
                 )
+                # Migrate legacy 'global' role to 'default'
+                conn.execute("UPDATE OR REPLACE agent_memories SET role = 'default' WHERE role = 'global';")
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_agent_memories_category_role ON agent_memories(category, role);"
                 )
@@ -360,6 +373,16 @@ class DatabaseManager:
                         session_id TEXT NOT NULL,
                         PRIMARY KEY (chatbot_id, channel_id),
                         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                    );
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS channel_roles (
+                        chatbot_id TEXT NOT NULL,
+                        channel_id TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        PRIMARY KEY (chatbot_id, channel_id)
                     );
                     """
                 )
@@ -974,7 +997,7 @@ class DatabaseManager:
             conn.close()
 
     # Agent Memory CRUD
-    def upsert_agent_memory(self, category: str, key: str, title: str, content: str, role: str = "global") -> None:
+    def upsert_agent_memory(self, category: str, key: str, title: str, content: str, role: str = "default") -> None:
         """Atomically insert or replace an agent memory record."""
         conn = self._get_connection()
         try:
@@ -990,7 +1013,7 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def get_agent_memory(self, category: str, key: str, role: str = "global") -> dict[str, Any] | None:
+    def get_agent_memory(self, category: str, key: str, role: str = "default") -> dict[str, Any] | None:
         """Retrieve a specific agent memory record."""
         conn = self._get_connection()
         try:
@@ -1009,7 +1032,7 @@ class DatabaseManager:
     def get_agent_memories(self, category: str | None = None, role: str | None = None) -> list[dict[str, Any]]:
         """Retrieve agent memories, optionally filtered by category and/or role.
 
-        If role is provided, retrieves both global memories and role-specific memories.
+        If role is provided, retrieves both default memories and role-specific memories.
         """
         conn = self._get_connection()
         try:
@@ -1023,7 +1046,7 @@ class DatabaseManager:
                 params.append(category)
 
             if role:
-                clauses.append("(role = 'global' OR role = ?)")
+                clauses.append("(role = 'default' OR role = ?)")
                 params.append(role)
 
             if clauses:
@@ -1036,7 +1059,7 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def delete_agent_memory(self, category: str, key: str, role: str = "global") -> None:
+    def delete_agent_memory(self, category: str, key: str, role: str = "default") -> None:
         """Delete a specific agent memory record."""
         conn = self._get_connection()
         try:
@@ -1045,6 +1068,81 @@ class DatabaseManager:
                     "DELETE FROM agent_memories WHERE category = ? AND key = ? AND role = ?",
                     (category, key, role),
                 )
+        finally:
+            conn.close()
+
+    def set_channel_role(self, chatbot_id: str, channel_id: str, role: str) -> None:
+        """Bind a roleplay persona to a chatbot channel/thread."""
+        conn = self._get_connection()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO channel_roles (chatbot_id, channel_id, role)
+                    VALUES (?, ?, ?)
+                    """,
+                    (chatbot_id, channel_id, role),
+                )
+        finally:
+            conn.close()
+
+    def get_channel_role(self, chatbot_id: str, channel_id: str) -> str | None:
+        """Retrieve the roleplay persona bound directly to a chatbot channel/thread."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT role FROM channel_roles WHERE chatbot_id = ? AND channel_id = ?",
+                (chatbot_id, channel_id),
+            )
+            row = cursor.fetchone()
+            return row["role"] if row else None
+        finally:
+            conn.close()
+
+    def get_channel_role_with_inheritance(self, chatbot_id: str, channel_id: str, session_id: str | None = None) -> str:
+        """Retrieve the active role bound to a channel/thread with parent inheritance support."""
+        # 1. Direct lookup
+        role = self.get_channel_role(chatbot_id, channel_id)
+        if role:
+            return role
+
+        # 2. Discord parent channel inheritance
+        if chatbot_id == "discord" and session_id:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT metadata FROM messages WHERE session_id = ? AND role = 'user' "
+                    "ORDER BY timestamp DESC LIMIT 1",
+                    (session_id,),
+                )
+                row = cursor.fetchone()
+                if row:
+                    meta = json.loads(row["metadata"])
+                    parent_id = meta.get("parent_channel_id")
+                    if parent_id:
+                        role = self.get_channel_role(chatbot_id, parent_id)
+                        if role:
+                            return role
+            except Exception as e:
+                logger.warning(f"Failed to retrieve parent channel role: {e}")
+            finally:
+                conn.close()
+
+        return "default"
+
+    def get_channel_by_session(self, session_id: str) -> tuple[str, str] | None:
+        """Retrieve the chatbot_id and channel_id mapping for a given session ID."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT chatbot_id, channel_id FROM channel_sessions WHERE session_id = ?",
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            return (row["chatbot_id"], row["channel_id"]) if row else None
         finally:
             conn.close()
 

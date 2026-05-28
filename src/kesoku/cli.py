@@ -16,7 +16,7 @@ from rich.console import Console
 from kesoku.agent.agent import Agent
 from kesoku.cli_chat import run_cli_chat_async
 from kesoku.cli_service import service_app
-from kesoku.config import get_config, init_config, init_skills, load_config
+from kesoku.config import get_config, init_config, init_roles, init_skills, load_config
 from kesoku.db import DatabaseManager
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import configure_logging, setup_logger
@@ -41,7 +41,7 @@ def cli_memory_list(
     category: Annotated[
         str | None, typer.Argument(help="Memory category (e.g., progress, user_profile, learnings)")
     ] = None,
-    role: Annotated[str, typer.Option("-r", "--role", help="Optional roleplay persona scope")] = "global",
+    role: Annotated[str, typer.Option("-r", "--role", help="Optional roleplay persona scope")] = "default",
     config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
 ) -> None:
     """List all active memory keys in the given category, or list all permitted categories if category is omitted."""
@@ -87,7 +87,7 @@ def cli_memory_list(
 def cli_memory_view(
     category: Annotated[str, typer.Argument(help="Memory category (e.g., progress, user_profile, learnings)")],
     key: Annotated[str | None, typer.Argument(help="Unique memory key. Omit to view all category entries.")] = None,
-    role: Annotated[str, typer.Option("-r", "--role", help="Optional roleplay persona scope")] = "global",
+    role: Annotated[str, typer.Option("-r", "--role", help="Optional roleplay persona scope")] = "default",
     config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
 ) -> None:
     """Retrieve the details of a specific memory key, or render all entries dynamically."""
@@ -136,7 +136,7 @@ def cli_memory_update(
     key: Annotated[str, typer.Argument(help="Unique memory key")],
     title: Annotated[str, typer.Argument(help="Human-readable title or label")],
     content: Annotated[str, typer.Argument(help="Markdown or JSON content payload")],
-    role: Annotated[str, typer.Option("-r", "--role", help="Optional roleplay persona scope")] = "global",
+    role: Annotated[str, typer.Option("-r", "--role", help="Optional roleplay persona scope")] = "default",
     create_category: Annotated[
         bool, typer.Option("--create-category", help="Override validation to create a new category")
     ] = False,
@@ -184,7 +184,7 @@ def cli_memory_update(
 def cli_memory_delete(
     category: Annotated[str, typer.Argument(help="Memory category (e.g., progress, user_profile, learnings)")],
     key: Annotated[str, typer.Argument(help="Unique memory key")],
-    role: Annotated[str, typer.Option("-r", "--role", help="Optional roleplay persona scope")] = "global",
+    role: Annotated[str, typer.Option("-r", "--role", help="Optional roleplay persona scope")] = "default",
     config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
 ) -> None:
     """Delete a specific memory record."""
@@ -215,6 +215,58 @@ def cli_memory_delete(
         f"key: [cyan]{sanitized}[/cyan], "
         f"scope: [yellow]{role}[/yellow])"
     )
+
+
+@memory_app.command("export")
+def cli_memory_export(
+    output_path: Annotated[str, typer.Argument(help="Target filepath to save the exported TOML file")],
+    config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
+) -> None:
+    """Export all agent memories from SQLite database into a structured TOML file."""
+    load_config(config)
+    cfg = get_config()
+    db = DatabaseManager(cfg.workspace.db_path)
+    db.verify_db()
+
+    console = Console()
+
+    try:
+        memories = db.get_agent_memories()
+        if not memories:
+            console.print("[bold yellow]No memories found in database to export.[/bold yellow]")
+            return
+
+        # Restructure into a nested dict: role -> category -> key -> data
+        export_data = {}
+        for m in memories:
+            role = m["role"]
+            cat = m["category"]
+            key = m["key"]
+
+            export_data.setdefault(role, {}).setdefault(cat, {})[key] = {
+                "title": m["title"],
+                "content": m["content"],
+                "updated_at": m["updated_at"],
+            }
+
+        # Ensure parent directories exist
+        target_path = os.path.abspath(output_path)
+        parent_dir = os.path.dirname(target_path)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+
+        # Serialize to TOML
+        import tomli_w
+        with open(target_path, "wb") as f:
+            tomli_w.dump(export_data, f)
+
+        console.print(
+            f"\n[bold green]Successfully exported {len(memories)} memory records to TOML![/bold green]\n"
+            f"  File: [cyan]{target_path}[/cyan]"
+        )
+    except Exception as e:
+        console.print(f"[bold red]Error exporting memories: {e}[/bold red]")
+        sys.exit(1)
 
 
 @wechat_app.command("pair")
@@ -260,6 +312,9 @@ def init_cmd(
     overwrite_skills: Annotated[
         bool, typer.Option("--overwrite-skills", help="Overwrite existing resource skills")
     ] = False,
+    overwrite_roles: Annotated[
+        bool, typer.Option("--overwrite-roles", help="Overwrite existing resource roles")
+    ] = False,
     overwrite_db: Annotated[
         bool, typer.Option("--overwrite-db", help="Overwrite existing database file (creates backup)")
     ] = False,
@@ -271,6 +326,7 @@ def init_cmd(
         config: Path to save/initialize config.toml.
         overwrite_config: Whether to overwrite existing config.toml.
         overwrite_skills: Whether to overwrite existing skills in skills dir.
+        overwrite_roles: Whether to overwrite existing roles in roles dir.
         overwrite_db: Whether to overwrite existing SQLite database file.
     """
     if workspace_path is not None:
@@ -286,6 +342,7 @@ def init_cmd(
     cfg = load_config(target_config_path)
     DatabaseManager(cfg.workspace.db_path).init_tables(overwrite=overwrite_db)
     init_skills(cfg.workspace.skills_dir, overwrite=overwrite_skills)
+    init_roles(cfg.workspace.roles_dir, overwrite=overwrite_roles)
     logger.info(f"Workspace initialized successfully at {workspace_path}")
 
 
@@ -468,7 +525,7 @@ def migrate_memory_cmd(
                 key=sanitized,
                 title=title,
                 content=body,
-                role="global",
+                role="default",
             )
             console.print(f"  -> Seeded user_profile: [cyan]{sanitized}[/cyan] (\"{title}\")")
 
@@ -495,7 +552,7 @@ def migrate_memory_cmd(
                 key=sanitized,
                 title=title,
                 content=body,
-                role="global",
+                role="default",
             )
             console.print(f"  -> Seeded progress: [cyan]{sanitized}[/cyan] (\"{title}\")")
 
@@ -529,7 +586,7 @@ def migrate_memory_cmd(
                 key=descriptor,
                 title=title,
                 content=b,
-                role="global",
+                role="default",
             )
             console.print(f"  -> Seeded learning: [cyan]{descriptor}[/cyan] (\"{title}\")")
 

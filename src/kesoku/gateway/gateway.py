@@ -68,6 +68,7 @@ class Gateway:
         created_at: float | None = None,
         chatbot_id: str | None = None,
         channel_id: str | None = None,
+        role: str | None = None,
     ) -> Session:
         """Create a new chat session record in SQLite and initialize system instructions.
 
@@ -79,6 +80,7 @@ class Gateway:
             created_at: Optional initial creation timestamp float.
             chatbot_id: Optional chatbot platform/instance identifier.
             channel_id: Optional external channel identifier.
+            role: Optional pre-resolved character persona binding.
 
         Returns:
             The created Session instance.
@@ -90,7 +92,7 @@ class Gateway:
 
         # Build system prompt if not provided
         if system_prompt is None:
-            system_prompt = build_sys_prompt(custom_prompt=custom_prompt, session=sess)
+            system_prompt = build_sys_prompt(custom_prompt=custom_prompt, session=sess, role=role)
         sess.system_prompt = system_prompt
 
         await asyncio.to_thread(self.db.create_session, sess)
@@ -417,3 +419,24 @@ class Gateway:
             # Delete the SQLite database records
             await asyncio.to_thread(self.db.delete_session, session_id)
             logger.info(f"Successfully deleted session {session_id} from database.")
+
+    async def set_channel_role(self, chatbot_id: str, channel_id: str, role: str) -> None:
+        """Bind a roleplay persona to a chatbot channel/thread."""
+        await asyncio.to_thread(self.db.set_channel_role, chatbot_id, channel_id, role)
+
+    async def get_channel_role(self, chatbot_id: str, channel_id: str) -> str | None:
+        """Retrieve the roleplay persona bound directly to a chatbot channel/thread."""
+        return await asyncio.to_thread(self.db.get_channel_role, chatbot_id, channel_id)
+
+    async def get_channel_role_with_inheritance(
+        self,
+        chatbot_id: str,
+        channel_id: str,
+        session_id: str | None = None,
+    ) -> str:
+        """Retrieve the active role bound to a channel/thread with parent inheritance support."""
+        return await asyncio.to_thread(self.db.get_channel_role_with_inheritance, chatbot_id, channel_id, session_id)
+
+    async def get_channel_by_session(self, session_id: str) -> tuple[str, str] | None:
+        """Retrieve the chatbot_id and channel_id mapping for a given session ID."""
+        return await asyncio.to_thread(self.db.get_channel_by_session, session_id)

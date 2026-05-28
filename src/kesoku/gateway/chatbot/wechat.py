@@ -1240,6 +1240,9 @@ You are interacting with the user via WeChat (Weixin).
         try:
             if command in {"clear", "reset", "status", "compact"}:
                 await self.commands.execute(command, reply_func, channel_id=chat_id)
+            elif command == "role":
+                role_name = " ".join(parts[1:]) if len(parts) > 1 else ""
+                await self.commands.execute("role", reply_func, channel_id=chat_id, role_name=role_name)
             elif command == "restart":
                 await self.commands.execute(command, reply_func)
             else:
