@@ -4,7 +4,6 @@ import logging
 import os
 from typing import Literal
 
-from kesoku.config import get_config  # noqa: F401
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
@@ -15,9 +14,6 @@ logger = logging.getLogger(__name__)
 async def build_clean_history(
     gateway: Gateway,
     session_id: str,
-    max_turns: int | None = None,
-    pin_initial_turns: int | None = None,
-    pin_recent_turns: int | None = None,
     order: Literal["phased", "grouped"] = "phased",
     heal_orphans: bool = True,
 ) -> list[Message]:
@@ -30,10 +26,7 @@ async def build_clean_history(
     Args:
         gateway: Gateway instance to interact with storage.
         session_id: Unique conversational session identifier.
-        max_turns: Deprecated/Ignored (kept for backward compatibility).
-        pin_initial_turns: Deprecated/Ignored (kept for backward compatibility).
-        pin_recent_turns: Deprecated/Ignored (kept for backward compatibility).
-        order: Deprecated/Ignored (kept for backward compatibility).
+        order: The sorting order of the history ("phased" or "grouped").
         heal_orphans: If True, heals orphaned tool calls in the database.
 
     Returns:
@@ -66,7 +59,7 @@ async def build_clean_history(
             await gateway.post(interrupted_msg)
 
     # 2. Load entire chronological history (limit=0 retrieves all messages in the session)
-    raw_history = await gateway.get_session_history(session_id, limit=0)
+    raw_history = await gateway.get_session_history(session_id, limit=0, order=order)
     # Exclude system-generated assistant notification messages from LLM prompt history
     raw_history = [
         m for m in raw_history

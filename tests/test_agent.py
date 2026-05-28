@@ -280,7 +280,7 @@ async def test_orphaned_tool_call_healing(temp_db: str) -> None:
     await gw.post(tc_msg)
 
     # Call build clean history directly
-    history = await build_clean_history(gateway=gw, session_id="sess_heal", max_turns=10)
+    history = await build_clean_history(gateway=gw, session_id="sess_heal")
 
     # Verify a tool result was synthesized and exists in history
     tr_msgs = [m for m in history if m.type == "tool_result"]
@@ -327,7 +327,7 @@ async def test_orphaned_tool_call_healing_disabled(temp_db: str) -> None:
     await gw.post(tc_msg)
 
     # Call build clean history directly with heal_orphans=False
-    history = await build_clean_history(gateway=gw, session_id="sess_no_heal", max_turns=10, heal_orphans=False)
+    history = await build_clean_history(gateway=gw, session_id="sess_no_heal", heal_orphans=False)
 
     # Verify no tool result was synthesized/added to history
     tr_msgs = [m for m in history if m.type == "tool_result"]
@@ -520,9 +520,9 @@ async def test_skill_pinning_and_parallel_safety_turn_based(temp_db: str) -> Non
         )
     )
 
-    # Retrieve clean history with limit that forces Turn 2 to truncate
+    # Retrieve clean history
     history = await build_clean_history(
-        gateway=gw, session_id="sess_skill", max_turns=2, pin_initial_turns=1, pin_recent_turns=1
+        gateway=gw, session_id="sess_skill"
     )
 
     # Let's assert all messages of Turn 2 are present!
@@ -695,24 +695,6 @@ async def test_priority_based_dropping_and_atomic_batches_turn_based(temp_db: st
     assert resp2.id in history_ids
 
 
-@pytest.mark.asyncio
-async def test_clean_history_config_loading(temp_db: str) -> None:
-    """Verify that build_clean_history loads default parameters from global config when arguments are None."""
-    DatabaseManager(temp_db).init_tables()
-    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
-    gw = Gateway(context=KesokuContext(config=cfg))
-
-    await gw.create_session("sess_cfg", title="Config Session")
-
-    mock_cfg = KesokuConfig()
-    mock_cfg.agent.history.max_turns = 42
-    mock_cfg.agent.history.pin_initial_turns = 7
-    mock_cfg.agent.history.pin_recent_turns = 13
-
-    with patch("kesoku.context.get_config", return_value=mock_cfg), \
-         patch("kesoku.agent.history.get_config", return_value=mock_cfg):
-        history = await build_clean_history(gateway=gw, session_id="sess_cfg")
-        assert len(history) == 0
 
 
 @pytest.mark.asyncio
@@ -852,14 +834,11 @@ async def test_llm_turn_logging(temp_db: str, tmp_path: Any) -> None:
         """Perform basic calculations."""
         return "4.0"
 
-    # Configure workspaces directory to temp_path / "sessions"
-    with patch("kesoku.context.get_config") as mock_get_context_config, \
-         patch("kesoku.agent.history.get_config") as mock_get_history_config:
+    with patch("kesoku.context.get_config") as mock_get_context_config:
         cfg = KesokuConfig()
         cfg.workspace.db_path = temp_db
         cfg.workspace.sessions_dir = str(tmp_path / "sessions")
         mock_get_context_config.return_value = cfg
-        mock_get_history_config.return_value = cfg
 
         # Create a session and post a user message
         session = await gw.create_session("sess_log", title="Logging Session")
@@ -942,14 +921,12 @@ async def test_llm_turn_logging_disabled(temp_db: str, tmp_path: Any) -> None:
         return "4.0"
 
     # Configure workspaces directory to temp_path / "sessions"
-    with patch("kesoku.context.get_config") as mock_get_context_config, \
-         patch("kesoku.agent.history.get_config") as mock_get_history_config:
+    with patch("kesoku.context.get_config") as mock_get_context_config:
         cfg = KesokuConfig()
         cfg.workspace.db_path = temp_db
         cfg.workspace.sessions_dir = str(tmp_path / "sessions")
         cfg.agent.raw_llm_logs = False
         mock_get_context_config.return_value = cfg
-        mock_get_history_config.return_value = cfg
 
         # Create a session and post a user message
         session = await gw.create_session("sess_log_disabled", title="No Logging Session")
@@ -1262,7 +1239,7 @@ async def test_history_attachment_stripping(temp_db: str) -> None:
 
     # Call build clean history
     history = await build_clean_history(
-        gateway=gw, session_id="sess_attach_strip", max_turns=10, pin_initial_turns=0, pin_recent_turns=2
+        gateway=gw, session_id="sess_attach_strip"
     )
 
     # Retrieve and inspect the historical message

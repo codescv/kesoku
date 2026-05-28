@@ -9,13 +9,6 @@ llm = "gemini"
 # user_prompts = ["memory/USER.md"]
 raw_llm_logs = true
 
-[agent.history]
-max_turns = 30
-pin_initial_turns = 3
-pin_recent_turns = 10
-active_turn_keep_tool_results_for_k_recent_calls = 3
-serialize_historical_tool_results = true
-serialize_tool_results_threshold = 200
 
 [gemini]
 # https://ai.google.dev/gemini-api/docs/models

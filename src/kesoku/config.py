@@ -65,26 +65,6 @@ class WorkspaceConfig(BaseModel):
     )
 
 
-class AgentHistoryConfig(BaseModel):
-    """Context history building and sliding window settings."""
-
-    max_turns: int = Field(default=30, description="Maximum logical turns in context history")
-    pin_initial_turns: int = Field(default=3, description="Number of initial conversational turns to pin")
-    pin_recent_turns: int = Field(default=10, description="Number of recent turns to keep in full detail")
-    active_turn_keep_tool_results_for_k_recent_calls: int = Field(
-        default=3,
-        description="For active turn, only keep tool results in the latest K LLM calls; others serialize to files",
-    )
-    serialize_historical_tool_results: bool = Field(
-        default=True,
-        description="Whether to serialize historical turn tool results to files and replace with pointer",
-    )
-    serialize_tool_results_threshold: int = Field(
-        default=200,
-        description="Minimum length of tool output (in characters) to trigger serialization to files",
-    )
-
-
 class AgentConfig(BaseModel):
     """Agent-level configuration settings."""
 
@@ -97,7 +77,6 @@ class AgentConfig(BaseModel):
         default=True,
         description="Whether to write raw LLM inputs and outputs to turn log files in the session directory",
     )
-    history: AgentHistoryConfig = Field(default_factory=AgentHistoryConfig)
 
 
 class GeminiConfig(BaseModel):
