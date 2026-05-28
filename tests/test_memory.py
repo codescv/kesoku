@@ -125,7 +125,7 @@ async def test_memory_tools_execution(tmp_path) -> None:
 
     # 4. Normal update on a role-isolated category with a strictly valid key
     res = update_memory(
-        category="fun_fact",
+        category="notes",
         key="funny_asuka_event",
         title="Asuka Day 1",
         content="Asuka was tsundere today",
@@ -137,9 +137,9 @@ async def test_memory_tools_execution(tmp_path) -> None:
     assert "Key: `funny_asuka_event`" in res
 
     # 4. Testing list_memories tool with roleplay segregation
-    # Writing a default fun_fact memory
+    # Writing a default notes memory
     update_memory(
-        category="fun_fact",
+        category="notes",
         key="funny_general_event",
         title="General Fun",
         content="Someone made a joke today",
@@ -149,31 +149,31 @@ async def test_memory_tools_execution(tmp_path) -> None:
     )
 
     # List memories as Tifa
-    list_tifa = list_memories(category="fun_fact", role="tifa", context=ctx)
+    list_tifa = list_memories(category="notes", role="tifa", context=ctx)
     # Tifa can see default memories but NOT Asuka's memories
     assert "funny_general_event" in list_tifa
     assert "funny_asuka_event" not in list_tifa
 
     # List memories as Asuka
-    list_asuka = list_memories(category="fun_fact", role="asuka", context=ctx)
+    list_asuka = list_memories(category="notes", role="asuka", context=ctx)
     # Asuka can see both default and Asuka-specific memories
     assert "funny_general_event" in list_asuka
     assert "funny_asuka_event" in list_asuka
 
     # 5. Testing view_memory tool with dynamic in-memory Markdown aggregation (key=None)
-    view_asuka_all = view_memory(category="fun_fact", key=None, role="asuka", context=ctx)
-    assert "# Category: fun_fact (scope: asuka)" in view_asuka_all
+    view_asuka_all = view_memory(category="notes", key=None, role="asuka", context=ctx)
+    assert "# Category: notes (scope: asuka)" in view_asuka_all
     assert "## General Fun (key: `funny_general_event`, scope: `default`)" in view_asuka_all
     assert "## Asuka Day 1 (key: `funny_asuka_event`, scope: `asuka`)" in view_asuka_all
     assert "Someone made a joke today" in view_asuka_all
     assert "Asuka was tsundere today" in view_asuka_all
 
     # 6. Testing delete_memory tool
-    delete_res = delete_memory(category="fun_fact", key="funny_asuka_event", role="asuka", context=ctx)
+    delete_res = delete_memory(category="notes", key="funny_asuka_event", role="asuka", context=ctx)
     assert "Memory successfully deleted" in delete_res
 
     # Verify deletion
-    list_asuka_after = list_memories(category="fun_fact", role="asuka", context=ctx)
+    list_asuka_after = list_memories(category="notes", role="asuka", context=ctx)
     assert "funny_asuka_event" not in list_asuka_after
 
 
@@ -229,9 +229,9 @@ async def test_category_role_routing_and_play_role(tmp_path) -> None:
     )
     assert "Scope: `default`" in res
 
-    # 2. Update 'fun_fact' memory - it should go to 'tifa' active role scope
+    # 2. Update 'notes' memory - it should go to 'tifa' active role scope
     res = update_memory(
-        category="fun_fact",
+        category="notes",
         key="funny_event",
         title="Funny",
         content="A funny thing happened",

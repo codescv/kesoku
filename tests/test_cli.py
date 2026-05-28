@@ -641,7 +641,7 @@ def test_cli_memory_export(tmp_path: Any) -> None:
     conn.execute(
         """
         INSERT INTO agent_memories (category, key, title, content, updated_at, role)
-        VALUES ('fun_fact', 'funny_event', 'Funny', 'Haha', 678.90, 'asuka')
+        VALUES ('notes', 'funny_event', 'Funny', 'Haha', 678.90, 'asuka')
         """
     )
     conn.commit()
@@ -666,9 +666,9 @@ def test_cli_memory_export(tmp_path: Any) -> None:
     assert exported_data["default"]["progress"]["standard_japanese"]["updated_at"] == 123.45
 
     assert "asuka" in exported_data
-    assert "fun_fact" in exported_data["asuka"]
-    assert "funny_event" in exported_data["asuka"]["fun_fact"]
-    assert exported_data["asuka"]["fun_fact"]["funny_event"]["title"] == "Funny"
-    assert exported_data["asuka"]["fun_fact"]["funny_event"]["content"] == "Haha"
-    assert exported_data["asuka"]["fun_fact"]["funny_event"]["updated_at"] == 678.90
+    assert "notes" in exported_data["asuka"]
+    assert "funny_event" in exported_data["asuka"]["notes"]
+    assert exported_data["asuka"]["notes"]["funny_event"]["title"] == "Funny"
+    assert exported_data["asuka"]["notes"]["funny_event"]["content"] == "Haha"
+    assert exported_data["asuka"]["notes"]["funny_event"]["updated_at"] == 678.90
 

@@ -89,8 +89,8 @@ The agent itself can switch its persona dynamically based on user prompt require
 
 ---
 
-## 🧠 Memory Isolation (`fun_fact` category)
+## 🧠 Memory Isolation (`notes` category)
 
 To ensure that different characters do not confuse their interactions:
-- Globally shared knowledge categories (`progress`, `user_profile`, `learnings`) are always stored in the globally shared `"default"` role scope.
-- The `"fun_fact"` memory category is role-isolated. Whenever the agent is active under a specific persona, facts and memorable daily events are stored privately under that character's role scope (e.g., `role='asuka'`).
+- Globally shared knowledge categories (`progress`, `learnings`) are always stored in the globally shared `"default"` role scope.
+- The `"notes"` memory category is role-isolated. Whenever the agent is active under a specific persona, facts and memorable daily events are stored privately under that character's role scope (e.g., `role='asuka'`).

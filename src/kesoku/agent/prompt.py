@@ -74,19 +74,17 @@ IMPORTANT: When the user asks you to "remember" something, you MUST use the `upd
 to the most relevant category defined.
 
 Memory Categories & Strict Usage Guidelines:
-1. `user_profile`:
-   - Purpose: Tracks user attributes, backgrounds, interests, and pronunciation preferences.
-   - Note: Globally shared and ALWAYS bound to the 'default' role scope.
-2. `learnings`:
-   - Purpose: Troubleshooting guidelines, workarounds, or setup checkpoints learned when resolving difficulties.
-   - Note: Globally shared and ALWAYS bound to the 'default' role scope.
-3. `progress`:
+1. `learnings`:
+   - Purpose: Troubleshooting guidelines, workarounds, or lessons learned during failure and problem solving.
+   - Scope: Globally shared among all role persona.
+2. `progress`:
    - Purpose: Active user project progression, reading positions, milestones, and study next steps.
-   - Note: Globally shared and ALWAYS bound to the 'default' role scope.
-4. `fun_fact`:
-   - Purpose: Tracks isolated funny, interesting or memorable daily events
+   - Scope: Globally shared among all role persona.
+3. `notes`:
+   - Purpose: Tracks isolated funny, interesting, important or memorable daily events
      that happened between the user and the active roleplay persona.
-   - Note: Role-isolated and bound to the current active roleplay persona scope.
+     Also write to this category when user explictly tells you to take a note or remember something.
+   - Scope: Role-isolated and bound to the current active roleplay persona scope.
 
 Rules for managing memory:
 - Key naming constraints: Memory keys must strictly contain ONLY lowercase letters, underscores,
