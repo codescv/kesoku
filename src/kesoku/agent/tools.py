@@ -730,22 +730,21 @@ async def compact_history(summary: str, context: ToolContext) -> str:
     Args:
         summary: The comprehensive chronological summary of the conversation so far.
                  You MUST follow this strict Markdown format:
-                 ### 1. Completed & Ongoing Goals
-                 - **Completed**: [List of tasks successfully resolved so far]
+                 ### 1. Tasks
+                 - **Completed**: [List of tasks successfully resolved so far, milestones]
                  - **In Progress**: [List of tasks currently being worked on]
 
                  ### 2. Critical States & Facts
-                 - **Key Facts / Constraints**: [Important facts or constraints mentioned by the user]
-                 - **Generated Assets / Paths**: [Paths of created files, staging outputs, or scripts]
+                 - **Key Facts**: [Important facts mentioned by the user, interesting happenings]
+                 - **Files**: [The absolute path of important directories:
+                               your intermediate files, important files you discovered, etc]
 
                  ### 3. User Preferences
                  - **Custom Rules**: [User-defined preferences, language choice, coding styles, or formatting rules]
 
                  ### 4. Key Commands & Executions
-                 - **Successful Commands**: [List of most commonly used or successfully executed shell
-                                            commands, build scripts, or test execution lines under
-                                            active/loaded skills, to avoid re-exploring them in
-                                            the new session]
+                 - **Important Commands**: [List of most commonly used or successfully executed shell
+                                            commands, avoid re-exploring them in the new session]
         context: The tool execution context (injected automatically).
 
     Returns:
