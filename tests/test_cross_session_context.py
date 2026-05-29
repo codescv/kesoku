@@ -236,3 +236,39 @@ async def test_get_role_messages_since(tmp_path) -> None:
     assert len(res_exclude) == 1
     assert res_exclude[0].id == "msg_u2"
 
+
+@pytest.mark.asyncio
+async def test_get_role_messages_since_default_unbound_channels(tmp_path) -> None:
+    """Test retrieving 'default' role messages for unbound channels without channel_roles entries."""
+    from kesoku.constants import MessageRole, MessageStatus, MessageType
+    from kesoku.db import Message, Session
+
+    temp_db = str(tmp_path / "test_default_unbound.db")
+    db = DatabaseManager(temp_db)
+    db.init_tables()
+
+    # 1. Create session mapping for a default channel (do NOT set role in channel_roles!)
+    db.create_session(Session(id="sess_def", title="Default Session"))
+    db.set_active_session_for_channel("cli", "chan_def", "sess_def")
+
+    # 2. Save default user message (unbound channel)
+    msg_user = Message(
+        id="msg_du",
+        session_id="sess_def",
+        chatbot_id="cli",
+        channel_id="chan_def",
+        sender="User",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Standard unbound message.",
+        timestamp=100.0,
+        status=MessageStatus.RESPONDED,
+    )
+    db.save_message(msg_user)
+
+    # 3. Fetch messages for role 'default' since timestamp = 50
+    res = db.get_role_messages_since("default", since_timestamp=50.0)
+    # Should successfully find the unbound channel message since its role defaults to 'default'!
+    assert len(res) == 1
+    assert res[0].id == "msg_du"
+

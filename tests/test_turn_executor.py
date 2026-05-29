@@ -785,8 +785,36 @@ async def test_turn_executor_cross_session_context_injection_and_consolidation(t
     # Give the async background task a split second to run and consolidate
     await asyncio.sleep(0.1)
 
-    # Assert that CrossSessionContext has successfully consolidated and released lock!
+    # Assert that the CrossSessionContext has successfully consolidated and released lock!
     ctx = gw.db.get_cross_session_context(role)
     assert ctx.status == "idle"
     assert ctx.content == "Consolidated memory from background!"
+
+
+def test_truncate_context_middle() -> None:
+    """Verify that truncate_context_middle preserves start/end and truncates middle correctly."""
+    from kesoku.agent.turn_executor import truncate_context_middle
+
+    # Scenario A: Under limit, should remain completely untouched
+    short_text = "Short content timeline."
+    assert truncate_context_middle(short_text, max_len=50) == short_text
+
+    # Scenario B: Over limit, should perform middle truncation preserving newline boundaries
+    lines = [f"Line {i}: This is some lengthy timeline memory content." for i in range(1, 41)]
+    long_text = "\n".join(lines)
+    assert len(long_text) > 500
+
+    # Truncate with a small limit (e.g., 400)
+    truncated = truncate_context_middle(long_text, max_len=400)
+    assert len(truncated) < len(long_text)
+    assert "... [Timeline Truncated for Brevity] ..." in truncated
+    # Start must be preserved
+    assert "Line 1:" in truncated
+    # End must be preserved
+    assert "Line 40:" in truncated
+    # Middle must be truncated
+    assert "Line 20:" not in truncated
+    # Newline boundaries must be clean
+    assert truncated.startswith("Line 1:")
+    assert truncated.endswith("Line 40: This is some lengthy timeline memory content.")
 

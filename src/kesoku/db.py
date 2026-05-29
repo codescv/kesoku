@@ -1199,13 +1199,13 @@ class DatabaseManager:
             query = """
                 SELECT m.* FROM messages m
                 JOIN channel_sessions cs ON m.session_id = cs.session_id
-                JOIN channel_roles cr ON cs.chatbot_id = cr.chatbot_id AND cs.channel_id = cr.channel_id
-                WHERE cr.role = ?
+                LEFT JOIN channel_roles cr ON cs.chatbot_id = cr.chatbot_id AND cs.channel_id = cr.channel_id
+                WHERE (cr.role = ? OR (? = 'default' AND cr.role IS NULL))
                   AND m.timestamp > ?
                   AND m.role IN ('user', 'assistant')
                   AND m.type = 'text'
             """
-            params: list[Any] = [role, since_timestamp]
+            params: list[Any] = [role, role, since_timestamp]
             if exclude_session_id:
                 query += " AND m.session_id != ?"
                 params.append(exclude_session_id)
