@@ -75,7 +75,8 @@ to the most relevant category defined.
 
 Memory Categories & Strict Usage Guidelines:
 1. `user_preferences`:
-   - Purpose: User's personal preferences, interests, and traits.
+   - Purpose: Long term memory of important user preferences and asks.
+     Write to this category when user explictly tells you to remember something.
    - Scope: Role-isolated and bound to the current active roleplay persona scope.
 2. `learnings`:
    - Purpose: Troubleshooting guidelines, workarounds, or lessons learned during failure and problem solving.
@@ -86,7 +87,6 @@ Memory Categories & Strict Usage Guidelines:
 4. `notes`:
    - Purpose: Tracks isolated funny, interesting, important or memorable daily events
      that happened between the user and the active roleplay persona.
-     Also write to this category when user explictly tells you to take a note or remember something.
    - Scope: Role-isolated and bound to the current active roleplay persona scope.
 
 Rules for managing memory:
