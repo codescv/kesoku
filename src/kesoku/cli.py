@@ -16,7 +16,9 @@ from kesoku.agent.agent import Agent
 from kesoku.cli_chat import run_cli_chat_async
 from kesoku.cli_service import service_app
 from kesoku.config import get_config, init_config, init_roles, init_skills, load_config
+from kesoku.cron import CronManager
 from kesoku.db import DatabaseManager
+from kesoku.gateway.chatbot.cronjob import CronjobChatbot
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import configure_logging, setup_logger
 
@@ -436,7 +438,9 @@ def start_cmd(
     if config_dir:
         cron_toml_path = os.path.join(config_dir, "cronjob.toml")
         if os.path.exists(cron_toml_path):
-            from kesoku.cron import CronManager
+            cronjob_bot = CronjobChatbot(chatbot_id="cronjob", gateway=gateway)
+            bot_tasks.append(cronjob_bot.start())
+            bots.append(cronjob_bot)
 
             cron_manager = CronManager(chatbots=bots, config_dir=config_dir)
             logger.info(f"Loaded cronjobs configuration from {cron_toml_path}")

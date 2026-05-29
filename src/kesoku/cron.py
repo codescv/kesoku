@@ -201,10 +201,17 @@ class CronManager:
             job: The job configuration dictionary.
             job_idx: The index of the job in the config.
         """
-        chatbot_id = job.get("chatbot_id", "discord")
+        chatbot_id = job.get("chatbot_id")
         channel_id = job.get("channel_id")
         prompt_path = job.get("prompt")
         mention_user_id = job.get("mention_user_id")
+
+        if not chatbot_id:
+            logger.error(f"Cronjob {job_idx} is missing chatbot_id field.")
+            return
+
+        if chatbot_id == "cronjob" and not channel_id:
+            channel_id = f"silent_{job_idx}"
 
         if not prompt_path:
             logger.warning(f"Cronjob {job_idx} is missing prompt field.")
