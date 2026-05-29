@@ -557,16 +557,18 @@ class TurnExecutor:
             )
             prompt = (
                 "You are an expert memory consolidator for a roleplay companion agent.\n"
-                f"Current Consolidated Memory Summary:\n\"\"\"\n{current_context or 'None'}\n\"\"\"\n\n"
+                f"Current Consolidated Event Timeline:\n\"\"\"\n{current_context or 'None'}\n\"\"\"\n\n"
                 f"New Chat History since last update:\n\"\"\"\n{history_log}\n\"\"\"\n\n"
-                "Task: Combine the current consolidated memory and the new chat history "
-                "into a single, highly concise consolidated memory summary.\n"
+                "Task: Combine the current event timeline and the new chat history into a single, "
+                "highly concise, chronological timeline/log of events and stories.\n"
                 "Rules:\n"
-                "- Retain ongoing user/agent tasks, major decisions, promises made by "
-                "the agent or user, and key status changes.\n"
-                "- Drop trivial pleasantries, temporary topics, and casual banter.\n"
-                "- Output a direct, highly clean, bullet-pointed markdown summary.\n"
-                "- Keep it strictly under 500 words."
+                "- Focus EXCLUSIVELY on concrete stories, events, interesting happenings, "
+                "milestones reached, topics discussed, and promises made during the conversation.\n"
+                "- STRICTLY PROHIBITED: Do not create any sections, headers, or bullet points for "
+                "'User Profile', 'Preferences', 'Rules', 'Settings', or 'Interface Configurations'. "
+                "Any such data must be completely discarded and MUST NOT be summarized.\n"
+                "- Drop trivial pleasantries, greeting exchanges, and temporary topics.\n"
+                "- Output a direct, highly clean, bullet-pointed markdown timeline of events."
             )
 
             # 3. Invoke LLM

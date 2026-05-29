@@ -1304,7 +1304,16 @@ class DatabaseManager:
         try:
             with conn:
                 now = time.time()
-                # 1. Self-heal stale locks older than 300 seconds (5 minutes)
+                # 1. Ensure a row for this role exists in the table (INSERT OR IGNORE)
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO cross_session_contexts
+                    (role, content, updated_at, status)
+                    VALUES (?, '', 0.0, 'idle')
+                    """,
+                    (role,),
+                )
+                # 2. Self-heal stale locks older than 300 seconds (5 minutes)
                 conn.execute(
                     """
                     UPDATE cross_session_contexts
@@ -1313,7 +1322,7 @@ class DatabaseManager:
                     """,
                     (role, now),
                 )
-                # 2. Try to atomically lock the record (CAS)
+                # 3. Try to atomically lock the record (CAS)
                 cursor = conn.execute(
                     """
                     UPDATE cross_session_contexts
