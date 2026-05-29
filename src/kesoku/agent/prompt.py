@@ -84,10 +84,6 @@ Memory Categories & Strict Usage Guidelines:
 3. `progress`:
    - Purpose: Active user project progression, reading positions, milestones, and study next steps.
    - Scope: Globally shared among all role persona.
-4. `notes`:
-   - Purpose: Tracks isolated funny, interesting, important or memorable daily events
-     that happened between the user and the active roleplay persona.
-   - Scope: Role-isolated and bound to the current active roleplay persona scope.
 
 Rules for managing memory:
 - Key naming constraints: Memory keys must strictly contain ONLY lowercase letters, underscores,

@@ -891,7 +891,7 @@ async def compact_history(summary: str, context: ToolContext) -> str:
 # Memory System Helpers and Tools
 def get_allowed_categories(db: Any) -> set[str]:
     """Retrieves the set of all currently permitted or existing memory categories."""
-    categories = {"learnings", "progress", "notes", "user_preferences"}
+    categories = {"learnings", "progress", "user_preferences"}
     try:
         memories = db.get_agent_memories()
         for m in memories:
@@ -921,8 +921,8 @@ def _resolve_memory_role(category: str, role_param: str | None, context: ToolCon
     if category in {"progress", "learnings"}:
         return "default"
 
-    # Rule 2: notes and user_preferences categories use current channel's active role
-    if category in {"notes", "user_preferences"}:
+    # Rule 2: user_preferences category uses current channel's active role
+    if category in {"user_preferences"}:
         if context and context.gateway and context.original_msg_id:
             db = context.gateway.db
             try:
@@ -948,7 +948,7 @@ def list_memories(
     """List all active memory keys and titles under the specified category.
 
     Args:
-        category: The memory category (e.g., 'progress', 'learnings', 'notes').
+        category: The memory category (e.g., 'progress', 'learnings', 'user_preferences').
         role: Optional roleplay persona scope (defaults to None for implicit channel/default persona).
         context: Injected tool execution context.
 
@@ -989,7 +989,7 @@ def view_memory(
     correct role/default scope and formats them into a beautiful, readable Markdown block.
 
     Args:
-        category: The memory category (e.g., 'progress', 'learnings', 'notes').
+        category: The memory category (e.g., 'progress', 'learnings', 'user_preferences').
         key: Optional unique snake_case key. If omitted, renders all entries.
         role: Optional roleplay persona scope (defaults to None for implicit channel/default persona).
         context: Injected tool execution context.
@@ -1045,12 +1045,9 @@ def update_memory(
     This executes a transactionally isolated UPSERT SQL statement, completely protecting other keys.
 
     Note: To prevent memory bloat, each memory entry's content MUST be kept concise.
-    For the 'notes' category, you are strongly encouraged to use different keys for different days
-    (e.g., using format like 'notes_2026_05_29' or 'notes_2026_05_30' instead of overwriting the same
-    key 'notes') to keep a chronological daily log.
 
     Args:
-        category: The memory category (e.g., 'progress', 'learnings', 'notes').
+        category: The memory category (e.g., 'progress', 'learnings', 'user_preferences').
         key: The unique snake_case key.
         title: Human-readable label or title for the entry.
         content: Detailed markdown or JSON content payload (must be <= 200 characters).
@@ -1119,7 +1116,7 @@ def delete_memory(
     """Atomically delete a specific memory entry under a category and implicit correct role scope.
 
     Args:
-        category: The memory category (e.g., 'progress', 'learnings', 'notes').
+        category: The memory category (e.g., 'progress', 'learnings', 'user_preferences').
         key: The unique snake_case key to delete.
         role: Optional roleplay persona scope (defaults to None for implicit channel/default persona).
         context: Injected tool execution context.

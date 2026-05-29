@@ -127,7 +127,7 @@ async def test_memory_tools_execution(tmp_path) -> None:
 
     # 4. Normal update on a role-isolated category with a strictly valid key
     res = update_memory(
-        category="notes",
+        category="user_preferences",
         key="funny_asuka_event",
         title="Asuka Day 1",
         content="Asuka was tsundere today",
@@ -139,9 +139,9 @@ async def test_memory_tools_execution(tmp_path) -> None:
     assert "Key: `funny_asuka_event`" in res
 
     # 4. Testing list_memories tool with roleplay segregation
-    # Writing a default notes memory
+    # Writing a default user_preferences memory
     update_memory(
-        category="notes",
+        category="user_preferences",
         key="funny_general_event",
         title="General Fun",
         content="Someone made a joke today",
@@ -151,31 +151,31 @@ async def test_memory_tools_execution(tmp_path) -> None:
     )
 
     # List memories as Tifa
-    list_tifa = list_memories(category="notes", role="tifa", context=ctx)
+    list_tifa = list_memories(category="user_preferences", role="tifa", context=ctx)
     # Tifa can see default memories but NOT Asuka's memories
     assert "funny_general_event" in list_tifa
     assert "funny_asuka_event" not in list_tifa
 
     # List memories as Asuka
-    list_asuka = list_memories(category="notes", role="asuka", context=ctx)
+    list_asuka = list_memories(category="user_preferences", role="asuka", context=ctx)
     # Asuka can see both default and Asuka-specific memories
     assert "funny_general_event" in list_asuka
     assert "funny_asuka_event" in list_asuka
 
     # 5. Testing view_memory tool with dynamic in-memory Markdown aggregation (key=None)
-    view_asuka_all = view_memory(category="notes", key=None, role="asuka", context=ctx)
-    assert "# Category: notes (scope: asuka)" in view_asuka_all
+    view_asuka_all = view_memory(category="user_preferences", key=None, role="asuka", context=ctx)
+    assert "# Category: user_preferences (scope: asuka)" in view_asuka_all
     assert "## General Fun (key: `funny_general_event`, scope: `default`)" in view_asuka_all
     assert "## Asuka Day 1 (key: `funny_asuka_event`, scope: `asuka`)" in view_asuka_all
     assert "Someone made a joke today" in view_asuka_all
     assert "Asuka was tsundere today" in view_asuka_all
 
     # 6. Testing delete_memory tool
-    delete_res = delete_memory(category="notes", key="funny_asuka_event", role="asuka", context=ctx)
+    delete_res = delete_memory(category="user_preferences", key="funny_asuka_event", role="asuka", context=ctx)
     assert "Memory successfully deleted" in delete_res
 
     # Verify deletion
-    list_asuka_after = list_memories(category="notes", role="asuka", context=ctx)
+    list_asuka_after = list_memories(category="user_preferences", role="asuka", context=ctx)
     assert "funny_asuka_event" not in list_asuka_after
 
 
@@ -231,9 +231,9 @@ async def test_category_role_routing_and_play_role(tmp_path) -> None:
     )
     assert "Scope: `default`" in res
 
-    # 2. Update 'notes' memory - it should go to 'tifa' active role scope
+    # 2. Update 'user_preferences' memory - it should go to 'tifa' active role scope
     res = update_memory(
-        category="notes",
+        category="user_preferences",
         key="funny_event",
         title="Funny",
         content="A funny thing happened",
@@ -283,7 +283,7 @@ async def test_memory_length_limit(tmp_path) -> None:
 
     # 1. Valid content length (<= 500 characters)
     res = update_memory(
-        category="notes",
+        category="user_preferences",
         key="valid_len",
         title="Valid Title",
         content="A" * 500,
@@ -293,7 +293,7 @@ async def test_memory_length_limit(tmp_path) -> None:
 
     # 2. Exceeding content length (> 500 characters)
     res_fail = update_memory(
-        category="notes",
+        category="user_preferences",
         key="invalid_len",
         title="Invalid Title",
         content="A" * 501,
@@ -304,7 +304,7 @@ async def test_memory_length_limit(tmp_path) -> None:
     # 3. Exceeding content length with import of MAX_MEMORY_CONTENT_LENGTH
     from kesoku.agent.tools import MAX_MEMORY_CONTENT_LENGTH
     res_fail_constant = update_memory(
-        category="notes",
+        category="user_preferences",
         key="invalid_len_constant",
         title="Invalid Title",
         content="A" * (MAX_MEMORY_CONTENT_LENGTH + 1),
