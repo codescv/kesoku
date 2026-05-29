@@ -20,6 +20,8 @@ from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
 
+MAX_TOTAL_USER_PREFERENCES_LENGTH = 500
+
 
 class TurnExecutor:
     """Orchestrates conversational turn execution, including LLM inference, thought logging, and tool calling."""
@@ -140,6 +142,39 @@ class TurnExecutor:
                     session_id=self.session_id,
                 )
 
+                # Inject user preferences into the latest user message
+                latest_user_msg = None
+                for msg in reversed(history):
+                    if msg.role == MessageRole.USER:
+                        latest_user_msg = msg
+                        break
+
+                if latest_user_msg:
+                    active_role = await self.gateway.get_channel_role_with_inheritance(
+                        current_msg.chatbot_id,
+                        current_msg.channel_id,
+                        self.session_id,
+                    )
+                    user_prefs = await asyncio.to_thread(
+                        self.gateway.db.get_agent_memories,
+                        category="user_preferences",
+                        role=active_role,
+                    )
+                    if user_prefs and "[User Preferences]" not in latest_user_msg.content:
+                        pref_suffix = "\n\n[User Preferences]\n" + "\n".join(
+                            f"- {pref['title']}: {pref['content']}" for pref in user_prefs
+                        )
+                        if len(pref_suffix) > MAX_TOTAL_USER_PREFERENCES_LENGTH:
+                            pref_suffix = pref_suffix[:MAX_TOTAL_USER_PREFERENCES_LENGTH - 3] + "..."
+                        msg_idx = history.index(latest_user_msg)
+                        copied_msg = latest_user_msg.model_copy()
+                        copied_msg.content += pref_suffix
+                        history[msg_idx] = copied_msg
+                        latest_user_msg = copied_msg
+                        logger.info(
+                            f"Injected {len(user_prefs)} user preferences into user message {copied_msg.id}"
+                        )
+
                  # Retrieve system prompt directly from session
                 session = await self.gateway.get_session(self.session_id)
                 system_prompt = session.system_prompt if session else None
@@ -163,18 +198,13 @@ class TurnExecutor:
                 percentage = (context_tokens / limit) * 100
 
                 # Inject context monitor warning into the latest user message in history
-                latest_user_msg = None
-                for msg in reversed(history):
-                    if msg.role == MessageRole.USER:
-                        latest_user_msg = msg
-                        break
-
-                if latest_user_msg:
+                threshold = cfg.agent.compact_history_warning_threshold
+                if latest_user_msg and percentage >= threshold:
                     monitor_suffix = (
                         f"\n\n[Context Monitor: Currently using {context_tokens:,} tokens, "
                         f"which is {percentage:.1f}% of your {limit:,} window limit. "
-                        f"Please call 'compact_history' tool if you are close to the limit "
-                        f"to reset the context window.]"
+                        "It is highly recommended that you call the 'compact_history' "
+                        "tool now to reset the context window.]"
                     )
                     if "[Context Monitor:" not in latest_user_msg.content:
                         # Clone the user message to avoid mutating shared database/cached states in place
@@ -182,6 +212,7 @@ class TurnExecutor:
                         copied_msg = latest_user_msg.model_copy()
                         copied_msg.content += monitor_suffix
                         history[msg_idx] = copied_msg
+                        latest_user_msg = copied_msg
                         logger.info(
                             f"Injected context monitor warning into user message {copied_msg.id}: "
                             f"{context_tokens} tokens ({percentage:.1f}%)"

@@ -1,11 +1,13 @@
 """Unit tests for the SQLite Category-based and Role-bound Agent Memory System."""
 
+import asyncio
+
 import pytest
 
 from kesoku.agent.tools import ToolContext, delete_memory, list_memories, update_memory, view_memory
 from kesoku.config import KesokuConfig, WorkspaceConfig
 from kesoku.context import KesokuContext
-from kesoku.db import DatabaseManager
+from kesoku.db import DatabaseManager, Message
 
 
 @pytest.mark.asyncio
@@ -260,3 +262,135 @@ async def test_category_role_routing_and_play_role(tmp_path) -> None:
     # Verify that database role is updated
     current_role = await gw.get_channel_role("discord", "chan_123")
     assert current_role == "asuka"
+
+
+@pytest.mark.asyncio
+async def test_memory_length_limit(tmp_path) -> None:
+    """Test that update_memory enforces content character limits properly."""
+    from kesoku.gateway.gateway import Gateway
+
+    temp_db = str(tmp_path / "test_memory_limit.db")
+    DatabaseManager(temp_db).init_tables()
+
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    ctx = ToolContext(
+        session_id="sess_limit_test",
+        session_workspace="test_ws",
+        gateway=gw,
+    )
+
+    # 1. Valid content length (<= 500 characters)
+    res = update_memory(
+        category="notes",
+        key="valid_len",
+        title="Valid Title",
+        content="A" * 500,
+        context=ctx,
+    )
+    assert "Memory successfully saved!" in res
+
+    # 2. Exceeding content length (> 500 characters)
+    res_fail = update_memory(
+        category="notes",
+        key="invalid_len",
+        title="Invalid Title",
+        content="A" * 501,
+        context=ctx,
+    )
+    assert "Error: Content length (501 characters) exceeds the maximum limit of 500 characters" in res_fail
+
+    # 3. Exceeding content length with import of MAX_MEMORY_CONTENT_LENGTH
+    from kesoku.agent.tools import MAX_MEMORY_CONTENT_LENGTH
+    res_fail_constant = update_memory(
+        category="notes",
+        key="invalid_len_constant",
+        title="Invalid Title",
+        content="A" * (MAX_MEMORY_CONTENT_LENGTH + 1),
+        context=ctx,
+    )
+    expected_err = (
+        f"Error: Content length ({MAX_MEMORY_CONTENT_LENGTH + 1} characters) "
+        f"exceeds the maximum limit of {MAX_MEMORY_CONTENT_LENGTH} characters"
+    )
+    assert expected_err in res_fail_constant
+
+
+@pytest.mark.asyncio
+async def test_memory_ordering(tmp_path) -> None:
+    """Test that get_agent_memories returns records ordered by updated_at DESC."""
+    temp_db = str(tmp_path / "test_memory_ordering.db")
+    db = DatabaseManager(temp_db)
+    db.init_tables()
+
+    # Insert memories with sleep in between to ensure different updated_at timestamps
+    db.upsert_agent_memory("progress", "key_first", "First Title", "Content A")
+    await asyncio.sleep(0.01)
+    db.upsert_agent_memory("progress", "key_second", "Second Title", "Content B")
+    await asyncio.sleep(0.01)
+    db.upsert_agent_memory("progress", "key_third", "Third Title", "Content C")
+
+    mems = db.get_agent_memories(category="progress")
+    assert len(mems) == 3
+    # Should be newest first (key_third, then key_second, then key_first)
+    assert mems[0]["key"] == "key_third"
+    assert mems[1]["key"] == "key_second"
+    assert mems[2]["key"] == "key_first"
+
+
+@pytest.mark.asyncio
+async def test_user_preferences_memory_behavior(tmp_path) -> None:
+    """Verify user_preferences memory is allowed, behaves with correct role scopes and respects limits."""
+    from kesoku.gateway.gateway import Gateway
+
+    temp_db = str(tmp_path / "test_pref.db")
+    DatabaseManager(temp_db).init_tables()
+
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    # Bind active channel role for the active context message
+    await gw.set_channel_role("discord", "chan_pref", "tifa")
+
+    # Create a mock user message in channel 'chan_pref' to simulate active context
+    msg = Message(
+        id="msg_pref",
+        session_id="sess_pref",
+        chatbot_id="discord",
+        channel_id="chan_pref",
+        sender="User",
+        role="user",
+        content="Preferences request",
+        status="responded",
+    )
+    await gw.post(msg)
+
+    ctx = ToolContext(
+        session_id="sess_pref",
+        session_workspace="test_ws",
+        original_msg_id="msg_pref",
+        gateway=gw,
+    )
+
+    # 1. Update 'user_preferences' memory - it should dynamically route to 'tifa' role scope
+    res = update_memory(
+        category="user_preferences",
+        key="dont_use_codeblocks",
+        title="Code Block Preference",
+        content="Avoid markdown code blocks",
+        role="default",  # Passed explicitly but should be overridden by channel active role 'tifa'
+        context=ctx,
+    )
+    assert "Memory successfully saved!" in res
+    assert "Scope: `tifa`" in res
+
+    # 2. Max content length limit (MAX_MEMORY_CONTENT_LENGTH is 500, let's check it enforces it)
+    res_fail = update_memory(
+        category="user_preferences",
+        key="pref_too_long",
+        title="Too Long Preference",
+        content="A" * 501,
+        context=ctx,
+    )
+    assert "Error: Content length (501 characters) exceeds the maximum limit of 500 characters" in res_fail

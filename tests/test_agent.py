@@ -131,7 +131,13 @@ async def test_run_shell_command(tmp_path: Any) -> None:
 @pytest.mark.asyncio
 async def test_run_shell_command_background_override(tmp_path: Any) -> None:
     """Verify background_threshold_seconds override in run_shell_command transitions to background."""
-    ctx = ToolContext(session_id="test_sess_override", session_workspace="test_ws_override")
+    from kesoku.agent.tools import ActiveJobsRegistry
+    jobs = ActiveJobsRegistry()
+    ctx = ToolContext(
+        session_id="test_sess_override",
+        session_workspace="test_ws_override",
+        active_jobs=jobs,
+    )
     with patch("kesoku.agent.tools.get_config") as mock_get_config:
         cfg = KesokuConfig()
         cfg.workspace.sessions_dir = str(tmp_path / "sessions")
@@ -140,10 +146,13 @@ async def test_run_shell_command_background_override(tmp_path: Any) -> None:
         mock_get_config.return_value = cfg
 
         # Override threshold to 0.01 seconds, so sleep 1 command will definitely transition to background!
-        res = await run_shell_command("sleep 1", background_threshold_seconds=0.01, context=ctx)
-
-        assert "transitioned to background execution" in res
-        assert "Background Job ID" in res
+        try:
+            res = await run_shell_command("sleep 1", background_threshold_seconds=0.01, context=ctx)
+            assert "transitioned to background execution" in res
+            assert "Background Job ID" in res
+        finally:
+            # Clean up the running background subprocess to avoid unraisable asyncio exception warnings
+            await jobs.stop_all_for_session("test_sess_override")
 
 
 def test_workspace_name() -> None:

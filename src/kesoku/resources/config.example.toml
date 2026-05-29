@@ -8,6 +8,8 @@ llm = "gemini"
 # Optional: List of custom system prompt file paths relative to agent working directory
 # user_prompts = ["memory/USER.md"]
 raw_llm_logs = true
+# Threshold percentage of context window limit before warning is shown (default: 80.0)
+compact_history_warning_threshold = 50.0
 
 
 [gemini]

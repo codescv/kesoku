@@ -9,7 +9,15 @@ import re
 import shlex
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from kesoku.gateway.gateway import Gateway
+    GatewayType = Gateway | None
+    ActiveJobsRegistryType = "ActiveJobsRegistry | None"
+else:
+    GatewayType = Any
+    ActiveJobsRegistryType = Any
 
 from google import genai
 from google.genai import types
@@ -25,6 +33,7 @@ logger = setup_logger(__name__)
 
 MAX_TOOL_OUTPUT_LENGTH = 3000
 TIMEOUT_SECONDS = 1800
+MAX_MEMORY_CONTENT_LENGTH = 500
 
 
 class ToolContext(BaseModel):
@@ -35,9 +44,9 @@ class ToolContext(BaseModel):
     session_id: str = Field(..., description="Unique session identifier")
     session_workspace: str = Field(..., description="Relative folder name for the session workspace")
     original_msg_id: str | None = Field(None, description="ID of the message initiating the turn")
-    active_jobs: Any = Field(None, exclude=True)
+    active_jobs: ActiveJobsRegistryType = Field(None, exclude=True)
     transitioned_to_session: str | None = Field(None, description="New session ID if history was compacted")
-    gateway: Any = Field(None, exclude=True)
+    gateway: GatewayType = Field(None, exclude=True)
 
 
 class ActiveJobsRegistry:
@@ -882,7 +891,7 @@ async def compact_history(summary: str, context: ToolContext) -> str:
 # Memory System Helpers and Tools
 def get_allowed_categories(db: Any) -> set[str]:
     """Retrieves the set of all currently permitted or existing memory categories."""
-    categories = {"learnings", "progress", "notes"}
+    categories = {"learnings", "progress", "notes", "user_preferences"}
     try:
         memories = db.get_agent_memories()
         for m in memories:
@@ -912,8 +921,8 @@ def _resolve_memory_role(category: str, role_param: str | None, context: ToolCon
     if category in {"progress", "learnings"}:
         return "default"
 
-    # Rule 2: notes category uses current channel's active role
-    if category == "notes":
+    # Rule 2: notes and user_preferences categories use current channel's active role
+    if category in {"notes", "user_preferences"}:
         if context and context.gateway and context.original_msg_id:
             db = context.gateway.db
             try:
@@ -922,7 +931,7 @@ def _resolve_memory_role(category: str, role_param: str | None, context: ToolCon
                     msg = msg_list[0]
                     return db.get_channel_role_with_inheritance(msg.chatbot_id, msg.channel_id, context.session_id)
             except Exception as e:
-                logger.warning(f"Failed to resolve active role for memory category notes: {e}")
+                logger.warning(f"Failed to resolve active role for memory category {category}: {e}")
         # Fallback
         return role_param if role_param else "default"
 
@@ -1035,11 +1044,16 @@ def update_memory(
 
     This executes a transactionally isolated UPSERT SQL statement, completely protecting other keys.
 
+    Note: To prevent memory bloat, each memory entry's content MUST be kept concise.
+    For the 'notes' category, you are strongly encouraged to use different keys for different days
+    (e.g., using format like 'notes_2026_05_29' or 'notes_2026_05_30' instead of overwriting the same
+    key 'notes') to keep a chronological daily log.
+
     Args:
         category: The memory category (e.g., 'progress', 'learnings', 'notes').
         key: The unique snake_case key.
         title: Human-readable label or title for the entry.
-        content: Detailed markdown or JSON content payload.
+        content: Detailed markdown or JSON content payload (must be <= 200 characters).
         role: Optional roleplay persona scope (defaults to None for implicit channel/default persona).
         create_category: True if permission was granted to initialize a new category.
         context: Injected tool execution context.
@@ -1067,6 +1081,12 @@ def update_memory(
                 f"Error: Invalid Key '{key}'.\n"
                 "Memory keys must strictly contain only lowercase letters, "
                 "underscores, and numbers (regex: ^[a-z0-9_]+$)."
+            )
+
+        if len(content) > MAX_MEMORY_CONTENT_LENGTH:
+            return (
+                f"Error: Content length ({len(content)} characters) exceeds the maximum limit "
+                f"of {MAX_MEMORY_CONTENT_LENGTH} characters. Please keep the memory extremely concise and try again."
             )
 
         sanitized_key = sanitize_key(key)

@@ -357,3 +357,261 @@ async def test_turn_executor_pivot_resets_nudged(temp_db: str) -> None:
     final_replies = [m for m in history if m.role == "assistant" and m.content == "Pivoted response success!"]
     assert len(final_replies) == 1
     assert final_replies[0].parent_id == msg2.id
+
+
+@pytest.mark.asyncio
+async def test_turn_executor_context_monitor_warning(temp_db: str) -> None:
+    """Verify that TurnExecutor injects context monitor warning based on percentage and threshold."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.create_session("sess_warning", title="Warning Session")
+
+    # Post a pending user message
+    user_msg = Message(
+        session_id="sess_warning",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        content="Hello Agent!",
+        status="pending_agent",
+    )
+    await gw.post(user_msg)
+
+    # Mock LLM with a context limit
+    class WarningLLM(BaseLLM):
+        @property
+        def context_window_limit(self) -> int:
+            return 1000
+
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+        ) -> LLMResponse:
+            # Capture generated history in metadata to assert warning injection
+            self.captured_history = list(history or [])
+            return LLMResponse(content="Responded", total_tokens=10)
+
+        def count_tokens(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+        ) -> int:
+            # Will trigger 50% when context_window_limit is 1000
+            return 500
+
+    llm = WarningLLM()
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    turn_logger = MagicMock(spec=TurnLogger)
+
+    context = KesokuContext(llm=llm)
+    executor = TurnExecutor("sess_warning", gw, tool_runner, turn_logger, context=context)
+
+    # Scenario A: Threshold is 80% (percentage is 50%, so no warning should be injected)
+    cfg.agent.compact_history_warning_threshold = 80.0
+
+    worker = MagicMock()
+    type(worker).running = PropertyMock(side_effect=[True, False])
+    async def mock_pivot(m: Message) -> Message:
+        return m
+    worker.drain_queue_and_pivot.side_effect = mock_pivot
+    worker.queue_empty.return_value = True
+
+    with patch("kesoku.context.get_config", return_value=cfg), \
+         patch("kesoku.agent.turn_executor.build_clean_history", return_value=[user_msg]):
+        await executor.process_turn(
+            current_msg=user_msg,
+            worker=worker,
+            session_staging_dir="/tmp/sess_warning",
+        )
+
+    # Assert no warning in the generated history
+    assert len(llm.captured_history) == 1
+    assert "[Context Monitor:" not in llm.captured_history[0].content
+
+    # Reset status of the message to process it again
+    user_msg.status = "pending_agent"
+    await gw.update_message_status(user_msg.id, "pending_agent")
+
+    # Scenario B: Threshold is 40% (percentage is 50%, so warning should be injected)
+    cfg.agent.compact_history_warning_threshold = 40.0
+
+    worker2 = MagicMock()
+    type(worker2).running = PropertyMock(side_effect=[True, False])
+    worker2.drain_queue_and_pivot.side_effect = mock_pivot
+    worker2.queue_empty.return_value = True
+
+    # Re-create cloned user message without any previous warning
+    user_msg_clean = Message(
+        session_id="sess_warning",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        content="Hello Agent!",
+        status="pending_agent",
+    )
+
+    executor2 = TurnExecutor("sess_warning", gw, tool_runner, turn_logger, context=context)
+    with patch("kesoku.context.get_config", return_value=cfg), \
+         patch("kesoku.agent.turn_executor.build_clean_history", return_value=[user_msg_clean]):
+        await executor2.process_turn(
+            current_msg=user_msg_clean,
+            worker=worker2,
+            session_staging_dir="/tmp/sess_warning",
+        )
+
+    assert (
+        "[Context Monitor: Currently using 500 tokens, "
+        "which is 50.0% of your 1,000 window limit. "
+        "It is highly recommended that you call the 'compact_history' "
+        "tool now to reset the context window.]"
+    ) in llm.captured_history[0].content
+
+
+@pytest.mark.asyncio
+async def test_turn_executor_user_preferences_injection(temp_db: str) -> None:
+    """Verify that TurnExecutor injects user preferences into the latest user message."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.create_session("sess_pref_inject", title="Preferences Session")
+
+    # Add user preferences to database under active role 'tifa'
+    await gw.set_channel_role("cli", "ch_pref", "tifa")
+    gw.db.upsert_agent_memory(
+        category="user_preferences",
+        key="rule_one",
+        title="No Codeblocks",
+        content="Avoid Markdown",
+        role="tifa",
+    )
+
+    user_msg = Message(
+        session_id="sess_pref_inject",
+        chatbot_id="cli",
+        channel_id="ch_pref",
+        sender="u1",
+        role="user",
+        content="Run task!",
+        status="pending_agent",
+    )
+    await gw.post(user_msg)
+
+    class MockPrefLLM(BaseLLM):
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+        ) -> LLMResponse:
+            self.captured_history = list(history or [])
+            return LLMResponse(content="Response", total_tokens=5)
+
+    llm = MockPrefLLM()
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    turn_logger = MagicMock(spec=TurnLogger)
+
+    context = KesokuContext(llm=llm)
+    executor = TurnExecutor("sess_pref_inject", gw, tool_runner, turn_logger, context=context)
+
+    worker = MagicMock()
+    type(worker).running = PropertyMock(side_effect=[True, False])
+    async def mock_pivot(m: Message) -> Message:
+        return m
+    worker.drain_queue_and_pivot.side_effect = mock_pivot
+    worker.queue_empty.return_value = True
+
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor.process_turn(
+            current_msg=user_msg,
+            worker=worker,
+            session_staging_dir="/tmp/sess_pref_inject",
+        )
+
+    # Assert that the user preferences were successfully injected in history
+    assert len(llm.captured_history) == 1
+    assert "Run task!" in llm.captured_history[0].content
+    assert "[User Preferences]" in llm.captured_history[0].content
+    assert "- No Codeblocks: Avoid Markdown" in llm.captured_history[0].content
+
+
+@pytest.mark.asyncio
+async def test_turn_executor_user_preferences_truncation(temp_db: str) -> None:
+    """Verify that TurnExecutor truncates injected user preferences if they exceed 500 characters."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.create_session("sess_pref_trunc", title="Preferences Truncation Session")
+
+    # Add very long user preferences to trigger 500 characters truncation
+    await gw.set_channel_role("cli", "ch_pref_trunc", "tifa")
+    gw.db.upsert_agent_memory(
+        category="user_preferences",
+        key="rule_long",
+        title="Long Preference",
+        content="A" * 600,
+        role="tifa",
+    )
+
+    user_msg = Message(
+        session_id="sess_pref_trunc",
+        chatbot_id="cli",
+        channel_id="ch_pref_trunc",
+        sender="u1",
+        role="user",
+        content="Go!",
+        status="pending_agent",
+    )
+    await gw.post(user_msg)
+
+    class MockTruncLLM(BaseLLM):
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+        ) -> LLMResponse:
+            self.captured_history = list(history or [])
+            return LLMResponse(content="Response", total_tokens=5)
+
+    llm = MockTruncLLM()
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    turn_logger = MagicMock(spec=TurnLogger)
+
+    context = KesokuContext(llm=llm)
+    executor = TurnExecutor("sess_pref_trunc", gw, tool_runner, turn_logger, context=context)
+
+    worker = MagicMock()
+    type(worker).running = PropertyMock(side_effect=[True, False])
+    async def mock_pivot(m: Message) -> Message:
+        return m
+    worker.drain_queue_and_pivot.side_effect = mock_pivot
+    worker.queue_empty.return_value = True
+
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor.process_turn(
+            current_msg=user_msg,
+            worker=worker,
+            session_staging_dir="/tmp/sess_pref_trunc",
+        )
+
+    # Assert that the user preferences block length was truncated and capped
+    assert len(llm.captured_history) == 1
+    content = llm.captured_history[0].content
+    assert "[User Preferences]" in content
+    from kesoku.agent.turn_executor import MAX_TOTAL_USER_PREFERENCES_LENGTH
+    preference_part = content[content.index("\n\n[User Preferences]"):]
+    assert len(preference_part) == MAX_TOTAL_USER_PREFERENCES_LENGTH
+    assert preference_part.endswith("...")

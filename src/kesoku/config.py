@@ -77,6 +77,10 @@ class AgentConfig(BaseModel):
         default=True,
         description="Whether to write raw LLM inputs and outputs to turn log files in the session directory",
     )
+    compact_history_warning_threshold: float = Field(
+        default=80.0,
+        description="Threshold percentage of context window limit before warning is shown",
+    )
 
 
 class GeminiConfig(BaseModel):

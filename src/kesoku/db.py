@@ -1051,7 +1051,7 @@ class DatabaseManager:
 
             if clauses:
                 query += " WHERE " + " AND ".join(clauses)
-            query += " ORDER BY key ASC"
+            query += " ORDER BY updated_at DESC"
 
             cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
