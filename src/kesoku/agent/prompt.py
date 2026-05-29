@@ -74,13 +74,16 @@ IMPORTANT: When the user asks you to "remember" something, you MUST use the `upd
 to the most relevant category defined.
 
 Memory Categories & Strict Usage Guidelines:
-1. `learnings`:
+1. `user_preferences`:
+   - Purpose: User's personal preferences, interests, and traits.
+   - Scope: Globally shared among all role persona.
+2. `learnings`:
    - Purpose: Troubleshooting guidelines, workarounds, or lessons learned during failure and problem solving.
    - Scope: Globally shared among all role persona.
-2. `progress`:
+3. `progress`:
    - Purpose: Active user project progression, reading positions, milestones, and study next steps.
    - Scope: Globally shared among all role persona.
-3. `notes`:
+4. `notes`:
    - Purpose: Tracks isolated funny, interesting, important or memorable daily events
      that happened between the user and the active roleplay persona.
      Also write to this category when user explictly tells you to take a note or remember something.
