@@ -1,5 +1,6 @@
 """Unit tests for TurnExecutor class."""
 
+import time
 from typing import Any
 from unittest.mock import MagicMock, PropertyMock, patch
 
@@ -615,3 +616,177 @@ async def test_turn_executor_user_preferences_truncation(temp_db: str) -> None:
     preference_part = content[content.index("\n\n[User Preferences]"):]
     assert len(preference_part) == MAX_TOTAL_USER_PREFERENCES_LENGTH
     assert preference_part.endswith("...")
+
+
+@pytest.mark.asyncio
+async def test_turn_executor_cross_session_context_injection_and_consolidation(temp_db: str) -> None:
+    """Verify that TurnExecutor injects CrossSessionContext and triggers background summarization on overrun."""
+    import asyncio
+    from unittest.mock import PropertyMock
+
+    from kesoku.constants import MessageRole, MessageStatus, MessageType
+    from kesoku.db import Message
+
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    role = "asuka"
+
+    # 1. Create session mapping and channel roles
+    await gw.create_session("sess_cs", title="Active Turn Session")
+    await gw.create_session("sess_other", title="Other Active Session")
+    await gw.set_active_session_for_channel("cli", "ch_cs", "sess_cs")
+    await gw.set_active_session_for_channel("cli", "ch_other", "sess_other")
+    await gw.set_channel_role("cli", "ch_cs", role)
+    await gw.set_channel_role("cli", "ch_other", role)
+
+    # 2. Insert base CrossSessionContext and message in sibling session
+    # Context updated 50 seconds ago
+    now = time.time()
+    conn = gw.db._get_connection()
+    try:
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO cross_session_contexts (role, content, updated_at, status)
+                VALUES (?, ?, ?, 'idle')
+                """,
+                (role, "Initial context summary.", now - 50),
+            )
+    finally:
+        conn.close()
+
+    # Sibling message created 20 seconds ago (since updated_at)
+    msg_other = Message(
+        id="msg_o1",
+        session_id="sess_other",
+        chatbot_id="cli",
+        channel_id="ch_other",
+        sender="User",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Can you write a script for me?",
+        timestamp=now - 20,
+        status=MessageStatus.RESPONDED,
+    )
+    await gw.post(msg_other)
+
+    # Current turn pending message
+    user_msg = Message(
+        id="msg_user_cs",
+        session_id="sess_cs",
+        chatbot_id="cli",
+        channel_id="ch_cs",
+        sender="u1",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Go ahead",
+        timestamp=now,
+        status=MessageStatus.PENDING_AGENT,
+    )
+    await gw.post(user_msg)
+
+    # 3. Setup Mock LLM
+    class ContextMockLLM(BaseLLM):
+        def __init__(self) -> None:
+            self.captured_history = []
+            self.token_count = 100  # Low count initially
+
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+        ) -> LLMResponse:
+            if system_prompt == "You are an expert background memory consolidator.":
+                # Background consolidation task call
+                self.captured_bg_history = list(history or [])
+                return LLMResponse(content="Consolidated memory from background!")
+            self.captured_history = list(history or [])
+            return LLMResponse(content="Replied to user")
+
+        def count_tokens(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+        ) -> int:
+            return self.token_count
+
+    llm = ContextMockLLM()
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    turn_logger = MagicMock(spec=TurnLogger)
+
+    context = KesokuContext(llm=llm)
+    executor = TurnExecutor("sess_cs", gw, tool_runner, turn_logger, context=context)
+
+    # Worker mock
+    worker = MagicMock()
+    type(worker).running = PropertyMock(side_effect=[True, False])
+    async def mock_pivot(m: Message) -> Message:
+        return m
+    worker.drain_queue_and_pivot.side_effect = mock_pivot
+    worker.queue_empty.return_value = True
+
+    # --- Scenario A: Below token threshold, no timeout ---
+    # Trigger execution
+    with patch("kesoku.context.get_config", return_value=cfg), \
+         patch("kesoku.agent.prompt.get_config", return_value=cfg), \
+         patch("kesoku.config.get_config", return_value=cfg):
+        await executor.process_turn(
+            current_msg=user_msg,
+            worker=worker,
+            session_staging_dir="/tmp/sess_cs",
+        )
+
+    # Assert that full context + other session's messages were injected
+    assert len(llm.captured_history) == 1
+    content = llm.captured_history[0].content
+    assert "[Cross-Session Memory]" in content
+    assert "Initial context summary." in content
+    assert "Can you write a script for me?" in content
+    # Assert no background consolidation was triggered yet (status is idle)
+    assert gw.db.get_cross_session_context(role).status == "idle"
+
+    # --- Scenario B: Token Overrun (New message tokens > 4000) ---
+    # Reset user message status
+    user_msg.status = "pending_agent"
+    await gw.update_message_status(user_msg.id, "pending_agent")
+
+    llm.token_count = 5000  # Force overrun
+    worker2 = MagicMock()
+    type(worker2).running = PropertyMock(side_effect=[True, False])
+    worker2.drain_queue_and_pivot.side_effect = mock_pivot
+    worker2.queue_empty.return_value = True
+
+    executor2 = TurnExecutor("sess_cs", gw, tool_runner, turn_logger, context=context)
+    with patch("kesoku.context.get_config", return_value=cfg), \
+         patch("kesoku.agent.prompt.get_config", return_value=cfg), \
+         patch("kesoku.config.get_config", return_value=cfg):
+        await executor2.process_turn(
+            current_msg=user_msg,
+            worker=worker2,
+            session_staging_dir="/tmp/sess_cs",
+        )
+
+    # Assert fallback N-message styling was injected (due to overrun consolidation fallback)
+    user_captured_msg = None
+    for m in reversed(llm.captured_history):
+        if m.role == MessageRole.USER:
+            user_captured_msg = m
+            break
+    assert user_captured_msg is not None
+    assert "summarization in progress" in user_captured_msg.content
+
+    # Give the async background task a split second to run and consolidate
+    await asyncio.sleep(0.1)
+
+    # Assert that CrossSessionContext has successfully consolidated and released lock!
+    ctx = gw.db.get_cross_session_context(role)
+    assert ctx.status == "idle"
+    assert ctx.content == "Consolidated memory from background!"
+

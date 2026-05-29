@@ -79,6 +79,15 @@ class AgentMemory(BaseModel):
     role: str = Field(default="default", description="Optional roleplay-specific character persona binding")
 
 
+class CrossSessionContext(BaseModel):
+    """Represents a cross-session context/memory summary for a specific persona role."""
+
+    role: str = Field(..., description="The unique role/persona identifier")
+    content: str = Field(..., description="The summarized memory/context content string")
+    updated_at: float = Field(default_factory=time.time, description="Unix timestamp of last consolidation")
+    status: str = Field(default="idle", description="Lock status: 'idle' or 'updating'")
+
+
 def _sort_session_messages(all_msgs: list[Message], order: Literal["phased", "grouped"]) -> list[Message]:
     """Sort historical messages for a specific session ordered logically.
 
@@ -263,6 +272,17 @@ class DatabaseManager:
                     );
                     """
                 )
+                # Ensure cross_session_contexts table exists
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS cross_session_contexts (
+                        role TEXT PRIMARY KEY,
+                        content TEXT NOT NULL,
+                        updated_at REAL NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'idle'
+                    );
+                    """
+                )
                 # Migrate legacy 'global' role to 'default'
                 conn.execute("UPDATE OR REPLACE agent_memories SET role = 'default' WHERE role = 'global';")
                 conn.execute(
@@ -383,6 +403,16 @@ class DatabaseManager:
                         channel_id TEXT NOT NULL,
                         role TEXT NOT NULL,
                         PRIMARY KEY (chatbot_id, channel_id)
+                    );
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS cross_session_contexts (
+                        role TEXT PRIMARY KEY,
+                        content TEXT NOT NULL,
+                        updated_at REAL NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'idle'
                     );
                     """
                 )
@@ -1143,6 +1173,197 @@ class DatabaseManager:
             )
             row = cursor.fetchone()
             return (row["chatbot_id"], row["channel_id"]) if row else None
+        finally:
+            conn.close()
+
+    def get_role_messages_since(
+        self,
+        role: str,
+        since_timestamp: float,
+        exclude_session_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[Message]:
+        """Retrieve high-value conversational messages for a role since a timestamp.
+
+        Args:
+            role: The persona role to query.
+            since_timestamp: Fetch messages created after this unix timestamp.
+            exclude_session_id: Optional session ID to exclude from the query.
+            limit: Optional maximum number of messages to return.
+
+        Returns:
+            List of matching Message objects.
+        """
+        conn = self._get_connection()
+        try:
+            query = """
+                SELECT m.* FROM messages m
+                JOIN channel_sessions cs ON m.session_id = cs.session_id
+                JOIN channel_roles cr ON cs.chatbot_id = cr.chatbot_id AND cs.channel_id = cr.channel_id
+                WHERE cr.role = ?
+                  AND m.timestamp > ?
+                  AND m.role IN ('user', 'assistant')
+                  AND m.type = 'text'
+            """
+            params: list[Any] = [role, since_timestamp]
+            if exclude_session_id:
+                query += " AND m.session_id != ?"
+                params.append(exclude_session_id)
+
+            query += " ORDER BY m.timestamp ASC"
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(limit)
+
+            cursor = conn.cursor()
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            return [
+                Message(
+                    id=row["id"],
+                    session_id=row["session_id"],
+                    chatbot_id=row["chatbot_id"],
+                    channel_id=row["channel_id"],
+                    sender=row["sender"],
+                    role=row["role"],
+                    type=row["type"],
+                    content=row["content"],
+                    metadata=json.loads(row["metadata"]),
+                    timestamp=row["timestamp"],
+                    status=row["status"],
+                    parent_id=row["parent_id"],
+                )
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    # Cross Session Context CRUD
+    def get_cross_session_context(self, role: str) -> CrossSessionContext | None:
+        """Retrieve the cross-session context for a specific role.
+
+        Args:
+            role: The persona role identifier.
+
+        Returns:
+            The CrossSessionContext object if found, None otherwise.
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM cross_session_contexts WHERE role = ?",
+                (role,),
+            )
+            row = cursor.fetchone()
+            if row:
+                return CrossSessionContext(
+                    role=row["role"],
+                    content=row["content"],
+                    updated_at=row["updated_at"],
+                    status=row["status"],
+                )
+            return None
+        finally:
+            conn.close()
+
+    def upsert_cross_session_context(self, role: str, content: str) -> None:
+        """Insert or replace a cross-session context record.
+
+        Args:
+            role: Persona role identifier.
+            content: The text content of the consolidated summary context.
+        """
+        conn = self._get_connection()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO cross_session_contexts
+                    (role, content, updated_at, status)
+                    VALUES (?, ?, ?, 'idle')
+                    """,
+                    (role, content, time.time()),
+                )
+        finally:
+            conn.close()
+
+    def claim_cross_session_context_for_update(self, role: str) -> bool:
+        """Atomically claim lock to update cross-session context for a role.
+
+        If a lock is already held ('updating') but older than 5 minutes (300s),
+        forcibly resets the lock to 'idle' and re-claims it to prevent deadlocks.
+
+        Args:
+            role: The target persona role identifier.
+
+        Returns:
+            True if lock was claimed successfully, False otherwise.
+        """
+        conn = self._get_connection()
+        try:
+            with conn:
+                now = time.time()
+                # 1. Self-heal stale locks older than 300 seconds (5 minutes)
+                conn.execute(
+                    """
+                    UPDATE cross_session_contexts
+                    SET status = 'idle'
+                    WHERE role = ? AND status = 'updating' AND (? - updated_at) > 300
+                    """,
+                    (role, now),
+                )
+                # 2. Try to atomically lock the record (CAS)
+                cursor = conn.execute(
+                    """
+                    UPDATE cross_session_contexts
+                    SET status = 'updating', updated_at = ?
+                    WHERE role = ? AND status = 'idle'
+                    """,
+                    (now, role),
+                )
+                return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    def release_cross_session_context_lock(
+        self, role: str, content: str, updated_at: float | None = None
+    ) -> None:
+        """Release lock on cross-session context, updating the summary content.
+
+        Args:
+            role: Persona role identifier.
+            content: The newly consolidated summary content.
+            updated_at: Optional timestamp to set as the new checkpoint. Defaults to current time.
+        """
+        conn = self._get_connection()
+        try:
+            with conn:
+                ts = updated_at if updated_at is not None else time.time()
+                conn.execute(
+                    """
+                    UPDATE cross_session_contexts
+                    SET content = ?, updated_at = ?, status = 'idle'
+                    WHERE role = ?
+                    """,
+                    (content, ts, role),
+                )
+        finally:
+            conn.close()
+
+    def recover_orphaned_context_locks(self) -> int:
+        """Reset any lingering updating locks from past server crashes.
+
+        Returns:
+            The number of locks recovered.
+        """
+        conn = self._get_connection()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    "UPDATE cross_session_contexts SET status = 'idle' WHERE status = 'updating'"
+                )
+                return cursor.rowcount
         finally:
             conn.close()
 

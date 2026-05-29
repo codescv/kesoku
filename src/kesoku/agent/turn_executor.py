@@ -175,6 +175,87 @@ class TurnExecutor:
                             f"Injected {len(user_prefs)} user preferences into user message {copied_msg.id}"
                         )
 
+                    # Inject Cross-Session Memory context
+                    stored_ctx = await asyncio.to_thread(
+                        self.gateway.db.get_cross_session_context,
+                        active_role,
+                    )
+                    stored_content = stored_ctx.content if stored_ctx else ""
+                    last_updated = stored_ctx.updated_at if stored_ctx else 0.0
+                    lock_status = stored_ctx.status if stored_ctx else "idle"
+
+                    new_messages = await asyncio.to_thread(
+                        self.gateway.db.get_role_messages_since,
+                        role=active_role,
+                        since_timestamp=last_updated,
+                        exclude_session_id=self.session_id,
+                    )
+
+                    try:
+                        new_msg_tokens = await asyncio.to_thread(
+                            llm.count_tokens,
+                            prompt=None,
+                            system_prompt=None,
+                            history=new_messages,
+                        )
+                    except Exception as te:
+                        logger.warning(f"Failed to count new message tokens: {te}")
+                        new_msg_tokens = llm.estimate_tokens_fallback(history=new_messages)
+
+                    now_ts = time.time()
+                    has_timeout = (now_ts - last_updated > 1800) and len(new_messages) > 0
+                    has_token_overrun = new_msg_tokens > 4000
+
+                    should_consolidate = has_timeout or has_token_overrun
+
+                    injected_content = stored_content
+                    if new_messages:
+                        if should_consolidate:
+                            # Fallback: inject only the most recent 10 messages
+                            fallback_msgs = new_messages[-10:]
+                            injected_content += (
+                                "\n\nRecent discussions in other threads (summarization in progress):\n"
+                                + "\n".join(
+                                    f"- [{time.strftime('%m-%d %H:%M', time.localtime(m.timestamp))}] "
+                                    f"{m.sender}: {m.content}"
+                                    for m in fallback_msgs
+                                )
+                            )
+                        else:
+                            # Inject all since they are within safe token limits
+                            injected_content += (
+                                "\n\nRecent discussions in other threads:\n"
+                                + "\n".join(
+                                    f"- [{time.strftime('%m-%d %H:%M', time.localtime(m.timestamp))}] "
+                                    f"{m.sender}: {m.content}"
+                                    for m in new_messages
+                                )
+                            )
+
+                    if injected_content and "[Cross-Session Memory]" not in latest_user_msg.content:
+                        context_suffix = f"\n\n[Cross-Session Memory]\n{injected_content}"
+                        msg_idx = history.index(latest_user_msg)
+                        copied_msg = latest_user_msg.model_copy()
+                        copied_msg.content += context_suffix
+                        history[msg_idx] = copied_msg
+                        latest_user_msg = copied_msg
+                        logger.info(
+                            f"Injected Cross-Session Memory ({new_msg_tokens} tokens) into user message {copied_msg.id}"
+                        )
+
+                    if should_consolidate and lock_status == "idle":
+                        locked = await asyncio.to_thread(
+                            self.gateway.db.claim_cross_session_context_for_update,
+                            active_role,
+                        )
+                        if locked:
+                            logger.info(f"Claimed lock for cross-session context update on role '{active_role}'")
+                            asyncio.create_task(
+                                self._summarize_cross_session_context_bg(
+                                    active_role, stored_content, last_updated
+                                )
+                            )
+
                  # Retrieve system prompt directly from session
                 session = await self.gateway.get_session(self.session_id)
                 system_prompt = session.system_prompt if session else None
@@ -437,3 +518,94 @@ class TurnExecutor:
             )
             await self.gateway.post(error_msg)
             await self.gateway.update_message_status(current_msg.id, MessageStatus.ERROR)
+
+    async def _summarize_cross_session_context_bg(
+        self, role: str, current_context: str, since_timestamp: float
+    ) -> None:
+        """Runs an asynchronous background task to summarize and consolidate memory context.
+
+        Args:
+            role: Persona role identifier.
+            current_context: The current summarized context content.
+            since_timestamp: Only fetch new messages created after this timestamp.
+        """
+        try:
+            logger.info(f"Starting background memory consolidation for role '{role}' since {since_timestamp}")
+            # 1. Fetch messages since since_timestamp, capped at 200 to prevent LLM/prompt overrun
+            history_msgs = await asyncio.to_thread(
+                self.gateway.db.get_role_messages_since,
+                role=role,
+                since_timestamp=since_timestamp,
+                exclude_session_id=None,
+                limit=200,
+            )
+
+            if not history_msgs:
+                logger.info(f"No new messages to consolidate for role '{role}'. Releasing lock.")
+                await asyncio.to_thread(
+                    self.gateway.db.release_cross_session_context_lock,
+                    role,
+                    current_context,
+                )
+                return
+
+            # 2. Build consolidation prompt
+            history_log = "\n".join(
+                f"[{time.strftime('%m-%d %H:%M', time.localtime(m.timestamp))}] "
+                f"{m.sender}: {m.content}"
+                for m in history_msgs
+            )
+            prompt = (
+                "You are an expert memory consolidator for a roleplay companion agent.\n"
+                f"Current Consolidated Memory Summary:\n\"\"\"\n{current_context or 'None'}\n\"\"\"\n\n"
+                f"New Chat History since last update:\n\"\"\"\n{history_log}\n\"\"\"\n\n"
+                "Task: Combine the current consolidated memory and the new chat history "
+                "into a single, highly concise consolidated memory summary.\n"
+                "Rules:\n"
+                "- Retain ongoing user/agent tasks, major decisions, promises made by "
+                "the agent or user, and key status changes.\n"
+                "- Drop trivial pleasantries, temporary topics, and casual banter.\n"
+                "- Output a direct, highly clean, bullet-pointed markdown summary.\n"
+                "- Keep it strictly under 500 words."
+            )
+
+            # 3. Invoke LLM
+            llm = self.context.get_llm()
+            res = await llm.generate(
+                system_prompt="You are an expert background memory consolidator.",
+                prompt=prompt,
+            )
+            new_summary = res.content.strip()
+
+            if not new_summary:
+                logger.warning(
+                    f"Consolidation returned empty response for role '{role}'. "
+                    "Releasing lock without change."
+                )
+                await asyncio.to_thread(
+                    self.gateway.db.release_cross_session_context_lock,
+                    role,
+                    current_context,
+                )
+                return
+
+            # 4. Save new consolidated summary to DB, releasing lock and checkpointing at the last digested message
+            checkpoint_ts = history_msgs[-1].timestamp
+            await asyncio.to_thread(
+                self.gateway.db.release_cross_session_context_lock,
+                role,
+                new_summary,
+                checkpoint_ts,
+            )
+            logger.info(f"Successfully consolidated and updated CrossSessionContext for role '{role}'.")
+        except Exception as e:
+            logger.error(f"Error in background memory consolidation for role '{role}': {e}", exc_info=True)
+            # Ensure lock is safely released even on crash or failure
+            try:
+                await asyncio.to_thread(
+                    self.gateway.db.release_cross_session_context_lock,
+                    role,
+                    current_context,
+                )
+            except Exception as le:
+                logger.critical(f"Critical failure: failed to release lock during cleanup for role '{role}': {le}")
