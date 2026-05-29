@@ -76,7 +76,7 @@ to the most relevant category defined.
 Memory Categories & Strict Usage Guidelines:
 1. `user_preferences`:
    - Purpose: User's personal preferences, interests, and traits.
-   - Scope: Globally shared among all role persona.
+   - Scope: Role-isolated and bound to the current active roleplay persona scope.
 2. `learnings`:
    - Purpose: Troubleshooting guidelines, workarounds, or lessons learned during failure and problem solving.
    - Scope: Globally shared among all role persona.
