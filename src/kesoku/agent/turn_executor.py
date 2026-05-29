@@ -608,6 +608,10 @@ class TurnExecutor:
                 "- STRICTLY PROHIBITED: Do not create any sections, headers, or bullet points for "
                 "'User Profile', 'Preferences', 'Rules', 'Settings', or 'Interface Configurations'. "
                 "Any such data must be completely discarded and MUST NOT be summarized.\n"
+                "- Keep the consolidated timeline highly compact and strictly under 300 words.\n"
+                "- As new events are integrated, you MUST aggressively prune and discard older, "
+                "resolved, or minor events to maintain the 500-word limit. Only keep the most "
+                "significant historical milestones and active ongoing stories.\n"
                 "- Drop trivial pleasantries, greeting exchanges, and temporary topics.\n"
                 "- Output a direct, highly clean, bullet-pointed markdown timeline of events."
             )
