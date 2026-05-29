@@ -244,6 +244,50 @@ class GoogleChatChatbot(Chatbot):
             await self._handle_incoming_message(event)
 
 
+    async def _handle_slash_command(self, channel_id: str, cmd_text: str) -> None:
+        """Parse and execute a text-based slash command.
+
+        Args:
+            channel_id: The thread/space identifier.
+            cmd_text: The raw text content of the slash command.
+        """
+        parts = cmd_text.strip().split()
+        command = parts[0].lower().lstrip("/")
+
+        async def reply_func(text: str) -> None:
+            body = {"text": text}
+            if channel_id and "threads" in channel_id:
+                body["thread"] = {"name": channel_id}
+
+            parent_space = channel_id.split("/threads/")[0] if channel_id else "spaces/unknown"
+            try:
+                await asyncio.to_thread(
+                    self._chat_service.spaces()
+                    .messages()
+                    .create(
+                        parent=parent_space,
+                        body=body,
+                        messageReplyOption="REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD",
+                    )
+                    .execute
+                )
+            except Exception as e:
+                logger.error(f"Google Chat: failed to send command reply: {e}", exc_info=True)
+
+        try:
+            if command in {"clear", "reset", "status", "compact"}:
+                await self.commands.execute(command, reply_func, channel_id=channel_id)
+            elif command == "role":
+                role_name = " ".join(parts[1:]) if len(parts) > 1 else ""
+                await self.commands.execute("role", reply_func, channel_id=channel_id, role_name=role_name)
+            elif command == "restart":
+                await self.commands.execute(command, reply_func)
+            else:
+                await reply_func(f"⚠️ Unrecognized command: /{command}")
+        except Exception as e:
+            logger.error(f"Google Chat command /{command} execution failed: {e}", exc_info=True)
+            await reply_func(f"⚠️ Failed to execute command: {e}")
+
     async def _handle_incoming_message(self, event: dict[str, Any]) -> None:
         """Process an incoming standard text message or mention.
 
@@ -273,6 +317,11 @@ class GoogleChatChatbot(Chatbot):
 
         # Define the thread context as the logical channel ID
         channel_id = thread_name if thread_name else space_name
+
+        # Intercept and process text-based slash commands
+        if text.startswith("/"):
+            await self._handle_slash_command(channel_id, text)
+            return
 
         # Resolve or create Kesoku session mapped to the thread/space context
         session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)

@@ -847,4 +847,131 @@ async def test_google_chat_trigger_cronjob(
         assert posted_msg.metadata.get("is_cronjob") is True
 
 
+@pytest.mark.asyncio
+@patch("google.auth.default")
+@patch("google.cloud.pubsub_v1.SubscriberClient")
+@patch("kesoku.gateway.chatbot.google_chat.build")
+async def test_google_chat_slash_command_intercept(
+    mock_build: MagicMock,
+    mock_subscriber: MagicMock,
+    mock_auth_default: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+) -> None:
+    """Test that incoming text starting with '/' is intercepted and run as a slash command."""
+    mock_auth_default.return_value = (MagicMock(), "test-project")
+
+    mock_chat_client = MagicMock()
+    mock_build.return_value = mock_chat_client
+    mock_messages = MagicMock()
+    mock_chat_client.spaces.return_value.messages.return_value = mock_messages
+    mock_create = MagicMock()
+    mock_messages.create = mock_create
+    mock_create.return_value.execute = MagicMock(return_value={"name": "spaces/AAA/messages/reply123"})
+
+    event_payload = {
+        "type": "MESSAGE",
+        "space": {"name": "spaces/AAA"},
+        "message": {
+            "name": "spaces/AAA/messages/msg123",
+            "text": "/role xiaozhang",
+            "sender": {
+                "displayName": "Test User",
+                "name": "users/allowed_user",
+                "email": "allowed@example.com",
+            },
+            "thread": {"name": "spaces/AAA/threads/BBB"},
+        },
+    }
+
+    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+        bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
+
+        # Spy/mock bot.commands.execute
+        bot.commands.execute = AsyncMock()
+
+        pubsub_msg = MagicMock(spec=pubsub_v1.subscriber.message.Message)
+        pubsub_msg.data = json.dumps(event_payload).encode("utf-8")
+
+        # Trigger incoming message
+        await bot._on_pubsub_message(pubsub_msg)
+
+        # Verify it intercepted and called commands.execute
+        bot.commands.execute.assert_called_once()
+        args, kwargs = bot.commands.execute.call_args
+        assert args[0] == "role"
+        assert kwargs["channel_id"] == "spaces/AAA/threads/BBB"
+        assert kwargs["role_name"] == "xiaozhang"
+
+        # Verify no session was created and no user message was posted to gateway
+        mock_gateway.create_session.assert_not_called()
+        mock_gateway.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("google.auth.default")
+@patch("google.cloud.pubsub_v1.SubscriberClient")
+@patch("kesoku.gateway.chatbot.google_chat.build")
+async def test_google_chat_slash_command_execution_reply(
+    mock_build: MagicMock,
+    mock_subscriber: MagicMock,
+    mock_auth_default: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+) -> None:
+    """Test that slash command execution returns the result directly to Google Chat."""
+    mock_auth_default.return_value = (MagicMock(), "test-project")
+
+    mock_chat_client = MagicMock()
+    mock_build.return_value = mock_chat_client
+    mock_messages = MagicMock()
+    mock_chat_client.spaces.return_value.messages.return_value = mock_messages
+    mock_create = MagicMock()
+    mock_messages.create = mock_create
+    mock_create.return_value.execute = MagicMock(return_value={"name": "spaces/AAA/messages/reply123"})
+
+    event_payload = {
+        "type": "MESSAGE",
+        "space": {"name": "spaces/AAA"},
+        "message": {
+            "name": "spaces/AAA/messages/msg123",
+            "text": "/role",  # Just query current role
+            "sender": {
+                "displayName": "Test User",
+                "name": "users/allowed_user",
+                "email": "allowed@example.com",
+            },
+            "thread": {"name": "spaces/AAA/threads/BBB"},
+        },
+    }
+
+    # Mock gateway role responses
+    mock_gateway.get_channel_role_with_inheritance = AsyncMock(return_value="default")
+    # Mock list_roles behavior inside update_role_by_channel
+    mock_config.workspace.roles_dir = "/mock/roles"
+
+    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config), \
+         patch("os.path.exists", return_value=True), \
+         patch("os.path.isdir", return_value=True), \
+         patch("os.listdir", return_value=["default", "xiaozhang"]):
+        bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
+
+        pubsub_msg = MagicMock(spec=pubsub_v1.subscriber.message.Message)
+        pubsub_msg.data = json.dumps(event_payload).encode("utf-8")
+
+        await bot._on_pubsub_message(pubsub_msg)
+
+        # Yield control
+        await asyncio.sleep(0.1)
+
+        # Verify message creation was called to send the role reply
+        mock_messages.create.assert_called_once()
+        call_kwargs = mock_messages.create.call_args[1]
+        assert call_kwargs["parent"] == "spaces/AAA"
+        assert call_kwargs["body"]["thread"]["name"] == "spaces/AAA/threads/BBB"
+        assert "Active Persona:" in call_kwargs["body"]["text"]
+        assert "xiaozhang" in call_kwargs["body"]["text"]
+
+
+
 
