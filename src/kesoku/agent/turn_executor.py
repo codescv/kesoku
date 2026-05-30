@@ -463,7 +463,7 @@ class TurnExecutor:
                         await self.gateway.post(thought_msg)
 
                     final_content = res.content
-                    if not final_content:
+                    if not final_content.strip():
                         if not nudged:
                             logger.info(
                                 f"LLM returned empty content in session {self.session_id}. "
