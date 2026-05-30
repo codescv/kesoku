@@ -193,9 +193,8 @@ def _sort_session_messages(all_msgs: list[Message], order: Literal["phased", "gr
         turn_msgs.sort(
             key=lambda m: (
                 get_iteration_index(m),
-                get_sorting_phase(m),
-                get_tool_group_timestamp(m),
                 m.timestamp,
+                get_sorting_phase(m),
             )
         )
 

@@ -221,7 +221,7 @@ async def monitor_background_job(
             )
 
         # Post special System wakeup alert to Gateway
-        gw = Gateway()
+        gw = context.gateway or Gateway()
 
         # Resolve the target chatbot_id and channel_id from the original message in database
         chatbot_id = "system"
