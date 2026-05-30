@@ -440,3 +440,8 @@ class Gateway:
     async def get_channel_by_session(self, session_id: str) -> tuple[str, str] | None:
         """Retrieve the chatbot_id and channel_id mapping for a given session ID."""
         return await asyncio.to_thread(self.db.get_channel_by_session, session_id)
+
+    async def get_last_message_timestamp(self, chatbot_id: str, channel_id: str) -> float | None:
+        """Retrieve the timestamp of the most recent user or assistant message in a channel."""
+        return await asyncio.to_thread(self.db.get_last_message_timestamp, chatbot_id, channel_id)
+

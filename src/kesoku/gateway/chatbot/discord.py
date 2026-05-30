@@ -824,6 +824,7 @@ class DiscordChatbot(Chatbot):
         channel_id: str,
         prompt_content: str,
         mention_user_id: str | None = None,
+        **kwargs: Any,
     ) -> None:
         """Trigger a scheduled cronjob in the specified channel/thread.
 
@@ -831,6 +832,7 @@ class DiscordChatbot(Chatbot):
             channel_id: Discord channel or thread identifier.
             prompt_content: The prompt message content to run.
             mention_user_id: Optional Discord user ID to mention.
+            **kwargs: Additional optional arguments.
         """
         if not self.bot.is_ready():
             logger.info("Discord bot is not ready yet. Waiting for connection...")

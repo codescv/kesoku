@@ -191,6 +191,28 @@ class CronManager:
                     except ValueError:
                         logger.warning(f"Invalid probability format for job {idx}: {probability}")
 
+                # Check min_idle_time_seconds if channel_id is explicitly provided
+                min_idle_time_seconds = job.get("min_idle_time_seconds")
+                if min_idle_time_seconds is not None:
+                    try:
+                        min_idle = float(min_idle_time_seconds)
+                        chatbot_id = job.get("chatbot_id")
+                        channel_id = job.get("channel_id")
+                        if channel_id and chatbot_id:
+                            bot = self.chatbots.get(chatbot_id)
+                            if bot:
+                                last_msg_ts = await bot.gateway.get_last_message_timestamp(chatbot_id, channel_id)
+                                if last_msg_ts is not None:
+                                    idle_time = now.timestamp() - last_msg_ts
+                                    if idle_time < min_idle:
+                                        logger.info(
+                                            f"Job {idx} matched schedule but was skipped because channel {channel_id} "
+                                            f"has been idle for only {idle_time:.1f}s (required {min_idle}s)."
+                                        )
+                                        continue
+                    except ValueError:
+                        logger.warning(f"Invalid min_idle_time_seconds format for job {idx}: {min_idle_time_seconds}")
+
                 # Run the job asynchronously in the background
                 asyncio.create_task(self._execute_job(job, idx))
 
@@ -255,10 +277,18 @@ class CronManager:
 
         try:
             if hasattr(bot, "trigger_cronjob"):
+                kwargs = {}
+                min_idle_time_seconds = job.get("min_idle_time_seconds")
+                if min_idle_time_seconds is not None:
+                    try:
+                        kwargs["min_idle_time_seconds"] = float(min_idle_time_seconds)
+                    except ValueError:
+                        pass
                 await bot.trigger_cronjob(
                     channel_id=str(channel_id) if channel_id else None,
                     prompt_content=prompt_content,
                     mention_user_id=str(mention_user_id) if mention_user_id else None,
+                    **kwargs,
                 )
             else:
                 logger.error(f"Chatbot '{chatbot_id}' does not support trigger_cronjob.")

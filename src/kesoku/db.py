@@ -1176,6 +1176,26 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def get_last_message_timestamp(self, chatbot_id: str, channel_id: str) -> float | None:
+        """Retrieve the timestamp of the most recent user or assistant message in a channel."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT timestamp FROM messages
+                WHERE chatbot_id = ? AND channel_id = ?
+                  AND role IN ('user', 'assistant')
+                ORDER BY timestamp DESC LIMIT 1
+                """,
+                (chatbot_id, channel_id),
+            )
+            row = cursor.fetchone()
+            return row["timestamp"] if row else None
+        finally:
+            conn.close()
+
+
     def get_role_messages_since(
         self,
         role: str,

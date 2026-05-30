@@ -888,6 +888,7 @@ class GoogleChatChatbot(Chatbot):
         channel_id: str,
         prompt_content: str,
         mention_user_id: str | None = None,
+        **kwargs: Any,
     ) -> None:
         """Trigger a scheduled cronjob in the specified Google Chat space/thread.
 
@@ -895,6 +896,7 @@ class GoogleChatChatbot(Chatbot):
             channel_id: Fully qualified space or thread resource name (e.g. 'spaces/AAAA/threads/BBBB').
             prompt_content: The prompt message content to run.
             mention_user_id: Optional user identifier (not natively highlighted here).
+            **kwargs: Additional optional arguments.
         """
         custom_prompt = self._build_gchat_custom_prompt({"type": "SPACE"}, "System")
 

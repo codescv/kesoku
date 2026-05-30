@@ -169,3 +169,52 @@ async def test_cron_manager_wechat_optional_channel():
             prompt_content="Hello WeChat cron!",
             mention_user_id=None,
         )
+
+
+@pytest.mark.asyncio
+async def test_cron_manager_min_idle_time_seconds():
+    mock_bot = MagicMock()
+    mock_bot.chatbot_id = "discord"
+    mock_bot.trigger_cronjob = AsyncMock()
+
+    mock_gateway = AsyncMock()
+    mock_bot.gateway = mock_gateway
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_real = os.path.realpath(tmpdir)  # noqa: ASYNC240
+        prompt_file_path = os.path.join(tmpdir_real, "test_prompt.md")
+        with open(prompt_file_path, "w") as f:  # noqa: ASYNC230
+            f.write("Hello!")
+
+        job = {
+            "schedule": "* * * * *",
+            "prompt": "test_prompt.md",
+            "channel_id": "999",
+            "chatbot_id": "discord",
+            "min_idle_time_seconds": 60,
+        }
+
+        manager = CronManager(chatbots=[mock_bot], config_dir=tmpdir_real)
+
+        # Case 1: Last message was 30 seconds ago (not idle enough)
+        mock_gateway.get_last_message_timestamp.return_value = datetime.datetime.now().timestamp() - 30
+
+        await manager._check_and_trigger_jobs([job])
+        await asyncio.sleep(0.1)
+        mock_bot.trigger_cronjob.assert_not_called()
+
+        # Reset minutes cache in manager to allow checking again
+        manager.last_executed_minute.clear()
+
+        # Case 2: Last message was 90 seconds ago (idle enough)
+        mock_gateway.get_last_message_timestamp.return_value = datetime.datetime.now().timestamp() - 90
+
+        await manager._check_and_trigger_jobs([job])
+        await asyncio.sleep(0.1)
+        mock_bot.trigger_cronjob.assert_called_once_with(
+            channel_id="999",
+            prompt_content="Hello!",
+            mention_user_id=None,
+            min_idle_time_seconds=60.0,
+        )
+

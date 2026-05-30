@@ -3,6 +3,8 @@
 Acts as a silent sink/receiver for cronjobs that execute without an active user-facing interface.
 """
 
+from typing import Any
+
 from kesoku.constants import MessageStatus
 from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot
@@ -39,6 +41,7 @@ class CronjobChatbot(Chatbot):
         channel_id: str,
         prompt_content: str,
         mention_user_id: str | None = None,
+        **kwargs: Any,
     ) -> None:
         """Trigger a scheduled cronjob in the silent virtual session.
 
@@ -46,6 +49,7 @@ class CronjobChatbot(Chatbot):
             channel_id: Virtual channel identifier.
             prompt_content: The prompt message content to run.
             mention_user_id: Unused parameter for virtual chatbot.
+            **kwargs: Additional optional arguments.
         """
         await self.trigger_cronjob_message(
             channel_id=channel_id,

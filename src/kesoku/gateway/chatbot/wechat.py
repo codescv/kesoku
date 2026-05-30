@@ -1257,8 +1257,10 @@ You are interacting with the user via WeChat (Weixin).
         channel_id: str | None,
         prompt_content: str,
         mention_user_id: str | None = None,
+        **kwargs: Any,
     ) -> None:
         """Trigger a scheduled cronjob in the specified WeChat chat/room."""
+        min_idle = kwargs.get("min_idle_time_seconds")
         if not channel_id:
             channels = self._token_store.get_all_channels(self._account_id)
             if not channels:
@@ -1267,12 +1269,32 @@ You are interacting with the user via WeChat (Weixin).
                 )
                 return
             for chan in channels:
+                if min_idle is not None:
+                    last_msg_ts = await self.gateway.get_last_message_timestamp(self.chatbot_id, chan)
+                    if last_msg_ts is not None:
+                        idle_time = time.time() - last_msg_ts
+                        if idle_time < min_idle:
+                            logger.info(
+                                f"WeChat: Skip channel {chan} because it has been idle for only {idle_time:.1f}s "
+                                f"(required {min_idle}s)."
+                            )
+                            continue
                 await self._trigger_cronjob_for_channel(
                     channel_id=chan,
                     prompt_content=prompt_content,
                     mention_user_id=mention_user_id,
                 )
         else:
+            if min_idle is not None:
+                last_msg_ts = await self.gateway.get_last_message_timestamp(self.chatbot_id, channel_id)
+                if last_msg_ts is not None:
+                    idle_time = time.time() - last_msg_ts
+                    if idle_time < min_idle:
+                        logger.info(
+                            f"WeChat: Skip channel {channel_id} because it has been idle for only {idle_time:.1f}s "
+                            f"(required {min_idle}s)."
+                        )
+                        return
             await self._trigger_cronjob_for_channel(
                 channel_id=channel_id,
                 prompt_content=prompt_content,
