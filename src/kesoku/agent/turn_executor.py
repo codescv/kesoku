@@ -199,18 +199,6 @@ class TurnExecutor:
                         category="user_preferences",
                         role=active_role,
                     )
-                    if user_prefs and "[User Preferences]" not in latest_user_msg.content:
-                        pref_suffix = "\n\n[User Preferences]\n" + "\n".join(
-                            f"- {pref['title']}: {pref['content']}" for pref in user_prefs
-                        )
-                        if len(pref_suffix) > MAX_TOTAL_USER_PREFERENCES_LENGTH:
-                            pref_suffix = pref_suffix[: MAX_TOTAL_USER_PREFERENCES_LENGTH - 3] + "..."
-                        msg_idx = history.index(latest_user_msg)
-                        copied_msg = latest_user_msg.model_copy()
-                        copied_msg.content += pref_suffix
-                        history[msg_idx] = copied_msg
-                        latest_user_msg = copied_msg
-                        logger.info(f"Injected {len(user_prefs)} user preferences into user message {copied_msg.id}")
 
                     # Inject Cross-Session Memory context
                     stored_ctx = await asyncio.to_thread(
@@ -266,16 +254,44 @@ class TurnExecutor:
                                 for m in new_messages
                             )
 
-                    if injected_content and "[Cross-Session Memory]" not in latest_user_msg.content:
-                        truncated_content = truncate_context_middle(injected_content)
-                        context_suffix = f"\n\n[Cross-Session Memory]\n{truncated_content}"
+                    pref_content = ""
+                    if user_prefs:
+                        pref_content = "\n".join(
+                            f"- {pref['title']}: {pref['content']}" for pref in user_prefs
+                        )
+                        if len(pref_content) > MAX_TOTAL_USER_PREFERENCES_LENGTH:
+                            pref_content = pref_content[: MAX_TOTAL_USER_PREFERENCES_LENGTH - 3] + "..."
+
+                    memory_content = ""
+                    if injected_content:
+                        memory_content = truncate_context_middle(injected_content)
+
+                    injected_blocks = []
+                    if pref_content:
+                        injected_blocks.append(f"# User Preferences:\n{pref_content}")
+                    if memory_content:
+                        injected_blocks.append(f"# Cross-Session Memory:\n{memory_content}")
+
+                    if injected_blocks and "[Background Context]" not in latest_user_msg.content:
+                        joined_blocks = "\n\n".join(injected_blocks)
+                        context_prefix = (
+                            "[Background Context: User Preferences & Cross-Session Memory]\n"
+                            "======\n"
+                            f"{joined_blocks}\n"
+                            "======\n"
+                            "IMPORTANT: The above is provided purely as background context. "
+                            "DO NOT reference or discuss these past topics unless the user's current "
+                            "request below explicitly asks about or is closely related to them. Focus on responding "
+                            "directly and helpfully to the user's current request below.\n\n"
+                            "[Current Request]\n"
+                        )
                         msg_idx = history.index(latest_user_msg)
                         copied_msg = latest_user_msg.model_copy()
-                        copied_msg.content += context_suffix
+                        copied_msg.content = context_prefix + copied_msg.content
                         history[msg_idx] = copied_msg
                         latest_user_msg = copied_msg
                         logger.info(
-                            f"Injected Cross-Session Memory ({new_msg_tokens} tokens) into user message {copied_msg.id}"
+                            f"Prepended {len(injected_blocks)} context blocks into user message {copied_msg.id}"
                         )
 
                     if should_consolidate and lock_status == "idle":

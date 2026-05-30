@@ -566,11 +566,13 @@ async def test_turn_executor_user_preferences_injection(temp_db: str) -> None:
             session_staging_dir="/tmp/sess_pref_inject",
         )
 
-    # Assert that the user preferences were successfully injected in history
+    # Assert that the user preferences were successfully injected and prepended in the latest user message
     assert len(llm.captured_history) == 1
-    assert "Run task!" in llm.captured_history[0].content
-    assert "[User Preferences]" in llm.captured_history[0].content
-    assert "- No Codeblocks: Avoid Markdown" in llm.captured_history[0].content
+    content = llm.captured_history[0].content
+    assert "Run task!" in content
+    assert "# User Preferences:" in content
+    assert "- No Codeblocks: Avoid Markdown" in content
+    assert content.index("Run task!") > content.index("# User Preferences:")
 
 
 @pytest.mark.asyncio
@@ -640,11 +642,13 @@ async def test_turn_executor_user_preferences_truncation(temp_db: str) -> None:
     # Assert that the user preferences block length was truncated and capped
     assert len(llm.captured_history) == 1
     content = llm.captured_history[0].content
-    assert "[User Preferences]" in content
+    assert "# User Preferences:" in content
     from kesoku.agent.turn_executor import MAX_TOTAL_USER_PREFERENCES_LENGTH
 
-    preference_part = content[content.index("\n\n[User Preferences]") :]
-    assert len(preference_part) == MAX_TOTAL_USER_PREFERENCES_LENGTH
+    # Check the prefix to ensure proper capping (excluding carriage returns/indicator suffix)
+    end_idx = content.index("======", content.index("# User Preferences:")) - 1
+    preference_part = content[content.index("# User Preferences:") : end_idx]
+    assert len(preference_part) == len("# User Preferences:\n") + MAX_TOTAL_USER_PREFERENCES_LENGTH
     assert preference_part.endswith("...")
 
 
@@ -777,12 +781,13 @@ async def test_turn_executor_cross_session_context_injection_and_consolidation(t
             session_staging_dir="/tmp/sess_cs",
         )
 
-    # Assert that full context + other session's messages were injected
+    # Assert that full context + other session's messages were injected and prepended
     assert len(llm.captured_history) == 1
     content = llm.captured_history[0].content
-    assert "[Cross-Session Memory]" in content
+    assert "# Cross-Session Memory:" in content
     assert "Initial context summary." in content
     assert "Can you write a script for me?" in content
+    assert "Go ahead" in content
     # Assert no background consolidation was triggered yet (status is idle)
     assert gw.db.get_cross_session_context(role).status == "idle"
 
@@ -809,14 +814,9 @@ async def test_turn_executor_cross_session_context_injection_and_consolidation(t
             session_staging_dir="/tmp/sess_cs",
         )
 
-    # Assert fallback N-message styling was injected (due to overrun consolidation fallback)
-    user_captured_msg = None
-    for m in reversed(llm.captured_history):
-        if m.role == MessageRole.USER:
-            user_captured_msg = m
-            break
-    assert user_captured_msg is not None
-    assert "summarization in progress" in user_captured_msg.content
+    # Assert fallback N-message styling was injected (due to overrun consolidation fallback in latest user message)
+    content = llm.captured_history[0].content
+    assert "summarization in progress" in content
 
     # Give the async background task a split second to run and consolidate
     await asyncio.sleep(0.1)
