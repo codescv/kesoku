@@ -218,3 +218,100 @@ async def test_cron_manager_min_idle_time_seconds():
             min_idle_time_seconds=60.0,
         )
 
+
+@pytest.mark.asyncio
+async def test_cron_manager_daily_target():
+    mock_bot = MagicMock()
+    mock_bot.chatbot_id = "discord"
+    mock_bot.trigger_cronjob = AsyncMock()
+
+    mock_gateway = AsyncMock()
+    mock_bot.gateway = mock_gateway
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_real = os.path.realpath(tmpdir)  # noqa: ASYNC240
+        prompt_file_path = os.path.join(tmpdir_real, "test_prompt.md")
+        with open(prompt_file_path, "w") as f:  # noqa: ASYNC230
+            f.write("Hello!")
+
+        job = {
+            "schedule": "* * * * *",
+            "prompt": "test_prompt.md",
+            "channel_id": "999",
+            "chatbot_id": "discord",
+            "daily_target": 3,
+        }
+
+        manager = CronManager(chatbots=[mock_bot], config_dir=tmpdir_real)
+
+        # Case 1: Already sent 3 messages today -> should skip
+        mock_gateway.get_cronjob_sent_stats_today.return_value = (3, None)
+
+        await manager._check_and_trigger_jobs([job])
+        await asyncio.sleep(0.1)
+        mock_bot.trigger_cronjob.assert_not_called()
+
+        # Reset minutes cache in manager to allow checking again
+        manager.last_executed_minute.clear()
+
+        # Case 2: Only sent 2 messages today -> should trigger
+        mock_gateway.get_cronjob_sent_stats_today.return_value = (2, None)
+
+        await manager._check_and_trigger_jobs([job])
+        await asyncio.sleep(0.1)
+        mock_bot.trigger_cronjob.assert_called_once_with(
+            channel_id="999",
+            prompt_content="Hello!",
+            mention_user_id=None,
+            daily_target=3,
+        )
+
+
+@pytest.mark.asyncio
+async def test_cron_manager_min_interval():
+    mock_bot = MagicMock()
+    mock_bot.chatbot_id = "discord"
+    mock_bot.trigger_cronjob = AsyncMock()
+
+    mock_gateway = AsyncMock()
+    mock_bot.gateway = mock_gateway
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_real = os.path.realpath(tmpdir)  # noqa: ASYNC240
+        prompt_file_path = os.path.join(tmpdir_real, "test_prompt.md")
+        with open(prompt_file_path, "w") as f:  # noqa: ASYNC230
+            f.write("Hello!")
+
+        job = {
+            "schedule": "* * * * *",
+            "prompt": "test_prompt.md",
+            "channel_id": "999",
+            "chatbot_id": "discord",
+            "min_interval_seconds": 7200,
+        }
+
+        manager = CronManager(chatbots=[mock_bot], config_dir=tmpdir_real)
+
+        # Case 1: Last trigger was 1 hour ago (3600s, less than 7200s) -> should skip
+        mock_gateway.get_cronjob_sent_stats_today.return_value = (1, datetime.datetime.now().timestamp() - 3600)
+
+        await manager._check_and_trigger_jobs([job])
+        await asyncio.sleep(0.1)
+        mock_bot.trigger_cronjob.assert_not_called()
+
+        # Reset minutes cache in manager to allow checking again
+        manager.last_executed_minute.clear()
+
+        # Case 2: Last trigger was 3 hours ago (10800s, more than 7200s) -> should trigger
+        mock_gateway.get_cronjob_sent_stats_today.return_value = (1, datetime.datetime.now().timestamp() - 10800)
+
+        await manager._check_and_trigger_jobs([job])
+        await asyncio.sleep(0.1)
+        mock_bot.trigger_cronjob.assert_called_once_with(
+            channel_id="999",
+            prompt_content="Hello!",
+            mention_user_id=None,
+            min_interval_seconds=7200.0,
+        )
+
+

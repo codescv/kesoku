@@ -1195,6 +1195,34 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def get_cronjob_sent_stats_today(self, chatbot_id: str, channel_id: str) -> tuple[int, float | None]:
+        """Retrieve count and last timestamp of cron messages sent today (local time) in a channel."""
+        import datetime
+        now = datetime.datetime.now()
+        # Local midnight timestamp
+        midnight = datetime.datetime(now.year, now.month, now.day)
+        midnight_ts = midnight.timestamp()
+
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COUNT(*), MAX(timestamp) FROM messages
+                WHERE chatbot_id = ? AND channel_id = ?
+                  AND sender = 'Cronjob'
+                  AND timestamp >= ?
+                """,
+                (chatbot_id, channel_id, midnight_ts),
+            )
+            row = cursor.fetchone()
+            count = row[0] if row and row[0] is not None else 0
+            last_ts = row[1] if row and row[1] is not None else None
+            return count, last_ts
+        finally:
+            conn.close()
+
+
 
     def get_role_messages_since(
         self,

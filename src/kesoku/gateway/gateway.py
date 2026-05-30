@@ -445,3 +445,8 @@ class Gateway:
         """Retrieve the timestamp of the most recent user or assistant message in a channel."""
         return await asyncio.to_thread(self.db.get_last_message_timestamp, chatbot_id, channel_id)
 
+    async def get_cronjob_sent_stats_today(self, chatbot_id: str, channel_id: str) -> tuple[int, float | None]:
+        """Retrieve count and last timestamp of cron messages sent today in a channel."""
+        return await asyncio.to_thread(self.db.get_cronjob_sent_stats_today, chatbot_id, channel_id)
+
+

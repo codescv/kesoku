@@ -21,6 +21,18 @@
 # # If set to 0.02, the job will run with a 2% chance on scheduled ticks.
 # # Omit this option to always run the job on schedule.
 # probability = 0.02
+#
+# # Optional: Minimum idle time in seconds.
+# # If the channel has active human/agent messages within this period, the job is skipped.
+# # min_idle_time_seconds = 1800
+#
+# # Optional: Maximum number of cron messages allowed per day in this channel.
+# # daily_target = 3
+#
+# # Optional: Minimum interval spacing required in seconds between triggers.
+# # min_interval_seconds = 7200
+
+
 
 # [[job]]
 # # Example: Run every Monday morning at 9:00 AM on Google Chat

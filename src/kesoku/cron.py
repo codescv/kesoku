@@ -191,13 +191,14 @@ class CronManager:
                     except ValueError:
                         logger.warning(f"Invalid probability format for job {idx}: {probability}")
 
+                chatbot_id = job.get("chatbot_id")
+                channel_id = job.get("channel_id")
+
                 # Check min_idle_time_seconds if channel_id is explicitly provided
                 min_idle_time_seconds = job.get("min_idle_time_seconds")
                 if min_idle_time_seconds is not None:
                     try:
                         min_idle = float(min_idle_time_seconds)
-                        chatbot_id = job.get("chatbot_id")
-                        channel_id = job.get("channel_id")
                         if channel_id and chatbot_id:
                             bot = self.chatbots.get(chatbot_id)
                             if bot:
@@ -212,6 +213,42 @@ class CronManager:
                                         continue
                     except ValueError:
                         logger.warning(f"Invalid min_idle_time_seconds format for job {idx}: {min_idle_time_seconds}")
+
+                # Check daily_target and min_interval_seconds if channel_id is explicitly provided
+                daily_target = job.get("daily_target")
+                min_interval_seconds = job.get("min_interval_seconds")
+                if (daily_target is not None or min_interval_seconds is not None) and channel_id and chatbot_id:
+                    bot = self.chatbots.get(chatbot_id)
+                    if bot:
+                        count, last_ts = await bot.gateway.get_cronjob_sent_stats_today(chatbot_id, channel_id)
+
+                        if daily_target is not None:
+                            try:
+                                target = int(daily_target)
+                                if count >= target:
+                                    logger.info(
+                                        f"Job {idx} matched schedule but was skipped because the daily target "
+                                        f"of {target} messages has already been reached today ({count} sent)."
+                                    )
+                                    continue
+                            except ValueError:
+                                logger.warning(f"Invalid daily_target format for job {idx}: {daily_target}")
+
+                        if min_interval_seconds is not None and last_ts is not None:
+                            try:
+                                min_interval = float(min_interval_seconds)
+                                elapsed = now.timestamp() - last_ts
+                                if elapsed < min_interval:
+                                    logger.info(
+                                        f"Job {idx} matched schedule but was skipped because minimum interval "
+                                        f"of {min_interval}s has not elapsed since last trigger "
+                                        f"({elapsed:.1f}s elapsed)."
+                                    )
+                                    continue
+                            except ValueError:
+                                logger.warning(
+                                    f"Invalid min_interval_seconds format for job {idx}: {min_interval_seconds}"
+                                )
 
                 # Run the job asynchronously in the background
                 asyncio.create_task(self._execute_job(job, idx))
@@ -284,6 +321,21 @@ class CronManager:
                         kwargs["min_idle_time_seconds"] = float(min_idle_time_seconds)
                     except ValueError:
                         pass
+
+                daily_target = job.get("daily_target")
+                if daily_target is not None:
+                    try:
+                        kwargs["daily_target"] = int(daily_target)
+                    except ValueError:
+                        pass
+
+                min_interval_seconds = job.get("min_interval_seconds")
+                if min_interval_seconds is not None:
+                    try:
+                        kwargs["min_interval_seconds"] = float(min_interval_seconds)
+                    except ValueError:
+                        pass
+
                 await bot.trigger_cronjob(
                     channel_id=str(channel_id) if channel_id else None,
                     prompt_content=prompt_content,
