@@ -143,17 +143,13 @@ async def test_claude_llm_generate_history_conversion() -> None:
         assert messages[1]["role"] == "assistant"
 
         # Verify tool use was represented correctly in assistant role
-        tool_use_block = next(
-            b for b in messages[1]["content"] if b["type"] == "tool_use"
-        )
+        tool_use_block = next(b for b in messages[1]["content"] if b["type"] == "tool_use")
         assert tool_use_block["name"] == "calculator"
         assert tool_use_block["input"] == {"expr": "2+2"}
         assert tool_use_block["id"] == f"toolu_{msg_tool_call.id}"
 
         # Verify tool result was represented correctly in user role
-        tool_res_block = next(
-            b for m in messages for b in m["content"] if b["type"] == "tool_result"
-        )
+        tool_res_block = next(b for m in messages for b in m["content"] if b["type"] == "tool_result")
         assert tool_res_block["content"] == "4"
         assert tool_res_block["tool_use_id"] == f"toolu_{msg_tool_call.id}"
 
@@ -183,12 +179,11 @@ async def test_gemini_llm_with_attachments() -> None:
     mock_client = MagicMock()
     mock_res = MagicMock()
     mock_res.parts = [MagicMock(text="Beautiful photo!", thought=False, function_call=None)]
-    mock_res.usage_metadata = MagicMock(
-        prompt_token_count=10, candidates_token_count=5, total_token_count=15
-    )
+    mock_res.usage_metadata = MagicMock(prompt_token_count=10, candidates_token_count=5, total_token_count=15)
     mock_client.models.generate_content.return_value = mock_res
 
     from unittest.mock import mock_open
+
     with (
         patch("google.genai.Client", return_value=mock_client),
         patch("os.path.exists", return_value=True),
@@ -240,6 +235,7 @@ async def test_claude_llm_with_attachments() -> None:
 
     # Use patches to mock file presence and reading
     from unittest.mock import mock_open
+
     with (
         patch("kesoku.agent.llm.AnthropicVertex", return_value=mock_client),
         patch("os.path.exists", return_value=True),
@@ -291,6 +287,7 @@ async def test_image_mime_type_correction() -> None:
     mock_claude_client.messages.create.return_value = mock_claude_res
 
     from unittest.mock import mock_open
+
     with (
         patch("kesoku.agent.llm.AnthropicVertex", return_value=mock_claude_client),
         patch("os.path.exists", return_value=True),
@@ -453,6 +450,3 @@ def test_image_resizing_and_compression() -> None:
     # Should be scaled down such that max dimension is 1024
     assert width == 1024
     assert height == 512
-
-
-

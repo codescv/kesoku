@@ -400,10 +400,9 @@ async def test_stop_turn_callback_with_metrics(mock_gateway: MagicMock) -> None:
                     "turn_time": 4.5,
                     "status": "interrupted",
                 }
-            }
+            },
         )
     ]
-
 
     await view.stop_turn.callback(mock_interaction)
 
@@ -499,4 +498,3 @@ async def test_question_view_init_and_callback(mock_gateway: MagicMock) -> None:
 
     # 6. Chatbot typing task is started
     assert "chan_abc" in mock_chatbot._typing_tasks
-

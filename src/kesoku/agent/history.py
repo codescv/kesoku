@@ -61,10 +61,7 @@ async def build_clean_history(
     # 2. Load entire chronological history (limit=0 retrieves all messages in the session)
     raw_history = await gateway.get_session_history(session_id, limit=0, order=order)
     # Exclude system-generated assistant notification messages from LLM prompt history
-    raw_history = [
-        m for m in raw_history
-        if not (m.role == MessageRole.ASSISTANT and m.sender == "Notification")
-    ]
+    raw_history = [m for m in raw_history if not (m.role == MessageRole.ASSISTANT and m.sender == "Notification")]
 
     # 3. Groups messages into complete logical turns (User/System prompt -> ... -> before next user/system prompt).
     turns: list[list[Message]] = []
@@ -88,7 +85,7 @@ async def build_clean_history(
     cleaned_turns = []
     num_turns = len(turns)
     for idx, turn in enumerate(turns):
-        is_latest = (idx == num_turns - 1)
+        is_latest = idx == num_turns - 1
 
         if is_latest:
             # Keep all thoughts and details in the latest/active turn

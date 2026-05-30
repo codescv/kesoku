@@ -64,8 +64,10 @@ async def test_turn_executor_successful_turn(temp_db: str) -> None:
     # Configure mock worker
     worker = MagicMock()
     type(worker).running = PropertyMock(side_effect=[True, False])
+
     async def mock_pivot(m: Message) -> Message:
         return m
+
     worker.drain_queue_and_pivot.side_effect = mock_pivot
     worker.queue_empty.return_value = True
 
@@ -136,8 +138,10 @@ async def test_turn_executor_nudging(temp_db: str) -> None:
     # Configure mock worker
     worker = MagicMock()
     type(worker).running = PropertyMock(side_effect=[True, True, False])
+
     async def mock_pivot(m: Message) -> Message:
         return m
+
     worker.drain_queue_and_pivot.side_effect = mock_pivot
     worker.queue_empty.return_value = True
 
@@ -211,6 +215,7 @@ async def test_turn_executor_tool_calls(temp_db: str) -> None:
 
     # Setup mock ToolRunner returning a result message
     tool_runner = MagicMock()
+
     async def execute_tool(call: Any, tc_msg: Message, is_interrupted: Any = None) -> Message:
         return Message(
             session_id="sess_tools",
@@ -224,6 +229,7 @@ async def test_turn_executor_tool_calls(temp_db: str) -> None:
             parent_id=tc_msg.id,
             metadata={"tool_name": "calculator", "tool_result": "10"},
         )
+
     tool_runner.execute_tool.side_effect = execute_tool
     tool_runner.tool_registry.get_tools_list.return_value = []
 
@@ -234,8 +240,10 @@ async def test_turn_executor_tool_calls(temp_db: str) -> None:
     # Configure mock worker
     worker = MagicMock()
     type(worker).running = PropertyMock(side_effect=[True, True, False])
+
     async def mock_pivot(m: Message) -> Message:
         return m
+
     worker.drain_queue_and_pivot.side_effect = mock_pivot
     worker.queue_empty.return_value = True
 
@@ -277,14 +285,24 @@ async def test_turn_executor_pivot_resets_nudged(temp_db: str) -> None:
     await gw.create_session("sess_pivot", title="Pivot Session")
 
     msg1 = Message(
-        session_id="sess_pivot", chatbot_id="cli", channel_id="ch1", sender="u1",
-        role="user", content="First prompt", status="pending_agent",
+        session_id="sess_pivot",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        content="First prompt",
+        status="pending_agent",
     )
     await gw.post(msg1)
 
     msg2 = Message(
-        session_id="sess_pivot", chatbot_id="cli", channel_id="ch1", sender="u1",
-        role="user", content="Pivoted prompt", status="pending_agent",
+        session_id="sess_pivot",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        content="Pivoted prompt",
+        status="pending_agent",
     )
     await gw.post(msg2)
 
@@ -322,6 +340,7 @@ async def test_turn_executor_pivot_resets_nudged(temp_db: str) -> None:
     type(worker).running = PropertyMock(side_effect=[True, True, True, False])
 
     loop_count = 0
+
     async def mock_pivot(m: Message) -> Message:
         nonlocal loop_count
         loop_count += 1
@@ -420,13 +439,17 @@ async def test_turn_executor_context_monitor_warning(temp_db: str) -> None:
 
     worker = MagicMock()
     type(worker).running = PropertyMock(side_effect=[True, False])
+
     async def mock_pivot(m: Message) -> Message:
         return m
+
     worker.drain_queue_and_pivot.side_effect = mock_pivot
     worker.queue_empty.return_value = True
 
-    with patch("kesoku.context.get_config", return_value=cfg), \
-         patch("kesoku.agent.turn_executor.build_clean_history", return_value=[user_msg]):
+    with (
+        patch("kesoku.context.get_config", return_value=cfg),
+        patch("kesoku.agent.turn_executor.build_clean_history", return_value=[user_msg]),
+    ):
         await executor.process_turn(
             current_msg=user_msg,
             worker=worker,
@@ -461,8 +484,10 @@ async def test_turn_executor_context_monitor_warning(temp_db: str) -> None:
     )
 
     executor2 = TurnExecutor("sess_warning", gw, tool_runner, turn_logger, context=context)
-    with patch("kesoku.context.get_config", return_value=cfg), \
-         patch("kesoku.agent.turn_executor.build_clean_history", return_value=[user_msg_clean]):
+    with (
+        patch("kesoku.context.get_config", return_value=cfg),
+        patch("kesoku.agent.turn_executor.build_clean_history", return_value=[user_msg_clean]),
+    ):
         await executor2.process_turn(
             current_msg=user_msg_clean,
             worker=worker2,
@@ -527,8 +552,10 @@ async def test_turn_executor_user_preferences_injection(temp_db: str) -> None:
 
     worker = MagicMock()
     type(worker).running = PropertyMock(side_effect=[True, False])
+
     async def mock_pivot(m: Message) -> Message:
         return m
+
     worker.drain_queue_and_pivot.side_effect = mock_pivot
     worker.queue_empty.return_value = True
 
@@ -596,8 +623,10 @@ async def test_turn_executor_user_preferences_truncation(temp_db: str) -> None:
 
     worker = MagicMock()
     type(worker).running = PropertyMock(side_effect=[True, False])
+
     async def mock_pivot(m: Message) -> Message:
         return m
+
     worker.drain_queue_and_pivot.side_effect = mock_pivot
     worker.queue_empty.return_value = True
 
@@ -613,7 +642,8 @@ async def test_turn_executor_user_preferences_truncation(temp_db: str) -> None:
     content = llm.captured_history[0].content
     assert "[User Preferences]" in content
     from kesoku.agent.turn_executor import MAX_TOTAL_USER_PREFERENCES_LENGTH
-    preference_part = content[content.index("\n\n[User Preferences]"):]
+
+    preference_part = content[content.index("\n\n[User Preferences]") :]
     assert len(preference_part) == MAX_TOTAL_USER_PREFERENCES_LENGTH
     assert preference_part.endswith("...")
 
@@ -727,16 +757,20 @@ async def test_turn_executor_cross_session_context_injection_and_consolidation(t
     # Worker mock
     worker = MagicMock()
     type(worker).running = PropertyMock(side_effect=[True, False])
+
     async def mock_pivot(m: Message) -> Message:
         return m
+
     worker.drain_queue_and_pivot.side_effect = mock_pivot
     worker.queue_empty.return_value = True
 
     # --- Scenario A: Below token threshold, no timeout ---
     # Trigger execution
-    with patch("kesoku.context.get_config", return_value=cfg), \
-         patch("kesoku.agent.prompt.get_config", return_value=cfg), \
-         patch("kesoku.config.get_config", return_value=cfg):
+    with (
+        patch("kesoku.context.get_config", return_value=cfg),
+        patch("kesoku.agent.prompt.get_config", return_value=cfg),
+        patch("kesoku.config.get_config", return_value=cfg),
+    ):
         await executor.process_turn(
             current_msg=user_msg,
             worker=worker,
@@ -764,9 +798,11 @@ async def test_turn_executor_cross_session_context_injection_and_consolidation(t
     worker2.queue_empty.return_value = True
 
     executor2 = TurnExecutor("sess_cs", gw, tool_runner, turn_logger, context=context)
-    with patch("kesoku.context.get_config", return_value=cfg), \
-         patch("kesoku.agent.prompt.get_config", return_value=cfg), \
-         patch("kesoku.config.get_config", return_value=cfg):
+    with (
+        patch("kesoku.context.get_config", return_value=cfg),
+        patch("kesoku.agent.prompt.get_config", return_value=cfg),
+        patch("kesoku.config.get_config", return_value=cfg),
+    ):
         await executor2.process_turn(
             current_msg=user_msg,
             worker=worker2,
@@ -817,4 +853,3 @@ def test_truncate_context_middle() -> None:
     # Newline boundaries must be clean
     assert truncated.startswith("Line 1:")
     assert truncated.endswith("Line 40: This is some lengthy timeline memory content.")
-

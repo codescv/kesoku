@@ -72,9 +72,7 @@ async def test_init_disabled_raises_value_error() -> None:
 async def test_init_missing_params_raises_value_error() -> None:
     """Test that initializing GoogleChatChatbot with missing params raises ValueError."""
     cfg = KesokuConfig()
-    cfg.google_chat = GoogleChatConfig(
-        enabled=True, project_id="", topic_id="", subscription_id=""
-    )
+    cfg.google_chat = GoogleChatConfig(enabled=True, project_id="", topic_id="", subscription_id="")
     gw = MagicMock(spec=Gateway)
 
     with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=cfg):
@@ -120,10 +118,13 @@ async def test_load_credentials_file(
     with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
         assert bot._project_id == "file-project"
-        mock_load_file.assert_called_once_with("/path/to/key.json", scopes=[
-            "https://www.googleapis.com/auth/pubsub",
-            "https://www.googleapis.com/auth/chat.bot",
-        ])
+        mock_load_file.assert_called_once_with(
+            "/path/to/key.json",
+            scopes=[
+                "https://www.googleapis.com/auth/pubsub",
+                "https://www.googleapis.com/auth/chat.bot",
+            ],
+        )
 
 
 @pytest.mark.asyncio
@@ -242,9 +243,6 @@ async def test_incoming_message_blocked_by_allowlist(
         mock_gateway.post.assert_not_called()
 
 
-
-
-
 @pytest.mark.asyncio
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
@@ -268,10 +266,12 @@ async def test_handle_outgoing_message_delivery_foldable_ui(
     mock_create = MagicMock()
     mock_messages.create = mock_create
     # The create call returns a message resource name
-    mock_create.return_value.execute = MagicMock(side_effect=[
-        {"name": "spaces/AAA/messages/foldable_card_123"},
-        {"name": "spaces/AAA/messages/final_reply_456"},
-    ])
+    mock_create.return_value.execute = MagicMock(
+        side_effect=[
+            {"name": "spaces/AAA/messages/foldable_card_123"},
+            {"name": "spaces/AAA/messages/final_reply_456"},
+        ]
+    )
 
     mock_patch = MagicMock()
     mock_messages.patch = mock_patch
@@ -327,7 +327,7 @@ async def test_handle_outgoing_message_delivery_foldable_ui(
                     "turn_tokens": 500,
                     "turn_time": 2.5,
                 }
-            }
+            },
         )
         await bot.handle_message(final_msg)
 
@@ -437,10 +437,12 @@ async def test_load_user_credentials_adc(
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
         creds, project = bot._load_user_credentials()
         assert project == "user-project"
-        mock_auth_default.assert_any_call(scopes=[
-            "https://www.googleapis.com/auth/chat.messages.reactions.create",
-            "https://www.googleapis.com/auth/chat.messages",
-        ])
+        mock_auth_default.assert_any_call(
+            scopes=[
+                "https://www.googleapis.com/auth/chat.messages.reactions.create",
+                "https://www.googleapis.com/auth/chat.messages",
+            ]
+        )
 
 
 @pytest.mark.asyncio
@@ -662,14 +664,11 @@ async def test_add_reaction_409_conflict_triggers_list_and_delete(
     # Configure list and delete mocks
     mock_list = MagicMock()
     mock_reactions.list = mock_list
-    mock_list.return_value.execute = MagicMock(return_value={
-        "reactions": [
-            {
-                "name": "spaces/AAA/messages/msg123/reactions/XYZ999",
-                "emoji": {"unicode": "👀"}
-            }
-        ]
-    })
+    mock_list.return_value.execute = MagicMock(
+        return_value={
+            "reactions": [{"name": "spaces/AAA/messages/msg123/reactions/XYZ999", "emoji": {"unicode": "👀"}}]
+        }
+    )
 
     mock_delete = MagicMock()
     mock_reactions.delete = mock_delete
@@ -950,10 +949,12 @@ async def test_google_chat_slash_command_execution_reply(
     # Mock list_roles behavior inside update_role_by_channel
     mock_config.workspace.roles_dir = "/mock/roles"
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config), \
-         patch("os.path.exists", return_value=True), \
-         patch("os.path.isdir", return_value=True), \
-         patch("os.listdir", return_value=["default", "xiaozhang"]):
+    with (
+        patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config),
+        patch("os.path.exists", return_value=True),
+        patch("os.path.isdir", return_value=True),
+        patch("os.listdir", return_value=["default", "xiaozhang"]),
+    ):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
 
         pubsub_msg = MagicMock(spec=pubsub_v1.subscriber.message.Message)
@@ -971,7 +972,3 @@ async def test_google_chat_slash_command_execution_reply(
         assert call_kwargs["body"]["thread"]["name"] == "spaces/AAA/threads/BBB"
         assert "Active Persona:" in call_kwargs["body"]["text"]
         assert "xiaozhang" in call_kwargs["body"]["text"]
-
-
-
-

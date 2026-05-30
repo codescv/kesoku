@@ -1,5 +1,4 @@
 """Tool registry and MVP skills for Kesoku AI Agent."""
-# ruff: noqa: ASYNC230, ASYNC240
 
 import asyncio
 import functools
@@ -7,12 +6,14 @@ import inspect
 import os
 import re
 import shlex
+import signal
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from kesoku.gateway.gateway import Gateway
+
     GatewayType = Gateway | None
     ActiveJobsRegistryType = "ActiveJobsRegistry | None"
 else:
@@ -24,6 +25,14 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from kesoku.agent.skills import SkillManager
+from kesoku.async_utils import (
+    async_exists,
+    async_get_subdirectories,
+    async_isdir,
+    async_read_text_file,
+    async_realpath,
+    async_write_text_file,
+)
 from kesoku.config import get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
@@ -97,13 +106,8 @@ class ActiveJobsRegistry:
         Args:
             session_id: The session ID to clean up.
         """
-        import signal
-
         async with self._lock:
-            target_job_ids = [
-                jid for jid, job in self._jobs.items()
-                if job["session_id"] == session_id
-            ]
+            target_job_ids = [jid for jid, job in self._jobs.items() if job["session_id"] == session_id]
 
             for jid in target_job_ids:
                 job = self._jobs[jid]
@@ -112,9 +116,8 @@ class ActiveJobsRegistry:
                 try:
                     # Terminate the process group to kill child processes as well
                     if os.name == "posix":
-                        import os as local_os
                         try:
-                            local_os.killpg(local_os.getpgid(proc.pid), signal.SIGTERM)
+                            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                         except Exception:
                             proc.terminate()
                     else:
@@ -124,9 +127,8 @@ class ActiveJobsRegistry:
                     logger.debug(f"Failed to gracefully terminate process group {proc.pid}: {e}")
                     try:
                         if os.name == "posix":
-                            import os as local_os
                             try:
-                                local_os.killpg(local_os.getpgid(proc.pid), signal.SIGKILL)
+                                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                             except Exception:
                                 proc.kill()
                         else:
@@ -152,14 +154,20 @@ async def stream_to_file(
     if stream is None:
         return
     try:
-        with open(file_path, mode, encoding="utf-8", errors="replace") as f:
-            while True:
-                line = await stream.readline()
-                if not line:
-                    break
-                decoded = line.decode("utf-8", errors="replace")
-                f.write(decoded)
+        if mode == "w":
+            await async_write_text_file(file_path, "")
+
+        def _append_line(text: str) -> None:
+            with open(file_path, "a", encoding="utf-8", errors="replace") as f:
+                f.write(text)
                 f.flush()
+
+        while True:
+            line = await stream.readline()
+            if not line:
+                break
+            decoded = line.decode("utf-8", errors="replace")
+            await asyncio.to_thread(_append_line, decoded)
     except Exception as e:
         logger.error(f"Failed to stream output to log file {file_path}: {e}")
 
@@ -187,6 +195,7 @@ async def monitor_background_job(
         stderr_task: The background stderr streaming task.
     """
     from kesoku.gateway.gateway import Gateway
+
     try:
         # Wait for process and stream tasks to finish
         return_code = await proc.wait()
@@ -195,16 +204,14 @@ async def monitor_background_job(
         # Read the final output logs
         stdout = ""
         stderr = ""
-        if os.path.exists(log_filepath_stdout):
+        if await async_exists(log_filepath_stdout):
             try:
-                with open(log_filepath_stdout, encoding="utf-8", errors="replace") as f:
-                    stdout = f.read()
+                stdout = await async_read_text_file(log_filepath_stdout)
             except Exception as e:
                 stdout = f"Failed to read stdout log: {e}"
-        if os.path.exists(log_filepath_stderr):
+        if await async_exists(log_filepath_stderr):
             try:
-                with open(log_filepath_stderr, encoding="utf-8", errors="replace") as f:
-                    stderr = f.read()
+                stderr = await async_read_text_file(log_filepath_stderr)
             except Exception as e:
                 stderr = f"Failed to read stderr log: {e}"
 
@@ -217,7 +224,7 @@ async def monitor_background_job(
                 f"Output truncated (total length {len(output)} bytes).\n"
                 f"Stdout saved to: `{log_filepath_stdout}`.\n"
                 f"Stderr saved to: `{log_filepath_stderr}`.\n\n"
-                f"Preview:\n{output[:MAX_TOOL_OUTPUT_LENGTH // 2]}...\n{output[-MAX_TOOL_OUTPUT_LENGTH // 2:]}"
+                f"Preview:\n{output[: MAX_TOOL_OUTPUT_LENGTH // 2]}...\n{output[-MAX_TOOL_OUTPUT_LENGTH // 2 :]}"
             )
 
         # Post special System wakeup alert to Gateway
@@ -228,9 +235,7 @@ async def monitor_background_job(
         channel_id = "system"
         if original_msg_id:
             try:
-                orig_msgs = await asyncio.to_thread(
-                    gw.db.get_messages_by_filters, {"id": original_msg_id}
-                )
+                orig_msgs = await asyncio.to_thread(gw.db.get_messages_by_filters, {"id": original_msg_id})
                 if orig_msgs:
                     chatbot_id = orig_msgs[0].chatbot_id
                     channel_id = orig_msgs[0].channel_id
@@ -504,12 +509,12 @@ async def run_shell_command(
     # Resolve target working directory
     if cwd:
         if os.path.isabs(cwd):
-            exec_dir = os.path.realpath(cwd)
+            exec_dir = await async_realpath(cwd)
         else:
             awd = config.agent_working_dir or os.getcwd()
-            exec_dir = os.path.realpath(os.path.join(awd, cwd))
+            exec_dir = await async_realpath(os.path.join(awd, cwd))
     else:
-        exec_dir = os.path.realpath(config.agent_working_dir or os.getcwd())
+        exec_dir = await async_realpath(config.agent_working_dir or os.getcwd())
 
     os.makedirs(exec_dir, exist_ok=True)
 
@@ -519,16 +524,18 @@ async def run_shell_command(
         env.update(config.shell.env)
 
     # Inject AWD and STAGING_DIR environment variables
-    env["AWD"] = os.path.realpath(config.agent_working_dir or os.getcwd())
+    env["AWD"] = await async_realpath(config.agent_working_dir or os.getcwd())
     if context and context.session_workspace:
-        env["STAGING_DIR"] = os.path.realpath(os.path.join(config.workspace.sessions_dir, context.session_workspace))
+        env["STAGING_DIR"] = await async_realpath(
+            os.path.join(config.workspace.sessions_dir, context.session_workspace)
+        )
 
     # Prepare unique background job identifiers and log paths
     job_id = f"job_{int(time.time())}"
     log_filename_stdout = f"background_{job_id}.stdout"
     log_filename_stderr = f"background_{job_id}.stderr"
     folder_name = context.session_workspace
-    session_staging_dir = os.path.realpath(os.path.join(config.workspace.sessions_dir, folder_name))
+    session_staging_dir = await async_realpath(os.path.join(config.workspace.sessions_dir, folder_name))
     os.makedirs(session_staging_dir, exist_ok=True)
     log_filepath_stdout = os.path.join(session_staging_dir, log_filename_stdout)
     log_filepath_stderr = os.path.join(session_staging_dir, log_filename_stderr)
@@ -538,8 +545,7 @@ async def run_shell_command(
     # Configure process group on POSIX to allow clean SIGTERM/SIGKILL propagation
     preexec_fn = None
     if os.name == "posix":
-        import os as local_os
-        preexec_fn = local_os.setsid
+        preexec_fn = os.setsid
 
     proc = None
     try:
@@ -610,10 +616,8 @@ async def run_shell_command(
         if proc:
             try:
                 if os.name == "posix":
-                    import os as local_os
-                    import signal
                     try:
-                        local_os.killpg(local_os.getpgid(proc.pid), signal.SIGTERM)
+                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                     except Exception:
                         proc.terminate()
                 else:
@@ -622,10 +626,8 @@ async def run_shell_command(
             except Exception:
                 try:
                     if os.name == "posix":
-                        import os as local_os
-                        import signal
                         try:
-                            local_os.killpg(local_os.getpgid(proc.pid), signal.SIGKILL)
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                         except Exception:
                             proc.kill()
                     else:
@@ -644,16 +646,14 @@ async def run_shell_command(
     # Read the written log file contents
     stdout = ""
     stderr = ""
-    if os.path.exists(log_filepath_stdout):
+    if await async_exists(log_filepath_stdout):
         try:
-            with open(log_filepath_stdout, encoding="utf-8", errors="replace") as f:
-                stdout = f.read()
+            stdout = await async_read_text_file(log_filepath_stdout)
         except Exception as e:
             stdout = f"Failed to read stdout logs: {e}"
-    if os.path.exists(log_filepath_stderr):
+    if await async_exists(log_filepath_stderr):
         try:
-            with open(log_filepath_stderr, encoding="utf-8", errors="replace") as f:
-                stderr = f.read()
+            stderr = await async_read_text_file(log_filepath_stderr)
         except Exception as e:
             stderr = f"Failed to read stderr logs: {e}"
 
@@ -666,8 +666,7 @@ async def run_shell_command(
         output_filename = f"cmd_output_{timestamp}.txt"
         output_filepath = os.path.join(session_staging_dir, output_filename)
         try:
-            with open(output_filepath, "w", encoding="utf-8") as f:
-                f.write(out_str)
+            await async_write_text_file(output_filepath, out_str)
             preview_len = MAX_TOOL_OUTPUT_LENGTH // 2
             final_output = (
                 f"Output truncated (total length {len(out_str)} bytes). "
@@ -679,8 +678,7 @@ async def run_shell_command(
         except Exception as ex:
             logger.error(f"Failed to save truncated output to '{output_filepath}': {ex}")
             final_output = (
-                f"Output truncated (total length {len(out_str)} bytes). "
-                f"Preview:\n{out_str[:MAX_TOOL_OUTPUT_LENGTH]}"
+                f"Output truncated (total length {len(out_str)} bytes). Preview:\n{out_str[:MAX_TOOL_OUTPUT_LENGTH]}"
             )
 
     if proc.returncode != 0:
@@ -817,19 +815,14 @@ async def compact_history(summary: str, context: ToolContext) -> str:
     completed_assistant_reply = None
     if initiating_msg:
         initiating_idx = old_history.index(initiating_msg)
-        for msg in old_history[initiating_idx + 1:]:
+        for msg in old_history[initiating_idx + 1 :]:
             if msg.role == MessageRole.ASSISTANT and msg.type == MessageType.TEXT:
                 completed_assistant_reply = msg
                 break
-        is_turn_completed = (completed_assistant_reply is not None)
+        is_turn_completed = completed_assistant_reply is not None
 
     # 5. Construct the compacted starting message
-    compacted_content = (
-        f"[Conversation History Summary]\n"
-        f"{summary}\n\n"
-        f"[Latest User Message]\n"
-        f"{latest_user_msg_content}"
-    )
+    compacted_content = f"[Conversation History Summary]\n{summary}\n\n[Latest User Message]\n{latest_user_msg_content}"
 
     # 6. Post the compacted message under the new session ID to the channel
     # If the turn was already completed, save it as PROCESSED so it doesn't trigger a new worker run
@@ -968,7 +961,7 @@ def list_memories(
         lines = [f"=== Memories in '{category}' (scope: {resolved_role}) ==="]
         for m in memories:
             updated_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m["updated_at"]))
-            lines.append(f"- key: `{m['key']}` | title: \"{m['title']}\" | updated: {updated_str} | scope: {m['role']}")
+            lines.append(f'- key: `{m["key"]}` | title: "{m["title"]}" | updated: {updated_str} | scope: {m["role"]}')
         return "\n".join(lines)
     except Exception as e:
         logger.error(f"Failed to list memories: {e}", exc_info=True)
@@ -1098,7 +1091,7 @@ def update_memory(
             f"Memory successfully saved!\n"
             f"  Category: `{category}`\n"
             f"  Key: `{sanitized_key}`\n"
-            f"  Title: \"{title}\"\n"
+            f'  Title: "{title}"\n'
             f"  Scope: `{resolved_role}`"
         )
     except Exception as e:
@@ -1141,8 +1134,7 @@ def delete_memory(
         mem = db.get_agent_memory(category=category, key=sanitized, role=resolved_role)
         if not mem:
             return (
-                f"No memory entry found for category='{category}', "
-                f"key='{sanitized}', role='{resolved_role}' to delete."
+                f"No memory entry found for category='{category}', key='{sanitized}', role='{resolved_role}' to delete."
             )
 
         db.delete_agent_memory(category=category, key=sanitized, role=resolved_role)
@@ -1172,14 +1164,9 @@ async def play_role(role: str, context: ToolContext) -> str:
     # 1. Validate role directory exists
     roles_dir = cfg.workspace.roles_dir
     role_dir = os.path.join(roles_dir, role)
-    if not os.path.exists(role_dir) or not os.path.isdir(role_dir):
+    if not await async_exists(role_dir) or not await async_isdir(role_dir):
         # Get available roles
-        available_roles = []
-        if os.path.exists(roles_dir):
-            available_roles = [
-                d for d in os.listdir(roles_dir)
-                if os.path.isdir(os.path.join(roles_dir, d))
-            ]
+        available_roles = await async_get_subdirectories(roles_dir)
         if not available_roles:
             available_roles = ["default"]
         return (
@@ -1204,6 +1191,7 @@ async def play_role(role: str, context: ToolContext) -> str:
     session = await context.gateway.get_session(context.session_id)
     if session:
         from kesoku.agent.prompt import build_sys_prompt
+
         new_sys_prompt = build_sys_prompt(session=session)
         await context.gateway.update_session_system_prompt(context.session_id, new_sys_prompt)
 

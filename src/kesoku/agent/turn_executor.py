@@ -62,7 +62,6 @@ def truncate_context_middle(text: str, max_len: int = 3000) -> str:
     return text[:char_start] + "\n\n... [Timeline Truncated for Brevity] ...\n\n" + text[-char_end:]
 
 
-
 class TurnExecutor:
     """Orchestrates conversational turn execution, including LLM inference, thought logging, and tool calling."""
 
@@ -205,15 +204,13 @@ class TurnExecutor:
                             f"- {pref['title']}: {pref['content']}" for pref in user_prefs
                         )
                         if len(pref_suffix) > MAX_TOTAL_USER_PREFERENCES_LENGTH:
-                            pref_suffix = pref_suffix[:MAX_TOTAL_USER_PREFERENCES_LENGTH - 3] + "..."
+                            pref_suffix = pref_suffix[: MAX_TOTAL_USER_PREFERENCES_LENGTH - 3] + "..."
                         msg_idx = history.index(latest_user_msg)
                         copied_msg = latest_user_msg.model_copy()
                         copied_msg.content += pref_suffix
                         history[msg_idx] = copied_msg
                         latest_user_msg = copied_msg
-                        logger.info(
-                            f"Injected {len(user_prefs)} user preferences into user message {copied_msg.id}"
-                        )
+                        logger.info(f"Injected {len(user_prefs)} user preferences into user message {copied_msg.id}")
 
                     # Inject Cross-Session Memory context
                     stored_ctx = await asyncio.to_thread(
@@ -263,13 +260,10 @@ class TurnExecutor:
                             )
                         else:
                             # Inject all since they are within safe token limits
-                            injected_content += (
-                                "\n\nRecent discussions in other threads:\n"
-                                + "\n".join(
-                                    f"- [{time.strftime('%m-%d %H:%M', time.localtime(m.timestamp))}] "
-                                    f"{m.sender}: {m.content}"
-                                    for m in new_messages
-                                )
+                            injected_content += "\n\nRecent discussions in other threads:\n" + "\n".join(
+                                f"- [{time.strftime('%m-%d %H:%M', time.localtime(m.timestamp))}] "
+                                f"{m.sender}: {m.content}"
+                                for m in new_messages
                             )
 
                     if injected_content and "[Cross-Session Memory]" not in latest_user_msg.content:
@@ -292,12 +286,10 @@ class TurnExecutor:
                         if locked:
                             logger.info(f"Claimed lock for cross-session context update on role '{active_role}'")
                             asyncio.create_task(
-                                self._summarize_cross_session_context_bg(
-                                    active_role, stored_content, last_updated
-                                )
+                                self._summarize_cross_session_context_bg(active_role, stored_content, last_updated)
                             )
 
-                 # Retrieve system prompt directly from session
+                # Retrieve system prompt directly from session
                 session = await self.gateway.get_session(self.session_id)
                 system_prompt = session.system_prompt if session else None
 
@@ -441,9 +433,7 @@ class TurnExecutor:
 
                         # Schedule worker stop task in the background so the current execution exits cleanly first
                         if self.gateway.agent:
-                            asyncio.create_task(
-                                self.gateway.agent.stop_session_worker(self.session_id, immediate=True)
-                            )
+                            asyncio.create_task(self.gateway.agent.stop_session_worker(self.session_id, immediate=True))
                         break
 
                     continue
@@ -465,10 +455,7 @@ class TurnExecutor:
                     final_content = res.content
                     if not final_content.strip():
                         if not nudged:
-                            logger.info(
-                                f"LLM returned empty content in session {self.session_id}. "
-                                f"Nudging model."
-                            )
+                            logger.info(f"LLM returned empty content in session {self.session_id}. Nudging model.")
                             nudge_msg = Message(
                                 session_id=self.session_id,
                                 chatbot_id=chatbot_id,
@@ -592,14 +579,13 @@ class TurnExecutor:
 
             # 2. Build consolidation prompt
             history_log = "\n".join(
-                f"[{time.strftime('%m-%d %H:%M', time.localtime(m.timestamp))}] "
-                f"{m.sender}: {m.content}"
+                f"[{time.strftime('%m-%d %H:%M', time.localtime(m.timestamp))}] {m.sender}: {m.content}"
                 for m in history_msgs
             )
             prompt = (
                 "You are an expert memory consolidator for a roleplay companion agent.\n"
-                f"Current Consolidated Event Timeline:\n\"\"\"\n{current_context or 'None'}\n\"\"\"\n\n"
-                f"New Chat History since last update:\n\"\"\"\n{history_log}\n\"\"\"\n\n"
+                f'Current Consolidated Event Timeline:\n"""\n{current_context or "None"}\n"""\n\n'
+                f'New Chat History since last update:\n"""\n{history_log}\n"""\n\n'
                 "Task: Combine the current event timeline and the new chat history into a single, "
                 "highly concise, chronological timeline/log of events and stories.\n"
                 "Rules:\n"
@@ -626,8 +612,7 @@ class TurnExecutor:
 
             if not new_summary:
                 logger.warning(
-                    f"Consolidation returned empty response for role '{role}'. "
-                    "Releasing lock without change."
+                    f"Consolidation returned empty response for role '{role}'. Releasing lock without change."
                 )
                 await asyncio.to_thread(
                     self.gateway.db.release_cross_session_context_lock,

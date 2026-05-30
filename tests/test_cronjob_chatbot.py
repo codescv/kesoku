@@ -74,9 +74,9 @@ async def test_cron_manager_defaults_to_cronjob_silent():
     mock_bot.trigger_cronjob = AsyncMock()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_real = os.path.realpath(tmpdir)  # noqa: ASYNC240
+        tmpdir_real = os.path.realpath(tmpdir)
         prompt_file_path = os.path.join(tmpdir_real, "silent_prompt.md")
-        with open(prompt_file_path, "w") as f:  # noqa: ASYNC230
+        with open(prompt_file_path, "w") as f:
             f.write("Silent cron job content")
 
         job = {
@@ -105,9 +105,9 @@ async def test_cron_manager_missing_chatbot_id():
     mock_bot.trigger_cronjob = AsyncMock()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_real = os.path.realpath(tmpdir)  # noqa: ASYNC240
+        tmpdir_real = os.path.realpath(tmpdir)
         prompt_file_path = os.path.join(tmpdir_real, "silent_prompt.md")
-        with open(prompt_file_path, "w") as f:  # noqa: ASYNC230
+        with open(prompt_file_path, "w") as f:
             f.write("Silent cron job content")
 
         job = {

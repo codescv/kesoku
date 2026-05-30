@@ -298,7 +298,6 @@ class Gateway:
             if msg.status in (MessageStatus.PENDING_AGENT, MessageStatus.PROCESSING, MessageStatus.PENDING):
                 await self.update_message_status(msg.id, MessageStatus.ERROR)
 
-
     async def update_message_metadata(self, message_id: str, metadata: dict[str, Any]) -> None:
         """Update the metadata of a message in storage.
 
@@ -391,7 +390,6 @@ class Gateway:
         """
         return await asyncio.to_thread(self.db.get_session_history_by_ranges, session_id, ranges, order)
 
-
     async def delete_session(self, session_id: str) -> None:
         """Delete a session, its message history from database, and its workspace from disk.
 
@@ -448,5 +446,3 @@ class Gateway:
     async def get_cronjob_sent_stats_today(self, chatbot_id: str, channel_id: str) -> tuple[int, float | None]:
         """Retrieve count and last timestamp of cron messages sent today in a channel."""
         return await asyncio.to_thread(self.db.get_cronjob_sent_stats_today, chatbot_id, channel_id)
-
-

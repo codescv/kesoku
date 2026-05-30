@@ -12,6 +12,10 @@ from typing import Any
 import discord
 
 from kesoku.agent.prompt import build_sys_prompt
+from kesoku.async_utils import (
+    async_exists,
+    async_realpath,
+)
 from kesoku.config import DiscordChannelOverride, get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
@@ -28,7 +32,6 @@ _get_local_timezone_name = get_local_timezone_name
 
 
 DISCORD_MAX_CONTENT_LENGTH = 2000
-
 
 
 def _build_discord_custom_prompt(
@@ -403,7 +406,7 @@ class DiscordChatbot(Chatbot):
         # Save any incoming attachments to the session staging directory
         attachments_metadata = []
         if message.attachments:
-            session_staging_dir = os.path.realpath(  # noqa: ASYNC240
+            session_staging_dir = await async_realpath(
                 os.path.join(self.config.workspace.sessions_dir, session.workspace_name)
             )
             os.makedirs(session_staging_dir, exist_ok=True)
@@ -417,7 +420,7 @@ class DiscordChatbot(Chatbot):
 
                 filepath = os.path.join(session_staging_dir, safe_filename)
                 # Avoid file collisions
-                if os.path.exists(filepath):  # noqa: ASYNC240
+                if await async_exists(filepath):
                     base, ext = os.path.splitext(safe_filename)
                     safe_filename = f"{base}_{attachment.id}{ext}"
                     filepath = os.path.join(session_staging_dir, safe_filename)
@@ -425,11 +428,13 @@ class DiscordChatbot(Chatbot):
                 logger.info(f"Saving Discord attachment {filename} to {filepath}")
                 await attachment.save(filepath)
 
-                attachments_metadata.append({
-                    "path": filepath,
-                    "mime_type": attachment.content_type or "application/octet-stream",
-                    "filename": filename,
-                })
+                attachments_metadata.append(
+                    {
+                        "path": filepath,
+                        "mime_type": attachment.content_type or "application/octet-stream",
+                        "filename": filename,
+                    }
+                )
 
         # Ingest user message into Gateway
         tz_name = get_local_timezone_name()
@@ -440,8 +445,7 @@ class DiscordChatbot(Chatbot):
         )
         if attachments_metadata:
             files_str = "\n".join(
-                f"[Attachment: {a['filename']} ({a['mime_type']}) saved at {a['path']}]"
-                for a in attachments_metadata
+                f"[Attachment: {a['filename']} ({a['mime_type']}) saved at {a['path']}]" for a in attachments_metadata
             )
             discord_msg_content += f"\n\nAttachments:\n{files_str}"
 
@@ -484,7 +488,6 @@ class DiscordChatbot(Chatbot):
         # Trigger typing status for the thread/channel while agent is thinking
         if channel_id not in self._typing_tasks:
             self._typing_tasks[channel_id] = asyncio.create_task(self._keep_typing(target_channel))
-
 
     async def handle_message(self, message: Message) -> None:
         """Process outgoing message from Gateway and send to target Discord thread."""
@@ -530,15 +533,16 @@ class DiscordChatbot(Chatbot):
             thought_content = f"{first_line} ... *(+{hidden_chars} chars)*"
 
             tc_exists = any(
-                item["type"] == "thought" and item["id"] == message.id
-                for item in self._turn_special_items[session_id]
+                item["type"] == "thought" and item["id"] == message.id for item in self._turn_special_items[session_id]
             )
             if not tc_exists:
-                self._turn_special_items[session_id].append({
-                    "type": "thought",
-                    "id": message.id,
-                    "content": thought_content,
-                })
+                self._turn_special_items[session_id].append(
+                    {
+                        "type": "thought",
+                        "id": message.id,
+                        "content": thought_content,
+                    }
+                )
 
         elif message.role == MessageRole.TOOL:
             tool_name = message.metadata.get("tool_name") or message.sender or "unknown_tool"
@@ -549,13 +553,15 @@ class DiscordChatbot(Chatbot):
                 for item in self._turn_special_items[session_id]
             )
             if not tc_exists:
-                self._turn_special_items[session_id].append({
-                    "type": "tool_call",
-                    "id": message.id,
-                    "tool_name": tool_name,
-                    "arg_suffix": arg_suffix,
-                    "status": "⏳",
-                })
+                self._turn_special_items[session_id].append(
+                    {
+                        "type": "tool_call",
+                        "id": message.id,
+                        "tool_name": tool_name,
+                        "arg_suffix": arg_suffix,
+                        "status": "⏳",
+                    }
+                )
 
         elif message.role == MessageRole.SYSTEM:
             first_line = message.content.split("\n")[0].strip()
@@ -563,15 +569,16 @@ class DiscordChatbot(Chatbot):
             system_content = f"{first_line} ... *(+{hidden_chars} chars)*"
 
             tc_exists = any(
-                item["type"] == "system" and item["id"] == message.id
-                for item in self._turn_special_items[session_id]
+                item["type"] == "system" and item["id"] == message.id for item in self._turn_special_items[session_id]
             )
             if not tc_exists:
-                self._turn_special_items[session_id].append({
-                    "type": "system",
-                    "id": message.id,
-                    "content": system_content,
-                })
+                self._turn_special_items[session_id].append(
+                    {
+                        "type": "system",
+                        "id": message.id,
+                        "content": system_content,
+                    }
+                )
 
         lines = []
         for item in self._turn_special_items[session_id]:
@@ -583,7 +590,7 @@ class DiscordChatbot(Chatbot):
                 lines.append(f"⚙️ *System Message:* {item['content']}")
         new_content = "\n".join(lines)
         if len(new_content) > DISCORD_MAX_CONTENT_LENGTH:
-            new_content = new_content[:DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
+            new_content = new_content[: DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
 
         channel = await self._get_discord_channel_with_abort(message)
         if not channel:
@@ -652,7 +659,7 @@ class DiscordChatbot(Chatbot):
                         lines.append(f"⚙️ *System Message:* {item['content']}")
                 new_content = "\n".join(lines)
                 if len(new_content) > DISCORD_MAX_CONTENT_LENGTH:
-                    new_content = new_content[:DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
+                    new_content = new_content[: DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
 
                 discord_msg = self._turn_special_msg.get(session_id)
                 if discord_msg:
@@ -670,7 +677,7 @@ class DiscordChatbot(Chatbot):
                 emoji = "❌" if message.metadata.get("tool_error") else "✅"
                 content = discord_msg.content.replace("⏳", emoji)
                 if len(content) > DISCORD_MAX_CONTENT_LENGTH:
-                    content = content[:DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
+                    content = content[: DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
                 await discord_msg.edit(content=content)
             except Exception as ee:
                 logger.warning(f"Failed to edit tool call message in-place: {ee}")
@@ -699,7 +706,7 @@ class DiscordChatbot(Chatbot):
         if not channel:
             return
 
-        if not os.path.exists(file_path):  # noqa: ASYNC240
+        if not await async_exists(file_path):
             logger.error(f"File not found: {file_path}")
             await channel.send(f"⚠️ File not found: {file_path}")
         else:
@@ -716,7 +723,7 @@ class DiscordChatbot(Chatbot):
         if not channel:
             return
 
-        if not os.path.exists(file_path):  # noqa: ASYNC240
+        if not await async_exists(file_path):
             logger.error(f"Voice file not found: {file_path}")
             await channel.send(f"⚠️ Voice file not found: {file_path}")
         else:
@@ -921,4 +928,3 @@ class DiscordChatbot(Chatbot):
         # Trigger typing status for the thread/channel while agent is thinking
         if target_channel_id_str not in self._typing_tasks:
             self._typing_tasks[target_channel_id_str] = asyncio.create_task(self._keep_typing(target_channel))
-

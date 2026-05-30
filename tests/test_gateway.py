@@ -646,6 +646,7 @@ async def test_gateway_queue_backpressure_full(temp_db: str) -> None:
     gw = Gateway(context=KesokuContext(config=cfg))
 
     from kesoku.gateway.gateway import Listener
+
     # Create a listener with maxsize = 2
     listener = Listener(lambda msg: True, maxsize=2)
     gw._listeners.add(listener)
@@ -709,6 +710,7 @@ async def test_gateway_listener_mutation_during_post(temp_db: str) -> None:
 
     # Create a listener that removes itself from gw._listeners when receiving a message
     listener = None
+
     def filter_func(msg: Message) -> bool:
         nonlocal listener
         # Remove itself during post processing
@@ -812,6 +814,3 @@ async def test_gateway_update_system_prompt(temp_db: str) -> None:
     fetched_session_after = await gw.get_session("sess_update_sys")
     assert fetched_session_after is not None
     assert fetched_session_after.system_prompt == "Updated prompt"  # Updated successfully!
-
-
-

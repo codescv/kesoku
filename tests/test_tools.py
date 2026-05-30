@@ -138,7 +138,7 @@ async def test_run_shell_command_env_variables(tmp_path) -> None:
 
         assert "=== STDOUT ===" in res
         assert str(tmp_path) in res
-        expected_staging = os.path.realpath(os.path.join(cfg.workspace.sessions_dir, "test_ws"))  # noqa: ASYNC240
+        expected_staging = os.path.realpath(os.path.join(cfg.workspace.sessions_dir, "test_ws"))
         assert expected_staging in res
     finally:
         kesoku.config._global_config = original_config
@@ -261,8 +261,8 @@ async def test_run_shell_command_failure_truncation(tmp_path) -> None:
         match = re.search(r"Full output saved to session workspace file: `([^`]+)`", err_msg)
         assert match is not None
         filepath = match.group(1)
-        assert os.path.exists(filepath)  # noqa: ASYNC240
-        with open(filepath, encoding="utf-8") as f:  # noqa: ASYNC230
+        assert os.path.exists(filepath)
+        with open(filepath, encoding="utf-8") as f:
             content = f.read()
             assert "a" * 12000 in content
     finally:
@@ -277,6 +277,7 @@ async def test_compact_history_tool(tmp_path) -> None:
     from kesoku.context import KesokuContext
     from kesoku.db import DatabaseManager, Message
     from kesoku.gateway.gateway import Gateway
+
     temp_db = str(tmp_path / "test_tools_compact.db")
     DatabaseManager(temp_db).init_tables()
     cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
@@ -345,6 +346,7 @@ async def test_manual_compact_command(tmp_path) -> None:
     from kesoku.db import DatabaseManager, Message
     from kesoku.gateway.chatbot.base import Chatbot
     from kesoku.gateway.gateway import Gateway
+
     temp_db = str(tmp_path / "test_tools_cmd.db")
     DatabaseManager(temp_db).init_tables()
     cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
@@ -378,6 +380,7 @@ async def test_manual_compact_command(tmp_path) -> None:
 
     # Execute the manual compact command
     reply_msg = None
+
     async def mock_reply(content: str) -> None:
         nonlocal reply_msg
         reply_msg = content
@@ -389,8 +392,7 @@ async def test_manual_compact_command(tmp_path) -> None:
     # Fetch messages to verify that the trigger signal message was posted with USER role
     history = await gw.get_session_history("sess_cmd_test", limit=10)
     trigger_msg = next(
-        m for m in history
-        if m.sender == "System" and "manually requested session compaction" in m.content
+        m for m in history if m.sender == "System" and "manually requested session compaction" in m.content
     )
     assert trigger_msg.role == "user"  # Crucial to wake up dispatcher
     assert trigger_msg.status == "pending_agent"
@@ -411,6 +413,7 @@ async def test_compact_history_tool_completed_turn(tmp_path) -> None:
     gw = Gateway(context=KesokuContext(config=cfg))
 
     import kesoku.config
+
     original_config = kesoku.config._global_config
     try:
         kesoku.config._global_config = cfg
@@ -496,6 +499,7 @@ async def test_compact_history_with_cronjob(tmp_path) -> None:
     gw = Gateway(context=KesokuContext(config=cfg))
 
     import kesoku.config
+
     original_config = kesoku.config._global_config
     try:
         kesoku.config._global_config = cfg
@@ -548,6 +552,3 @@ async def test_compact_history_with_cronjob(tmp_path) -> None:
         assert "🔄 Conversation history has been automatically compacted" in notify_msg.content
     finally:
         kesoku.config._global_config = original_config
-
-
-

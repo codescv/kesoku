@@ -81,4 +81,3 @@ async def test_run_cli_chat_async_show_history_grouped(mock_build: AsyncMock, mo
         grouped=True,
     )
     mock_build.assert_called_once_with(gateway=gw_instance, session_id="s1", order="grouped", heal_orphans=False)
-

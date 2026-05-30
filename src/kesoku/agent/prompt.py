@@ -133,6 +133,7 @@ def build_sys_prompt(
         role = "default"
         if session:
             from kesoku.db import DatabaseManager
+
             db = DatabaseManager(cfg.workspace.db_path)
             try:
                 mapping = db.get_channel_by_session(session.id)

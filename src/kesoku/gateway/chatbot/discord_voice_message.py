@@ -196,8 +196,11 @@ async def send_voice_message(
         return state.create_message(channel=channel, data=data)
     finally:
         # Ensure the temporary file is cleaned up
-        if os.path.exists(temp_ogg_path):  # noqa: ASYNC240
-            try:
-                os.unlink(temp_ogg_path)
-            except Exception as ce:
-                logger.warning(f"Failed to clean up temporary voice file {temp_ogg_path}: {ce}")
+        def _cleanup():
+            if os.path.exists(temp_ogg_path):
+                try:
+                    os.unlink(temp_ogg_path)
+                except Exception as ce:
+                    logger.warning(f"Failed to clean up temporary voice file {temp_ogg_path}: {ce}")
+
+        await asyncio.to_thread(_cleanup)

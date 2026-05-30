@@ -65,13 +65,16 @@ async def test_agent_execution_loop(temp_db: str) -> None:
     )
 
     from kesoku.agent.llm import LLMResponse
-    llm = MockLLM(responses=[
-        LLMResponse(
-            content="Let me calculate that.",
-            tool_calls=[ToolCallRequest(name="calculator", arguments={"expression": "25 + 10"})]
-        ),
-        LLMResponse(content="The calculation result is 35.", tool_calls=[])
-    ])
+
+    llm = MockLLM(
+        responses=[
+            LLMResponse(
+                content="Let me calculate that.",
+                tool_calls=[ToolCallRequest(name="calculator", arguments={"expression": "25 + 10"})],
+            ),
+            LLMResponse(content="The calculation result is 35.", tool_calls=[]),
+        ]
+    )
     context = KesokuContext(llm=llm, tool_registry=reg)
     agent = Agent(gw, context=context)
 
@@ -132,6 +135,7 @@ async def test_run_shell_command(tmp_path: Any) -> None:
 async def test_run_shell_command_background_override(tmp_path: Any) -> None:
     """Verify background_threshold_seconds override in run_shell_command transitions to background."""
     from kesoku.agent.tools import ActiveJobsRegistry
+
     jobs = ActiveJobsRegistry()
     ctx = ToolContext(
         session_id="test_sess_override",
@@ -379,9 +383,7 @@ async def test_system_prompt_and_pinned_turns_turn_based(temp_db: str) -> None:
         )
 
     # Call build clean history directly
-    history = await build_clean_history(
-        gateway=gw, session_id="sess_pin"
-    )
+    history = await build_clean_history(gateway=gw, session_id="sess_pin")
 
     # Verify all 6 turns are kept, meaning we have exactly 12 messages
     assert len(history) == 12
@@ -530,9 +532,7 @@ async def test_skill_pinning_and_parallel_safety_turn_based(temp_db: str) -> Non
     )
 
     # Retrieve clean history
-    history = await build_clean_history(
-        gateway=gw, session_id="sess_skill"
-    )
+    history = await build_clean_history(gateway=gw, session_id="sess_skill")
 
     # Let's assert all messages of Turn 2 are present!
     history_ids = {m.id for m in history}
@@ -681,9 +681,7 @@ async def test_priority_based_dropping_and_atomic_batches_turn_based(temp_db: st
     await gw.post(resp2)
 
     # Call history building directly
-    history = await build_clean_history(
-        gateway=gw, session_id="sess_drop"
-    )
+    history = await build_clean_history(gateway=gw, session_id="sess_drop")
     history_ids = {m.id for m in history}
 
     # Turn 1 checks:
@@ -702,8 +700,6 @@ async def test_priority_based_dropping_and_atomic_batches_turn_based(temp_db: st
     assert tc2.id in history_ids
     assert tr2.id in history_ids
     assert resp2.id in history_ids
-
-
 
 
 @pytest.mark.asyncio
@@ -739,8 +735,10 @@ async def test_session_worker_dynamic_llm(temp_db: str) -> None:
         )
     ]
 
-    with patch("kesoku.context.get_config", return_value=mock_cfg), \
-         patch("kesoku.context.KesokuContext.get_llm") as mock_get_llm:
+    with (
+        patch("kesoku.context.get_config", return_value=mock_cfg),
+        patch("kesoku.context.KesokuContext.get_llm") as mock_get_llm,
+    ):
         mock_claude = MagicMock()
         mock_get_llm.return_value = mock_claude
 
@@ -879,14 +877,14 @@ async def test_llm_turn_logging(temp_db: str, tmp_path: Any) -> None:
 
         # Construct the expected session staging directory path
         staging_dir = os.path.join(cfg.workspace.sessions_dir, session.workspace_name)
-        assert os.path.exists(staging_dir)  # noqa: ASYNC240
+        assert os.path.exists(staging_dir)
 
         # Verify that llm-turn-1.log.yaml exists
         log_path = os.path.join(staging_dir, "llm-turn-1.log.yaml")
-        assert os.path.exists(log_path)  # noqa: ASYNC240
+        assert os.path.exists(log_path)
 
         # Load and verify the contents of the log file
-        with open(log_path, encoding="utf-8") as f:  # noqa: ASYNC230
+        with open(log_path, encoding="utf-8") as f:
             log_data = yaml.safe_load(f)
 
         assert log_data["metadata"]["session_id"] == "sess_log"
@@ -970,7 +968,7 @@ async def test_llm_turn_logging_disabled(temp_db: str, tmp_path: Any) -> None:
 
         # The log file should NOT exist
         log_path = os.path.join(staging_dir, "llm-turn-1.log.yaml")
-        assert not os.path.exists(log_path)  # noqa: ASYNC240
+        assert not os.path.exists(log_path)
 
 
 @pytest.mark.asyncio
@@ -984,30 +982,57 @@ async def test_simplified_history_thought_stripping(temp_db: str) -> None:
 
     # Turn 1 (Historical completed turn with thoughts)
     user1 = Message(
-        session_id="sess_simp", chatbot_id="cli", channel_id="ch1", sender="u1",
-        role="user", content="Turn 1 prompt", status="processed"
+        session_id="sess_simp",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        content="Turn 1 prompt",
+        status="processed",
     )
     await gw.post(user1)
     thought1 = Message(
-        session_id="sess_simp", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
-        role="assistant", type="thought", content="Turn 1 thoughts", status="responded"
+        session_id="sess_simp",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role="assistant",
+        type="thought",
+        content="Turn 1 thoughts",
+        status="responded",
     )
     await gw.post(thought1)
     resp1 = Message(
-        session_id="sess_simp", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
-        role="assistant", content="Turn 1 response", status="responded"
+        session_id="sess_simp",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role="assistant",
+        content="Turn 1 response",
+        status="responded",
     )
     await gw.post(resp1)
 
     # Turn 2 (Active turn with thoughts)
     user2 = Message(
-        session_id="sess_simp", chatbot_id="cli", channel_id="ch1", sender="u1",
-        role="user", content="Turn 2 prompt", status="pending_agent"
+        session_id="sess_simp",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        content="Turn 2 prompt",
+        status="pending_agent",
     )
     await gw.post(user2)
     thought2 = Message(
-        session_id="sess_simp", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
-        role="assistant", type="thought", content="Turn 2 thoughts", status="responded"
+        session_id="sess_simp",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role="assistant",
+        type="thought",
+        content="Turn 2 thoughts",
+        status="responded",
     )
     await gw.post(thought2)
 
@@ -1022,7 +1047,7 @@ async def test_simplified_history_thought_stripping(temp_db: str) -> None:
 
     # Check Turn 2 (Active)
     assert user2.id in history_ids
-    assert thought2.id in history_ids      # Active turn thought must be preserved!
+    assert thought2.id in history_ids  # Active turn thought must be preserved!
 
 
 @pytest.mark.asyncio
@@ -1106,6 +1131,7 @@ async def test_graceful_shutdown_and_orphaned_recovery(temp_db: str) -> None:
 
     # Mock LLM that takes some time (0.3s) to return a response
     from kesoku.agent.llm import BaseLLM, LLMResponse
+
     class SlowLLM(BaseLLM):
         async def generate(
             self,
@@ -1143,6 +1169,7 @@ async def test_graceful_shutdown_and_orphaned_recovery(temp_db: str) -> None:
     # --- Part 2: Test Orphaned Processing Messages Recovery ---
     # Manual post a message with status "processing" and old timestamp
     import time
+
     old_msg = Message(
         session_id="sess_graceful",
         chatbot_id="cli",
@@ -1171,9 +1198,7 @@ async def test_graceful_shutdown_and_orphaned_recovery(temp_db: str) -> None:
     await gw.post(recent_msg)
 
     # Directly trigger database recovery
-    recovered_count = await asyncio.to_thread(
-        gw.db.recover_orphaned_processing_messages, threshold_seconds=300.0
-    )
+    recovered_count = await asyncio.to_thread(gw.db.recover_orphaned_processing_messages, threshold_seconds=300.0)
     assert recovered_count == 1
 
     # Verify that old_msg was reverted to pending_agent
@@ -1247,9 +1272,7 @@ async def test_history_attachment_stripping(temp_db: str) -> None:
     await gw.post(msg2)
 
     # Call build clean history
-    history = await build_clean_history(
-        gateway=gw, session_id="sess_attach_strip"
-    )
+    history = await build_clean_history(gateway=gw, session_id="sess_attach_strip")
 
     # Retrieve and inspect the historical message
     hist_msg = next(m for m in history if m.id == msg1.id)
@@ -1287,9 +1310,8 @@ async def test_agent_wakeup_by_system_message(temp_db: str) -> None:
     await gw.post(msg)
 
     from kesoku.agent.llm import LLMResponse
-    llm = MockLLM(responses=[
-        LLMResponse(content="System alert processed successfully.", tool_calls=[])
-    ])
+
+    llm = MockLLM(responses=[LLMResponse(content="System alert processed successfully.", tool_calls=[])])
     context = KesokuContext(llm=llm, tool_registry=reg)
     agent = Agent(gw, context=context)
 
@@ -1304,10 +1326,3 @@ async def test_agent_wakeup_by_system_message(temp_db: str) -> None:
     # Verify the system message was successfully claimed and processed
     history = await gw.get_session_history("sess_sys_wakeup")
     assert any(m.id == msg.id and m.status == "processed" for m in history)
-
-
-
-
-
-
-

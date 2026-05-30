@@ -584,17 +584,12 @@ def test_cli_service_named_instances() -> None:
         # Status of named service
         res_status = runner.invoke(app, ["service", "status", "--name", "custom-inst"])
         assert res_status.exit_code == 0
-        mock_run.assert_any_call(
-            ["systemctl", "--user", "status", "kesoku-custom-inst"]
-        )
+        mock_run.assert_any_call(["systemctl", "--user", "status", "kesoku-custom-inst"])
 
         # Logs of named service
         res_logs = runner.invoke(app, ["service", "logs", "--name", "custom-inst"])
         assert res_logs.exit_code == 0
-        mock_run.assert_any_call(
-            ["journalctl", "--user", "-u", "kesoku-custom-inst", "-n", "50"],
-            check=True
-        )
+        mock_run.assert_any_call(["journalctl", "--user", "-u", "kesoku-custom-inst", "-n", "50"], check=True)
 
     # 3. Test named uninstall
     with (
@@ -655,6 +650,7 @@ def test_cli_memory_export(tmp_path: Any) -> None:
 
     # Verify exported TOML file contents
     import tomllib
+
     with open(export_path, "rb") as f:
         exported_data = tomllib.load(f)
 
@@ -671,4 +667,3 @@ def test_cli_memory_export(tmp_path: Any) -> None:
     assert exported_data["asuka"]["notes"]["funny_event"]["title"] == "Funny"
     assert exported_data["asuka"]["notes"]["funny_event"]["content"] == "Haha"
     assert exported_data["asuka"]["notes"]["funny_event"]["updated_at"] == 678.90
-

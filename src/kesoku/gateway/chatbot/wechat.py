@@ -13,6 +13,7 @@ import mimetypes
 import os
 import re
 import secrets
+import ssl
 import struct
 import textwrap
 import time
@@ -22,12 +23,20 @@ from typing import Any
 from urllib.parse import quote, urlparse
 
 import aiohttp
+import certifi
 import qrcode
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from PIL import Image
 
 from kesoku.agent.prompt import build_sys_prompt
+from kesoku.async_utils import (
+    async_exists,
+    async_read_bytes,
+    async_read_text_file,
+    async_realpath,
+    async_write_binary_file,
+)
 from kesoku.config import get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
@@ -942,10 +951,6 @@ async def qr_login(
     """Run the interactive iLink QR login flow in the terminal."""
     ssl_ctx = None
     try:
-        import ssl
-
-        import certifi
-
         ssl_ctx = ssl.create_default_context(cafile=certifi.where())
     except ImportError:
         pass
@@ -1113,10 +1118,6 @@ You are interacting with the user via WeChat (Weixin).
 
         ssl_ctx = None
         try:
-            import ssl
-
-            import certifi
-
             ssl_ctx = ssl.create_default_context(cafile=certifi.where())
         except ImportError:
             pass
@@ -1251,7 +1252,6 @@ You are interacting with the user via WeChat (Weixin).
             logger.error(f"WeChat command /{command} execution failed: {e}")
             await reply_func(f"⚠️ Failed to execute command: {e}")
 
-
     async def trigger_cronjob(
         self,
         channel_id: str | None,
@@ -1338,11 +1338,10 @@ You are interacting with the user via WeChat (Weixin).
             sys_file = self.config.sys_prompt_file
             cfg = get_config()
             if not os.path.isabs(sys_file) and cfg.agent_working_dir:
-                sys_file = os.path.join(cfg.agent_working_dir, sys_file)  # noqa: ASYNC240
-            if os.path.exists(sys_file):  # noqa: ASYNC240
+                sys_file = os.path.join(cfg.agent_working_dir, sys_file)
+            if await async_exists(sys_file):
                 try:
-                    with open(sys_file, encoding="utf-8") as f:  # noqa: ASYNC230
-                        custom_sys_prompt = f.read().strip()
+                    custom_sys_prompt = await async_read_text_file(sys_file)
                     if custom_sys_prompt:
                         custom_prompt = f"{custom_prompt}\n\n{custom_sys_prompt}"
                 except Exception as e:
@@ -1421,11 +1420,10 @@ You are interacting with the user via WeChat (Weixin).
                 sys_file = self.config.sys_prompt_file
                 cfg = get_config()
                 if not os.path.isabs(sys_file) and cfg.agent_working_dir:
-                    sys_file = os.path.join(cfg.agent_working_dir, sys_file)  # noqa: ASYNC240
-                if os.path.exists(sys_file):  # noqa: ASYNC240
+                    sys_file = os.path.join(cfg.agent_working_dir, sys_file)
+                if await async_exists(sys_file):
                     try:
-                        with open(sys_file, encoding="utf-8") as f:  # noqa: ASYNC230
-                            custom_sys_prompt = f.read().strip()
+                        custom_sys_prompt = await async_read_text_file(sys_file)
                         if custom_sys_prompt:
                             custom_prompt = f"{custom_prompt}\n\n{custom_sys_prompt}"
                     except Exception as e:
@@ -1449,11 +1447,10 @@ You are interacting with the user via WeChat (Weixin).
                 sys_file = self.config.sys_prompt_file
                 cfg = get_config()
                 if not os.path.isabs(sys_file) and cfg.agent_working_dir:
-                    sys_file = os.path.join(cfg.agent_working_dir, sys_file)  # noqa: ASYNC240
-                if os.path.exists(sys_file):  # noqa: ASYNC240
+                    sys_file = os.path.join(cfg.agent_working_dir, sys_file)
+                if await async_exists(sys_file):
                     try:
-                        with open(sys_file, encoding="utf-8") as f:  # noqa: ASYNC230
-                            custom_sys_prompt = f.read().strip()
+                        custom_sys_prompt = await async_read_text_file(sys_file)
                         if custom_sys_prompt:
                             custom_prompt = f"{custom_prompt}\n\n{custom_sys_prompt}"
                     except Exception as e:
@@ -1463,7 +1460,7 @@ You are interacting with the user via WeChat (Weixin).
             await self.gateway.update_session_system_prompt(session.id, new_sys_prompt)
 
         attachments_metadata = []
-        session_staging_dir = os.path.realpath(  # noqa: ASYNC240
+        session_staging_dir = await async_realpath(
             os.path.join(get_config().workspace.sessions_dir, session.workspace_name)
         )
         os.makedirs(session_staging_dir, exist_ok=True)
@@ -1550,8 +1547,7 @@ You are interacting with the user via WeChat (Weixin).
                 # Sanitize filename
                 safe_filename = "".join(c for c in filename if c.isalnum() or c in "._-")
                 filepath = os.path.join(session_staging_dir, safe_filename)
-                with open(filepath, "wb") as f:  # noqa: ASYNC230
-                    f.write(data)
+                await async_write_binary_file(filepath, data)
                 attachments_metadata.append(
                     {
                         "path": filepath,
@@ -1663,7 +1659,7 @@ You are interacting with the user via WeChat (Weixin).
         message: Message,
     ) -> None:
         """Deliver a file attachment segment via WeChat media API with retry mechanism and logging."""
-        if not os.path.exists(file_path):  # noqa: ASYNC240
+        if not await async_exists(file_path):
             logger.error("WeChat: Outbound file not found: %s", file_path)
             return
 
@@ -1747,7 +1743,7 @@ You are interacting with the user via WeChat (Weixin).
         context_token: str | None,
         playtime_sec: int | None = None,
     ) -> str:
-        plaintext = Path(path).read_bytes()  # noqa: ASYNC240
+        plaintext = await async_read_bytes(path)
         mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
 
         # Compress outbound images if they are too large to prevent CDN upload 500 errors

@@ -76,30 +76,34 @@ class TurnLogger:
         # Format history messages into dict representation
         formatted_history = []
         if system_prompt:
-            formatted_history.append({
-                "id": f"sys_{self.session_id}",
-                "role": "system",
-                "sender": "System",
-                "type": "text",
-                "content": system_prompt,
-                "metadata": {},
-                "timestamp": time.time() - 1000.0,
-                "status": "responded",
-                "parent_id": None,
-            })
+            formatted_history.append(
+                {
+                    "id": f"sys_{self.session_id}",
+                    "role": "system",
+                    "sender": "System",
+                    "type": "text",
+                    "content": system_prompt,
+                    "metadata": {},
+                    "timestamp": time.time() - 1000.0,
+                    "status": "responded",
+                    "parent_id": None,
+                }
+            )
 
         for msg in history:
-            formatted_history.append({
-                "id": msg.id,
-                "role": str(msg.role),
-                "sender": msg.sender,
-                "type": str(msg.type),
-                "content": msg.content,
-                "metadata": msg.metadata,
-                "timestamp": msg.timestamp,
-                "status": str(msg.status),
-                "parent_id": msg.parent_id,
-            })
+            formatted_history.append(
+                {
+                    "id": msg.id,
+                    "role": str(msg.role),
+                    "sender": msg.sender,
+                    "type": str(msg.type),
+                    "content": msg.content,
+                    "metadata": msg.metadata,
+                    "timestamp": msg.timestamp,
+                    "status": str(msg.status),
+                    "parent_id": msg.parent_id,
+                }
+            )
 
         # Format tools with signature details
         formatted_tools = []
@@ -107,26 +111,26 @@ class TurnLogger:
             doc = inspect.getdoc(func) or ""
             description = doc.split("\n\n")[0] if doc else ""
             sig = inspect.signature(func)
-            parameters = {
-                p_name: str(p.annotation)
-                for p_name, p in sig.parameters.items()
-                if p_name != "context"
-            }
-            formatted_tools.append({
-                "name": func.__name__,
-                "description": description,
-                "parameters": parameters,
-            })
+            parameters = {p_name: str(p.annotation) for p_name, p in sig.parameters.items() if p_name != "context"}
+            formatted_tools.append(
+                {
+                    "name": func.__name__,
+                    "description": description,
+                    "parameters": parameters,
+                }
+            )
 
         # Format response tool calls
         formatted_tool_calls = []
         for tc in response.tool_calls:
-            formatted_tool_calls.append({
-                "name": tc.name,
-                "arguments": tc.arguments,
-                "thought_signature": tc.thought_signature,
-                "tool_call_id": tc.tool_call_id,
-            })
+            formatted_tool_calls.append(
+                {
+                    "name": tc.name,
+                    "arguments": tc.arguments,
+                    "thought_signature": tc.thought_signature,
+                    "tool_call_id": tc.tool_call_id,
+                }
+            )
 
         now = datetime.datetime.fromtimestamp(time.time(), datetime.UTC)
 

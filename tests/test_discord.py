@@ -898,9 +898,7 @@ async def test_on_message_no_auto_thread_by_channel_id(mock_gateway: MagicMock) 
         enabled=True,
         bot_token="test_token",
         chatbot_id="discord_test",
-        channels=[
-            DiscordChannelOverride(channels=["999888"], auto_thread=False)
-        ],
+        channels=[DiscordChannelOverride(channels=["999888"], auto_thread=False)],
     )
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
@@ -945,9 +943,7 @@ async def test_on_message_no_auto_thread_by_channel_name(mock_gateway: MagicMock
         enabled=True,
         bot_token="test_token",
         chatbot_id="discord_test",
-        channels=[
-            DiscordChannelOverride(channels=["no-thread-channel"], auto_thread=False)
-        ],
+        channels=[DiscordChannelOverride(channels=["no-thread-channel"], auto_thread=False)],
     )
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
@@ -991,9 +987,7 @@ async def test_on_message_in_existing_thread_inside_no_thread_channel(mock_gatew
         enabled=True,
         bot_token="test_token",
         chatbot_id="discord_test",
-        channels=[
-            DiscordChannelOverride(channels=["no-thread-channel"], auto_thread=False)
-        ],
+        channels=[DiscordChannelOverride(channels=["no-thread-channel"], auto_thread=False)],
     )
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
@@ -1146,9 +1140,7 @@ async def test_trigger_cronjob_auto_thread(mock_gateway: MagicMock) -> None:
         enabled=True,
         bot_token="test_token",
         chatbot_id="discord_test",
-        channels=[
-            DiscordChannelOverride(channels=["no-thread-channel"], auto_thread=False)
-        ],
+        channels=[DiscordChannelOverride(channels=["no-thread-channel"], auto_thread=False)],
     )
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
@@ -1296,9 +1288,7 @@ async def test_channel_override_auto_thread_matching(mock_gateway: MagicMock) ->
         enabled=True,
         bot_token="test_token",
         chatbot_id="discord_test",
-        channels=[
-            DiscordChannelOverride(channels=["parent-channel-id"], auto_thread=False)
-        ],
+        channels=[DiscordChannelOverride(channels=["parent-channel-id"], auto_thread=False)],
     )
     with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
@@ -1402,9 +1392,7 @@ async def test_on_message_resolves_and_passes_role(mock_config: KesokuConfig, mo
             msg.created_at = datetime.datetime.now(datetime.UTC)
 
             # Case 1: Direct lookup of thread has no role, but parent channel is bound to "asuka"
-            mock_gateway.get_channel_role.side_effect = lambda cb_id, chan_id: (
-                "asuka" if chan_id == "98765" else None
-            )
+            mock_gateway.get_channel_role.side_effect = lambda cb_id, chan_id: "asuka" if chan_id == "98765" else None
 
             await bot.on_message(msg)
 

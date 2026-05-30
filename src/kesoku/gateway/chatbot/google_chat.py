@@ -50,7 +50,7 @@ def parse_emoji_sequence(emoji_str: str) -> list[str]:
     current: list[str] = []
     for char in emoji_str:
         # Variation Selector (0xfe0f) or ZWJ (0x200d) or Fitzpatrick skin tones
-        if ord(char) in (0xfe0f, 0x200d) or (current and ord(char) in range(0x1f3fb, 0x1f3ff + 1)):
+        if ord(char) in (0xFE0F, 0x200D) or (current and ord(char) in range(0x1F3FB, 0x1F3FF + 1)):
             current.append(char)
         else:
             if current:
@@ -82,9 +82,7 @@ class GoogleChatChatbot(Chatbot):
             raise ValueError("Google Chat chatbot is disabled in configuration.")
 
         if not self.config.project_id or not self.config.topic_id or not self.config.subscription_id:
-            raise ValueError(
-                "Google Chat is enabled but project_id, topic_id, or subscription_id are not configured."
-            )
+            raise ValueError("Google Chat is enabled but project_id, topic_id, or subscription_id are not configured.")
 
         self._running = False
         self._pubsub_task: asyncio.Task[None] | None = None
@@ -191,9 +189,7 @@ class GoogleChatChatbot(Chatbot):
             loop.call_soon_threadsafe(queue.put_nowait, pubsub_msg)
 
         # Start standard pull subscription
-        streaming_pull_future = self._subscriber_client.subscribe(
-            self._subscription_path, callback=_pubsub_callback
-        )
+        streaming_pull_future = self._subscriber_client.subscribe(self._subscription_path, callback=_pubsub_callback)
 
         try:
             while self._running:
@@ -242,7 +238,6 @@ class GoogleChatChatbot(Chatbot):
         # Direct / Space Messages
         if event_type == "MESSAGE":
             await self._handle_incoming_message(event)
-
 
     async def _handle_slash_command(self, channel_id: str, cmd_text: str) -> None:
         """Parse and execute a text-based slash command.
@@ -425,11 +420,7 @@ class GoogleChatChatbot(Chatbot):
             reaction_name = used_map[emoji]
             try:
                 await asyncio.to_thread(
-                    self._user_chat_service.spaces()
-                    .messages()
-                    .reactions()
-                    .delete(name=reaction_name)
-                    .execute
+                    self._user_chat_service.spaces().messages().reactions().delete(name=reaction_name).execute
                 )
                 used_map.pop(emoji)
                 logger.debug(f"Successfully removed reaction '{emoji}' from message: {message_name}")
@@ -446,11 +437,7 @@ class GoogleChatChatbot(Chatbot):
         body = {"emoji": emoji_payload}
         try:
             res = await asyncio.to_thread(
-                self._user_chat_service.spaces()
-                .messages()
-                .reactions()
-                .create(parent=message_name, body=body)
-                .execute
+                self._user_chat_service.spaces().messages().reactions().create(parent=message_name, body=body).execute
             )
             # Store the created reaction resource name mapped to the emoji
             used_map[emoji] = res["name"]
@@ -464,11 +451,7 @@ class GoogleChatChatbot(Chatbot):
                 )
                 try:
                     reactions_list_res = await asyncio.to_thread(
-                        self._user_chat_service.spaces()
-                        .messages()
-                        .reactions()
-                        .list(parent=message_name)
-                        .execute
+                        self._user_chat_service.spaces().messages().reactions().list(parent=message_name).execute
                     )
                     reactions_list = reactions_list_res.get("reactions", [])
                     # Find our reaction
@@ -480,11 +463,7 @@ class GoogleChatChatbot(Chatbot):
                         if r_unicode == emoji or r_custom == emoji:
                             # Found it! Let's delete it
                             await asyncio.to_thread(
-                                self._user_chat_service.spaces()
-                                .messages()
-                                .reactions()
-                                .delete(name=r["name"])
-                                .execute
+                                self._user_chat_service.spaces().messages().reactions().delete(name=r["name"]).execute
                             )
                             logger.debug(
                                 f"Successfully removed duplicate reaction '{emoji}' from message: {message_name}"
@@ -501,7 +480,6 @@ class GoogleChatChatbot(Chatbot):
                 logger.error(f"Google Chat API error when adding reaction '{emoji}': {e}")
         except Exception as e:
             logger.error(f"Failed to add reaction '{emoji}' to message {message_name}: {e}")
-
 
     async def handle_message(self, message: Message) -> None:
         """Process and send outgoing assistant messages to the Google Chat API.
@@ -534,20 +512,24 @@ class GoogleChatChatbot(Chatbot):
             items = foldable["items"]
 
             if message.role == MessageRole.ASSISTANT and message.type == MessageType.THOUGHT:
-                items.append({
-                    "type": "thought",
-                    "content": message.content,
-                })
+                items.append(
+                    {
+                        "type": "thought",
+                        "content": message.content,
+                    }
+                )
             elif message.role == MessageRole.TOOL and message.type == MessageType.TOOL_CALL:
                 tool_name = message.metadata.get("tool_name") or message.sender or "unknown_tool"
                 arg_suffix = await self._get_tool_arguments_suffix(message)
-                items.append({
-                    "type": "tool_call",
-                    "id": message.id,
-                    "tool_name": tool_name,
-                    "arg_suffix": arg_suffix,
-                    "status": "⏳",
-                })
+                items.append(
+                    {
+                        "type": "tool_call",
+                        "id": message.id,
+                        "tool_name": tool_name,
+                        "arg_suffix": arg_suffix,
+                        "status": "⏳",
+                    }
+                )
 
                 # Trigger a random emoji reaction for the tool call if configured
                 if self.config.reaction_emoji and self._user_chat_service:
@@ -578,15 +560,15 @@ class GoogleChatChatbot(Chatbot):
                                 item["status"] = "✅"
                             break
             elif message.role == MessageRole.SYSTEM:
-                items.append({
-                    "type": "system",
-                    "content": message.content,
-                })
+                items.append(
+                    {
+                        "type": "system",
+                        "content": message.content,
+                    }
+                )
 
             # Build the card payload
-            body = {
-                "cardsV2": [self._build_foldable_ui_card(session_id, items, status="running")]
-            }
+            body = {"cardsV2": [self._build_foldable_ui_card(session_id, items, status="running")]}
             if message.channel_id and "threads" in message.channel_id:
                 body["thread"] = {"name": message.channel_id}
 
@@ -763,25 +745,13 @@ class GoogleChatChatbot(Chatbot):
         for item in items:
             if item["type"] == "thought":
                 content_html = html.escape(item["content"]).replace("\n", "<br>")
-                widgets.append({
-                    "textParagraph": {
-                        "text": f"💭 <b>Thought:</b> {content_html}"
-                    }
-                })
+                widgets.append({"textParagraph": {"text": f"💭 <b>Thought:</b> {content_html}"}})
             elif item["type"] == "tool_call":
                 emoji = item["status"]
-                widgets.append({
-                    "textParagraph": {
-                        "text": f"🛠️ <b>{item['tool_name']}</b>{item['arg_suffix']} {emoji}"
-                    }
-                })
+                widgets.append({"textParagraph": {"text": f"🛠️ <b>{item['tool_name']}</b>{item['arg_suffix']} {emoji}"}})
             elif item["type"] == "system":
                 content_html = html.escape(item["content"]).replace("\n", "<br>")
-                widgets.append({
-                    "textParagraph": {
-                        "text": f"⚙️ <b>System:</b> {content_html}"
-                    }
-                })
+                widgets.append({"textParagraph": {"text": f"⚙️ <b>System:</b> {content_html}"}})
 
         if not widgets:
             widgets.append({"textParagraph": {"text": "<i>Preparing turn...</i>"}})
@@ -818,15 +788,7 @@ class GoogleChatChatbot(Chatbot):
                 f"{prefix} <b>Session:</b> {session_turns} turns | <b>Context:</b> {context_k} tokens{suffix}<br>"
                 f"⏱️ <b>Turn:</b> {turn_tool_calls} tool calls | {turn_k} tokens | {turn_time:.1f}s"
             )
-            card_sections.append({
-                "widgets": [
-                    {
-                        "textParagraph": {
-                            "text": metrics_text
-                        }
-                    }
-                ]
-            })
+            card_sections.append({"widgets": [{"textParagraph": {"text": metrics_text}}]})
 
         return {
             "cardId": f"foldable_ui_{session_id}",

@@ -1,7 +1,5 @@
 """Unit tests for ToolRunner class."""
 
-
-
 from kesoku.agent.llm import ToolCallRequest
 from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.tools import ToolContext, ToolRegistry

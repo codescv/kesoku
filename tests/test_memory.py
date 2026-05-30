@@ -249,6 +249,7 @@ async def test_category_role_routing_and_play_role(tmp_path) -> None:
 
     def write_intro():
         import os
+
         os.makedirs(os.path.join(roles_dir, "asuka"), exist_ok=True)
         with open(os.path.join(roles_dir, "asuka", "intro.md"), "w") as f:
             f.write("Asuka Intro")
@@ -303,6 +304,7 @@ async def test_memory_length_limit(tmp_path) -> None:
 
     # 3. Exceeding content length with import of MAX_MEMORY_CONTENT_LENGTH
     from kesoku.agent.tools import MAX_MEMORY_CONTENT_LENGTH
+
     res_fail_constant = update_memory(
         category="user_preferences",
         key="invalid_len_constant",

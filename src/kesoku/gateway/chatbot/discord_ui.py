@@ -215,7 +215,8 @@ class MessageHeaderView(discord.ui.View):
 
                 # Clear session reference from chatbot's header views cache
                 self.chatbot._header_views = {
-                    tid: val for tid, val in self.chatbot._header_views.items()
+                    tid: val
+                    for tid, val in self.chatbot._header_views.items()
                     if not tid.startswith(self.session_id) and tid != self.session_id
                 }
 
@@ -604,6 +605,7 @@ class QuestionView(discord.ui.View):
         Returns:
             A callback coroutine for the button interaction.
         """
+
         async def callback(interaction: discord.Interaction) -> None:
             # Defer the interaction response
             await interaction.response.defer()
@@ -617,9 +619,7 @@ class QuestionView(discord.ui.View):
             await interaction.message.edit(view=self)
 
             # Send a visible confirmation message to the channel
-            response_msg = await interaction.channel.send(
-                f"<@{interaction.user.id}> selected: **{choice}**"
-            )
+            response_msg = await interaction.channel.send(f"<@{interaction.user.id}> selected: **{choice}**")
 
             # Construct and post the user message to the Gateway
             tz_name = _get_local_timezone_name()

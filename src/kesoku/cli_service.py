@@ -248,9 +248,7 @@ WantedBy={wanted_by}
     console.print(f"  [bold cyan]kesoku service start {user_flag.strip()}{name_opt}[/bold cyan]   - Start the service")
     console.print(f"  [bold cyan]kesoku service stop {user_flag.strip()}{name_opt}[/bold cyan]    - Stop the service")
     status_label = f"kesoku service status {user_flag.strip()}{name_opt}"
-    console.print(
-        f"  [bold cyan]{status_label}[/bold cyan]  - Check service status (via systemctl)"
-    )
+    console.print(f"  [bold cyan]{status_label}[/bold cyan]  - Check service status (via systemctl)")
     console.print(f"  [bold cyan]kesoku service logs {user_flag.strip()}{name_opt}[/bold cyan]    - View service logs")
 
 
@@ -344,9 +342,7 @@ def _run_systemctl_action(action: str, user: bool, name: str | None, console: Co
         console.print(f"[bold green]Successfully executed service {action} for {service_name}![/bold green]")
     except subprocess.CalledProcessError as e:
         err_msg = e.stderr.strip() or e
-        console.print(
-            f"[bold red]Error executing service {action} for {service_name}: {err_msg}[/bold red]"
-        )
+        console.print(f"[bold red]Error executing service {action} for {service_name}: {err_msg}[/bold red]")
         raise typer.Exit(code=1)
 
 

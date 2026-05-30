@@ -271,4 +271,3 @@ async def test_get_role_messages_since_default_unbound_channels(tmp_path) -> Non
     # Should successfully find the unbound channel message since its role defaults to 'default'!
     assert len(res) == 1
     assert res[0].id == "msg_du"
-

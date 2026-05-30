@@ -96,36 +96,13 @@ def test_format_text_headers_shifting() -> None:
     chatbot = MockChatbot(chatbot_id="mock_bot", gateway=mock_gateway)
 
     # Case 1: Headers start at level 2 -> shifted to level 1, clamp levels > 3
-    input_text = (
-        "## Header A\n"
-        "### Header B\n"
-        "#### Header C\n"
-        "##### Header D\n"
-    )
-    expected = (
-        "# Header A\n"
-        "\n"
-        "## Header B\n"
-        "\n"
-        "### Header C\n"
-        "\n"
-        "### Header D\n"
-    )
+    input_text = "## Header A\n### Header B\n#### Header C\n##### Header D\n"
+    expected = "# Header A\n\n## Header B\n\n### Header C\n\n### Header D\n"
     assert chatbot.format_text(input_text) == expected
 
     # Case 2: Headers already start at level 1 -> no shifting, only clamp levels > 3
-    input_text_2 = (
-        "# Header A\n"
-        "## Header B\n"
-        "#### Header C\n"
-    )
-    expected_2 = (
-        "# Header A\n"
-        "\n"
-        "## Header B\n"
-        "\n"
-        "### Header C\n"
-    )
+    input_text_2 = "# Header A\n## Header B\n#### Header C\n"
+    expected_2 = "# Header A\n\n## Header B\n\n### Header C\n"
     assert chatbot.format_text(input_text_2) == expected_2
 
 
@@ -134,22 +111,10 @@ def test_format_text_consecutive_newlines_and_spacing() -> None:
     mock_gateway = MagicMock(spec=Gateway)
     chatbot = MockChatbot(chatbot_id="mock_bot", gateway=mock_gateway)
 
-    input_text = (
-        "Some text.\n"
-        "## Header A\n"
-        "\n"
-        "\n"
-        "Other text.\n"
-    )
+    input_text = "Some text.\n## Header A\n\n\nOther text.\n"
     # Note: chatbot.format_text preserves trailing newlines,
     # and ensures exactly one blank line before headings if not at the start.
-    expected = (
-        "Some text.\n"
-        "\n"
-        "# Header A\n"
-        "\n"
-        "Other text.\n"
-    )
+    expected = "Some text.\n\n# Header A\n\nOther text.\n"
     assert chatbot.format_text(input_text) == expected
 
 
@@ -188,15 +153,7 @@ def test_split_text_into_chunks_code_block() -> None:
     mock_gateway = MagicMock(spec=Gateway)
     chatbot = MockChatbot(chatbot_id="mock_bot", gateway=mock_gateway)
 
-    text = (
-        "Some introduction.\n"
-        "```python\n"
-        "line1\n"
-        "line2\n"
-        "line3\n"
-        "```\n"
-        "Conclusion."
-    )
+    text = "Some introduction.\n```python\nline1\nline2\nline3\n```\nConclusion."
     # With max_length set so that it splits in the middle of the python code block:
     # e.g. max_length = 45.
     # Let's verify chunking:

@@ -1,5 +1,6 @@
 """Database models and SQLite persistence manager for Kesoku AI Agent."""
 
+import datetime
 import json
 import logging
 import os
@@ -25,12 +26,8 @@ class Message(BaseModel):
     chatbot_id: str = Field(..., description="Unique identifier of the chatbot platform/instance (e.g., 'cli')")
     channel_id: str = Field(..., description="External platform-specific channel or room identifier")
     sender: str = Field(..., description="Sender identifier or username")
-    role: MessageRole = Field(
-        default=MessageRole.USER, description="Role of the message sender"
-    )
-    type: MessageType = Field(
-        default=MessageType.TEXT, description="Type of message content or action"
-    )
+    role: MessageRole = Field(default=MessageRole.USER, description="Role of the message sender")
+    type: MessageType = Field(default=MessageType.TEXT, description="Type of message content or action")
     content: str = Field(..., description="Text content of the message")
     metadata: dict[str, Any] = Field(
         default_factory=dict,
@@ -130,19 +127,11 @@ def _sort_session_messages(all_msgs: list[Message], order: Literal["phased", "gr
     # 2. Sort each turn individually
     for root_ts, turn_msgs in turns.items():
         # Identify all tool calls in the current turn
-        tc_map = {
-            m.id: m for m in turn_msgs
-            if m.role == MessageRole.TOOL and m.type == MessageType.TOOL_CALL
-        }
+        tc_map = {m.id: m for m in turn_msgs if m.role == MessageRole.TOOL and m.type == MessageType.TOOL_CALL}
 
         # Collect and sort tool results by parent tool call timestamp
-        tr_msgs = [
-            m for m in turn_msgs
-            if m.role == MessageRole.TOOL and m.type == MessageType.TOOL_RESULT
-        ]
-        tr_msgs.sort(
-            key=lambda m: tc_map[m.parent_id].timestamp if m.parent_id in tc_map else m.timestamp
-        )
+        tr_msgs = [m for m in turn_msgs if m.role == MessageRole.TOOL and m.type == MessageType.TOOL_RESULT]
+        tr_msgs.sort(key=lambda m: tc_map[m.parent_id].timestamp if m.parent_id in tc_map else m.timestamp)
 
         # Group tool results into logical execution batches
         batches: list[list[Message]] = []
@@ -204,7 +193,6 @@ def _sort_session_messages(all_msgs: list[Message], order: Literal["phased", "gr
         sorted_msgs.extend(turns[r_ts])
 
     return sorted_msgs
-
 
 
 class DatabaseManager:
@@ -417,8 +405,7 @@ class DatabaseManager:
                 )
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);")
                 conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp "
-                    "ON messages(session_id, timestamp);"
+                    "CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp ON messages(session_id, timestamp);"
                 )
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(chatbot_id, channel_id);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);")
@@ -682,7 +669,6 @@ class DatabaseManager:
                 return cursor.rowcount == 1
         finally:
             conn.close()
-
 
     def update_message_metadata(self, message_id: str, metadata: dict[str, Any]) -> None:
         """Update the metadata dictionary of a message.
@@ -997,7 +983,7 @@ class DatabaseManager:
             query = f"""
                 SELECT * FROM messages
                 WHERE session_id = ?
-                  AND ({' OR '.join(clauses)})
+                  AND ({" OR ".join(clauses)})
             """
             cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
@@ -1196,7 +1182,6 @@ class DatabaseManager:
 
     def get_cronjob_sent_stats_today(self, chatbot_id: str, channel_id: str) -> tuple[int, float | None]:
         """Retrieve count and last timestamp of cron messages sent today (local time) in a channel."""
-        import datetime
         now = datetime.datetime.now()
         # Local midnight timestamp
         midnight = datetime.datetime(now.year, now.month, now.day)
@@ -1220,8 +1205,6 @@ class DatabaseManager:
             return count, last_ts
         finally:
             conn.close()
-
-
 
     def get_role_messages_since(
         self,
@@ -1382,9 +1365,7 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def release_cross_session_context_lock(
-        self, role: str, content: str, updated_at: float | None = None
-    ) -> None:
+    def release_cross_session_context_lock(self, role: str, content: str, updated_at: float | None = None) -> None:
         """Release lock on cross-session context, updating the summary content.
 
         Args:
@@ -1416,11 +1397,7 @@ class DatabaseManager:
         conn = self._get_connection()
         try:
             with conn:
-                cursor = conn.execute(
-                    "UPDATE cross_session_contexts SET status = 'idle' WHERE status = 'updating'"
-                )
+                cursor = conn.execute("UPDATE cross_session_contexts SET status = 'idle' WHERE status = 'updating'")
                 return cursor.rowcount
         finally:
             conn.close()
-
-

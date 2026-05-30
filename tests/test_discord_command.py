@@ -83,7 +83,7 @@ async def test_restart_command_success(mock_chatbot: MagicMock) -> None:
 
     # Case 1: Default behavior without specific service env variables (defaults to --user, no name)
     with (
-        patch("subprocess.Popen") as mock_popen,
+        patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_create_subprocess_exec,
         patch("os.execv") as mock_execv,
         patch("asyncio.sleep", AsyncMock()),
         patch.dict("os.environ", {}, clear=True),
@@ -93,10 +93,9 @@ async def test_restart_command_success(mock_chatbot: MagicMock) -> None:
         # Assert first message was sent via followup
         interaction.followup.send.assert_any_call("🔄 Restarting service...")
 
-        # Assert Popen was called with correct parameters
-        mock_popen.assert_called_once_with(
-            [kesoku_bin, "service", "restart", "--user"],
-            start_new_session=True
+        # Assert create_subprocess_exec was called with correct parameters
+        mock_create_subprocess_exec.assert_called_once_with(
+            kesoku_bin, "service", "restart", "--user", start_new_session=True
         )
 
         # Assert chatbot stop was called cleanly
@@ -109,20 +108,18 @@ async def test_restart_command_success(mock_chatbot: MagicMock) -> None:
 
     # Case 2: Service is configured as a system service with an instance suffix name
     with (
-        patch("subprocess.Popen") as mock_popen,
+        patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_create_subprocess_exec,
         patch("os.execv") as mock_execv,
         patch("asyncio.sleep", AsyncMock()),
-        patch.dict("os.environ", {
-            "KESOKU_SERVICE_USER": "false",
-            "KESOKU_SERVICE_INSTANCE_NAME": "custom-inst"
-        }, clear=True),
+        patch.dict(
+            "os.environ", {"KESOKU_SERVICE_USER": "false", "KESOKU_SERVICE_INSTANCE_NAME": "custom-inst"}, clear=True
+        ),
     ):
         await restart_cmd.callback(interaction)
 
-        # Assert Popen was called with --system and --name custom-inst
-        mock_popen.assert_called_once_with(
-            [kesoku_bin, "service", "restart", "--system", "--name", "custom-inst"],
-            start_new_session=True
+        # Assert create_subprocess_exec was called with --system and --name custom-inst
+        mock_create_subprocess_exec.assert_called_once_with(
+            kesoku_bin, "service", "restart", "--system", "--name", "custom-inst", start_new_session=True
         )
 
         mock_chatbot.stop.assert_called_once()
@@ -131,7 +128,7 @@ async def test_restart_command_success(mock_chatbot: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_restart_command_fallback_to_execv(mock_chatbot: MagicMock) -> None:
-    """Test that if Popen raises an exception, /restart falls back to in-place execv."""
+    """Test that if create_subprocess_exec raises an exception, /restart falls back to in-place execv."""
     setup_discord_commands(mock_chatbot)
 
     commands = mock_chatbot.tree.get_commands()
@@ -149,9 +146,11 @@ async def test_restart_command_fallback_to_execv(mock_chatbot: MagicMock) -> Non
     interaction.followup = AsyncMock()
     interaction.followup.send = AsyncMock()
 
-    # Mock subprocess.Popen to raise an OSError (e.g. command not found)
+    # Mock asyncio.create_subprocess_exec to raise an OSError (e.g. command not found)
     with (
-        patch("subprocess.Popen", side_effect=OSError("Command not found")) as mock_popen,
+        patch(
+            "asyncio.create_subprocess_exec", side_effect=OSError("Command not found")
+        ) as mock_create_subprocess_exec,
         patch("os.execv") as mock_execv,
         patch("sys.stdout.flush") as mock_stdout_flush,
         patch("sys.stderr.flush") as mock_stderr_flush,
@@ -162,8 +161,8 @@ async def test_restart_command_fallback_to_execv(mock_chatbot: MagicMock) -> Non
         # Assert first message was sent via followup
         interaction.followup.send.assert_any_call("🔄 Restarting service...")
 
-        # Popen was called
-        mock_popen.assert_called_once()
+        # create_subprocess_exec was called
+        mock_create_subprocess_exec.assert_called_once()
 
         # os.execv MUST be called as a fallback
         mock_execv.assert_called_once_with(sys.executable, [sys.executable] + sys.argv)
@@ -174,7 +173,7 @@ async def test_restart_command_fallback_to_execv(mock_chatbot: MagicMock) -> Non
 
 @pytest.mark.asyncio
 async def test_restart_command_total_failure(mock_chatbot: MagicMock) -> None:
-    """Test that if both Popen and execv fail, the error is reported cleanly via followup."""
+    """Test that if both create_subprocess_exec and execv fail, the error is reported cleanly via followup."""
     setup_discord_commands(mock_chatbot)
 
     commands = mock_chatbot.tree.get_commands()
@@ -192,9 +191,9 @@ async def test_restart_command_total_failure(mock_chatbot: MagicMock) -> None:
     interaction.followup = AsyncMock()
     interaction.followup.send = AsyncMock()
 
-    # Both Popen and execv raise exceptions
+    # Both create_subprocess_exec and execv raise exceptions
     with (
-        patch("subprocess.Popen", side_effect=OSError("Command not found")),
+        patch("asyncio.create_subprocess_exec", side_effect=OSError("Command not found")),
         patch("os.execv", side_effect=OSError("Permission denied")),
         patch("sys.stdout.flush"),
         patch("sys.stderr.flush"),

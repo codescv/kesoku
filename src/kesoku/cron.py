@@ -10,6 +10,11 @@ import random
 import tomllib
 from typing import Any
 
+from kesoku.async_utils import (
+    async_exists,
+    async_read_text_file,
+    async_realpath,
+)
 from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -290,19 +295,18 @@ class CronManager:
         if not os.path.isabs(prompt_path):
             full_prompt_path = os.path.join(self.config_dir, prompt_path)
 
-        abs_prompt_path = os.path.realpath(full_prompt_path)  # noqa: ASYNC240
-        abs_config_dir = os.path.realpath(self.config_dir)  # noqa: ASYNC240
+        abs_prompt_path = await async_realpath(full_prompt_path)
+        abs_config_dir = await async_realpath(self.config_dir)
         if not abs_prompt_path.startswith(abs_config_dir):
             logger.error(f"Security Warning: Path traversal attempt blocked in cronjob {job_idx}: {prompt_path}")
             return
 
-        if not os.path.exists(abs_prompt_path):  # noqa: ASYNC240
+        if not await async_exists(abs_prompt_path):
             logger.error(f"Prompt file not found for cronjob {job_idx}: {abs_prompt_path}")
             return
 
         try:
-            with open(abs_prompt_path, encoding="utf-8") as f:  # noqa: ASYNC230
-                prompt_content = f.read()
+            prompt_content = await async_read_text_file(abs_prompt_path)
         except Exception as e:
             logger.error(f"Failed to read prompt file for cronjob {job_idx}: {e}")
             return

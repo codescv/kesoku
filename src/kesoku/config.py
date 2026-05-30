@@ -105,9 +105,7 @@ class ClaudeConfig(BaseModel):
     """Anthropic / Claude LLM configuration settings on Vertex AI."""
 
     model_name: str = Field(default="claude-3-5-sonnet@20241022", description="Claude model identifier")
-    project_id: str | None = Field(
-        default="gtech-ads-localizer-external", description="GCP Project ID (for Vertex AI)"
-    )
+    project_id: str | None = Field(default="gtech-ads-localizer-external", description="GCP Project ID (for Vertex AI)")
     location: str | None = Field(default="us-east5", description="GCP Region/Location (for Vertex AI)")
 
 
@@ -344,7 +342,6 @@ def init_config(config_path: str, overwrite: bool = False) -> None:
             logger.info(f"Cronjob template copied successfully to {cron_toml_path}")
         except Exception as e:
             logger.error(f"Failed to copy cronjob template to {cron_toml_path}: {e}")
-
 
 
 def init_skills(skills_dir: str, overwrite: bool = False) -> None:

@@ -6,6 +6,7 @@ Provides an abstract base class BaseLLM and a concrete GeminiLLM implementation.
 import asyncio
 import base64
 import inspect
+import io
 import os
 import re
 import typing
@@ -16,6 +17,7 @@ from typing import Any, Literal
 from anthropic import AnthropicVertex
 from google import genai
 from google.genai import types
+from PIL import Image
 from pydantic import BaseModel, Field
 
 from kesoku.config import ClaudeConfig, GeminiConfig, KesokuConfig, get_config
@@ -119,10 +121,6 @@ def _resize_and_compress_image(file_bytes: bytes, max_size: int = 1024) -> tuple
         Tuple of (processed_image_bytes, mime_type).
     """
     try:
-        import io
-
-        from PIL import Image
-
         img = Image.open(io.BytesIO(file_bytes))
 
         # Convert palette or other modes to RGB/RGBA to support WebP format
@@ -655,8 +653,7 @@ class ClaudeLLM(BaseLLM):
         logger.info(f"Using ClaudeLLM backend ({self.model_name}).")
 
         logger.info(
-            f"Initializing Claude client in Vertex AI mode "
-            f"(Project: {config.project_id}, Region: {config.location})"
+            f"Initializing Claude client in Vertex AI mode (Project: {config.project_id}, Region: {config.location})"
         )
         self.client = AnthropicVertex(
             project_id=config.project_id,
@@ -685,34 +682,40 @@ class ClaudeLLM(BaseLLM):
                     blocks.append({"type": "text", "text": f"<thought>\n{block.text}\n</thought>"})
                 elif isinstance(block, ImageBlock):
                     data_b64 = base64.b64encode(block.data).decode("utf-8")
-                    blocks.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": block.media_type,
-                            "data": data_b64,
-                        },
-                    })
+                    blocks.append(
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": block.media_type,
+                                "data": data_b64,
+                            },
+                        }
+                    )
                 elif isinstance(block, DocumentBlock):
                     data_b64 = base64.b64encode(block.data).decode("utf-8")
-                    blocks.append({
-                        "type": "document",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "application/pdf",
-                            "data": data_b64,
-                        },
-                    })
+                    blocks.append(
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": data_b64,
+                            },
+                        }
+                    )
                 elif isinstance(block, ToolCallBlock):
                     tool_call_id = block.tool_call_id
                     if not tool_call_id.startswith("toolu_"):
                         tool_call_id = f"toolu_{tool_call_id}"
-                    blocks.append({
-                        "type": "tool_use",
-                        "id": tool_call_id,
-                        "name": block.name,
-                        "input": block.arguments,
-                    })
+                    blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": tool_call_id,
+                            "name": block.name,
+                            "input": block.arguments,
+                        }
+                    )
                 elif isinstance(block, ToolResultBlock):
                     tool_call_id = block.tool_call_id
                     if not tool_call_id.startswith("toolu_"):

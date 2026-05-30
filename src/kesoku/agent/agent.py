@@ -12,6 +12,10 @@ from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.tools import ToolContext
 from kesoku.agent.turn_executor import TurnExecutor
 from kesoku.agent.turn_logger import TurnLogger
+from kesoku.async_utils import (
+    async_makedirs,
+    async_realpath,
+)
 from kesoku.constants import MessageStatus
 from kesoku.context import KesokuContext
 from kesoku.db import Message
@@ -161,10 +165,8 @@ class SessionWorker:
         )
 
         cfg = self.context.config
-        session_staging_dir = os.path.realpath(  # noqa: ASYNC240
-            os.path.join(cfg.workspace.sessions_dir, folder_name)
-        )
-        os.makedirs(session_staging_dir, exist_ok=True)  # noqa: ASYNC240
+        session_staging_dir = await async_realpath(os.path.join(cfg.workspace.sessions_dir, folder_name))
+        await async_makedirs(session_staging_dir)
 
         tool_runner = ToolRunner(self.context.tool_registry, tool_context)
         turn_logger = TurnLogger(self.session_id, session_staging_dir)
@@ -211,9 +213,7 @@ class Agent:
         logger.info("Kesoku Agent master dispatcher loop started.")
 
         # Recover orphaned processing messages at startup
-        recovered_count = await asyncio.to_thread(
-            self.gateway.db.recover_orphaned_processing_messages
-        )
+        recovered_count = await asyncio.to_thread(self.gateway.db.recover_orphaned_processing_messages)
         if recovered_count > 0:
             logger.info(f"Recovered {recovered_count} orphaned processing messages back to pending_agent status.")
 

@@ -236,7 +236,7 @@ async def test_wechat_chatbot_process_message_with_sys_prompt_file(
             custom_prompt = create_args["custom_prompt"]
             assert "Custom wechat prompt instructions go here." in custom_prompt
     finally:
-        if os.path.exists(tmp_sys_prompt_path):  # noqa: ASYNC240
+        if os.path.exists(tmp_sys_prompt_path):
             os.unlink(tmp_sys_prompt_path)
 
 
@@ -521,6 +521,7 @@ async def test_wechat_inbound_image_mime_sniffing(
     png_bytes = b"\x89PNG\r\n\x1a\nfake_png_content"
 
     from unittest.mock import mock_open
+
     with (
         patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config),
         patch("kesoku.gateway.chatbot.wechat._download_and_decrypt_media", return_value=png_bytes) as mock_dl,
@@ -541,8 +542,8 @@ async def test_wechat_inbound_image_mime_sniffing(
                         "aeskey": "1234567890abcdef1234567890abcdef",
                         "media": {
                             "encrypt_query_param": "query_val",
-                        }
-                    }
+                        },
+                    },
                 }
             ],
         }
@@ -625,6 +626,7 @@ async def test_wechat_chatbot_send_file_retry_success(
 
         # Mock _send_file to fail on first attempt and succeed on second
         call_count = 0
+
         async def mock_send_file_side_effect(*args, **kwargs):
             nonlocal call_count
             call_count += 1

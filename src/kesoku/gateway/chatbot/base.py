@@ -4,9 +4,13 @@ import asyncio
 import datetime
 import os
 import re
+import shutil
+import sys
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any
+
+import tzlocal
 
 from kesoku.config import get_config
 from kesoku.constants import SYSTEM_START_TIME, MessageRole, MessageStatus, MessageType
@@ -55,11 +59,13 @@ def parse_message_content(content: str) -> list[dict[str, Any]]:
                 parts = [p.strip() for p in inner_val.split("|")]
                 question_text = parts[0]
                 choices = parts[1:]
-            segments.append({
-                "type": "question",
-                "question": question_text,
-                "choices": choices,
-            })
+            segments.append(
+                {
+                    "type": "question",
+                    "question": question_text,
+                    "choices": choices,
+                }
+            )
         else:
             segments.append({"type": block_type, "path": inner_val})
         last_idx = match.end()
@@ -73,13 +79,13 @@ def parse_message_content(content: str) -> list[dict[str, Any]]:
 
 class DeliveryAbortedError(Exception):
     """Exception raised to immediately halt outgoing message delivery."""
+
     pass
 
 
 def get_local_timezone_name() -> str:
     """Retrieve the local system timezone name (e.g., 'Asia/Shanghai')."""
     try:
-        import tzlocal
         return tzlocal.get_localzone().key or "UTC"
     except Exception:
         return datetime.datetime.now().astimezone().tzname() or "UTC"
@@ -206,8 +212,6 @@ class Chatbot(ABC):
         )
 
     def _get_kesoku_executable(self) -> str:
-        import shutil
-        import sys
         executable_dir = os.path.dirname(sys.executable)
         kesoku_path = os.path.join(executable_dir, "kesoku")
         if os.path.exists(kesoku_path):
@@ -218,9 +222,6 @@ class Chatbot(ABC):
         """Restart the Kesoku service."""
         logger.info(f"Chatbot '{self.chatbot_id}' requesting service restart.")
         self.stop()
-
-        import subprocess
-        import sys
 
         kesoku_bin = self._get_kesoku_executable()
         cmd = [kesoku_bin, "service", "restart"]
@@ -237,7 +238,7 @@ class Chatbot(ABC):
 
         logger.info(f"Launching restart command: {' '.join(cmd)}")
         try:
-            subprocess.Popen(cmd, start_new_session=True)  # noqa: ASYNC220
+            await asyncio.create_subprocess_exec(*cmd, start_new_session=True)
             logger.info("Successfully launched kesoku service restart command.")
         except Exception as e:
             logger.error(f"Failed to run restart command: {e}")
@@ -374,7 +375,7 @@ class Chatbot(ABC):
 
         now_dt = datetime.datetime.now()
         tz_name = get_local_timezone_name()
-        now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
+        now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
         msg_content = f"`{sender_name}` at `{now_str} {tz_name}`:\n{prompt_content}"
 
@@ -776,10 +777,7 @@ class Chatbot(ABC):
         def list_roles(path: str) -> list[str]:
             if os.path.exists(path):
                 try:
-                    return [
-                        d for d in os.listdir(path)
-                        if os.path.isdir(os.path.join(path, d))
-                    ]
+                    return [d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))]
                 except Exception as e:
                     logger.warning(f"Failed to list roles directory: {e}")
             return []
@@ -816,6 +814,7 @@ class Chatbot(ABC):
         session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
         if session:
             from kesoku.agent.prompt import build_sys_prompt
+
             new_sys_prompt = build_sys_prompt(session=session)
             await self.gateway.update_session_system_prompt(session.id, new_sys_prompt)
 

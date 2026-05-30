@@ -90,4 +90,3 @@ user_allowlist = ["users/111", "users/222"]
     assert cfg.google_chat.impersonate_service_account == "sa@my-gcp-project.iam.gserviceaccount.com"
     assert "users/111" in cfg.google_chat.user_allowlist
     assert "users/222" in cfg.google_chat.user_allowlist
-

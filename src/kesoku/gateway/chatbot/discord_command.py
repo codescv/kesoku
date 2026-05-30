@@ -14,7 +14,6 @@ if TYPE_CHECKING:
 logger = setup_logger(__name__)
 
 
-
 def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
     """Set up Discord application (slash) commands on the chatbot's client based on registered command registry.
 
@@ -34,6 +33,7 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
 
         # Define dynamic callback using a closure factory
         if cmd_name == "role":
+
             async def role_callback(interaction: discord.Interaction, role_name: str = "") -> None:
                 logger.info(
                     f"Received /role slash command with role_name='{role_name}' from user {interaction.user.name} "
@@ -61,6 +61,7 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
                 callback=role_callback,
             )
         else:
+
             def make_callback(c_name: str) -> Callable[[discord.Interaction], Awaitable[None]]:
                 async def callback(interaction: discord.Interaction) -> None:
                     logger.info(
@@ -96,4 +97,3 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
                 callback=make_callback(cmd_name),
             )
         chatbot.tree.add_command(cmd)
-

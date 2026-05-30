@@ -90,9 +90,9 @@ async def test_cron_manager_duplicates_and_trigger():
     mock_bot.trigger_cronjob = AsyncMock()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_real = os.path.realpath(tmpdir)  # noqa: ASYNC240
+        tmpdir_real = os.path.realpath(tmpdir)
         prompt_file_path = os.path.join(tmpdir_real, "test_prompt.md")
-        with open(prompt_file_path, "w") as f:  # noqa: ASYNC230
+        with open(prompt_file_path, "w") as f:
             f.write("Hello from cron!")
 
         job = {
@@ -128,7 +128,7 @@ async def test_cron_manager_path_traversal():
     mock_bot.trigger_cronjob = AsyncMock()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_real = os.path.realpath(tmpdir)  # noqa: ASYNC240
+        tmpdir_real = os.path.realpath(tmpdir)
         job = {
             "schedule": "* * * * *",
             "prompt": "../outside_prompt.md",  # path traversal attempt
@@ -149,9 +149,9 @@ async def test_cron_manager_wechat_optional_channel():
     mock_bot.trigger_cronjob = AsyncMock()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_real = os.path.realpath(tmpdir)  # noqa: ASYNC240
+        tmpdir_real = os.path.realpath(tmpdir)
         prompt_file_path = os.path.join(tmpdir_real, "test_prompt.md")
-        with open(prompt_file_path, "w") as f:  # noqa: ASYNC230
+        with open(prompt_file_path, "w") as f:
             f.write("Hello WeChat cron!")
 
         job = {
@@ -181,9 +181,9 @@ async def test_cron_manager_min_idle_time_seconds():
     mock_bot.gateway = mock_gateway
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_real = os.path.realpath(tmpdir)  # noqa: ASYNC240
+        tmpdir_real = os.path.realpath(tmpdir)
         prompt_file_path = os.path.join(tmpdir_real, "test_prompt.md")
-        with open(prompt_file_path, "w") as f:  # noqa: ASYNC230
+        with open(prompt_file_path, "w") as f:
             f.write("Hello!")
 
         job = {
@@ -229,9 +229,9 @@ async def test_cron_manager_daily_target():
     mock_bot.gateway = mock_gateway
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_real = os.path.realpath(tmpdir)  # noqa: ASYNC240
+        tmpdir_real = os.path.realpath(tmpdir)
         prompt_file_path = os.path.join(tmpdir_real, "test_prompt.md")
-        with open(prompt_file_path, "w") as f:  # noqa: ASYNC230
+        with open(prompt_file_path, "w") as f:
             f.write("Hello!")
 
         job = {
@@ -277,9 +277,9 @@ async def test_cron_manager_min_interval():
     mock_bot.gateway = mock_gateway
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_real = os.path.realpath(tmpdir)  # noqa: ASYNC240
+        tmpdir_real = os.path.realpath(tmpdir)
         prompt_file_path = os.path.join(tmpdir_real, "test_prompt.md")
-        with open(prompt_file_path, "w") as f:  # noqa: ASYNC230
+        with open(prompt_file_path, "w") as f:
             f.write("Hello!")
 
         job = {
@@ -313,5 +313,3 @@ async def test_cron_manager_min_interval():
             mention_user_id=None,
             min_interval_seconds=7200.0,
         )
-
-

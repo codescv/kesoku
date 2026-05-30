@@ -7,12 +7,15 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from typing import Annotated
 
+import tomli_w
 import typer
 from rich.console import Console
 
 from kesoku.agent.agent import Agent
+from kesoku.agent.tools import get_allowed_categories, sanitize_key, validate_key
 from kesoku.cli_chat import run_cli_chat_async
 from kesoku.cli_service import service_app
 from kesoku.config import get_config, init_config, init_roles, init_skills, load_config
@@ -54,8 +57,6 @@ def cli_memory_list(
     console = Console()
 
     if not category:
-        from kesoku.agent.tools import get_allowed_categories
-
         allowed = get_allowed_categories(db)
         console.print("\n[bold green]=== Permitted & Active Categories ===[/bold green]")
         core = {"learnings", "progress"}
@@ -73,12 +74,10 @@ def cli_memory_list(
 
     console.print(f"\n[bold green]=== Memories in '{category}' (scope: {role}) ===[/bold green]")
     for m in memories:
-        import time
-
         updated_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m["updated_at"]))
         console.print(
             f"  - key: [cyan]{m['key']}[/cyan] | "
-            f"title: \"[bold]{m['title']}[/bold]\" | "
+            f'title: "[bold]{m["title"]}[/bold]" | '
             f"scope: [yellow]{m['role']}[/yellow] | "
             f"updated: {updated_str}"
         )
@@ -96,8 +95,6 @@ def cli_memory_view(
     cfg = get_config()
     db = DatabaseManager(cfg.workspace.db_path)
     db.verify_db()
-
-    from kesoku.agent.tools import sanitize_key, validate_key
 
     console = Console()
 
@@ -149,8 +146,6 @@ def cli_memory_update(
     db = DatabaseManager(cfg.workspace.db_path)
     db.verify_db()
 
-    from kesoku.agent.tools import get_allowed_categories, sanitize_key, validate_key
-
     allowed = get_allowed_categories(db)
     if category not in allowed and not create_category:
         typer.echo(
@@ -193,8 +188,6 @@ def cli_memory_delete(
     cfg = get_config()
     db = DatabaseManager(cfg.workspace.db_path)
     db.verify_db()
-
-    from kesoku.agent.tools import sanitize_key, validate_key
 
     if not validate_key(key):
         typer.echo(
@@ -257,7 +250,6 @@ def cli_memory_export(
             os.makedirs(parent_dir, exist_ok=True)
 
         # Serialize to TOML
-        import tomli_w
         with open(target_path, "wb") as f:
             tomli_w.dump(export_data, f)
 
@@ -293,6 +285,7 @@ def wechat_pair(
     cfg.wechat.base_url = credentials["base_url"]
 
     from kesoku.config import save_config
+
     save_config(cfg, config)
 
     console = Console()
