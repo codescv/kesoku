@@ -186,18 +186,57 @@ class CronManager:
 
                 self.last_executed_minute[idx] = current_minute_epoch
 
+                chatbot_id = job.get("chatbot_id")
+                channel_id = job.get("channel_id")
+
                 probability = job.get("probability")
-                if probability is not None:
+                prob_base = job.get("probability_base")
+                prob_max = job.get("probability_max")
+                ramp_up = job.get("ramp_up_seconds")
+
+                prob = None
+                if prob_base is not None and prob_max is not None and ramp_up is not None:
+                    try:
+                        p_base = float(prob_base)
+                        p_max = float(prob_max)
+                        r_up = float(ramp_up)
+
+                        if chatbot_id and channel_id:
+                            bot = self.chatbots.get(chatbot_id)
+                            if bot:
+                                last_msg_ts = await bot.gateway.get_last_message_timestamp(chatbot_id, channel_id)
+                                if last_msg_ts is None:
+                                    # Completely empty channel, use max probability
+                                    prob = p_max
+                                else:
+                                    idle_time = now.timestamp() - last_msg_ts
+                                    if r_up <= 0:
+                                        prob = p_max
+                                    else:
+                                        ratio = min(1.0, max(0.0, idle_time / r_up))
+                                        prob = p_base + (p_max - p_base) * ratio
+
+                        if prob is None:
+                            # Fallback if chatbot or channel is not resolved
+                            prob = p_max
+                    except ValueError:
+                        logger.warning(
+                            f"Invalid progressive probability formats for job {idx}: "
+                            f"base={prob_base}, max={prob_max}, ramp_up={ramp_up}"
+                        )
+
+                if prob is None and probability is not None:
                     try:
                         prob = float(probability)
-                        if random.random() > prob:
-                            logger.info(f"Job {idx} matched schedule but was skipped by probability filter.")
-                            continue
                     except ValueError:
                         logger.warning(f"Invalid probability format for job {idx}: {probability}")
 
-                chatbot_id = job.get("chatbot_id")
-                channel_id = job.get("channel_id")
+                if prob is not None:
+                    if random.random() > prob:
+                        logger.info(
+                            f"Job {idx} matched schedule but was skipped by probability filter (p={prob:.4f})."
+                        )
+                        continue
 
                 # Check min_idle_time_seconds if channel_id is explicitly provided
                 min_idle_time_seconds = job.get("min_idle_time_seconds")

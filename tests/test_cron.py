@@ -313,3 +313,75 @@ async def test_cron_manager_min_interval():
             mention_user_id=None,
             min_interval_seconds=7200.0,
         )
+
+
+@pytest.mark.asyncio
+async def test_cron_manager_progressive_probability():
+    mock_bot = MagicMock()
+    mock_bot.chatbot_id = "discord"
+    mock_bot.trigger_cronjob = AsyncMock()
+
+    mock_gateway = AsyncMock()
+    mock_bot.gateway = mock_gateway
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_real = os.path.realpath(tmpdir)
+        prompt_file_path = os.path.join(tmpdir_real, "test_prompt.md")
+        with open(prompt_file_path, "w") as f:
+            f.write("Hello!")
+
+        job = {
+            "schedule": "* * * * *",
+            "prompt": "test_prompt.md",
+            "channel_id": "999",
+            "chatbot_id": "discord",
+            "probability_base": 0.1,
+            "probability_max": 0.9,
+            "ramp_up_seconds": 3600,
+        }
+
+        manager = CronManager(chatbots=[mock_bot], config_dir=tmpdir_real)
+
+        # Case 1: Completely empty channel (last_msg_ts is None) -> prob = p_max (0.9)
+        # random.random() is 0.5 <= 0.9 -> should trigger!
+        mock_gateway.get_last_message_timestamp.return_value = None
+
+        from unittest.mock import patch
+        with patch("random.random", return_value=0.5):
+            await manager._check_and_trigger_jobs([job])
+            await asyncio.sleep(0.1)
+            mock_bot.trigger_cronjob.assert_called_once_with(
+                channel_id="999",
+                prompt_content="Hello!",
+                mention_user_id=None,
+            )
+
+        # Reset minutes cache and mock_bot
+        manager.last_executed_minute.clear()
+        mock_bot.trigger_cronjob.reset_mock()
+
+        # Case 2: Idle time is 1800s (half of ramp_up_seconds 3600s)
+        # prob = p_base + (p_max - p_base) * 0.5 = 0.1 + 0.8 * 0.5 = 0.5
+        # If random.random is 0.6 (> 0.5) -> should skip!
+        now_ts = datetime.datetime.now().timestamp()
+        mock_gateway.get_last_message_timestamp.return_value = now_ts - 1800
+
+        with patch("random.random", return_value=0.6):
+            await manager._check_and_trigger_jobs([job])
+            await asyncio.sleep(0.1)
+            mock_bot.trigger_cronjob.assert_not_called()
+
+        # Reset
+        manager.last_executed_minute.clear()
+        mock_bot.trigger_cronjob.reset_mock()
+
+        # Case 3: Idle time is 1800s (prob = 0.5)
+        # If random.random is 0.4 (<= 0.5) -> should trigger!
+        with patch("random.random", return_value=0.4):
+            await manager._check_and_trigger_jobs([job])
+            await asyncio.sleep(0.1)
+            mock_bot.trigger_cronjob.assert_called_once_with(
+                channel_id="999",
+                prompt_content="Hello!",
+                mention_user_id=None,
+            )
