@@ -712,6 +712,22 @@ You are interacting with the user via WeChat (Weixin).
 - Keep your messages relatively concise since WeChat clients have character and readability limitations.
 """
 
+    async def _compile_custom_prompt(self, channel_id: str, chat_type: str) -> str:
+        custom_prompt = self._build_wechat_custom_prompt(channel_id, chat_type)
+        if self.config.sys_prompt_file:
+            sys_file = self.config.sys_prompt_file
+            cfg = get_config()
+            if not os.path.isabs(sys_file) and cfg.agent_working_dir:
+                sys_file = os.path.join(cfg.agent_working_dir, sys_file)
+            if await async_exists(sys_file):
+                try:
+                    custom_sys_prompt = await async_read_text_file(sys_file)
+                    if custom_sys_prompt:
+                        custom_prompt = f"{custom_prompt}\n\n{custom_sys_prompt}"
+                except Exception as e:
+                    logger.error(f"WeChat: Failed to read system prompt file {sys_file}: {e}")
+        return custom_prompt
+
     async def start(self) -> None:
         """Start the WeChat bot and Gateway listener subscriber loop."""
         self._running = True
@@ -843,21 +859,7 @@ You are interacting with the user via WeChat (Weixin).
     ) -> None:
         """Helper to trigger cronjob in a single specific channel."""
         chat_type = "group" if channel_id.endswith("@chatroom") else "dm"
-        custom_prompt = self._build_wechat_custom_prompt(channel_id, chat_type)
-
-        # Read custom configurable system prompt file if present
-        if self.config.sys_prompt_file:
-            sys_file = self.config.sys_prompt_file
-            cfg = get_config()
-            if not os.path.isabs(sys_file) and cfg.agent_working_dir:
-                sys_file = os.path.join(cfg.agent_working_dir, sys_file)
-            if await async_exists(sys_file):
-                try:
-                    custom_sys_prompt = await async_read_text_file(sys_file)
-                    if custom_sys_prompt:
-                        custom_prompt = f"{custom_prompt}\n\n{custom_sys_prompt}"
-                except Exception as e:
-                    logger.error(f"WeChat: Failed to read system prompt file {sys_file}: {e}")
+        custom_prompt = await self._compile_custom_prompt(channel_id, chat_type)
 
         msg_content = prompt_content
         if mention_user_id:
@@ -1023,19 +1025,7 @@ You are interacting with the user via WeChat (Weixin).
         channel_id = effective_chat_id
 
         # Compile prompt
-        custom_prompt = self._build_wechat_custom_prompt(channel_id, chat_type)
-        if self.config.sys_prompt_file:
-            sys_file = self.config.sys_prompt_file
-            cfg = get_config()
-            if not os.path.isabs(sys_file) and cfg.agent_working_dir:
-                sys_file = os.path.join(cfg.agent_working_dir, sys_file)
-            if await async_exists(sys_file):
-                try:
-                    custom_sys_prompt = await async_read_text_file(sys_file)
-                    if custom_sys_prompt:
-                        custom_prompt = f"{custom_prompt}\n\n{custom_sys_prompt}"
-                except Exception as e:
-                    logger.error(f"WeChat: Failed to read system prompt file {sys_file}: {e}")
+        custom_prompt = await self._compile_custom_prompt(channel_id, chat_type)
 
         context_token = str(message.get("context_token") or "").strip()
 

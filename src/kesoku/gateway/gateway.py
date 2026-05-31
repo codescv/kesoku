@@ -15,7 +15,7 @@ from typing import Any
 from kesoku.agent.prompt import build_sys_prompt
 from kesoku.constants import MessageRole, MessageStatus
 from kesoku.context import KesokuContext
-from kesoku.db import Message, Session
+from kesoku.db import CrossSessionContext, Message, Session
 from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -126,6 +126,31 @@ class Gateway:
             The Session object if found, None otherwise.
         """
         return await asyncio.to_thread(self.db.get_session_by_channel, chatbot_id, channel_id)
+
+    async def get_cross_session_memory_updates(
+        self,
+        role: str,
+        exclude_session_id: str,
+    ) -> tuple[CrossSessionContext | None, list[Message]]:
+        """Retrieve consolidated cross-session context and recent messages since last update.
+
+        Args:
+            role: Active persona role name.
+            exclude_session_id: The session ID to exclude from the recent messages query.
+
+        Returns:
+            A tuple of (CrossSessionContext or None, list of Message instances).
+        """
+        stored_ctx = await asyncio.to_thread(self.db.get_cross_session_context, role)
+        last_updated = stored_ctx.updated_at if stored_ctx else 0.0
+
+        new_messages = await asyncio.to_thread(
+            self.db.get_role_messages_since,
+            role=role,
+            since_timestamp=last_updated,
+            exclude_session_id=exclude_session_id,
+        )
+        return stored_ctx, new_messages
 
     async def set_active_session_for_channel(self, chatbot_id: str, channel_id: str, session_id: str) -> None:
         """Bind a session as the active session for a chatbot channel.

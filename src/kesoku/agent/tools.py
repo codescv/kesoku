@@ -1223,24 +1223,18 @@ async def view_cross_session_memory(context: ToolContext) -> str:
     if not context or not context.gateway:
         return "Error: ToolContext or Gateway is missing."
 
-    db = context.gateway.db
+
 
     # 1. Resolve active role using helper
     active_role = _resolve_memory_role(category="user_preferences", role_param=None, context=context)
 
     try:
-        # 2. Query consolidated timeline from DB
-        stored_ctx = await asyncio.to_thread(db.get_cross_session_context, active_role)
-        timeline_content = stored_ctx.content if stored_ctx else ""
-        last_updated = stored_ctx.updated_at if stored_ctx else 0.0
-
-        # 3. Query recent messages written after checkpoint in other sessions
-        new_messages = await asyncio.to_thread(
-            db.get_role_messages_since,
+        # 2. Query consolidated timeline and recent messages from Gateway
+        stored_ctx, new_messages = await context.gateway.get_cross_session_memory_updates(
             role=active_role,
-            since_timestamp=last_updated,
             exclude_session_id=context.session_id,
         )
+        timeline_content = stored_ctx.content if stored_ctx else ""
 
         lines = [f"=== Cross-Session Event Timeline (Role: {active_role}) ==="]
         if timeline_content.strip():

@@ -58,6 +58,21 @@ class TurnExecutor:
         """
         return await self.gateway.get_session_turns_count(self.session_id)
 
+    async def _is_bootstrap_turn(self, history: list[Message], current_msg: Message) -> bool:
+        """Determine if this is a Bootstrap Turn (first turn of session or idle > 30 mins)."""
+        turn_count = await self._get_session_turns_count()
+        if turn_count <= 1:
+            return True
+        non_current_msgs = [m for m in history if m.id != current_msg.id]
+        if non_current_msgs:
+            last_msg_time = non_current_msgs[-1].timestamp
+            # 1800 seconds = 30 minutes inactivity
+            if current_msg.timestamp - last_msg_time > 1800:
+                return True
+        else:
+            return True
+        return False
+
     def _resolve_llm(self, current_msg: Message) -> BaseLLM:
         """Resolve the appropriate LLM instance for the current message, applying overrides.
 
@@ -370,19 +385,7 @@ class TurnExecutor:
         )
 
         # 1. Calculate if this is a Bootstrap Turn (first turn of session or idle > 30 mins)
-        turn_count = await self._get_session_turns_count()
-        is_bootstrap = False
-        if turn_count <= 1:
-            is_bootstrap = True
-        else:
-            non_current_msgs = [m for m in history if m.id != current_msg.id]
-            if non_current_msgs:
-                last_msg_time = non_current_msgs[-1].timestamp
-                # 1800 seconds = 30 minutes inactivity
-                if current_msg.timestamp - last_msg_time > 1800:
-                    is_bootstrap = True
-            else:
-                is_bootstrap = True
+        is_bootstrap = await self._is_bootstrap_turn(history, current_msg)
 
         # 2. Query user preferences only if this is a bootstrap turn
         pref_content = ""
@@ -435,20 +438,13 @@ class TurnExecutor:
 
         # 4. Background Consolidation Trigger (Unchanged)
         # Retrieve Cross-Session Memory context parameters solely to check and trigger consolidation asynchronously
-        stored_ctx = await asyncio.to_thread(
-            self.gateway.db.get_cross_session_context,
-            active_role,
+        stored_ctx, new_messages = await self.gateway.get_cross_session_memory_updates(
+            role=active_role,
+            exclude_session_id=self.session_id,
         )
         stored_content = stored_ctx.content if stored_ctx else ""
         last_updated = stored_ctx.updated_at if stored_ctx else 0.0
         lock_status = stored_ctx.status if stored_ctx else "idle"
-
-        new_messages = await asyncio.to_thread(
-            self.gateway.db.get_role_messages_since,
-            role=active_role,
-            since_timestamp=last_updated,
-            exclude_session_id=self.session_id,
-        )
 
         try:
             new_msg_tokens = await asyncio.to_thread(
