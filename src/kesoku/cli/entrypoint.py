@@ -15,7 +15,7 @@ import typer
 from rich.console import Console
 
 from kesoku.agent.agent import Agent
-from kesoku.agent.tools import get_allowed_categories, sanitize_key, validate_key
+from kesoku.agent.tools import sanitize_key, validate_key
 from kesoku.cli.chat import run_cli_chat_async
 from kesoku.cli.service import service_app
 from kesoku.config import get_config, init_config, init_roles, init_skills, load_config
@@ -57,7 +57,7 @@ def cli_memory_list(
     console = Console()
 
     if not category:
-        allowed = get_allowed_categories(db)
+        allowed = db.get_allowed_memory_categories()
         console.print("\n[bold green]=== Permitted & Active Categories ===[/bold green]")
         core = {"learnings", "progress"}
         for cat in sorted(list(allowed)):
@@ -146,7 +146,7 @@ def cli_memory_update(
     db = DatabaseManager(cfg.workspace.db_path)
     db.verify_db()
 
-    allowed = get_allowed_categories(db)
+    allowed = db.get_allowed_memory_categories()
     if category not in allowed and not create_category:
         typer.echo(
             f"Error: Category '{category}' is not recognized.\n"

@@ -882,16 +882,6 @@ async def compact_history(summary: str, context: ToolContext) -> str:
 
 
 # Memory System Helpers and Tools
-async def get_allowed_categories(db: Any) -> set[str]:
-    """Retrieves the set of all currently permitted or existing memory categories."""
-    categories = {"learnings", "progress", "user_preferences"}
-    try:
-        memories = await db.get_agent_memories()
-        for m in memories:
-            categories.add(m["category"])
-    except Exception as e:
-        logger.warning(f"Failed to fetch existing categories from database: {e}")
-    return categories
 
 
 def sanitize_key(input_key: str) -> str:
@@ -1059,7 +1049,7 @@ async def update_memory(
     resolved_role = await _resolve_memory_role(category, role, context)
     db = context.gateway.db
     try:
-        allowed = await get_allowed_categories(db)
+        allowed = await db.get_allowed_memory_categories()
         if category not in allowed and not create_category:
             return (
                 f"Write Denied: Category '{category}' is not recognized.\n"

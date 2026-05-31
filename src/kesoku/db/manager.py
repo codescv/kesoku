@@ -747,6 +747,17 @@ class DatabaseManager:
                     (category, key, role),
                 )
 
+    def get_allowed_memory_categories(self) -> set[str]:
+        """Retrieves the set of all currently permitted or existing memory categories."""
+        categories = {"learnings", "progress", "user_preferences"}
+        try:
+            memories = self.get_agent_memories()
+            for m in memories:
+                categories.add(m["category"])
+        except Exception as e:
+            logger.warning(f"Failed to fetch existing categories from database: {e}")
+        return categories
+
     def set_channel_role(self, chatbot_id: str, channel_id: str, role: str) -> None:
         """Bind a roleplay persona to a chatbot channel/thread."""
         with self.connection_provider.connection() as conn:
@@ -1315,6 +1326,14 @@ class AsyncDatabaseManager:
             role: The role associated with the memory.
         """
         await asyncio.to_thread(self.sync_db.delete_agent_memory, category, key, role)
+
+    async def get_allowed_memory_categories(self) -> set[str]:
+        """Retrieves the set of all currently permitted or existing memory categories.
+
+        Returns:
+            A set of allowed categories.
+        """
+        return await asyncio.to_thread(self.sync_db.get_allowed_memory_categories)
 
     async def set_channel_role(self, chatbot_id: str, channel_id: str, role: str) -> None:
         """Set the role for a specific channel.
