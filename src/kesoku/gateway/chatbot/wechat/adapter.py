@@ -23,12 +23,11 @@ import aiohttp
 import certifi
 import qrcode
 
-from kesoku.agent.prompt import build_sys_prompt
 from kesoku.config import get_config
-from kesoku.constants import MessageRole, MessageStatus, MessageType
+from kesoku.constants import MessageRole, MessageType
 from kesoku.db import Message
 from kesoku.gateway.attachment_manager import AttachmentManager
-from kesoku.gateway.chatbot.base import Chatbot
+from kesoku.gateway.chatbot.base import Chatbot, InboundMessageAttachment, InboundMessageDTO
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 from kesoku.utils.async_fs import (
@@ -895,83 +894,20 @@ You are interacting with the user via WeChat (Weixin).
                 exc_info=True,
             )
 
-    async def _process_message(self, message: dict[str, Any]) -> None:
-        sender_id = str(message.get("from_user_id") or "").strip()
-        if not sender_id or sender_id == self._account_id:
-            return
-
-        message_id = str(message.get("message_id") or "").strip()
-        if message_id and self._dedup.is_duplicate(message_id):
-            return
-
-        item_list = message.get("item_list") or []
-        text = _extract_text(item_list)
-
-        chat_type, effective_chat_id = _guess_chat_type(message, self._account_id)
-
-        if text.startswith("/"):
-            await self._handle_slash_command(effective_chat_id, text, sender_id)
-            return
-
-        context_token = str(message.get("context_token") or "").strip()
+    async def pre_ingest_hook(self, dto: InboundMessageDTO) -> None:
+        """Hook executed before session resolution or creation."""
+        context_token = dto.raw_metadata.get("context_token")
         if context_token:
-            self._token_store.set(self._account_id, effective_chat_id, context_token)
-        asyncio.create_task(self._maybe_fetch_typing_ticket(sender_id, context_token or None))
+            self._token_store.set(self._account_id, dto.channel_id, context_token)
+        asyncio.create_task(self._maybe_fetch_typing_ticket(dto.sender_id, context_token or None))
 
-        # Resolve or create Kesoku session mapped to the thread/space context
-        channel_id = effective_chat_id
-        session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
-        if not session:
-            title = f"WeChat Session: {text[:30]}"
-            custom_prompt = self._build_wechat_custom_prompt(channel_id, chat_type)
-
-            # Read custom configurable system prompt file if present
-            if self.config.sys_prompt_file:
-                sys_file = self.config.sys_prompt_file
-                cfg = get_config()
-                if not os.path.isabs(sys_file) and cfg.agent_working_dir:
-                    sys_file = os.path.join(cfg.agent_working_dir, sys_file)
-                if await async_exists(sys_file):
-                    try:
-                        custom_sys_prompt = await async_read_text_file(sys_file)
-                        if custom_sys_prompt:
-                            custom_prompt = f"{custom_prompt}\n\n{custom_sys_prompt}"
-                    except Exception as e:
-                        logger.error(f"WeChat: Failed to read system prompt file {sys_file}: {e}")
-
-            session = await self.gateway.create_session(
-                session_id=None,
-                title=title,
-                custom_prompt=custom_prompt,
-                chatbot_id=self.chatbot_id,
-                channel_id=channel_id,
-            )
-        else:
-            await self.gateway.update_session_updated_at(session.id)
-
-            # Rebuild and update the system prompt with the latest custom instructions
-            custom_prompt = self._build_wechat_custom_prompt(channel_id, chat_type)
-
-            # Read custom configurable system prompt file if present
-            if self.config.sys_prompt_file:
-                sys_file = self.config.sys_prompt_file
-                cfg = get_config()
-                if not os.path.isabs(sys_file) and cfg.agent_working_dir:
-                    sys_file = os.path.join(cfg.agent_working_dir, sys_file)
-                if await async_exists(sys_file):
-                    try:
-                        custom_sys_prompt = await async_read_text_file(sys_file)
-                        if custom_sys_prompt:
-                            custom_prompt = f"{custom_prompt}\n\n{custom_sys_prompt}"
-                    except Exception as e:
-                        logger.error(f"WeChat: Failed to read system prompt file {sys_file}: {e}")
-
-            new_sys_prompt = build_sys_prompt(custom_prompt=custom_prompt, session=session)
-            await self.gateway.update_session_system_prompt(session.id, new_sys_prompt)
-
+    async def process_attachments_hook(
+        self, session: Any, dto: InboundMessageDTO, raw_message: Any
+    ) -> list[InboundMessageAttachment]:
+        """Hook to process and save attachments using the resolved session workspace."""
+        item_list = raw_message.get("item_list") or []
         attachments_metadata = []
 
-        # Download and decrypt media assets
         for item in item_list:
             item_type = item.get("type")
             filename = None
@@ -1049,55 +985,89 @@ You are interacting with the user via WeChat (Weixin).
                     collision_id=secrets.token_hex(4),
                 )
                 attachments_metadata.append(
-                    {
-                        "path": saved["path"],
-                        "mime_type": mime,
-                        "filename": filename,
-                    }
+                    InboundMessageAttachment(
+                        path=saved["path"],
+                        mime_type=mime,
+                        filename=filename,
+                    )
                 )
+        return attachments_metadata
 
-        if not text and not attachments_metadata:
-            return
-
-        msg_content = text
-        if attachments_metadata:
-            files_str = "\n".join(
-                f"[Attachment: {a['filename']} ({a['mime_type']}) saved at {a['path']}]" for a in attachments_metadata
-            )
-            if msg_content:
-                msg_content += f"\n\nAttachments:\n{files_str}"
-            else:
-                msg_content = f"Attachments:\n{files_str}"
-
-        user_msg = Message(
-            session_id=session.id,
-            chatbot_id=self.chatbot_id,
-            channel_id=channel_id,
-            sender=sender_id,
-            role=MessageRole.USER,
-            type=MessageType.TEXT,
-            content=msg_content,
-            timestamp=time.time(),
-            status=MessageStatus.PENDING_AGENT,
-            metadata={
-                "wechat_message_id": message_id,
-                "attachments": attachments_metadata,
-                "chat_type": chat_type,
-            },
-        )
-        await self.gateway.post(user_msg)
-
+    async def post_ingest_hook(self, session: Any, message: Message, dto: InboundMessageDTO) -> None:
+        """Hook executed after the message is successfully posted to the gateway."""
         # Start typing indicator
-        typing_ticket = self._typing_cache.get(channel_id)
+        typing_ticket = self._typing_cache.get(dto.channel_id)
         if typing_ticket:
             try:
                 await self.send_client.send_typing(
-                    to=channel_id,
+                    to=dto.channel_id,
                     typing_status=TYPING_START,
                     ticket=typing_ticket,
                 )
             except Exception as e:
                 logger.debug("WeChat: typing start failed: %s", e)
+
+    async def _process_message(self, message: dict[str, Any]) -> None:
+        sender_id = str(message.get("from_user_id") or "").strip()
+        if not sender_id or sender_id == self._account_id:
+            return
+
+        message_id = str(message.get("message_id") or "").strip()
+        if message_id and self._dedup.is_duplicate(message_id):
+            return
+
+        item_list = message.get("item_list") or []
+        text = _extract_text(item_list)
+
+        chat_type, effective_chat_id = _guess_chat_type(message, self._account_id)
+        channel_id = effective_chat_id
+
+        # Compile prompt
+        custom_prompt = self._build_wechat_custom_prompt(channel_id, chat_type)
+        if self.config.sys_prompt_file:
+            sys_file = self.config.sys_prompt_file
+            cfg = get_config()
+            if not os.path.isabs(sys_file) and cfg.agent_working_dir:
+                sys_file = os.path.join(cfg.agent_working_dir, sys_file)
+            if await async_exists(sys_file):
+                try:
+                    custom_sys_prompt = await async_read_text_file(sys_file)
+                    if custom_sys_prompt:
+                        custom_prompt = f"{custom_prompt}\n\n{custom_sys_prompt}"
+                except Exception as e:
+                    logger.error(f"WeChat: Failed to read system prompt file {sys_file}: {e}")
+
+        context_token = str(message.get("context_token") or "").strip()
+
+        dto = InboundMessageDTO(
+            sender_id=sender_id,
+            channel_id=channel_id,
+            text=text,
+            message_id=message_id,
+            timestamp=time.time(),
+            raw_metadata={
+                "wechat_message_id": message_id,
+                "chat_type": chat_type,
+                "context_token": context_token,
+            },
+            session_title=f"WeChat Session: {text[:30]}",
+            custom_prompt=custom_prompt,
+        )
+
+        async def reply_func(reply_text: str) -> None:
+            msg_context_token = context_token or self._token_store.get(self._account_id, sender_id)
+            client_id = f"kesoku-wechat-cmd-{uuid.uuid4().hex}"
+            try:
+                await self.send_client.send_message(
+                    to=channel_id,
+                    text=reply_text,
+                    context_token=msg_context_token,
+                    client_id=client_id,
+                )
+            except Exception as e:
+                logger.error(f"WeChat: failed to send command reply: {e}")
+
+        await self.ingest_message(dto, raw_message=message, reply_callback=reply_func)
 
     async def _maybe_fetch_typing_ticket(self, user_id: str, context_token: str | None) -> None:
         if not self._poll_session or not self._token:

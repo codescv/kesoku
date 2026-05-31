@@ -4,12 +4,15 @@ import asyncio
 import datetime
 import os
 import re
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import tzlocal
+from pydantic import BaseModel, Field
 
+from kesoku.agent.prompt import build_sys_prompt
 from kesoku.config import get_config
 from kesoku.constants import SYSTEM_START_TIME, MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
@@ -114,6 +117,26 @@ def _format_uptime(td: datetime.timedelta) -> str:
         parts.append(f"{minutes}m")
     parts.append(f"{seconds}s")
     return " ".join(parts)
+
+class InboundMessageAttachment(BaseModel):
+    """Unified attachment metadata for inbound messages."""
+    path: str
+    mime_type: str
+    filename: str
+
+
+class InboundMessageDTO(BaseModel):
+    """Unified Data Transfer Object for inbound messages across all platforms."""
+    sender_id: str
+    channel_id: str
+    text: str = ""
+    message_id: str = ""
+    timestamp: float = Field(default_factory=time.time)
+    attachments: list[InboundMessageAttachment] = Field(default_factory=list)
+    raw_metadata: dict[str, Any] = Field(default_factory=dict)
+    session_title: str | None = None
+    custom_prompt: str | None = None
+    role: str = "default"
 
 
 class CommandRegistry:
@@ -585,6 +608,144 @@ class Chatbot(ABC):
         """Lifecycle hook triggered after a message is successfully delivered."""
         pass
 
+    async def pre_ingest_hook(self, dto: InboundMessageDTO) -> None:
+        """Hook executed before session resolution or creation.
+
+        Adapters can override this to perform platform-specific setup (e.g. token stores, typing).
+        """
+        pass
+
+    async def pre_ingest_interruption_hook(self, session: Any, dto: InboundMessageDTO) -> None:
+        """Hook executed after session is resolved/created, but before posting.
+
+        Adapters can override this to handle thought interruption (e.g. deleting old UI cards).
+        """
+        pass
+
+    async def post_ingest_hook(self, session: Any, message: Message, dto: InboundMessageDTO) -> None:
+        """Hook executed after the message is successfully posted to the gateway.
+
+        Adapters can override this to perform post-ingestion actions (e.g. adding reactions).
+        """
+        pass
+
+    async def process_attachments_hook(
+        self, session: Any, dto: InboundMessageDTO, raw_message: Any
+    ) -> list[InboundMessageAttachment]:
+        """Hook to process and save attachments using the resolved session workspace.
+
+        Adapters should override this to download/decrypt assets and save them using AttachmentManager.
+        """
+        return dto.attachments
+
+    def _format_inbound_content(self, dto: InboundMessageDTO) -> str:
+        """Format the inbound message content, including attachments list if present."""
+        msg_content = dto.text
+        if dto.attachments:
+            files_str = "\n".join(
+                f"[Attachment: {a.filename} ({a.mime_type}) saved at {a.path}]" for a in dto.attachments
+            )
+            if msg_content:
+                msg_content += f"\n\nAttachments:\n{files_str}"
+            else:
+                msg_content = f"Attachments:\n{files_str}"
+        return msg_content
+
+    async def _resolve_or_create_session(self, dto: InboundMessageDTO) -> tuple[Any, bool]:
+        """Resolve an existing session or create a new one for the channel."""
+        session = await self.gateway.get_session_by_channel(self.chatbot_id, dto.channel_id)
+        created = False
+        if not session:
+            title = dto.session_title or f"Session: {dto.text[:30]}"
+            custom_prompt = dto.custom_prompt or ""
+
+            session = await self.gateway.create_session(
+                session_id=None,
+                title=title,
+                custom_prompt=custom_prompt,
+                chatbot_id=self.chatbot_id,
+                channel_id=dto.channel_id,
+                role=dto.role,
+                created_at=dto.timestamp,
+            )
+            created = True
+        else:
+            await self.gateway.update_session_updated_at(session.id)
+
+            if dto.custom_prompt:
+                new_sys_prompt = build_sys_prompt(custom_prompt=dto.custom_prompt, session=session)
+                await self.gateway.update_session_system_prompt(session.id, new_sys_prompt)
+
+        return session, created
+
+    async def ingest_message(
+        self,
+        dto: InboundMessageDTO,
+        raw_message: Any = None,
+        reply_callback: Callable[[str], Awaitable[None]] | None = None,
+    ) -> bool:
+        """Ingest an inbound message from the platform into the Kesoku Gateway.
+
+        Handles:
+        1. Slash command interception (if reply_callback is provided).
+        2. Pre-ingest hook.
+        3. Resolve or create session.
+        4. Interruption hook.
+        5. Process attachments (via hook).
+        6. Format content.
+        7. Post to Gateway.
+        8. Post-ingest hook.
+
+        Args:
+            dto: Unified inbound message data transfer object.
+            raw_message: Optional raw platform message payload for attachment processing.
+            reply_callback: Optional async callback to reply to slash commands.
+
+        Returns:
+            True if the message was intercepted as a slash command, False otherwise.
+        """
+        # 1. Slash command interception
+        if reply_callback and dto.text.startswith("/"):
+            await self.execute_command_from_text(dto.text, reply_callback, channel_id=dto.channel_id)
+            return True
+
+        # 2. Pre-ingest hook
+        await self.pre_ingest_hook(dto)
+
+        # 3. Resolve or create session
+        session, _ = await self._resolve_or_create_session(dto)
+
+        # 4. Interruption hook
+        await self.pre_ingest_interruption_hook(session, dto)
+
+        # 5. Process attachments
+        dto.attachments = await self.process_attachments_hook(session, dto, raw_message)
+
+        # 6. Format content
+        msg_content = self._format_inbound_content(dto)
+
+        # 7. Post to Gateway
+        user_msg = Message(
+            session_id=session.id,
+            chatbot_id=self.chatbot_id,
+            channel_id=dto.channel_id,
+            sender=dto.sender_id,
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content=msg_content,
+            timestamp=dto.timestamp,
+            status=MessageStatus.PENDING_AGENT,
+            metadata={
+                **dto.raw_metadata,
+                "attachments": [a.model_dump() for a in dto.attachments],
+            },
+        )
+        await self.gateway.post(user_msg)
+
+        # 8. Post-ingest hook
+        await self.post_ingest_hook(session, user_msg, dto)
+        return False
+
     async def update_role_by_channel(self, channel_id: str, role_name: str = "") -> str:
         """Update or query the active roleplay persona for the current channel. Returns status message."""
         role_name = role_name.strip()
@@ -632,8 +793,6 @@ class Chatbot(ABC):
         # 2. Rebuild the active session system prompt if a session exists
         session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
         if session:
-            from kesoku.agent.prompt import build_sys_prompt
-
             new_sys_prompt = build_sys_prompt(session=session)
             await self.gateway.update_session_system_prompt(session.id, new_sys_prompt)
 

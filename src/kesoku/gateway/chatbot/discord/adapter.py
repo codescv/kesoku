@@ -10,12 +10,17 @@ from collections import defaultdict
 from typing import Any
 
 import discord
-from kesoku.agent.prompt import build_sys_prompt
 from kesoku.config import DiscordChannelOverride, get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.attachment_manager import AttachmentManager
-from kesoku.gateway.chatbot.base import Chatbot, DeliveryAbortedError, get_local_timezone_name
+from kesoku.gateway.chatbot.base import (
+    Chatbot,
+    DeliveryAbortedError,
+    InboundMessageAttachment,
+    InboundMessageDTO,
+    get_local_timezone_name,
+)
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 from kesoku.utils.async_fs import (
@@ -262,6 +267,76 @@ class DiscordChatbot(Chatbot):
             except Exception as e:
                 logger.error(f"Failed to sync Discord slash commands: {e}", exc_info=True)
 
+    async def pre_ingest_interruption_hook(self, session: Any, dto: InboundMessageDTO) -> None:
+        """Hook executed after session is resolved/created, but before posting."""
+        channel_id = dto.channel_id
+        session_id = session.id
+
+        # Clean up any active previous turn UI elements if a new turn is started (thought interruption)
+        task = self._typing_tasks.pop(channel_id, None)
+        if task:
+            task.cancel()
+
+        intermediate_msgs = self._intermediate_messages.pop(channel_id, [])
+        if intermediate_msgs:
+            for msg in intermediate_msgs:
+                try:
+                    await msg.delete()
+                except Exception as de:
+                    logger.warning(f"Failed to delete intermediate message {msg.id} on interruption: {de}")
+
+        active_turn_ids = [tid for tid in self._header_views if tid == session_id or tid.startswith(session_id)]
+        for tid in active_turn_ids:
+            header_msg, header_view = self._header_views.pop(tid)
+            try:
+                await header_msg.delete()
+            except Exception as he:
+                logger.warning(f"Failed to delete header message {header_msg.id} on interruption: {he}")
+
+        self._turn_special_items.pop(session_id, None)
+        self._turn_special_msg.pop(session_id, None)
+
+    async def process_attachments_hook(
+        self, session: Any, dto: InboundMessageDTO, raw_message: Any
+    ) -> list[InboundMessageAttachment]:
+        """Hook to process and save attachments using the resolved session workspace."""
+        message = raw_message  # raw_message is the discord.Message
+        attachments_metadata = []
+        if message.attachments:
+            for attachment in message.attachments:
+                async def save_cb(target_path: str, att=attachment) -> None:
+                    await att.save(target_path)
+
+                saved = await self.attachment_manager.save_attachment(
+                    filename=attachment.filename,
+                    workspace_name=session.workspace_name,
+                    save_callback=save_cb,
+                    collision_id=str(attachment.id),
+                )
+                attachments_metadata.append(
+                    InboundMessageAttachment(
+                        path=saved["path"],
+                        mime_type=attachment.content_type or "application/octet-stream",
+                        filename=attachment.filename,
+                    )
+                )
+        return attachments_metadata
+
+    async def post_ingest_hook(self, session: Any, message: Message, dto: InboundMessageDTO) -> None:
+        """Hook executed after the message is successfully posted to the gateway."""
+        # Trigger typing status for the thread/channel while agent is thinking
+        channel_id = dto.channel_id
+        if channel_id not in self._typing_tasks:
+            target_channel = self.bot.get_channel(int(channel_id))
+            if not target_channel:
+                try:
+                    target_channel = await self.bot.fetch_channel(int(channel_id))
+                except Exception as e:
+                    logger.error(f"Failed to fetch channel {channel_id} in post_ingest_hook: {e}")
+
+            if target_channel:
+                self._typing_tasks[channel_id] = asyncio.create_task(self._keep_typing(target_channel))
+
     async def on_message(self, message: discord.Message) -> None:
         """Process incoming messages from Discord and ingest into Kesoku Gateway.
 
@@ -345,98 +420,26 @@ class DiscordChatbot(Chatbot):
                 target_channel = thread
 
         channel_id = str(target_channel.id)
-        session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
 
-        if not session:
-            custom_prompt = _build_discord_custom_prompt(target_channel, message.author)
-            session_title = getattr(target_channel, "name", None) or f"Chat with {message.author.display_name}"
+        custom_prompt = _build_discord_custom_prompt(target_channel, message.author)
+        session_title = getattr(target_channel, "name", None) or f"Chat with {message.author.display_name}"
 
-            # Resolve current role before session creation for accurate initial system prompt
-            role = "default"
-            db_role = await self.gateway.get_channel_role(self.chatbot_id, channel_id)
-            if db_role:
-                role = db_role
-            elif isinstance(target_channel, discord.Thread) and target_channel.parent:
-                parent_role = await self.gateway.get_channel_role(self.chatbot_id, str(target_channel.parent.id))
-                if parent_role:
-                    role = parent_role
+        # Resolve role
+        role = "default"
+        db_role = await self.gateway.get_channel_role(self.chatbot_id, channel_id)
+        if isinstance(db_role, str):
+            role = db_role
+        elif isinstance(target_channel, discord.Thread) and target_channel.parent:
+            parent_role = await self.gateway.get_channel_role(self.chatbot_id, str(target_channel.parent.id))
+            if isinstance(parent_role, str):
+                role = parent_role
 
-            session = await self.gateway.create_session(
-                title=session_title,
-                custom_prompt=custom_prompt,
-                created_at=message.created_at.timestamp(),
-                chatbot_id=self.chatbot_id,
-                channel_id=channel_id,
-                role=role,
-            )
-            session_id = session.id
-        else:
-            session_id = session.id
-            await self.gateway.update_session_updated_at(session_id)
-
-            # Rebuild and update the system prompt with the latest Discord channel topic,
-            # members list, and custom instructions
-            custom_prompt = _build_discord_custom_prompt(target_channel, message.author)
-            new_sys_prompt = build_sys_prompt(custom_prompt=custom_prompt, session=session)
-            await self.gateway.update_session_system_prompt(session_id, new_sys_prompt)
-
-            # Clean up any active previous turn UI elements if a new turn is started (thought interruption)
-            task = self._typing_tasks.pop(channel_id, None)
-            if task:
-                task.cancel()
-
-            intermediate_msgs = self._intermediate_messages.pop(channel_id, [])
-            if intermediate_msgs:
-                for msg in intermediate_msgs:
-                    try:
-                        await msg.delete()
-                    except Exception as de:
-                        logger.warning(f"Failed to delete intermediate message {msg.id} on interruption: {de}")
-
-            active_turn_ids = [tid for tid in self._header_views if tid == session_id or tid.startswith(session_id)]
-            for tid in active_turn_ids:
-                header_msg, header_view = self._header_views.pop(tid)
-                try:
-                    await header_msg.delete()
-                except Exception as he:
-                    logger.warning(f"Failed to delete header message {header_msg.id} on interruption: {he}")
-
-            self._turn_special_items.pop(session_id, None)
-            self._turn_special_msg.pop(session_id, None)
-
-        # Save any incoming attachments to the session staging directory
-        attachments_metadata = []
-        if message.attachments:
-            for attachment in message.attachments:
-                async def save_cb(target_path: str, att=attachment) -> None:
-                    await att.save(target_path)
-
-                saved = await self.attachment_manager.save_attachment(
-                    filename=attachment.filename,
-                    workspace_name=session.workspace_name,
-                    save_callback=save_cb,
-                    collision_id=str(attachment.id),
-                )
-                attachments_metadata.append(
-                    {
-                        "path": saved["path"],
-                        "mime_type": attachment.content_type or "application/octet-stream",
-                        "filename": attachment.filename,
-                    }
-                )
-
-        # Ingest user message into Gateway
         tz_name = get_local_timezone_name()
         discord_msg_content = (
             f"`{message.author.display_name}` <@{message.author.id}> "
             f"at `{message.created_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')} {tz_name}`:\n"
             f"{message.content}"
         )
-        if attachments_metadata:
-            files_str = "\n".join(
-                f"[Attachment: {a['filename']} ({a['mime_type']}) saved at {a['path']}]" for a in attachments_metadata
-            )
-            discord_msg_content += f"\n\nAttachments:\n{files_str}"
 
         # Construct metadata with parent/thread identifiers
         channel_name = getattr(target_channel, "name", "") or ""
@@ -453,30 +456,24 @@ class DiscordChatbot(Chatbot):
             "discord_author_id": str(message.author.id),
             "channel_name": channel_name,
         }
-        if attachments_metadata:
-            msg_metadata["attachments"] = attachments_metadata
         if parent_channel_id:
             msg_metadata["parent_channel_id"] = parent_channel_id
         if parent_channel_name:
             msg_metadata["parent_channel_name"] = parent_channel_name
 
-        msg = Message(
-            session_id=session_id,
-            chatbot_id=self.chatbot_id,
+        dto = InboundMessageDTO(
+            sender_id=message.author.display_name,
             channel_id=channel_id,
-            sender=message.author.display_name,
-            role=MessageRole.USER,
-            type=MessageType.TEXT,
-            content=discord_msg_content,
+            text=discord_msg_content,
+            message_id=str(message.id),
             timestamp=message.created_at.timestamp(),
-            status=MessageStatus.PENDING_AGENT,
-            metadata=msg_metadata,
+            raw_metadata=msg_metadata,
+            session_title=session_title,
+            custom_prompt=custom_prompt,
+            role=role,
         )
-        await self.gateway.post(msg)
 
-        # Trigger typing status for the thread/channel while agent is thinking
-        if channel_id not in self._typing_tasks:
-            self._typing_tasks[channel_id] = asyncio.create_task(self._keep_typing(target_channel))
+        await self.ingest_message(dto, raw_message=message)
 
     async def handle_message(self, message: Message) -> None:
         """Process outgoing message from Gateway and send to target Discord thread."""

@@ -19,7 +19,7 @@ from googleapiclient.errors import HttpError
 from kesoku.config import get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
-from kesoku.gateway.chatbot.base import Chatbot, parse_message_content
+from kesoku.gateway.chatbot.base import Chatbot, InboundMessageDTO, parse_message_content
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 
@@ -240,34 +240,64 @@ class GoogleChatChatbot(Chatbot):
         if event_type == "MESSAGE":
             await self._handle_incoming_message(event)
 
-    async def _handle_slash_command(self, channel_id: str, cmd_text: str) -> None:
-        """Parse and execute a text-based slash command.
+    async def pre_ingest_interruption_hook(self, session: Any, dto: InboundMessageDTO) -> None:
+        """Hook executed after session is resolved/created, but before posting."""
+        session_id = session.id
+        channel_id = dto.channel_id
 
-        Args:
-            channel_id: The thread/space identifier.
-            cmd_text: The raw text content of the slash command.
-        """
-        async def reply_func(text: str) -> None:
-            body = {"text": text}
+        foldable = self._foldable_ui_messages.pop(session_id, None)
+        if foldable and foldable["name"]:
+            history = await self.gateway.get_session_history(session_id, limit=20)
+            prev_user_msg = None
+            for msg in reversed(history):
+                if msg.role == MessageRole.USER:
+                    prev_user_msg = msg
+                    break
+            metrics = prev_user_msg.metadata.get("turn_metrics") if prev_user_msg else None
+
+            body = {
+                "cardsV2": [
+                    GoogleChatCardBuilder.build_foldable_ui_card(
+                        session_id,
+                        foldable["items"],
+                        status="interrupted",
+                        metrics=metrics,
+                    )
+                ]
+            }
             if channel_id and "threads" in channel_id:
                 body["thread"] = {"name": channel_id}
-
-            parent_space = channel_id.split("/threads/")[0] if channel_id else "spaces/unknown"
             try:
                 await asyncio.to_thread(
                     self._chat_service.spaces()
                     .messages()
-                    .create(
-                        parent=parent_space,
+                    .patch(
+                        name=foldable["name"],
                         body=body,
-                        messageReplyOption="REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD",
+                        updateMask="cardsV2",
                     )
                     .execute
                 )
             except Exception as e:
-                logger.error(f"Google Chat: failed to send command reply: {e}", exc_info=True)
+                logger.error(f"Failed to finalize previous Google Chat foldable UI card on thought interruption: {e}")
 
-        await self.execute_command_from_text(cmd_text, reply_func, channel_id=channel_id)
+    async def post_ingest_hook(self, session: Any, message: Message, dto: InboundMessageDTO) -> None:
+        """Hook executed after the message is successfully posted to the gateway."""
+        session_id = session.id
+        message_name = dto.raw_metadata.get("message_name")
+        if not message_name:
+            return
+
+        # Store active user message name for this session
+        self._active_user_message_names[session_id] = message_name
+        self._used_reactions[message_name] = {}
+
+        # Optionally add a random emoji reaction if configured and using user credentials
+        if self.config.reaction_emoji and self._user_chat_service:
+            emojis = parse_emoji_sequence(self.config.reaction_emoji)
+            if emojis:
+                selected_emoji = random.choice(emojis)
+                asyncio.create_task(self._add_reaction(message_name, selected_emoji))
 
     async def _handle_incoming_message(self, event: dict[str, Any]) -> None:
         """Process an incoming standard text message or mention.
@@ -299,89 +329,43 @@ class GoogleChatChatbot(Chatbot):
         # Define the thread context as the logical channel ID
         channel_id = thread_name if thread_name else space_name
 
-        # Intercept and process text-based slash commands
-        if text.startswith("/"):
-            await self._handle_slash_command(channel_id, text)
-            return
+        # Compile prompt
+        custom_prompt = self._build_gchat_custom_prompt(space_data, sender_name)
 
-        # Resolve or create Kesoku session mapped to the thread/space context
-        session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
-        if not session:
-            title = f"Google Chat Session: {text[:30]}"
-            session = await self.gateway.create_session(
-                session_id=None,
-                title=title,
-                custom_prompt=self._build_gchat_custom_prompt(space_data, sender_name),
-                chatbot_id=self.chatbot_id,
-                channel_id=channel_id,
-            )
-            # Save session metadata
-            await self.gateway.update_session_updated_at(session.id)
+        dto = InboundMessageDTO(
+            sender_id=sender_name,
+            channel_id=channel_id,
+            text=text,
+            message_id=message_data.get("name", ""),
+            timestamp=time.time(),
+            raw_metadata={
+                "message_name": message_data.get("name"),
+            },
+            session_title=f"Google Chat Session: {text[:30]}",
+            custom_prompt=custom_prompt,
+        )
 
-        # If there is a previous turn still marked as active (running), update it to interrupted before starting new one
-        foldable = self._foldable_ui_messages.pop(session.id, None)
-        if foldable and foldable["name"]:
-            history = await self.gateway.get_session_history(session.id, limit=20)
-            prev_user_msg = None
-            for msg in reversed(history):
-                if msg.role == MessageRole.USER:
-                    prev_user_msg = msg
-                    break
-            metrics = prev_user_msg.metadata.get("turn_metrics") if prev_user_msg else None
-
-            body = {
-                "cardsV2": [
-                    GoogleChatCardBuilder.build_foldable_ui_card(
-                        session.id,
-                        foldable["items"],
-                        status="interrupted",
-                        metrics=metrics,
-                    )
-                ]
-            }
+        async def reply_func(reply_text: str) -> None:
+            body = {"text": reply_text}
             if channel_id and "threads" in channel_id:
                 body["thread"] = {"name": channel_id}
+
+            parent_space = channel_id.split("/threads/")[0] if channel_id else "spaces/unknown"
             try:
                 await asyncio.to_thread(
                     self._chat_service.spaces()
                     .messages()
-                    .patch(
-                        name=foldable["name"],
+                    .create(
+                        parent=parent_space,
                         body=body,
-                        updateMask="cardsV2",
+                        messageReplyOption="REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD",
                     )
                     .execute
                 )
             except Exception as e:
-                logger.error(f"Failed to finalize previous Google Chat foldable UI card on thought interruption: {e}")
+                logger.error(f"Google Chat: failed to send command reply: {e}", exc_info=True)
 
-        # Construct Gateway Message
-        user_msg = Message(
-            session_id=session.id,
-            chatbot_id=self.chatbot_id,
-            channel_id=channel_id,
-            sender=sender_name,
-            role=MessageRole.USER,
-            type=MessageType.TEXT,
-            content=text,
-            status=MessageStatus.PENDING_AGENT,
-            timestamp=time.time(),
-        )
-
-        # Store active user message name for this session
-        if message_data.get("name"):
-            self._active_user_message_names[session.id] = message_data["name"]
-            self._used_reactions[message_data["name"]] = {}
-
-        # Post user message to trigger agent processing loop
-        await self.gateway.post(user_msg)
-
-        # Optionally add a random emoji reaction if configured and using user credentials
-        if self.config.reaction_emoji and self._user_chat_service and message_data.get("name"):
-            emojis = parse_emoji_sequence(self.config.reaction_emoji)
-            if emojis:
-                selected_emoji = random.choice(emojis)
-                asyncio.create_task(self._add_reaction(message_data["name"], selected_emoji))
+        await self.ingest_message(dto, raw_message=event, reply_callback=reply_func)
 
     async def _add_reaction(self, message_name: str, emoji: str) -> None:
         """Add an emoji reaction to a Google Chat message using user credentials.
