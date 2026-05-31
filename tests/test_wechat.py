@@ -524,7 +524,10 @@ async def test_wechat_inbound_image_mime_sniffing(
 
     with (
         patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config),
-        patch("kesoku.gateway.chatbot.wechat._download_and_decrypt_media", return_value=png_bytes) as mock_dl,
+        patch(
+            "kesoku.gateway.chatbot.wechat.WeChatMediaManager.download_and_decrypt",
+            return_value=png_bytes,
+        ) as mock_dl,
         patch("builtins.open", mock_open()) as mock_file_open,
     ):
         bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)

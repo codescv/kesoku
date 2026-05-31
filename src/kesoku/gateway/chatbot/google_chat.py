@@ -5,7 +5,6 @@ a Google Cloud Pub/Sub Pull Subscription and GCP public APIs.
 """
 
 import asyncio
-import html
 import json
 import random
 import time
@@ -21,6 +20,7 @@ from kesoku.config import get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot, parse_message_content
+from kesoku.gateway.chatbot.google_chat_cards import GoogleChatCardBuilder
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 
@@ -246,9 +246,6 @@ class GoogleChatChatbot(Chatbot):
             channel_id: The thread/space identifier.
             cmd_text: The raw text content of the slash command.
         """
-        parts = cmd_text.strip().split()
-        command = parts[0].lower().lstrip("/")
-
         async def reply_func(text: str) -> None:
             body = {"text": text}
             if channel_id and "threads" in channel_id:
@@ -269,19 +266,7 @@ class GoogleChatChatbot(Chatbot):
             except Exception as e:
                 logger.error(f"Google Chat: failed to send command reply: {e}", exc_info=True)
 
-        try:
-            if command in {"clear", "reset", "status", "compact"}:
-                await self.commands.execute(command, reply_func, channel_id=channel_id)
-            elif command == "role":
-                role_name = " ".join(parts[1:]) if len(parts) > 1 else ""
-                await self.commands.execute("role", reply_func, channel_id=channel_id, role_name=role_name)
-            elif command == "restart":
-                await self.commands.execute(command, reply_func)
-            else:
-                await reply_func(f"⚠️ Unrecognized command: /{command}")
-        except Exception as e:
-            logger.error(f"Google Chat command /{command} execution failed: {e}", exc_info=True)
-            await reply_func(f"⚠️ Failed to execute command: {e}")
+        await self.execute_command_from_text(cmd_text, reply_func, channel_id=channel_id)
 
     async def _handle_incoming_message(self, event: dict[str, Any]) -> None:
         """Process an incoming standard text message or mention.
@@ -345,7 +330,7 @@ class GoogleChatChatbot(Chatbot):
 
             body = {
                 "cardsV2": [
-                    self._build_foldable_ui_card(
+                    GoogleChatCardBuilder.build_foldable_ui_card(
                         session.id,
                         foldable["items"],
                         status="interrupted",
@@ -520,7 +505,9 @@ class GoogleChatChatbot(Chatbot):
                 )
             elif message.role == MessageRole.TOOL and message.type == MessageType.TOOL_CALL:
                 tool_name = message.metadata.get("tool_name") or message.sender or "unknown_tool"
-                arg_suffix = await self._get_tool_arguments_suffix(message)
+                arg_suffix = GoogleChatCardBuilder.get_tool_arguments_suffix(
+                    message.metadata.get("tool_arguments")
+                )
                 items.append(
                     {
                         "type": "tool_call",
@@ -568,7 +555,13 @@ class GoogleChatChatbot(Chatbot):
                 )
 
             # Build the card payload
-            body = {"cardsV2": [self._build_foldable_ui_card(session_id, items, status="running")]}
+            body = {
+                "cardsV2": [
+                    GoogleChatCardBuilder.build_foldable_ui_card(
+                        session_id, items, status="running"
+                    )
+                ]
+            }
             if message.channel_id and "threads" in message.channel_id:
                 body["thread"] = {"name": message.channel_id}
 
@@ -610,7 +603,7 @@ class GoogleChatChatbot(Chatbot):
                 # Finalize the foldable UI card
                 body = {
                     "cardsV2": [
-                        self._build_foldable_ui_card(
+                        GoogleChatCardBuilder.build_foldable_ui_card(
                             session_id,
                             foldable["items"],
                             status="finished",
@@ -674,7 +667,11 @@ class GoogleChatChatbot(Chatbot):
                 )
 
             if choices:
-                cards.append(self._build_question_card(session_id, question_text, choices))
+                cards.append(
+                    GoogleChatCardBuilder.build_question_card(
+                        session_id, question_text, choices
+                    )
+                )
 
             if cards:
                 body["cardsV2"] = cards
@@ -695,142 +692,7 @@ class GoogleChatChatbot(Chatbot):
             except Exception as e:
                 logger.error(f"Failed to send final message to Google Chat space: {e}", exc_info=True)
 
-    async def _get_tool_arguments_suffix(self, message: Message) -> str:
-        """Format and retrieve the tool arguments suffix for Google Chat card display.
 
-        Args:
-            message: The tool call Message.
-
-        Returns:
-            Formatted suffix string (e.g., ': <code>arg_value</code>'), or empty string if none.
-        """
-        tool_args = message.metadata.get("tool_arguments")
-
-        arg_str = ""
-        if isinstance(tool_args, dict):
-            # Exclude framework/context arguments
-            filtered_args = {k: v for k, v in tool_args.items() if k != "context"}
-            if len(filtered_args) == 1:
-                val = next(iter(filtered_args.values()))
-                arg_str = str(val)
-            elif len(filtered_args) > 1:
-                arg_str = ", ".join(f"{k}: {v}" for k, v in filtered_args.items())
-
-        if arg_str:
-            arg_str = arg_str.replace("\n", " ")
-            if len(arg_str) > 80:
-                arg_str = arg_str[:80] + "..."
-
-        return f": <code>{html.escape(arg_str)}</code>" if arg_str else ""
-
-    def _build_foldable_ui_card(
-        self,
-        session_id: str,
-        items: list[dict[str, Any]],
-        status: str = "running",
-        metrics: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Construct a single foldable UI card for all intermediate thoughts and tools.
-
-        Args:
-            session_id: Active session ID.
-            items: List of intermediate special messages/thoughts/tools.
-            status: Either 'running', 'finished', or 'interrupted'.
-            metrics: Optional dictionary containing session and turn metrics.
-
-        Returns:
-            A cardsV2 dictionary structure.
-        """
-        widgets = []
-        for item in items:
-            if item["type"] == "thought":
-                content_html = html.escape(item["content"]).replace("\n", "<br>")
-                widgets.append({"textParagraph": {"text": f"💭 <b>Thought:</b> {content_html}"}})
-            elif item["type"] == "tool_call":
-                emoji = item["status"]
-                widgets.append({"textParagraph": {"text": f"🛠️ <b>{item['tool_name']}</b>{item['arg_suffix']} {emoji}"}})
-            elif item["type"] == "system":
-                content_html = html.escape(item["content"]).replace("\n", "<br>")
-                widgets.append({"textParagraph": {"text": f"⚙️ <b>System:</b> {content_html}"}})
-
-        if not widgets:
-            widgets.append({"textParagraph": {"text": "<i>Preparing turn...</i>"}})
-
-        # Collapsible section for Thoughts & Tools
-        thoughts_tools_section = {
-            "header": "Thoughts & Tools",
-            "collapsible": True,
-            "uncollapsibleWidgetsCount": 0,
-            "widgets": widgets,
-        }
-
-        card_sections = [thoughts_tools_section]
-
-        # Control / Metrics section
-        if status in ("finished", "interrupted") and metrics:
-            session_turns = metrics.get("session_turns", 0)
-            context_tokens = metrics.get("context_tokens", 0)
-            turn_tool_calls = metrics.get("turn_tool_calls", 0)
-            turn_tokens = metrics.get("turn_tokens", 0)
-            turn_time = metrics.get("turn_time", 0.0)
-
-            context_k = f"{round(context_tokens / 1000)}K"
-            turn_k = f"{round(turn_tokens / 1000)}K"
-
-            if status == "finished":
-                prefix = "⚡"
-                suffix = ""
-            else:
-                prefix = "🛑"
-                suffix = " (Interrupted)"
-
-            metrics_text = (
-                f"{prefix} <b>Session:</b> {session_turns} turns | <b>Context:</b> {context_k} tokens{suffix}<br>"
-                f"⏱️ <b>Turn:</b> {turn_tool_calls} tool calls | {turn_k} tokens | {turn_time:.1f}s"
-            )
-            card_sections.append({"widgets": [{"textParagraph": {"text": metrics_text}}]})
-
-        return {
-            "cardId": f"foldable_ui_{session_id}",
-            "card": {
-                "header": {
-                    "title": "Kesoku Agent",
-                    "subtitle": "Active Turn" if status == "running" else "Turn Completed",
-                },
-                "sections": card_sections,
-            },
-        }
-
-    def _build_question_card(self, session_id: str, question: str, choices: list[str]) -> dict[str, Any]:
-        """Construct the multiple-choice question card without interactive buttons.
-
-        Args:
-            session_id: Active session ID.
-            question: The question prompt text.
-            choices: A list of choice values.
-
-        Returns:
-            A cardsV2 dictionary structure.
-        """
-        choices_list = "\n".join(f"- {choice}" for choice in choices)
-        card_text = f"{question}\n\n{choices_list}"
-        return {
-            "cardId": f"question_{session_id}",
-            "card": {
-                "sections": [
-                    {
-                        "widgets": [
-                            {
-                                "textParagraph": {
-                                    "text": card_text,
-                                    "textSyntax": "MARKDOWN",
-                                }
-                            }
-                        ]
-                    },
-                ],
-            },
-        }
 
     def _build_gchat_custom_prompt(self, space_data: dict[str, Any], sender_name: str) -> str:
         """Build contextual system instructions injected into Google Chat sessions."""

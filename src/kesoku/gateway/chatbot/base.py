@@ -4,8 +4,6 @@ import asyncio
 import datetime
 import os
 import re
-import shutil
-import sys
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -17,6 +15,7 @@ from kesoku.constants import SYSTEM_START_TIME, MessageRole, MessageStatus, Mess
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
+from kesoku.utils.service import restart_service as utils_restart_service
 from kesoku.utils.text import format_text, split_text_into_chunks
 
 logger = setup_logger(__name__)
@@ -212,46 +211,52 @@ class Chatbot(ABC):
             handle_role,
         )
 
-    def _get_kesoku_executable(self) -> str:
-        executable_dir = os.path.dirname(sys.executable)
-        kesoku_path = os.path.join(executable_dir, "kesoku")
-        if os.path.exists(kesoku_path):
-            return kesoku_path
-        return shutil.which("kesoku") or "kesoku"
-
     async def restart_service(self) -> None:
         """Restart the Kesoku service."""
-        logger.info(f"Chatbot '{self.chatbot_id}' requesting service restart.")
-        self.stop()
+        await utils_restart_service(self.chatbot_id, self.stop)
 
-        kesoku_bin = self._get_kesoku_executable()
-        cmd = [kesoku_bin, "service", "restart"]
+    async def execute_command_from_text(
+        self,
+        text: str,
+        reply_func: Callable[[str], Awaitable[None]],
+        channel_id: str | None = None,
+    ) -> None:
+        """Parse and execute a slash command from text.
 
-        service_user = os.environ.get("KESOKU_SERVICE_USER", "true") == "true"
-        if service_user:
-            cmd.append("--user")
-        else:
-            cmd.append("--system")
+        Args:
+            text: Raw text containing the command (e.g., '/role helper').
+            reply_func: Async callback to send response back.
+            channel_id: Optional channel ID context.
+        """
+        parts = text.strip().split()
+        if not parts:
+            return
 
-        instance_name = os.environ.get("KESOKU_SERVICE_INSTANCE_NAME")
-        if instance_name:
-            cmd.extend(["--name", instance_name])
+        raw_command = parts[0]
+        if not raw_command.startswith("/"):
+            return
 
-        logger.info(f"Launching restart command: {' '.join(cmd)}")
+        command = raw_command.lower().lstrip("/")
+
         try:
-            await asyncio.create_subprocess_exec(*cmd, start_new_session=True)
-            logger.info("Successfully launched kesoku service restart command.")
+            if command in {"clear", "reset", "status", "compact"}:
+                if not channel_id:
+                    await reply_func("⚠️ Channel ID is required for this command.")
+                    return
+                await self.commands.execute(command, reply_func, channel_id=channel_id)
+            elif command == "role":
+                if not channel_id:
+                    await reply_func("⚠️ Channel ID is required for this command.")
+                    return
+                role_name = " ".join(parts[1:]) if len(parts) > 1 else ""
+                await self.commands.execute("role", reply_func, channel_id=channel_id, role_name=role_name)
+            elif command == "restart":
+                await self.commands.execute(command, reply_func)
+            else:
+                await reply_func(f"⚠️ Unrecognized command: /{command}")
         except Exception as e:
-            logger.error(f"Failed to run restart command: {e}")
-            # Fallback to in-place os.execv restart
-            logger.info("Falling back to in-place os.execv restart...")
-            try:
-                sys.stdout.flush()
-                sys.stderr.flush()
-                os.execv(sys.executable, [sys.executable] + sys.argv)
-            except Exception as fallback_error:
-                logger.error(f"In-place fallback restart failed: {fallback_error}")
-                raise e
+            logger.error(f"Command /{command} execution failed: {e}", exc_info=True)
+            await reply_func(f"⚠️ Failed to execute command: {e}")
 
     async def clear_session(self, session_id: str) -> None:
         """Stop any active worker for the session, and delete the session database record and workspace."""

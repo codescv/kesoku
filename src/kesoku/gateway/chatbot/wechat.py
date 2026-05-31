@@ -13,13 +13,11 @@ import os
 import re
 import secrets
 import ssl
-import struct
 import textwrap
 import time
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlparse
 
 import aiohttp
 import certifi
@@ -29,27 +27,37 @@ from kesoku.agent.prompt import build_sys_prompt
 from kesoku.config import get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
+from kesoku.gateway.attachment_manager import AttachmentManager
 from kesoku.gateway.chatbot.base import Chatbot
+from kesoku.gateway.chatbot.wechat_client import (
+    ILINK_BASE_URL,
+    ITEM_FILE,
+    ITEM_IMAGE,
+    ITEM_TEXT,
+    ITEM_VIDEO,
+    ITEM_VOICE,
+    MEDIA_FILE,
+    MEDIA_IMAGE,
+    MEDIA_VIDEO,
+    MEDIA_VOICE,
+    MSG_STATE_FINISH,
+    MSG_TYPE_BOT,
+    TYPING_START,
+    TYPING_STOP,
+    WEIXIN_CDN_BASE_URL,
+    ILinkClient,
+)
+from kesoku.gateway.chatbot.wechat_listener import WeChatListener
+from kesoku.gateway.chatbot.wechat_media import WeChatMediaManager
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 from kesoku.utils.async_fs import (
     async_exists,
     async_read_bytes,
     async_read_text_file,
-    async_realpath,
-    async_write_binary_file,
-)
-from kesoku.utils.crypto import (
-    aes128_ecb_decrypt as _aes128_ecb_decrypt,
-)
-from kesoku.utils.crypto import (
-    aes128_ecb_encrypt as _aes128_ecb_encrypt,
 )
 from kesoku.utils.crypto import (
     aes_padded_size as _aes_padded_size,
-)
-from kesoku.utils.crypto import (
-    parse_aes_key as _parse_aes_key,
 )
 from kesoku.utils.image import (
     compress_image as _compress_image,
@@ -60,50 +68,8 @@ from kesoku.utils.image import (
 
 logger = setup_logger(__name__)
 
-ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
-WEIXIN_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
-ILINK_APP_ID = "bot"
-CHANNEL_VERSION = "2.2.0"
-ILINK_APP_CLIENT_VERSION = (2 << 16) | (2 << 8) | 0
-
-EP_GET_UPDATES = "ilink/bot/getupdates"
-EP_SEND_MESSAGE = "ilink/bot/sendmessage"
-EP_SEND_TYPING = "ilink/bot/sendtyping"
-EP_GET_CONFIG = "ilink/bot/getconfig"
-EP_GET_UPLOAD_URL = "ilink/bot/getuploadurl"
-EP_GET_BOT_QR = "ilink/bot/get_bot_qrcode"
-EP_GET_QR_STATUS = "ilink/bot/get_qrcode_status"
-
-LONG_POLL_TIMEOUT_MS = 35_000
-API_TIMEOUT_MS = 15_000
-CONFIG_TIMEOUT_MS = 10_000
-QR_TIMEOUT_MS = 35_000
-
-MAX_CONSECUTIVE_FAILURES = 3
-RETRY_DELAY_SECONDS = 2
-BACKOFF_DELAY_SECONDS = 30
-SESSION_EXPIRED_ERRCODE = -14
-RATE_LIMIT_ERRCODE = -2
 MESSAGE_DEDUP_TTL_SECONDS = 300
 WEIXIN_COPY_LINE_WIDTH = 120
-
-MEDIA_IMAGE = 1
-MEDIA_VIDEO = 2
-MEDIA_FILE = 3
-MEDIA_VOICE = 4
-
-ITEM_TEXT = 1
-ITEM_IMAGE = 2
-ITEM_VOICE = 3
-ITEM_FILE = 4
-ITEM_VIDEO = 5
-
-MSG_TYPE_USER = 1
-MSG_TYPE_BOT = 2
-MSG_STATE_FINISH = 2
-
-TYPING_START = 1
-TYPING_STOP = 2
 
 _HEADER_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _TABLE_RULE_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$")
@@ -119,39 +85,7 @@ def _safe_id(value: str | None, keep: int = 8) -> str:
     return raw[:keep]
 
 
-def _json_dumps(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
-
-
-
-def _random_wechat_uin() -> str:
-    value = struct.unpack(">I", secrets.token_bytes(4))[0]
-    return base64.b64encode(str(value).encode("utf-8")).decode("ascii")
-
-
-def _base_info() -> dict[str, Any]:
-    return {"channel_version": CHANNEL_VERSION}
-
-
-def _headers(token: str | None, body: str) -> dict[str, str]:
-    headers = {
-        "Content-Type": "application/json",
-        "AuthorizationType": "ilink_bot_token",
-        "Content-Length": str(len(body.encode("utf-8"))),
-        "X-WECHAT-UIN": _random_wechat_uin(),
-        "iLink-App-Id": ILINK_APP_ID,
-        "iLink-App-ClientVersion": str(ILINK_APP_CLIENT_VERSION),
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
-
-
-def _is_stale_session_ret(ret: int | None, errcode: int | None, errmsg: str | None) -> bool:
-    if ret != RATE_LIMIT_ERRCODE and errcode != RATE_LIMIT_ERRCODE:
-        return False
-    return (errmsg or "").lower() == "unknown error"
 
 
 class ContextTokenStore:
@@ -244,16 +178,7 @@ class MessageDeduplicator:
         return False
 
 
-def _cdn_download_url(cdn_base_url: str, encrypted_query_param: str) -> str:
-    return f"{cdn_base_url.rstrip('/')}/download?encrypted_query_param={quote(encrypted_query_param, safe='')}"
 
-
-def _cdn_upload_url(cdn_base_url: str, upload_param: str, filekey: str) -> str:
-    return (
-        f"{cdn_base_url.rstrip('/')}/upload"
-        f"?encrypted_query_param={quote(upload_param, safe='')}"
-        f"&filekey={quote(filekey, safe='')}"
-    )
 
 
 def _guess_chat_type(message: dict[str, Any], account_id: str) -> tuple[str, str]:
@@ -267,264 +192,20 @@ def _guess_chat_type(message: dict[str, Any], account_id: str) -> tuple[str, str
     return "dm", str(message.get("from_user_id") or "")
 
 
-async def _api_post(
-    session: aiohttp.ClientSession,
-    *,
-    base_url: str,
-    endpoint: str,
-    payload: dict[str, Any],
-    token: str | None,
-    timeout_ms: int,
-) -> dict[str, Any]:
-    body = _json_dumps({**payload, "base_info": _base_info()})
-    url = f"{base_url.rstrip('/')}/{endpoint}"
-    timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000)
-    async with session.post(url, data=body, headers=_headers(token, body), timeout=timeout) as response:
-        raw = await response.text()
-        if not response.ok:
-            raise RuntimeError(f"iLink POST {endpoint} HTTP {response.status}: {raw[:200]}")
-        return json.loads(raw)
 
 
-async def _api_get(
-    session: aiohttp.ClientSession,
-    *,
-    base_url: str,
-    endpoint: str,
-    timeout_ms: int,
-) -> dict[str, Any]:
-    url = f"{base_url.rstrip('/')}/{endpoint}"
-    headers = {
-        "iLink-App-Id": ILINK_APP_ID,
-        "iLink-App-ClientVersion": str(ILINK_APP_CLIENT_VERSION),
-    }
-    timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000)
-    async with session.get(url, headers=headers, timeout=timeout) as response:
-        raw = await response.text()
-        if not response.ok:
-            raise RuntimeError(f"iLink GET {endpoint} HTTP {response.status}: {raw[:200]}")
-        return json.loads(raw)
 
 
-async def _get_updates(
-    session: aiohttp.ClientSession,
-    *,
-    base_url: str,
-    token: str,
-    sync_buf: str,
-    timeout_ms: int,
-) -> dict[str, Any]:
-    try:
-        return await _api_post(
-            session,
-            base_url=base_url,
-            endpoint=EP_GET_UPDATES,
-            payload={"get_updates_buf": sync_buf},
-            token=token,
-            timeout_ms=timeout_ms,
-        )
-    except TimeoutError:
-        return {"ret": 0, "msgs": [], "get_updates_buf": sync_buf}
 
 
-async def _send_message(
-    session: aiohttp.ClientSession,
-    *,
-    base_url: str,
-    token: str,
-    to: str,
-    text: str,
-    context_token: str | None,
-    client_id: str,
-) -> dict[str, Any]:
-    if not text or not text.strip():
-        raise ValueError("_send_message: text must not be empty")
-    message: dict[str, Any] = {
-        "from_user_id": "",
-        "to_user_id": to,
-        "client_id": client_id,
-        "message_type": MSG_TYPE_BOT,
-        "message_state": MSG_STATE_FINISH,
-        "item_list": [{"type": ITEM_TEXT, "text_item": {"text": text}}],
-    }
-    if context_token:
-        message["context_token"] = context_token
-    return await _api_post(
-        session,
-        base_url=base_url,
-        endpoint=EP_SEND_MESSAGE,
-        payload={"msg": message},
-        token=token,
-        timeout_ms=API_TIMEOUT_MS,
-    )
 
-
-async def _send_typing(
-    session: aiohttp.ClientSession,
-    *,
-    base_url: str,
-    token: str,
-    to_user_id: str,
-    typing_ticket: str,
-    status: int,
-) -> None:
-    await _api_post(
-        session,
-        base_url=base_url,
-        endpoint=EP_SEND_TYPING,
-        payload={
-            "ilink_user_id": to_user_id,
-            "typing_ticket": typing_ticket,
-            "status": status,
-        },
-        token=token,
-        timeout_ms=CONFIG_TIMEOUT_MS,
-    )
-
-
-async def _get_config(
-    session: aiohttp.ClientSession,
-    *,
-    base_url: str,
-    token: str,
-    user_id: str,
-    context_token: str | None,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {"ilink_user_id": user_id}
-    if context_token:
-        payload["context_token"] = context_token
-    return await _api_post(
-        session,
-        base_url=base_url,
-        endpoint=EP_GET_CONFIG,
-        payload=payload,
-        token=token,
-        timeout_ms=CONFIG_TIMEOUT_MS,
-    )
-
-
-async def _get_upload_url(
-    session: aiohttp.ClientSession,
-    *,
-    base_url: str,
-    token: str,
-    to_user_id: str,
-    media_type: int,
-    filekey: str,
-    rawsize: int,
-    rawfilemd5: str,
-    filesize: int,
-    aeskey_hex: str,
-) -> dict[str, Any]:
-    return await _api_post(
-        session,
-        base_url=base_url,
-        endpoint=EP_GET_UPLOAD_URL,
-        payload={
-            "filekey": filekey,
-            "media_type": media_type,
-            "to_user_id": to_user_id,
-            "rawsize": rawsize,
-            "rawfilemd5": rawfilemd5,
-            "filesize": filesize,
-            "no_need_thumb": True,
-            "aeskey": aeskey_hex,
-        },
-        token=token,
-        timeout_ms=API_TIMEOUT_MS,
-    )
-
-
-async def _upload_ciphertext(
-    session: aiohttp.ClientSession,
-    *,
-    ciphertext: bytes,
-    upload_url: str,
-) -> str:
-    async def _do_upload() -> str:
-        headers = {"Content-Type": "application/octet-stream"}
-        async with session.post(upload_url, data=ciphertext, headers=headers) as response:
-            if response.status == 200:
-                encrypted_param = response.headers.get("x-encrypted-param")
-                if encrypted_param:
-                    await response.read()
-                    return encrypted_param
-                raw = await response.text()
-                raise RuntimeError(f"CDN upload missing x-encrypted-param header: {raw[:200]}")
-            raw = await response.text()
-            raise RuntimeError(f"CDN upload HTTP {response.status}: {raw[:200]}")
-
-    return await asyncio.wait_for(_do_upload(), timeout=120)
-
-
-async def _download_bytes(
-    session: aiohttp.ClientSession,
-    *,
-    url: str,
-    timeout_seconds: float = 60.0,
-) -> bytes:
-    async def _do_download() -> bytes:
-        async with session.get(url) as response:
-            response.raise_for_status()
-            return await response.read()
-
-    return await asyncio.wait_for(_do_download(), timeout=timeout_seconds)
-
-
-_WEIXIN_CDN_ALLOWLIST: frozenset[str] = frozenset(
-    {
-        "novac2c.cdn.weixin.qq.com",
-        "ilinkai.weixin.qq.com",
-        "wx.qlogo.cn",
-        "thirdwx.qlogo.cn",
-        "res.wx.qq.com",
-        "mmbiz.qpic.cn",
-        "mmbiz.qlogo.cn",
-    }
-)
-
-
-def _assert_weixin_cdn_url(url: str) -> None:
-    try:
-        parsed = urlparse(url)
-        scheme = parsed.scheme.lower()
-        host = parsed.hostname or ""
-    except Exception as exc:
-        raise ValueError(f"Unparseable media URL: {url!r}") from exc
-
-    if scheme not in {"http", "https"}:
-        raise ValueError(f"Media URL has disallowed scheme {scheme!r}; only http/https are permitted.")
-    if host not in _WEIXIN_CDN_ALLOWLIST:
-        raise ValueError(f"Media URL host {host!r} is not in the WeChat CDN allowlist. Refusing to fetch.")
 
 
 def _media_reference(item: dict[str, Any], key: str) -> dict[str, Any]:
     return (item.get(key) or {}).get("media") or {}
 
 
-async def _download_and_decrypt_media(
-    session: aiohttp.ClientSession,
-    *,
-    cdn_base_url: str,
-    encrypted_query_param: str | None,
-    aes_key_b64: str | None,
-    full_url: str | None,
-    timeout_seconds: float,
-) -> bytes:
-    if encrypted_query_param:
-        raw = await _download_bytes(
-            session,
-            url=_cdn_download_url(cdn_base_url, encrypted_query_param),
-            timeout_seconds=timeout_seconds,
-        )
-    elif full_url:
-        _assert_weixin_cdn_url(full_url)
-        raw = await _download_bytes(session, url=full_url, timeout_seconds=timeout_seconds)
-    else:
-        raise RuntimeError("media item had neither encrypt_query_param nor full_url")
-    if aes_key_b64:
-        raw = _aes128_ecb_decrypt(raw, _parse_aes_key(aes_key_b64))
-    return raw
+
 
 
 def _mime_from_filename(filename: str) -> str:
@@ -859,13 +540,9 @@ async def qr_login(
     connector = aiohttp.TCPConnector(ssl=ssl_ctx) if ssl_ctx else None
 
     async with aiohttp.ClientSession(trust_env=True, connector=connector) as session:
+        client = ILinkClient(session, base_url=ILINK_BASE_URL, token="")
         try:
-            qr_resp = await _api_get(
-                session,
-                base_url=ILINK_BASE_URL,
-                endpoint=f"{EP_GET_BOT_QR}?bot_type=3",
-                timeout_ms=QR_TIMEOUT_MS,
-            )
+            qr_resp = await client.get_bot_qrcode(bot_type=3)
         except Exception as exc:
             logger.error("weixin: failed to fetch QR code: %s", exc)
             return None
@@ -890,17 +567,11 @@ async def qr_login(
             print(f"（终端二维码渲染失败: {_qr_exc}，请直接打开上面的二维码链接）")
 
         deadline = time.monotonic() + timeout_seconds
-        current_base_url = ILINK_BASE_URL
         refresh_count = 0
 
         while time.monotonic() < deadline:
             try:
-                status_resp = await _api_get(
-                    session,
-                    base_url=current_base_url,
-                    endpoint=f"{EP_GET_QR_STATUS}?qrcode={qrcode_value}",
-                    timeout_ms=QR_TIMEOUT_MS,
-                )
+                status_resp = await client.get_qrcode_status(qrcode=qrcode_value)
             except TimeoutError:
                 await asyncio.sleep(1)
                 continue
@@ -917,7 +588,7 @@ async def qr_login(
             elif status == "scaned_but_redirect":
                 redirect_host = str(status_resp.get("redirect_host") or "")
                 if redirect_host:
-                    current_base_url = f"https://{redirect_host}"
+                    client.base_url = f"https://{redirect_host}"
             elif status == "expired":
                 refresh_count += 1
                 if refresh_count > 3:
@@ -925,12 +596,8 @@ async def qr_login(
                     return None
                 print(f"\n二维码已过期，正在刷新... ({refresh_count}/3)")
                 try:
-                    qr_resp = await _api_get(
-                        session,
-                        base_url=ILINK_BASE_URL,
-                        endpoint=f"{EP_GET_BOT_QR}?bot_type=3",
-                        timeout_ms=QR_TIMEOUT_MS,
-                    )
+                    client.base_url = ILINK_BASE_URL
+                    qr_resp = await client.get_bot_qrcode(bot_type=3)
                     qrcode_value = str(qr_resp.get("qrcode") or "")
                     qrcode_url = str(qr_resp.get("qrcode_img_content") or "")
                     qr_scan_data = qrcode_url if qrcode_url else qrcode_value
@@ -973,6 +640,7 @@ class WechatChatbot(Chatbot):
     def __init__(self, chatbot_id: str, gateway: Gateway) -> None:
         """Initialize WechatChatbot adapter."""
         super().__init__(chatbot_id, gateway)
+        self.attachment_manager = AttachmentManager()
         cfg = get_config()
         self.config = cfg.wechat
 
@@ -986,9 +654,8 @@ class WechatChatbot(Chatbot):
             )
 
         self._running = False
-        self._poll_task: asyncio.Task | None = None
-        self._poll_session: aiohttp.ClientSession | None = None
-        self._send_session: aiohttp.ClientSession | None = None
+        self._poll_session_val: aiohttp.ClientSession | None = None
+        self._send_session_val: aiohttp.ClientSession | None = None
 
         persist_path = None
         if cfg.agent_working_dir:
@@ -1001,6 +668,39 @@ class WechatChatbot(Chatbot):
         self._token = self.config.token.strip()
         self._base_url = self.config.base_url.strip().rstrip("/")
         self._cdn_base_url = WEIXIN_CDN_BASE_URL
+
+        self.poll_client: ILinkClient | None = None
+        self.send_client: ILinkClient | None = None
+        self.media_manager: WeChatMediaManager | None = None
+        self.listener: WeChatListener | None = None
+
+    @property
+    def _poll_session(self) -> aiohttp.ClientSession | None:
+        return self._poll_session_val
+
+    @_poll_session.setter
+    def _poll_session(self, session: aiohttp.ClientSession | None) -> None:
+        self._poll_session_val = session
+        if session:
+            self.poll_client = ILinkClient(session, base_url=self._base_url, token=self._token)
+            self.listener = WeChatListener(self.poll_client, self._process_message_safe)
+        else:
+            self.poll_client = None
+            self.listener = None
+
+    @property
+    def _send_session(self) -> aiohttp.ClientSession | None:
+        return self._send_session_val
+
+    @_send_session.setter
+    def _send_session(self, session: aiohttp.ClientSession | None) -> None:
+        self._send_session_val = session
+        if session:
+            self.send_client = ILinkClient(session, base_url=self._base_url, token=self._token)
+            self.media_manager = WeChatMediaManager(self.send_client)
+        else:
+            self.send_client = None
+            self.media_manager = None
 
     def _build_wechat_custom_prompt(self, chat_id: str, chat_type: str) -> str:
         return f"""
@@ -1031,106 +731,29 @@ You are interacting with the user via WeChat (Weixin).
             timeout=aiohttp.ClientTimeout(total=None),
         )
 
-        self._poll_task = asyncio.create_task(self._poll_loop())
+        self.listener.start()
         logger.info(f"WeChat bot '{self.chatbot_id}' successfully connected.")
-        await asyncio.gather(self._listener_task, self._poll_task)
+        await self._listener_task
 
     def stop(self) -> None:
         """Stop the WeChat bot and disconnect sessions."""
         self._running = False
         super().stop()
-        if self._poll_task and not self._poll_task.done():
-            self._poll_task.cancel()
+        if self.listener:
+            self.listener.stop()
         if self._poll_session and not self._poll_session.closed:
             asyncio.create_task(self._poll_session.close())
         if self._send_session and not self._send_session.closed:
             asyncio.create_task(self._send_session.close())
 
-    async def _poll_loop(self) -> None:
-        sync_buf = ""
-        timeout_ms = LONG_POLL_TIMEOUT_MS
-        consecutive_failures = 0
-
-        while self._running:
-            try:
-                response = await _get_updates(
-                    self._poll_session,
-                    base_url=self._base_url,
-                    token=self._token,
-                    sync_buf=sync_buf,
-                    timeout_ms=timeout_ms,
-                )
-                suggested_timeout = response.get("longpolling_timeout_ms")
-                if isinstance(suggested_timeout, int) and suggested_timeout > 0:
-                    timeout_ms = suggested_timeout
-
-                ret = response.get("ret", 0)
-                errcode = response.get("errcode", 0)
-                if ret not in {0, None} or errcode not in {0, None}:
-                    if (
-                        ret == SESSION_EXPIRED_ERRCODE
-                        or errcode == SESSION_EXPIRED_ERRCODE
-                        or _is_stale_session_ret(ret, errcode, response.get("errmsg"))
-                    ):
-                        logger.error("WeChat: Session expired; pausing for 10 minutes")
-                        await asyncio.sleep(600)
-                        consecutive_failures = 0
-                        continue
-
-                    consecutive_failures += 1
-                    logger.warning(
-                        "WeChat: getUpdates failed ret=%s errcode=%s errmsg=%s (%d/%d)",
-                        ret,
-                        errcode,
-                        response.get("errmsg", ""),
-                        consecutive_failures,
-                        MAX_CONSECUTIVE_FAILURES,
-                    )
-                    await asyncio.sleep(
-                        BACKOFF_DELAY_SECONDS
-                        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES
-                        else RETRY_DELAY_SECONDS
-                    )
-                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                        consecutive_failures = 0
-                    continue
-
-                consecutive_failures = 0
-                new_sync_buf = str(response.get("get_updates_buf") or "")
-                if new_sync_buf:
-                    sync_buf = new_sync_buf
-
-                for msg in response.get("msgs") or []:
-                    asyncio.create_task(self._process_message_safe(msg))
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                consecutive_failures += 1
-                logger.error(
-                    "WeChat: poll error (%d/%d): %s",
-                    consecutive_failures,
-                    MAX_CONSECUTIVE_FAILURES,
-                    exc,
-                )
-                await asyncio.sleep(
-                    BACKOFF_DELAY_SECONDS if consecutive_failures >= MAX_CONSECUTIVE_FAILURES else RETRY_DELAY_SECONDS
-                )
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    consecutive_failures = 0
-
     async def _handle_slash_command(self, chat_id: str, cmd_text: str, sender_id: str) -> None:
         """Process text-based slash commands for WeChat."""
-        parts = cmd_text.strip().split()
-        command = parts[0].lower().lstrip("/")
         context_token = self._token_store.get(self._account_id, sender_id)
         client_id = f"kesoku-wechat-cmd-{uuid.uuid4().hex}"
 
         async def reply_func(text: str) -> None:
             try:
-                await _send_message(
-                    self._send_session,
-                    base_url=self._base_url,
-                    token=self._token,
+                await self.send_client.send_message(
                     to=chat_id,
                     text=text,
                     context_token=context_token,
@@ -1139,19 +762,7 @@ You are interacting with the user via WeChat (Weixin).
             except Exception as e:
                 logger.error(f"WeChat: failed to send command reply: {e}")
 
-        try:
-            if command in {"clear", "reset", "status", "compact"}:
-                await self.commands.execute(command, reply_func, channel_id=chat_id)
-            elif command == "role":
-                role_name = " ".join(parts[1:]) if len(parts) > 1 else ""
-                await self.commands.execute("role", reply_func, channel_id=chat_id, role_name=role_name)
-            elif command == "restart":
-                await self.commands.execute(command, reply_func)
-            else:
-                await reply_func(f"⚠️ Unrecognized command: /{command}")
-        except Exception as e:
-            logger.error(f"WeChat command /{command} execution failed: {e}")
-            await reply_func(f"⚠️ Failed to execute command: {e}")
+        await self.execute_command_from_text(cmd_text, reply_func, channel_id=chat_id)
 
     async def trigger_cronjob(
         self,
@@ -1265,13 +876,10 @@ You are interacting with the user via WeChat (Weixin).
         typing_ticket = self._typing_cache.get(channel_id)
         if typing_ticket:
             try:
-                await _send_typing(
-                    self._send_session,
-                    base_url=self._base_url,
-                    token=self._token,
-                    to_user_id=channel_id,
-                    typing_ticket=typing_ticket,
-                    status=TYPING_START,
+                await self.send_client.send_typing(
+                    to=channel_id,
+                    typing_status=TYPING_START,
+                    ticket=typing_ticket,
                 )
             except Exception as e:
                 logger.debug("WeChat: typing start failed: %s", e)
@@ -1361,10 +969,6 @@ You are interacting with the user via WeChat (Weixin).
             await self.gateway.update_session_system_prompt(session.id, new_sys_prompt)
 
         attachments_metadata = []
-        session_staging_dir = await async_realpath(
-            os.path.join(get_config().workspace.sessions_dir, session.workspace_name)
-        )
-        os.makedirs(session_staging_dir, exist_ok=True)
 
         # Download and decrypt media assets
         for item in item_list:
@@ -1380,9 +984,7 @@ You are interacting with the user via WeChat (Weixin).
                     base64.b64encode(bytes.fromhex(str(aeskey))).decode("ascii") if aeskey else media.get("aes_key")
                 )
                 try:
-                    data = await _download_and_decrypt_media(
-                        self._poll_session,
-                        cdn_base_url=self._cdn_base_url,
+                    data = await self.media_manager.download_and_decrypt(
                         encrypted_query_param=media.get("encrypt_query_param"),
                         aes_key_b64=aes_key_b64,
                         full_url=media.get("full_url"),
@@ -1396,9 +998,7 @@ You are interacting with the user via WeChat (Weixin).
             elif item_type == ITEM_VIDEO:
                 media = _media_reference(item, "video_item")
                 try:
-                    data = await _download_and_decrypt_media(
-                        self._poll_session,
-                        cdn_base_url=self._cdn_base_url,
+                    data = await self.media_manager.download_and_decrypt(
                         encrypted_query_param=media.get("encrypt_query_param"),
                         aes_key_b64=media.get("aes_key"),
                         full_url=media.get("full_url"),
@@ -1415,9 +1015,7 @@ You are interacting with the user via WeChat (Weixin).
                 filename = str(file_item.get("file_name") or "document.bin")
                 mime = _mime_from_filename(filename)
                 try:
-                    data = await _download_and_decrypt_media(
-                        self._poll_session,
-                        cdn_base_url=self._cdn_base_url,
+                    data = await self.media_manager.download_and_decrypt(
                         encrypted_query_param=media.get("encrypt_query_param"),
                         aes_key_b64=media.get("aes_key"),
                         full_url=media.get("full_url"),
@@ -1431,9 +1029,7 @@ You are interacting with the user via WeChat (Weixin).
                 media = voice_item.get("media") or {}
                 if not voice_item.get("text"):
                     try:
-                        data = await _download_and_decrypt_media(
-                            self._poll_session,
-                            cdn_base_url=self._cdn_base_url,
+                        data = await self.media_manager.download_and_decrypt(
                             encrypted_query_param=media.get("encrypt_query_param"),
                             aes_key_b64=media.get("aes_key"),
                             full_url=media.get("full_url"),
@@ -1445,13 +1041,15 @@ You are interacting with the user via WeChat (Weixin).
                         logger.warning("WeChat: voice download failed: %s", e)
 
             if data and filename:
-                # Sanitize filename
-                safe_filename = "".join(c for c in filename if c.isalnum() or c in "._-")
-                filepath = os.path.join(session_staging_dir, safe_filename)
-                await async_write_binary_file(filepath, data)
+                saved = await self.attachment_manager.save_attachment(
+                    filename=filename,
+                    workspace_name=session.workspace_name,
+                    data=data,
+                    collision_id=secrets.token_hex(4),
+                )
                 attachments_metadata.append(
                     {
-                        "path": filepath,
+                        "path": saved["path"],
                         "mime_type": mime,
                         "filename": filename,
                     }
@@ -1492,13 +1090,10 @@ You are interacting with the user via WeChat (Weixin).
         typing_ticket = self._typing_cache.get(channel_id)
         if typing_ticket:
             try:
-                await _send_typing(
-                    self._send_session,
-                    base_url=self._base_url,
-                    token=self._token,
-                    to_user_id=channel_id,
-                    typing_ticket=typing_ticket,
-                    status=TYPING_START,
+                await self.send_client.send_typing(
+                    to=channel_id,
+                    typing_status=TYPING_START,
+                    ticket=typing_ticket,
                 )
             except Exception as e:
                 logger.debug("WeChat: typing start failed: %s", e)
@@ -1509,10 +1104,7 @@ You are interacting with the user via WeChat (Weixin).
         if self._typing_cache.get(user_id):
             return
         try:
-            response = await _get_config(
-                self._poll_session,
-                base_url=self._base_url,
-                token=self._token,
+            response = await self.poll_client.get_config(
                 user_id=user_id,
                 context_token=context_token,
             )
@@ -1541,10 +1133,7 @@ You are interacting with the user via WeChat (Weixin).
             if chunk.strip():
                 client_id = f"kesoku-wechat-{uuid.uuid4().hex}"
                 try:
-                    await _send_message(
-                        self._send_session,
-                        base_url=self._base_url,
-                        token=self._token,
+                    await self.send_client.send_message(
                         to=channel_id,
                         text=chunk,
                         context_token=context_token,
@@ -1626,13 +1215,10 @@ You are interacting with the user via WeChat (Weixin).
             typing_ticket = self._typing_cache.get(message.channel_id)
             if typing_ticket:
                 try:
-                    await _send_typing(
-                        self._send_session,
-                        base_url=self._base_url,
-                        token=self._token,
-                        to_user_id=message.channel_id,
-                        typing_ticket=typing_ticket,
-                        status=TYPING_STOP,
+                    await self.send_client.send_typing(
+                        to=message.channel_id,
+                        typing_status=TYPING_STOP,
+                        ticket=typing_ticket,
                     )
                 except Exception as e:
                     logger.debug("WeChat: typing stop failed: %s", e)
@@ -1671,38 +1257,15 @@ You are interacting with the user via WeChat (Weixin).
         filekey = secrets.token_hex(16)
         aes_key = secrets.token_bytes(16)
         rawsize = len(plaintext)
-        rawfilemd5 = hashlib.md5(plaintext).hexdigest()
 
         logger.info("WeChat: Initiating send_file for path=%s, mime=%s, size=%d", path, mime, rawsize)
 
-        upload_response = await _get_upload_url(
-            self._send_session,
-            base_url=self._base_url,
-            token=self._token,
+        encrypted_query_param = await self.media_manager.encrypt_and_upload(
+            plaintext=plaintext,
             to_user_id=chat_id,
             media_type=media_type,
             filekey=filekey,
-            rawsize=rawsize,
-            rawfilemd5=rawfilemd5,
-            filesize=_aes_padded_size(rawsize),
-            aeskey_hex=aes_key.hex(),
-        )
-
-        upload_param = str(upload_response.get("upload_param") or "")
-        upload_full_url = str(upload_response.get("upload_full_url") or "")
-        ciphertext = _aes128_ecb_encrypt(plaintext, aes_key)
-
-        if upload_full_url:
-            upload_url = upload_full_url
-        elif upload_param:
-            upload_url = _cdn_upload_url(WEIXIN_CDN_BASE_URL, upload_param, filekey)
-        else:
-            raise RuntimeError(f"WeChat: upload URL unavailable: {upload_response}")
-
-        encrypted_query_param = await _upload_ciphertext(
-            self._send_session,
-            ciphertext=ciphertext,
-            upload_url=upload_url,
+            aes_key=aes_key,
         )
 
         aes_key_for_api = base64.b64encode(aes_key.hex().encode("ascii")).decode("ascii")
@@ -1715,20 +1278,23 @@ You are interacting with the user via WeChat (Weixin).
             }
         }
 
+        padded_size = _aes_padded_size(rawsize)
+
         if media_type == MEDIA_IMAGE:
             media_payload = {
                 "type": ITEM_IMAGE,
                 "image_item": {
                     "media": media_item["media"],
-                    "mid_size": len(ciphertext),
+                    "mid_size": padded_size,
                 },
             }
         elif media_type == MEDIA_VIDEO:
+            rawfilemd5 = hashlib.md5(plaintext).hexdigest()
             media_payload = {
                 "type": ITEM_VIDEO,
                 "video_item": {
                     "media": media_item["media"],
-                    "video_size": len(ciphertext),
+                    "video_size": padded_size,
                     "video_md5": rawfilemd5,
                 },
             }
@@ -1754,22 +1320,13 @@ You are interacting with the user via WeChat (Weixin).
             }
 
         last_message_id = f"kesoku-wechat-{uuid.uuid4().hex}"
-        await _api_post(
-            self._send_session,
-            base_url=self._base_url,
-            endpoint=EP_SEND_MESSAGE,
-            payload={
-                "msg": {
-                    "from_user_id": "",
-                    "to_user_id": chat_id,
-                    "client_id": last_message_id,
-                    "message_type": MSG_TYPE_BOT,
-                    "message_state": MSG_STATE_FINISH,
-                    "item_list": [media_payload],
-                    **({"context_token": context_token} if context_token else {}),
-                }
-            },
-            token=self._token,
-            timeout_ms=API_TIMEOUT_MS,
-        )
+        await self.send_client.send_raw_message({
+            "from_user_id": "",
+            "to_user_id": chat_id,
+            "client_id": last_message_id,
+            "message_type": MSG_TYPE_BOT,
+            "message_state": MSG_STATE_FINISH,
+            "item_list": [media_payload],
+            **({"context_token": context_token} if context_token else {}),
+        })
         return last_message_id

@@ -15,6 +15,7 @@ from kesoku.agent.prompt import build_sys_prompt
 from kesoku.config import DiscordChannelOverride, get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
+from kesoku.gateway.attachment_manager import AttachmentManager
 from kesoku.gateway.chatbot.base import Chatbot, DeliveryAbortedError, get_local_timezone_name
 from kesoku.gateway.chatbot.discord_command import setup_discord_commands
 from kesoku.gateway.chatbot.discord_ui import MessageHeaderView, QuestionView
@@ -23,7 +24,6 @@ from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 from kesoku.utils.async_fs import (
     async_exists,
-    async_realpath,
 )
 
 logger = setup_logger(__name__)
@@ -134,6 +134,7 @@ class DiscordChatbot(Chatbot):
         """
         super().__init__(chatbot_id, gateway)
         self.config = get_config()
+        self.attachment_manager = AttachmentManager()
         self.bot_token = bot_token or self.config.discord.bot_token or os.environ.get("DISCORD_TOKEN")
         if not self.bot_token:
             raise ValueError("Discord bot token is required but not configured.")
@@ -406,33 +407,21 @@ class DiscordChatbot(Chatbot):
         # Save any incoming attachments to the session staging directory
         attachments_metadata = []
         if message.attachments:
-            session_staging_dir = await async_realpath(
-                os.path.join(self.config.workspace.sessions_dir, session.workspace_name)
-            )
-            os.makedirs(session_staging_dir, exist_ok=True)
-
             for attachment in message.attachments:
-                filename = attachment.filename
-                # Sanitize filename to prevent path traversal
-                safe_filename = "".join(c for c in filename if c.isalnum() or c in "._-")
-                if not safe_filename:
-                    safe_filename = f"attachment_{attachment.id}"
+                async def save_cb(target_path: str, att=attachment) -> None:
+                    await att.save(target_path)
 
-                filepath = os.path.join(session_staging_dir, safe_filename)
-                # Avoid file collisions
-                if await async_exists(filepath):
-                    base, ext = os.path.splitext(safe_filename)
-                    safe_filename = f"{base}_{attachment.id}{ext}"
-                    filepath = os.path.join(session_staging_dir, safe_filename)
-
-                logger.info(f"Saving Discord attachment {filename} to {filepath}")
-                await attachment.save(filepath)
-
+                saved = await self.attachment_manager.save_attachment(
+                    filename=attachment.filename,
+                    workspace_name=session.workspace_name,
+                    save_callback=save_cb,
+                    collision_id=str(attachment.id),
+                )
                 attachments_metadata.append(
                     {
-                        "path": filepath,
+                        "path": saved["path"],
                         "mime_type": attachment.content_type or "application/octet-stream",
-                        "filename": filename,
+                        "filename": attachment.filename,
                     }
                 )
 
