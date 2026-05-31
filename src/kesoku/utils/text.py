@@ -223,3 +223,42 @@ def split_text_into_chunks(text: str, max_length: int) -> list[str]:
             chunks.append(current_chunk)
 
     return chunks
+
+
+def truncate_context_middle(text: str, max_len: int = 3000) -> str:
+    """Truncates text in the middle if it exceeds max_len, preserving beginning and end.
+
+    It attempts to split cleanly on newline boundaries to preserve markdown list formatting.
+
+    Args:
+        text: The input context string.
+        max_len: Maximum allowed character length.
+
+    Returns:
+        The truncated string with a deletion indicator in the middle.
+    """
+    if len(text) <= max_len:
+        return text
+
+    # Split into 40% start, 55% end, keeping 5% buffer for the indicator
+    keep_start = int(max_len * 0.4)
+    keep_end = int(max_len * 0.55)
+
+    # Try to find clean newline boundaries near the split indices (+-100 chars)
+    # to prevent breaking markdown list items/lines in half
+    start_idx = text.find("\n", max(0, keep_start - 100), min(len(text), keep_start + 100))
+    if start_idx == -1:
+        start_idx = keep_start
+
+    end_idx = text.rfind("\n", max(0, len(text) - keep_end - 100), min(len(text), len(text) - keep_end + 100))
+    if end_idx == -1:
+        end_idx = len(text) - keep_end
+
+    if start_idx < end_idx:
+        return text[:start_idx] + "\n\n... [Timeline Truncated for Brevity] ...\n\n" + text[end_idx:]
+
+    # Fallback to simple raw slice if boundary matching fails or is overlapping
+    char_start = int(max_len * 0.45)
+    char_end = int(max_len * 0.45)
+    return text[:char_start] + "\n\n... [Timeline Truncated for Brevity] ...\n\n" + text[-char_end:]
+

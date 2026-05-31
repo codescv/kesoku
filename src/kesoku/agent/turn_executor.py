@@ -17,49 +17,12 @@ from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
+from kesoku.utils.text import truncate_context_middle
 
 logger = setup_logger(__name__)
 
 MAX_TOTAL_USER_PREFERENCES_LENGTH = 500
 MAX_TOTAL_CROSS_SESSION_CONTEXT_LENGTH = 3000
-
-
-def truncate_context_middle(text: str, max_len: int = 3000) -> str:
-    """Truncates text in the middle if it exceeds max_len, preserving beginning and end.
-
-    It attempts to split cleanly on newline boundaries to preserve markdown list formatting.
-
-    Args:
-        text: The input context string.
-        max_len: Maximum allowed character length.
-
-    Returns:
-        The truncated string with a deletion indicator in the middle.
-    """
-    if len(text) <= max_len:
-        return text
-
-    # Split into 40% start, 55% end, keeping 5% buffer for the indicator
-    keep_start = int(max_len * 0.4)
-    keep_end = int(max_len * 0.55)
-
-    # Try to find clean newline boundaries near the split indices (+-100 chars)
-    # to prevent breaking markdown list items/lines in half
-    start_idx = text.find("\n", max(0, keep_start - 100), min(len(text), keep_start + 100))
-    if start_idx == -1:
-        start_idx = keep_start
-
-    end_idx = text.rfind("\n", max(0, len(text) - keep_end - 100), min(len(text), len(text) - keep_end + 100))
-    if end_idx == -1:
-        end_idx = len(text) - keep_end
-
-    if start_idx < end_idx:
-        return text[:start_idx] + "\n\n... [Timeline Truncated for Brevity] ...\n\n" + text[end_idx:]
-
-    # Fallback to simple raw slice if boundary matching fails or is overlapping
-    char_start = int(max_len * 0.45)
-    char_end = int(max_len * 0.45)
-    return text[:char_start] + "\n\n... [Timeline Truncated for Brevity] ...\n\n" + text[-char_end:]
 
 
 class TurnExecutor:
@@ -181,129 +144,9 @@ class TurnExecutor:
                     session_id=self.session_id,
                 )
 
-                # Inject user preferences into the latest user message
-                latest_user_msg = None
-                for msg in reversed(history):
-                    if msg.role == MessageRole.USER:
-                        latest_user_msg = msg
-                        break
-
-                if latest_user_msg:
-                    active_role = await self.gateway.get_channel_role_with_inheritance(
-                        current_msg.chatbot_id,
-                        current_msg.channel_id,
-                        self.session_id,
-                    )
-                    user_prefs = await asyncio.to_thread(
-                        self.gateway.db.get_agent_memories,
-                        category="user_preferences",
-                        role=active_role,
-                    )
-
-                    # Inject Cross-Session Memory context
-                    stored_ctx = await asyncio.to_thread(
-                        self.gateway.db.get_cross_session_context,
-                        active_role,
-                    )
-                    stored_content = stored_ctx.content if stored_ctx else ""
-                    last_updated = stored_ctx.updated_at if stored_ctx else 0.0
-                    lock_status = stored_ctx.status if stored_ctx else "idle"
-
-                    new_messages = await asyncio.to_thread(
-                        self.gateway.db.get_role_messages_since,
-                        role=active_role,
-                        since_timestamp=last_updated,
-                        exclude_session_id=self.session_id,
-                    )
-
-                    try:
-                        new_msg_tokens = await asyncio.to_thread(
-                            llm.count_tokens,
-                            prompt=None,
-                            system_prompt=None,
-                            history=new_messages,
-                        )
-                    except Exception as te:
-                        logger.warning(f"Failed to count new message tokens: {te}")
-                        new_msg_tokens = llm.estimate_tokens_fallback(history=new_messages)
-
-                    now_ts = time.time()
-                    has_timeout = (now_ts - last_updated > 1800) and len(new_messages) > 0
-                    has_token_overrun = new_msg_tokens > 4000
-
-                    should_consolidate = has_timeout or has_token_overrun
-
-                    injected_content = stored_content
-                    if new_messages:
-                        if should_consolidate:
-                            # Fallback: inject only the most recent 10 messages
-                            fallback_msgs = new_messages[-10:]
-                            injected_content += (
-                                "\n\nRecent discussions in other threads (summarization in progress):\n"
-                                + "\n".join(
-                                    f"- [{time.strftime('%m-%d %H:%M', time.localtime(m.timestamp))}] "
-                                    f"{m.sender}: {m.content}"
-                                    for m in fallback_msgs
-                                )
-                            )
-                        else:
-                            # Inject all since they are within safe token limits
-                            injected_content += "\n\nRecent discussions in other threads:\n" + "\n".join(
-                                f"- [{time.strftime('%m-%d %H:%M', time.localtime(m.timestamp))}] "
-                                f"{m.sender}: {m.content}"
-                                for m in new_messages
-                            )
-
-                    pref_content = ""
-                    if user_prefs:
-                        pref_content = "\n".join(
-                            f"- {pref['title']}: {pref['content']}" for pref in user_prefs
-                        )
-                        if len(pref_content) > MAX_TOTAL_USER_PREFERENCES_LENGTH:
-                            pref_content = pref_content[: MAX_TOTAL_USER_PREFERENCES_LENGTH - 3] + "..."
-
-                    memory_content = ""
-                    if injected_content:
-                        memory_content = truncate_context_middle(injected_content)
-
-                    injected_blocks = []
-                    if pref_content:
-                        injected_blocks.append(f"# User Preferences:\n{pref_content}")
-                    if memory_content:
-                        injected_blocks.append(f"# Cross-Session Memory:\n{memory_content}")
-
-                    if injected_blocks and "[Background Context]" not in latest_user_msg.content:
-                        joined_blocks = "\n\n".join(injected_blocks)
-                        context_prefix = (
-                            "[Background Context: User Preferences & Cross-Session Memory]\n"
-                            "======\n"
-                            f"{joined_blocks}\n"
-                            "======\n"
-                            "IMPORTANT: The above is provided purely as background context. "
-                            "DO NOT reference or discuss these past topics unless the user's current "
-                            "request below explicitly asks about or is closely related to them. Focus on responding "
-                            "directly and helpfully to the user's current request below.\n\n"
-                            "[Current Request]\n"
-                        )
-                        msg_idx = history.index(latest_user_msg)
-                        copied_msg = latest_user_msg.model_copy()
-                        copied_msg.content = context_prefix + copied_msg.content
-                        history[msg_idx] = copied_msg
-                        latest_user_msg = copied_msg
-                        logger.info(
-                            f"Prepended {len(injected_blocks)} context blocks into user message {copied_msg.id}"
-                        )
-
-                    if should_consolidate and lock_status == "idle":
-                        locked = await asyncio.to_thread(
-                            self.gateway.db.claim_cross_session_context_for_update,
-                            active_role,
-                        )
-                        if locked:
-                            logger.info(f"Claimed lock for cross-session context update on role '{active_role}'")
-                            asyncio.create_task(
-                                self._summarize_cross_session_context_bg(active_role, stored_content, last_updated)
-                            )
+                latest_user_msg = await self._inject_context_and_trigger_consolidation(
+                    history, current_msg, llm
+                )
 
                 # Retrieve system prompt directly from session
                 session = await self.gateway.get_session(self.session_id)
@@ -311,42 +154,10 @@ class TurnExecutor:
 
                 tools_list = self.tool_runner.tool_registry.get_tools_list()
 
-                # Calculate/estimate context tokens asynchronously to avoid blocking the event loop
-                try:
-                    context_tokens = await asyncio.to_thread(
-                        llm.count_tokens,
-                        prompt=None,
-                        system_prompt=system_prompt,
-                        history=history,
-                        tools=tools_list,
-                    )
-                except Exception as te:
-                    logger.warning(f"Failed to count context tokens: {te}")
-                    context_tokens = llm.estimate_tokens_fallback(None, system_prompt, history)
-
-                limit = getattr(llm, "context_window_limit", 1048576)
-                percentage = (context_tokens / limit) * 100
-
-                # Inject context monitor warning into the latest user message in history
-                threshold = cfg.agent.compact_history_warning_threshold
-                if latest_user_msg and percentage >= threshold:
-                    monitor_suffix = (
-                        f"\n\n[Context Monitor: Currently using {context_tokens:,} tokens, "
-                        f"which is {percentage:.1f}% of your {limit:,} window limit. "
-                        "It is highly recommended that you call the 'compact_history' "
-                        "tool now to reset the context window.]"
-                    )
-                    if "[Context Monitor:" not in latest_user_msg.content:
-                        # Clone the user message to avoid mutating shared database/cached states in place
-                        msg_idx = history.index(latest_user_msg)
-                        copied_msg = latest_user_msg.model_copy()
-                        copied_msg.content += monitor_suffix
-                        history[msg_idx] = copied_msg
-                        latest_user_msg = copied_msg
-                        logger.info(
-                            f"Injected context monitor warning into user message {copied_msg.id}: "
-                            f"{context_tokens} tokens ({percentage:.1f}%)"
-                        )
+                # Calculate and monitor context window limit
+                await self._monitor_context_window(
+                    history, latest_user_msg, system_prompt, tools_list, llm, cfg
+                )
 
                 # LLM inference
                 res = await llm.generate(
@@ -376,156 +187,29 @@ class TurnExecutor:
                 if res.total_tokens:
                     turn_tokens += res.total_tokens
 
-                # Check if LLM requested tool calls
                 if res.tool_calls:
                     turn_tool_calls += len(res.tool_calls)
-                    thought_text = res.thought or res.content
-                    if thought_text:
-                        thought_msg = Message(
-                            session_id=self.session_id,
-                            chatbot_id=chatbot_id,
-                            channel_id=channel_id,
-                            sender="Kesoku",
-                            role=MessageRole.ASSISTANT,
-                            type=MessageType.THOUGHT,
-                            content=thought_text,
-                            status=MessageStatus.RESPONDED,
-                            parent_id=current_msg.id,
-                        )
-                        await self.gateway.post(thought_msg)
-
-                    tool_call_msgs = []
-                    for call in res.tool_calls:
-                        logger.info(f"Executing requested tool call: '{call.name}' with args {call.arguments}")
-                        call_args_json = json.dumps(call.arguments, indent=2, ensure_ascii=False)
-                        tool_call_msg = Message(
-                            session_id=self.session_id,
-                            chatbot_id=chatbot_id,
-                            channel_id=channel_id,
-                            sender="Kesoku",
-                            role=MessageRole.TOOL,
-                            type=MessageType.TOOL_CALL,
-                            content=f"Calling tool `{call.name}` with arguments:\n```json\n{call_args_json}\n```",
-                            status=MessageStatus.RESPONDED,
-                            parent_id=current_msg.id,
-                            metadata={
-                                "tool_name": call.name,
-                                "tool_arguments": call.arguments,
-                                "thought_signature": call.thought_signature,
-                                "tool_call_id": call.tool_call_id,
-                            },
-                        )
-                        await self.gateway.post(tool_call_msg)
-                        tool_call_msgs.append((call, tool_call_msg))
-
-                    exec_tasks = [
-                        self.tool_runner.execute_tool(
-                            call,
-                            tc_msg,
-                            is_interrupted=lambda: not worker.queue_empty(),
-                        )
-                        for call, tc_msg in tool_call_msgs
-                    ]
-                    if not worker.queue_empty():
-                        logger.info("Interruption detected before launching concurrent tool execution.")
-                        for coro in exec_tasks:
-                            coro.close()
+                    should_continue = await self._execute_tool_calls(res, current_msg, worker)
+                    if should_continue:
+                        continue
+                    else:
                         break
-                    result_msgs = await asyncio.gather(*exec_tasks)
-                    for rm in result_msgs:
-                        await self.gateway.post(rm)
-
-                    # Check if history was compacted and session was transitioned
-                    tool_ctx = self.tool_runner.tool_context
-                    val = getattr(tool_ctx, "transitioned_to_session", None)
-                    if isinstance(val, str):
-                        new_session_id = val
-                        logger.info(
-                            f"Session '{self.session_id}' transitioned to '{new_session_id}'. "
-                            "Aborting remaining turn steps and stopping old session worker."
-                        )
-                        # Mark the initiating message as processed
-                        await self.gateway.mark_message_processed(current_msg.id)
-
-                        # Schedule worker stop task in the background so the current execution exits cleanly first
-                        if self.gateway.agent:
-                            asyncio.create_task(self.gateway.agent.stop_session_worker(self.session_id, immediate=True))
-                        break
-
-                    continue
                 else:
-                    if res.thought:
-                        thought_msg = Message(
-                            session_id=self.session_id,
-                            chatbot_id=chatbot_id,
-                            channel_id=channel_id,
-                            sender="Kesoku",
-                            role=MessageRole.ASSISTANT,
-                            type=MessageType.THOUGHT,
-                            content=res.thought,
-                            status=MessageStatus.RESPONDED,
-                            parent_id=current_msg.id,
-                        )
-                        await self.gateway.post(thought_msg)
-
-                    final_content = res.content
-                    if not final_content.strip():
-                        if not nudged:
-                            logger.info(f"LLM returned empty content in session {self.session_id}. Nudging model.")
-                            nudge_msg = Message(
-                                session_id=self.session_id,
-                                chatbot_id=chatbot_id,
-                                channel_id=channel_id,
-                                sender="System",
-                                role=MessageRole.SYSTEM,
-                                type=MessageType.TEXT,
-                                content=(
-                                    "Your previous response had empty content. Please provide a final "
-                                    "user-facing response summarizing your results/actions."
-                                ),
-                                status=MessageStatus.RESPONDED,
-                                parent_id=current_msg.id,
-                            )
-                            await self.gateway.post(nudge_msg)
-                            nudged = True
-                            continue
-                        else:
-                            logger.warning(
-                                f"LLM returned empty content again after nudge in session "
-                                f"{self.session_id}. Using fallback."
-                            )
-                            final_content = "Processed request successfully."
-
-                    limit = getattr(llm, "context_window_limit", 1048576)
-                    context_percent = (last_context_tokens / limit) * 100 if limit else 0.0
-
-                    final_msg = Message(
-                        session_id=self.session_id,
-                        chatbot_id=chatbot_id,
-                        channel_id=channel_id,
-                        sender="Kesoku",
-                        role=MessageRole.ASSISTANT,
-                        type=MessageType.TEXT,
-                        content=final_content,
-                        status=MessageStatus.PENDING,
-                        parent_id=current_msg.id,
-                        metadata={
-                            "turn_metrics": {
-                                "session_turns": await self._get_session_turns_count(),
-                                "context_tokens": last_context_tokens,
-                                "cached_tokens": last_cached_tokens,
-                                "context_limit": limit,
-                                "context_percent": context_percent,
-                                "turn_tool_calls": turn_tool_calls,
-                                "turn_tokens": turn_tokens,
-                                "turn_time": time.time() - start_time,
-                                "status": "finished",
-                            }
-                        },
+                    should_continue, nudged = await self._handle_final_response(
+                        res=res,
+                        current_msg=current_msg,
+                        last_context_tokens=last_context_tokens,
+                        last_cached_tokens=last_cached_tokens,
+                        turn_tool_calls=turn_tool_calls,
+                        turn_tokens=turn_tokens,
+                        start_time=start_time,
+                        llm=llm,
+                        nudged=nudged,
                     )
-                    await self.gateway.post(final_msg)
-                    await self.gateway.mark_message_processed(current_msg.id)
-                    break
+                    if should_continue:
+                        continue
+                    else:
+                        break
         except asyncio.CancelledError:
             # Interrupted turn: save turn metrics to the initiating user message
             turn_metrics = {
@@ -657,3 +341,381 @@ class TurnExecutor:
                 )
             except Exception as le:
                 logger.critical(f"Critical failure: failed to release lock during cleanup for role '{role}': {le}")
+
+    async def _inject_context_and_trigger_consolidation(
+        self,
+        history: list[Message],
+        current_msg: Message,
+        llm: BaseLLM,
+    ) -> Message | None:
+        """Inject context and user preferences, triggering background consolidation if needed.
+
+        Modifies the history list in-place by prepending context block to the latest user message.
+
+        Returns:
+            The modified latest User Message, or None if no user message was found to inject context into.
+        """
+        # Inject user preferences into the latest user message
+        latest_user_msg = None
+        for msg in reversed(history):
+            if msg.role == MessageRole.USER:
+                latest_user_msg = msg
+                break
+
+        if not latest_user_msg:
+            return None
+
+        active_role = await self.gateway.get_channel_role_with_inheritance(
+            current_msg.chatbot_id,
+            current_msg.channel_id,
+            self.session_id,
+        )
+        user_prefs = await asyncio.to_thread(
+            self.gateway.db.get_agent_memories,
+            category="user_preferences",
+            role=active_role,
+        )
+
+        # Inject Cross-Session Memory context
+        stored_ctx = await asyncio.to_thread(
+            self.gateway.db.get_cross_session_context,
+            active_role,
+        )
+        stored_content = stored_ctx.content if stored_ctx else ""
+        last_updated = stored_ctx.updated_at if stored_ctx else 0.0
+        lock_status = stored_ctx.status if stored_ctx else "idle"
+
+        new_messages = await asyncio.to_thread(
+            self.gateway.db.get_role_messages_since,
+            role=active_role,
+            since_timestamp=last_updated,
+            exclude_session_id=self.session_id,
+        )
+
+        try:
+            new_msg_tokens = await asyncio.to_thread(
+                llm.count_tokens,
+                prompt=None,
+                system_prompt=None,
+                history=new_messages,
+            )
+        except Exception as te:
+            logger.warning(f"Failed to count new message tokens: {te}")
+            new_msg_tokens = llm.estimate_tokens_fallback(history=new_messages)
+
+        now_ts = time.time()
+        has_timeout = (now_ts - last_updated > 1800) and len(new_messages) > 0
+        has_token_overrun = new_msg_tokens > 4000
+
+        should_consolidate = has_timeout or has_token_overrun
+
+        injected_content = stored_content
+        if new_messages:
+            if should_consolidate:
+                # Fallback: inject only the most recent 10 messages
+                fallback_msgs = new_messages[-10:]
+                injected_content += (
+                    "\n\nRecent discussions in other threads (summarization in progress):\n"
+                    + "\n".join(
+                        f"- [{time.strftime('%m-%d %H:%M', time.localtime(m.timestamp))}] "
+                        f"{m.sender}: {m.content}"
+                        for m in fallback_msgs
+                    )
+                )
+            else:
+                # Inject all since they are within safe token limits
+                injected_content += "\n\nRecent discussions in other threads:\n" + "\n".join(
+                    f"- [{time.strftime('%m-%d %H:%M', time.localtime(m.timestamp))}] "
+                    f"{m.sender}: {m.content}"
+                    for m in new_messages
+                )
+
+        pref_content = ""
+        if user_prefs:
+            pref_content = "\n".join(
+                f"- {pref['title']}: {pref['content']}" for pref in user_prefs
+            )
+            if len(pref_content) > MAX_TOTAL_USER_PREFERENCES_LENGTH:
+                pref_content = pref_content[: MAX_TOTAL_USER_PREFERENCES_LENGTH - 3] + "..."
+
+        memory_content = ""
+        if injected_content:
+            memory_content = truncate_context_middle(injected_content)
+
+        injected_blocks = []
+        if pref_content:
+            injected_blocks.append(f"# User Preferences:\n{pref_content}")
+        if memory_content:
+            injected_blocks.append(f"# Cross-Session Memory:\n{memory_content}")
+
+        if injected_blocks and "[Background Context]" not in latest_user_msg.content:
+            joined_blocks = "\n\n".join(injected_blocks)
+            context_prefix = (
+                "[Background Context: User Preferences & Cross-Session Memory]\n"
+                "======\n"
+                f"{joined_blocks}\n"
+                "======\n"
+                "IMPORTANT: The above is provided purely as background context. "
+                "DO NOT reference or discuss these past topics unless the user's current "
+                "request below explicitly asks about or is closely related to them. Focus on responding "
+                "directly and helpfully to the user's current request below.\n\n"
+                "[Current Request]\n"
+            )
+            msg_idx = history.index(latest_user_msg)
+            copied_msg = latest_user_msg.model_copy()
+            copied_msg.content = context_prefix + copied_msg.content
+            history[msg_idx] = copied_msg
+            latest_user_msg = copied_msg
+            logger.info(
+                f"Prepended {len(injected_blocks)} context blocks into user message {copied_msg.id}"
+            )
+
+        if should_consolidate and lock_status == "idle":
+            locked = await asyncio.to_thread(
+                self.gateway.db.claim_cross_session_context_for_update,
+                active_role,
+            )
+            if locked:
+                logger.info(f"Claimed lock for cross-session context update on role '{active_role}'")
+                asyncio.create_task(
+                    self._summarize_cross_session_context_bg(active_role, stored_content, last_updated)
+                )
+
+        return latest_user_msg
+
+    async def _monitor_context_window(
+        self,
+        history: list[Message],
+        latest_user_msg: Message | None,
+        system_prompt: str | None,
+        tools_list: list,
+        llm: BaseLLM,
+        cfg,
+    ) -> int:
+        """Estimate context window usage and prepend context monitoring warning to latest_user_msg in place if needed.
+
+        Returns:
+            The calculated or estimated context token count.
+        """
+        try:
+            context_tokens = await asyncio.to_thread(
+                llm.count_tokens,
+                prompt=None,
+                system_prompt=system_prompt,
+                history=history,
+                tools=tools_list,
+            )
+        except Exception as te:
+            logger.warning(f"Failed to count context tokens: {te}")
+            context_tokens = llm.estimate_tokens_fallback(None, system_prompt, history)
+
+        limit = getattr(llm, "context_window_limit", 1048576)
+        percentage = (context_tokens / limit) * 100
+
+        threshold = cfg.agent.compact_history_warning_threshold
+        if latest_user_msg and percentage >= threshold:
+            monitor_suffix = (
+                f"\n\n[Context Monitor: Currently using {context_tokens:,} tokens, "
+                f"which is {percentage:.1f}% of your {limit:,} window limit. "
+                "It is highly recommended that you call the 'compact_history' "
+                "tool now to reset the context window.]"
+            )
+            if "[Context Monitor:" not in latest_user_msg.content:
+                # Clone to avoid mutating shared database/cached states in place
+                msg_idx = history.index(latest_user_msg)
+                copied_msg = latest_user_msg.model_copy()
+                copied_msg.content += monitor_suffix
+                history[msg_idx] = copied_msg
+                logger.info(
+                    f"Injected context monitor warning into user message {copied_msg.id}: "
+                    f"{context_tokens} tokens ({percentage:.1f}%)"
+                )
+
+        return context_tokens
+
+    async def _execute_tool_calls(
+        self,
+        res,
+        current_msg: Message,
+        worker: "SessionWorker",
+    ) -> bool:
+        """Execute the requested tool calls concurrently, posting thought, call, and result messages.
+
+        Returns:
+            True if process_turn should continue (loop back to LLM generation),
+            False if turn execution was interrupted or transitioned to a new session (should break).
+        """
+        chatbot_id = current_msg.chatbot_id
+        channel_id = current_msg.channel_id
+
+        thought_text = res.thought or res.content
+        if thought_text:
+            thought_msg = Message(
+                session_id=self.session_id,
+                chatbot_id=chatbot_id,
+                channel_id=channel_id,
+                sender="Kesoku",
+                role=MessageRole.ASSISTANT,
+                type=MessageType.THOUGHT,
+                content=thought_text,
+                status=MessageStatus.RESPONDED,
+                parent_id=current_msg.id,
+            )
+            await self.gateway.post(thought_msg)
+
+        tool_call_msgs = []
+        for call in res.tool_calls:
+            logger.info(f"Executing requested tool call: '{call.name}' with args {call.arguments}")
+            call_args_json = json.dumps(call.arguments, indent=2, ensure_ascii=False)
+            tool_call_msg = Message(
+                session_id=self.session_id,
+                chatbot_id=chatbot_id,
+                channel_id=channel_id,
+                sender="Kesoku",
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_CALL,
+                content=f"Calling tool `{call.name}` with arguments:\n```json\n{call_args_json}\n```",
+                status=MessageStatus.RESPONDED,
+                parent_id=current_msg.id,
+                metadata={
+                    "tool_name": call.name,
+                    "tool_arguments": call.arguments,
+                    "thought_signature": call.thought_signature,
+                    "tool_call_id": call.tool_call_id,
+                },
+            )
+            await self.gateway.post(tool_call_msg)
+            tool_call_msgs.append((call, tool_call_msg))
+
+        exec_tasks = [
+            self.tool_runner.execute_tool(
+                call,
+                tc_msg,
+                is_interrupted=lambda: not worker.queue_empty(),
+            )
+            for call, tc_msg in tool_call_msgs
+        ]
+        if not worker.queue_empty():
+            logger.info("Interruption detected before launching concurrent tool execution.")
+            for coro in exec_tasks:
+                coro.close()
+            return False
+
+        result_msgs = await asyncio.gather(*exec_tasks)
+        for rm in result_msgs:
+            await self.gateway.post(rm)
+
+        # Check if history was compacted and session was transitioned
+        tool_ctx = self.tool_runner.tool_context
+        val = getattr(tool_ctx, "transitioned_to_session", None)
+        if isinstance(val, str):
+            new_session_id = val
+            logger.info(
+                f"Session '{self.session_id}' transitioned to '{new_session_id}'. "
+                "Aborting remaining turn steps and stopping old session worker."
+            )
+            # Mark the initiating message as processed
+            await self.gateway.mark_message_processed(current_msg.id)
+
+            # Schedule worker stop task in the background so the current execution exits cleanly first
+            if self.gateway.agent:
+                asyncio.create_task(self.gateway.agent.stop_session_worker(self.session_id, immediate=True))
+            return False
+
+        return True
+
+    async def _handle_final_response(
+        self,
+        res,
+        current_msg: Message,
+        last_context_tokens: int,
+        last_cached_tokens: int,
+        turn_tool_calls: int,
+        turn_tokens: int,
+        start_time: float,
+        llm: BaseLLM,
+        nudged: bool,
+    ) -> tuple[bool, bool]:
+        """Handle final assistant response including thought logging, nudge logic, and metrics embedding.
+
+        Returns:
+            tuple[should_continue, new_nudged_flag]:
+                - should_continue=True: loop should continue (i.e. nudged LLM for retry).
+                - should_continue=False: loop should break (i.e. successfully processed turn).
+        """
+        chatbot_id = current_msg.chatbot_id
+        channel_id = current_msg.channel_id
+
+        if res.thought:
+            thought_msg = Message(
+                session_id=self.session_id,
+                chatbot_id=chatbot_id,
+                channel_id=channel_id,
+                sender="Kesoku",
+                role=MessageRole.ASSISTANT,
+                type=MessageType.THOUGHT,
+                content=res.thought,
+                status=MessageStatus.RESPONDED,
+                parent_id=current_msg.id,
+            )
+            await self.gateway.post(thought_msg)
+
+        final_content = res.content
+        if not final_content.strip():
+            if not nudged:
+                logger.info(f"LLM returned empty content in session {self.session_id}. Nudging model.")
+                nudge_msg = Message(
+                    session_id=self.session_id,
+                    chatbot_id=chatbot_id,
+                    channel_id=channel_id,
+                    sender="System",
+                    role=MessageRole.SYSTEM,
+                    type=MessageType.TEXT,
+                    content=(
+                        "Your previous response had empty content. Please provide a final "
+                        "user-facing response summarizing your results/actions."
+                    ),
+                    status=MessageStatus.RESPONDED,
+                    parent_id=current_msg.id,
+                )
+                await self.gateway.post(nudge_msg)
+                return True, True  # should_continue=True, nudged=True
+            else:
+                logger.warning(
+                    f"LLM returned empty content again after nudge in session "
+                    f"{self.session_id}. Using fallback."
+                )
+                final_content = "Processed request successfully."
+
+        limit = getattr(llm, "context_window_limit", 1048576)
+        context_percent = (last_context_tokens / limit) * 100 if limit else 0.0
+
+        final_msg = Message(
+            session_id=self.session_id,
+            chatbot_id=chatbot_id,
+            channel_id=channel_id,
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content=final_content,
+            status=MessageStatus.PENDING,
+            parent_id=current_msg.id,
+            metadata={
+                "turn_metrics": {
+                    "session_turns": await self._get_session_turns_count(),
+                    "context_tokens": last_context_tokens,
+                    "cached_tokens": last_cached_tokens,
+                    "context_limit": limit,
+                    "context_percent": context_percent,
+                    "turn_tool_calls": turn_tool_calls,
+                    "turn_tokens": turn_tokens,
+                    "turn_time": time.time() - start_time,
+                    "status": "finished",
+                }
+            },
+        )
+        await self.gateway.post(final_msg)
+        await self.gateway.mark_message_processed(current_msg.id)
+        return False, nudged  # should_continue=False, nudged unmodified
+
+
