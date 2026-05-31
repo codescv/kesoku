@@ -204,7 +204,7 @@ class CronManager:
                         if chatbot_id and channel_id:
                             bot = self.chatbots.get(chatbot_id)
                             if bot:
-                                last_msg_ts = await bot.gateway.get_last_message_timestamp(chatbot_id, channel_id)
+                                last_msg_ts = await bot.gateway.db.get_last_message_timestamp(chatbot_id, channel_id)
                                 if last_msg_ts is None:
                                     # Completely empty channel, use max probability
                                     prob = p_max
@@ -246,7 +246,7 @@ class CronManager:
                         if channel_id and chatbot_id:
                             bot = self.chatbots.get(chatbot_id)
                             if bot:
-                                last_msg_ts = await bot.gateway.get_last_message_timestamp(chatbot_id, channel_id)
+                                last_msg_ts = await bot.gateway.db.get_last_message_timestamp(chatbot_id, channel_id)
                                 if last_msg_ts is not None:
                                     idle_time = now.timestamp() - last_msg_ts
                                     if idle_time < min_idle:
@@ -264,7 +264,7 @@ class CronManager:
                 if (daily_target is not None or min_interval_seconds is not None) and channel_id and chatbot_id:
                     bot = self.chatbots.get(chatbot_id)
                     if bot:
-                        count, last_ts = await bot.gateway.get_cronjob_sent_stats_today(chatbot_id, channel_id)
+                        count, last_ts = await bot.gateway.db.get_cronjob_sent_stats_today(chatbot_id, channel_id)
 
                         if daily_target is not None:
                             try:

@@ -6,7 +6,7 @@ This avoids global mutable state and supports dependency injection.
 from kesoku.agent.llm import BaseLLM, get_llm
 from kesoku.agent.tools import ActiveJobsRegistry, ToolRegistry, default_registry
 from kesoku.config import KesokuConfig, get_config
-from kesoku.db import DatabaseManager
+from kesoku.db import AsyncDatabaseManager, DatabaseManager
 
 
 class KesokuContext:
@@ -28,7 +28,8 @@ class KesokuContext:
             llm: Optional LLM client instance (useful for mock injection in tests).
         """
         self._config = config
-        self.db: DatabaseManager = db or DatabaseManager(self.config.workspace.db_path)
+        self.sync_db: DatabaseManager = db or DatabaseManager(self.config.workspace.db_path)
+        self.db: AsyncDatabaseManager = AsyncDatabaseManager(self.sync_db)
         self.tool_registry: ToolRegistry = tool_registry or default_registry
         self._llm = llm
         self.active_jobs = ActiveJobsRegistry()

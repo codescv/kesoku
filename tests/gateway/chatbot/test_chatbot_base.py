@@ -31,8 +31,10 @@ class MockChatbot(Chatbot):
 async def test_get_session_status_by_channel() -> None:
     """Test that get_session_status_by_channel returns correct metrics and uptime info."""
     mock_gateway = MagicMock(spec=Gateway)
+    mock_db = AsyncMock()
+    mock_gateway.db = mock_db
     mock_session = Session(id="session123", title="Test Session")
-    mock_gateway.get_session_by_channel = AsyncMock(return_value=mock_session)
+    mock_db.get_session_by_channel = AsyncMock(return_value=mock_session)
 
     # Mock history with one user message and one assistant message containing turn metrics
     history = [
@@ -66,7 +68,7 @@ async def test_get_session_status_by_channel() -> None:
             },
         ),
     ]
-    mock_gateway.get_session_history = AsyncMock(return_value=history)
+    mock_db.get_session_history = AsyncMock(return_value=history)
 
     chatbot = MockChatbot(chatbot_id="mock_bot", gateway=mock_gateway)
 

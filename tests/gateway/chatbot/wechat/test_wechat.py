@@ -58,11 +58,13 @@ def mock_config(tmp_path) -> KesokuConfig:
 def mock_gateway() -> MagicMock:
     """Provide a mock Gateway instance."""
     gw = MagicMock(spec=Gateway)
-    gw.get_session_by_channel = AsyncMock(return_value=None)
+    db = AsyncMock()
+    gw.db = db
+    db.get_session_by_channel = AsyncMock(return_value=None)
+    db.update_session_updated_at = AsyncMock()
+    db.update_message_status = AsyncMock()
     gw.create_session = AsyncMock(return_value=Session(id="sess123", title="Test WeChat Session"))
-    gw.update_session_updated_at = AsyncMock()
     gw.post = AsyncMock()
-    gw.update_message_status = AsyncMock()
     gw.agent = MagicMock()
     return gw
 
@@ -177,7 +179,7 @@ async def test_wechat_chatbot_process_message(
         assert bot._token_store.get("test_bot_id", "user_alice") == "ctx_tok_999"
 
         # Verify session retrieval
-        mock_gateway.get_session_by_channel.assert_called_once_with("wechat_test", "user_alice")
+        mock_gateway.db.get_session_by_channel.assert_called_once_with("wechat_test", "user_alice")
 
         # Verify new session creation
         mock_gateway.create_session.assert_called_once()
@@ -282,7 +284,7 @@ async def test_wechat_chatbot_send_text(
         assert body["msg"]["item_list"][0]["text_item"]["text"] == "Hello from assistant!"
 
         # Verify status was updated to DELIVERED
-        mock_gateway.update_message_status.assert_called_once_with("msg_out_999", MessageStatus.DELIVERED)
+        mock_gateway.db.update_message_status.assert_called_once_with("msg_out_999", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -304,7 +306,7 @@ async def test_wechat_chatbot_slash_command_clear(
         bot._send_session = mock_session
 
         # Mock existing session
-        mock_gateway.get_session_by_channel.return_value = Session(id="sess123", title="Active Session")
+        mock_gateway.db.get_session_by_channel.return_value = Session(id="sess123", title="Active Session")
 
         inbound_payload = {
             "from_user_id": "user_alice",
@@ -343,7 +345,7 @@ async def test_wechat_chatbot_slash_command_status(
         bot._poll_session = mock_session
         bot._send_session = mock_session
 
-        mock_gateway.get_session_by_channel.return_value = Session(id="sess123", title="Active Session")
+        mock_gateway.db.get_session_by_channel.return_value = Session(id="sess123", title="Active Session")
 
         # Mock history containing metrics
         mock_history = [
@@ -377,7 +379,7 @@ async def test_wechat_chatbot_slash_command_status(
                 },
             ),
         ]
-        mock_gateway.get_session_history.return_value = mock_history
+        mock_gateway.db.get_session_history.return_value = mock_history
 
         inbound_payload = {
             "from_user_id": "user_alice",

@@ -39,12 +39,14 @@ def mock_config(tmp_path: Any) -> KesokuConfig:
 def mock_gateway() -> MagicMock:
     """Provide a mock Gateway instance."""
     gw = MagicMock(spec=Gateway)
-    gw.get_session = AsyncMock(return_value=None)
-    gw.get_session_by_channel = AsyncMock(return_value=None)
+    db = AsyncMock()
+    gw.db = db
+    db.get_session = AsyncMock(return_value=None)
+    db.get_session_by_channel = AsyncMock(return_value=None)
+    db.update_session_updated_at = AsyncMock()
+    db.update_message_status = AsyncMock()
     gw.create_session = AsyncMock(return_value=Session(id="thread123", title="Test Session"))
-    gw.update_session_updated_at = AsyncMock()
     gw.post = AsyncMock()
-    gw.update_message_status = AsyncMock()
     return gw
 
 
@@ -216,7 +218,7 @@ async def test_handle_message_chunking(mock_config: KesokuConfig, mock_gateway: 
             await bot.handle_message(msg)
             # Chunk 1 should contain line1 + line2 (1802 chars). Chunk 2 should contain line3 (901 chars).
             assert mock_channel.send.call_count == 2
-            mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
+            mock_gateway.db.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -258,7 +260,7 @@ async def test_handle_message_with_files_split_and_upload(mock_config: KesokuCon
                     mock_channel.send.assert_any_call(file=mock_file)
                     mock_channel.send.assert_any_call(" how are you?")
 
-                    mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
+                    mock_gateway.db.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -325,7 +327,7 @@ async def test_handle_message_fetch_channel_deleted(mock_config: KesokuConfig, m
             # Verify abort_session was called on the gateway
             mock_gateway.abort_session.assert_called_once_with("thread123")
             # Verify update_message_status was called to mark the message as delivered
-            mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
+            mock_gateway.db.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -360,7 +362,7 @@ async def test_handle_message_fetch_channel_forbidden(mock_config: KesokuConfig,
             # Verify abort_session was called on the gateway
             mock_gateway.abort_session.assert_called_once_with("thread123")
             # Verify update_message_status was called to mark the message as delivered
-            mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
+            mock_gateway.db.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -693,8 +695,7 @@ async def test_handle_message_tool_result_in_place_edit(mock_config: KesokuConfi
             bot._sent_tool_calls["parent123"] = mock_discord_msg
 
             # Mock parent message retrieval (to verify it is NOT called)
-            mock_gateway.db = MagicMock()
-            mock_gateway.db.get_messages_by_filters = MagicMock()
+            mock_gateway.db.get_messages_by_filters = AsyncMock()
 
             result_msg = Message(
                 id="result123",
@@ -851,7 +852,7 @@ async def test_handle_message_with_voice_success(mock_config: KesokuConfig, mock
                     mock_exists.assert_called_once_with("/tmp/voice.ogg")
                     mock_send_voice.assert_called_once_with(mock_channel, "/tmp/voice.ogg")
                     mock_channel.send.assert_called_once_with("Listen here: ")
-                    mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
+                    mock_gateway.db.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -888,7 +889,7 @@ async def test_handle_message_with_voice_fallback(mock_config: KesokuConfig, moc
                         mock_exists.assert_called_once_with("/tmp/voice.ogg")
                         mock_channel.send.assert_any_call("Listen here: ")
                         mock_channel.send.assert_any_call(file=mock_file)
-                        mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
+                        mock_gateway.db.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -1233,7 +1234,7 @@ async def test_handle_message_removes_stop_button_on_final_response(
             mock_header_msg.edit.assert_called_once_with(
                 content="🔍 **Session ID:** `thread123`", view=mock_header_view
             )
-            mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
+            mock_gateway.db.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -1280,7 +1281,7 @@ async def test_handle_message_with_question(mock_config: KesokuConfig, mock_gate
                         color=discord.Color.blurple(),
                     )
                     mock_channel.send.assert_called_once_with(embed=mock_embed, view=mock_view)
-                    mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
+                    mock_gateway.db.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -1395,7 +1396,9 @@ async def test_on_message_resolves_and_passes_role(mock_config: KesokuConfig, mo
             msg.created_at = datetime.datetime.now(datetime.UTC)
 
             # Case 1: Direct lookup of thread has no role, but parent channel is bound to "asuka"
-            mock_gateway.get_channel_role.side_effect = lambda cb_id, chan_id: "asuka" if chan_id == "98765" else None
+            mock_gateway.db.get_channel_role.side_effect = (
+                lambda cb_id, chan_id: "asuka" if chan_id == "98765" else None
+            )
 
             await bot.on_message(msg)
 

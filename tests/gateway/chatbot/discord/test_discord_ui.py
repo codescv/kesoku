@@ -16,7 +16,9 @@ from kesoku.gateway.gateway import Gateway
 def mock_gateway() -> MagicMock:
     """Provide a mock Gateway instance."""
     gw = MagicMock(spec=Gateway)
-    gw.get_session_history = AsyncMock(return_value=[])
+    db = AsyncMock()
+    gw.db = db
+    db.get_session_history = AsyncMock(return_value=[])
     return gw
 
 
@@ -141,7 +143,7 @@ def test_generate_html_trajectory(mock_gateway: MagicMock) -> None:
 @patch("kesoku.gateway.chatbot.discord.ui.build_clean_history", new_callable=AsyncMock)
 async def test_view_trajectory_callback_success(mock_build: AsyncMock, mock_gateway: MagicMock) -> None:
     """Test successful click of the 'View Trajectory' button."""
-    mock_gateway.get_session = AsyncMock(return_value=None)
+    mock_gateway.db.get_session = AsyncMock(return_value=None)
     view = MessageHeaderView(gateway=mock_gateway, session_id="session_123")
 
     mock_interaction = AsyncMock(spec=discord.Interaction)
@@ -193,7 +195,7 @@ async def test_view_trajectory_callback_success(mock_build: AsyncMock, mock_gate
 @patch("kesoku.gateway.chatbot.discord.ui.build_clean_history", new_callable=AsyncMock)
 async def test_view_trajectory_callback_failure(mock_build: AsyncMock, mock_gateway: MagicMock) -> None:
     """Test click of the 'View Trajectory' button when history fetch fails."""
-    mock_gateway.get_session = AsyncMock(return_value=None)
+    mock_gateway.db.get_session = AsyncMock(return_value=None)
     view = MessageHeaderView(gateway=mock_gateway, session_id="session_123")
 
     mock_interaction = AsyncMock(spec=discord.Interaction)
@@ -263,7 +265,7 @@ async def test_stop_turn_callback(mock_gateway: MagicMock) -> None:
     mock_button = MagicMock(spec=discord.ui.Button)
 
     # Mock DB user message to stop
-    mock_gateway.get_session_history.return_value = [
+    mock_gateway.db.get_session_history.return_value = [
         Message(
             id="msg_u1",
             session_id="s123",
@@ -289,7 +291,7 @@ async def test_stop_turn_callback(mock_gateway: MagicMock) -> None:
     # Worker should be removed from agent
     assert "s123" not in mock_agent.workers
     # Message status updated to interrupted
-    mock_gateway.update_message_status.assert_called_once_with("msg_u1", MessageStatus.INTERRUPTED)
+    mock_gateway.db.update_message_status.assert_called_once_with("msg_u1", MessageStatus.INTERRUPTED)
     # Typing task cancelled
     mock_typing_task.cancel.assert_called_once()
     # Intermediate message deleted
@@ -380,7 +382,7 @@ async def test_stop_turn_callback_with_metrics(mock_gateway: MagicMock) -> None:
     mock_button = MagicMock(spec=discord.ui.Button)
 
     # Mock DB user message to stop, with metrics
-    mock_gateway.get_session_history.return_value = [
+    mock_gateway.db.get_session_history.return_value = [
         Message(
             id="msg_u1",
             session_id="s123",

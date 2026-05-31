@@ -3,7 +3,7 @@
 import asyncio
 import os
 import tempfile
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
@@ -18,7 +18,8 @@ from kesoku.gateway.gateway import Gateway
 async def test_cronjob_chatbot_handle_message() -> None:
     """Verify that CronjobChatbot silently accepts and marks messages as DELIVERED."""
     mock_gateway = MagicMock(spec=Gateway)
-    mock_gateway.update_message_status = AsyncMock()
+    mock_db = AsyncMock()
+    mock_gateway.db = mock_db
 
     chatbot = CronjobChatbot(chatbot_id="cronjob", gateway=mock_gateway)
     message = Message(
@@ -33,16 +34,18 @@ async def test_cronjob_chatbot_handle_message() -> None:
     )
 
     await chatbot.handle_message(message)
-    mock_gateway.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
+    mock_gateway.db.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
 async def test_cronjob_chatbot_trigger_cronjob() -> None:
     """Verify that trigger_cronjob correctly posts PENDING_AGENT message to Gateway."""
     mock_gateway = MagicMock(spec=Gateway)
+    mock_db = AsyncMock()
+    mock_gateway.db = mock_db
     mock_session = MagicMock()
     mock_session.id = "sess123"
-    mock_gateway.get_session_by_channel = AsyncMock(return_value=mock_session)
+    mock_db.get_session_by_channel = AsyncMock(return_value=mock_session)
     mock_gateway.post = AsyncMock()
 
     chatbot = CronjobChatbot(chatbot_id="cronjob", gateway=mock_gateway)
@@ -52,8 +55,8 @@ async def test_cronjob_chatbot_trigger_cronjob() -> None:
         prompt_content="Test silent cron content",
     )
 
-    mock_gateway.get_session_by_channel.assert_called_once_with("cronjob", "silent_0")
-    mock_gateway.update_session_updated_at.assert_called_once_with("sess123")
+    mock_gateway.db.get_session_by_channel.assert_called_once_with("cronjob", "silent_0")
+    mock_gateway.db.update_session_updated_at.assert_called_once_with("sess123", ANY)
     mock_gateway.post.assert_called_once()
 
     posted_msg = mock_gateway.post.call_args[0][0]

@@ -100,7 +100,7 @@ async def test_multi_user_simultaneous(temp_db: str) -> None:
         ]
     )
 
-    context = KesokuContext(llm=llm, tool_registry=reg)
+    context = KesokuContext(config=cfg, llm=llm, tool_registry=reg)
     agent = Agent(gw, context=context)
     agent_task = asyncio.create_task(agent.start())
 
@@ -137,8 +137,8 @@ async def test_multi_user_simultaneous(temp_db: str) -> None:
     await asyncio.gather(agent_task, return_exceptions=True)
 
     # Verify both sessions were processed and workers were created
-    hist_a = await gw.get_session_history("sess_A")
-    hist_b = await gw.get_session_history("sess_B")
+    hist_a = await gw.db.get_session_history("sess_A")
+    hist_b = await gw.db.get_session_history("sess_B")
 
     assert any(m.status == MessageStatus.PROCESSED for m in hist_a)
     assert any(m.status == MessageStatus.PROCESSED for m in hist_b)
@@ -172,7 +172,7 @@ async def test_user_thought_interruption(temp_db: str) -> None:
         ]
     )
 
-    context = KesokuContext(llm=llm, tool_registry=reg)
+    context = KesokuContext(config=cfg, llm=llm, tool_registry=reg)
     agent = Agent(gw, context=context)
     agent_task = asyncio.create_task(agent.start())
 
@@ -209,7 +209,7 @@ async def test_user_thought_interruption(temp_db: str) -> None:
     agent.stop()
     await asyncio.gather(agent_task, return_exceptions=True)
 
-    hist = await gw.get_session_history("sess_int")
+    hist = await gw.db.get_session_history("sess_int")
 
     # Verify msg1 was interrupted or msg2 was processed
     assert any(m.status == MessageStatus.INTERRUPTED or m.id == msg2.id for m in hist)

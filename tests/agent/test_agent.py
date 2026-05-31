@@ -75,7 +75,7 @@ async def test_agent_execution_loop(temp_db: str) -> None:
             LLMResponse(content="The calculation result is 35.", tool_calls=[]),
         ]
     )
-    context = KesokuContext(llm=llm, tool_registry=reg)
+    context = KesokuContext(config=cfg, llm=llm, tool_registry=reg)
     agent = Agent(gw, context=context)
 
     # Start agent loop in background
@@ -87,7 +87,7 @@ async def test_agent_execution_loop(temp_db: str) -> None:
     await asyncio.gather(agent_task, return_exceptions=True)
 
     # Verify message status was marked as processed
-    history = await gw.get_session_history("sess1")
+    history = await gw.db.get_session_history("sess1")
     assert len(history) >= 1
     assert any(m.status == "processed" for m in history)
 
@@ -210,7 +210,7 @@ async def test_agent_parallel_tool_calls(temp_db: str) -> None:
         ToolCallRequest(name="dummy_search", arguments={"query": "B"}, thought_signature=None),
     ]
     llm = MockLLM(mock_tools=mock_tools)
-    context = KesokuContext(llm=llm, tool_registry=reg)
+    context = KesokuContext(config=cfg, llm=llm, tool_registry=reg)
     agent = Agent(gw, context=context)
 
     agent_task = asyncio.create_task(agent.start())
@@ -218,7 +218,7 @@ async def test_agent_parallel_tool_calls(temp_db: str) -> None:
     agent.stop()
     await asyncio.gather(agent_task, return_exceptions=True)
 
-    history = await gw.get_session_history("sess_parallel")
+    history = await gw.db.get_session_history("sess_parallel")
     tc_msgs = [m for m in history if m.type == "tool_call"]
     tr_msgs = [m for m in history if m.type == "tool_result"]
     assert len(tc_msgs) == 2
@@ -727,7 +727,7 @@ async def test_session_worker_dynamic_llm(temp_db: str) -> None:
     from kesoku.agent.turn_executor import TurnExecutor
     from kesoku.config import DiscordChannelOverride
 
-    mock_cfg = KesokuConfig()
+    mock_cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
     mock_cfg.discord.channels = [
         DiscordChannelOverride(
             channels=["announcements"],
@@ -742,7 +742,7 @@ async def test_session_worker_dynamic_llm(temp_db: str) -> None:
         mock_claude = MagicMock()
         mock_get_llm.return_value = mock_claude
 
-        context = KesokuContext(llm=MockLLM())
+        context = KesokuContext(config=mock_cfg, llm=MockLLM())
         executor = TurnExecutor(
             session_id="sess_override",
             gateway=gw,
@@ -799,7 +799,7 @@ async def test_agent_empty_response_nudge(temp_db: str) -> None:
                 return LLMResponse(content="Hello! Here is the reply after nudge.")
 
     llm = NudgeLLM()
-    context = KesokuContext(llm=llm, tool_registry=reg)
+    context = KesokuContext(config=cfg, llm=llm, tool_registry=reg)
     agent = Agent(gw, context=context)
 
     agent_task = asyncio.create_task(agent.start())
@@ -807,7 +807,7 @@ async def test_agent_empty_response_nudge(temp_db: str) -> None:
     agent.stop()
     await asyncio.gather(agent_task, return_exceptions=True)
 
-    history = await gw.get_session_history("sess_nudge")
+    history = await gw.db.get_session_history("sess_nudge")
 
     # We expect:
     # 1. User Prompt ("Hello!")
@@ -1086,7 +1086,7 @@ async def test_agent_llm_error_handling(temp_db: str) -> None:
             raise RuntimeError("LLM API Connection Failed")
 
     llm = FailingLLM()
-    context = KesokuContext(llm=llm, tool_registry=reg)
+    context = KesokuContext(config=cfg, llm=llm, tool_registry=reg)
     agent = Agent(gw, context=context)
 
     agent_task = asyncio.create_task(agent.start())
@@ -1094,7 +1094,7 @@ async def test_agent_llm_error_handling(temp_db: str) -> None:
     agent.stop()
     await asyncio.gather(agent_task, return_exceptions=True)
 
-    history = await gw.get_session_history("sess_err")
+    history = await gw.db.get_session_history("sess_err")
 
     # Verify that initiating user message is updated to status "error"
     db_user_msg = next(m for m in history if m.id == user_msg.id)
@@ -1145,7 +1145,7 @@ async def test_graceful_shutdown_and_orphaned_recovery(temp_db: str) -> None:
             return LLMResponse(content="Finished slowly.")
 
     llm = SlowLLM()
-    context = KesokuContext(llm=llm, tool_registry=reg)
+    context = KesokuContext(config=cfg, llm=llm, tool_registry=reg)
     agent = Agent(gw, context=context)
 
     agent_task = asyncio.create_task(agent.start())
@@ -1154,7 +1154,7 @@ async def test_graceful_shutdown_and_orphaned_recovery(temp_db: str) -> None:
     await asyncio.sleep(0.15)
 
     # Verify it's processing
-    history = await gw.get_session_history("sess_graceful")
+    history = await gw.db.get_session_history("sess_graceful")
     db_msg = next(m for m in history if m.id == msg1.id)
     assert db_msg.status == "processing"
 
@@ -1163,7 +1163,7 @@ async def test_graceful_shutdown_and_orphaned_recovery(temp_db: str) -> None:
     await asyncio.gather(agent_task, return_exceptions=True)
 
     # The message should be marked as processed, not interrupted or error, because it finished gracefully!
-    history = await gw.get_session_history("sess_graceful")
+    history = await gw.db.get_session_history("sess_graceful")
     db_msg = next(m for m in history if m.id == msg1.id)
     assert db_msg.status == "processed"
 
@@ -1199,11 +1199,11 @@ async def test_graceful_shutdown_and_orphaned_recovery(temp_db: str) -> None:
     await gw.post(recent_msg)
 
     # Directly trigger database recovery
-    recovered_count = await asyncio.to_thread(gw.db.recover_orphaned_processing_messages, threshold_seconds=300.0)
+    recovered_count = await gw.db.recover_orphaned_processing_messages(threshold_seconds=300.0)
     assert recovered_count == 1
 
     # Verify that old_msg was reverted to pending_agent
-    history = await gw.get_session_history("sess_graceful")
+    history = await gw.db.get_session_history("sess_graceful")
     db_old_msg = next(m for m in history if m.id == old_msg.id)
     assert db_old_msg.status == "pending_agent"
 
@@ -1313,7 +1313,7 @@ async def test_agent_wakeup_by_system_message(temp_db: str) -> None:
     from kesoku.agent.llm import LLMResponse
 
     llm = MockLLM(responses=[LLMResponse(content="System alert processed successfully.", tool_calls=[])])
-    context = KesokuContext(llm=llm, tool_registry=reg)
+    context = KesokuContext(config=cfg, llm=llm, tool_registry=reg)
     agent = Agent(gw, context=context)
 
     # Start agent loop
@@ -1325,5 +1325,5 @@ async def test_agent_wakeup_by_system_message(temp_db: str) -> None:
     await asyncio.gather(agent_task, return_exceptions=True)
 
     # Verify the system message was successfully claimed and processed
-    history = await gw.get_session_history("sess_sys_wakeup")
+    history = await gw.db.get_session_history("sess_sys_wakeup")
     assert any(m.id == msg.id and m.status == "processed" for m in history)

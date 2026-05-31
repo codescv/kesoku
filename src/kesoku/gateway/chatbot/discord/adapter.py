@@ -426,11 +426,11 @@ class DiscordChatbot(Chatbot):
 
         # Resolve role
         role = "default"
-        db_role = await self.gateway.get_channel_role(self.chatbot_id, channel_id)
+        db_role = await self.gateway.db.get_channel_role(self.chatbot_id, channel_id)
         if isinstance(db_role, str):
             role = db_role
         elif isinstance(target_channel, discord.Thread) and target_channel.parent:
-            parent_role = await self.gateway.get_channel_role(self.chatbot_id, str(target_channel.parent.id))
+            parent_role = await self.gateway.db.get_channel_role(self.chatbot_id, str(target_channel.parent.id))
             if isinstance(parent_role, str):
                 role = parent_role
 
@@ -496,7 +496,7 @@ class DiscordChatbot(Chatbot):
                     "Aborting session and marking message as delivered to stop retrying."
                 )
                 await self.gateway.abort_session(message.session_id)
-                await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
+                await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
                 raise DeliveryAbortedError("Discord channel fetch failed (deleted or forbidden)")
             except Exception as fe:
                 logger.error(f"Failed to fetch Discord channel {target_id}: {fe}")
@@ -607,7 +607,7 @@ class DiscordChatbot(Chatbot):
                 await discord_msg.edit(content=new_content)
             except Exception as ee:
                 logger.warning(f"Failed to edit single special message: {ee}")
-            await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
+            await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
             return
 
         sent_msg = await channel.send(new_content)
@@ -616,7 +616,7 @@ class DiscordChatbot(Chatbot):
         if message.role == MessageRole.TOOL and message.type == MessageType.TOOL_CALL:
             self._sent_tool_calls[message.id] = sent_msg
 
-        await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
+        await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
 
     async def handle_tool_result(self, message: Message) -> None:
         """Update the status of a previously executed tool to Success or Error emoji in the special messages list."""
@@ -654,7 +654,7 @@ class DiscordChatbot(Chatbot):
                     except Exception as ee:
                         logger.warning(f"Failed to edit single special message: {ee}")
 
-                await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
+                await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
                 return
 
         if tool_call_msg_id and tool_call_msg_id in self._sent_tool_calls:
@@ -668,7 +668,7 @@ class DiscordChatbot(Chatbot):
             except Exception as ee:
                 logger.warning(f"Failed to edit tool call message in-place: {ee}")
 
-        await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
+        await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
 
     async def send_text_chunks(self, channel_id: str, chunks: list[str], message: Message) -> None:
         """Deliver formatted text chunks sequentially to the target channel."""

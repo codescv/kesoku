@@ -62,7 +62,7 @@ class MessageHeaderView(discord.ui.View):
             )
 
             # Fetch system prompt directly from session and prepend as first item
-            session = await self.gateway.get_session(self.session_id)
+            session = await self.gateway.db.get_session(self.session_id)
             if session and session.system_prompt:
                 sys_msg = Message(
                     session_id=self.session_id,
@@ -122,7 +122,7 @@ class MessageHeaderView(discord.ui.View):
             await asyncio.sleep(0.15)
 
             # 2. Fetch recent history to find the active user message and update its status
-            history = await self.gateway.get_session_history(self.session_id, limit=20)
+            history = await self.gateway.db.get_session_history(self.session_id, limit=20)
             user_msg = None
             for msg in reversed(history):
                 if msg.role == MessageRole.USER:
@@ -131,7 +131,7 @@ class MessageHeaderView(discord.ui.View):
 
             if user_msg:
                 if user_msg.status in (MessageStatus.PENDING_AGENT, MessageStatus.PROCESSING):
-                    await self.gateway.update_message_status(user_msg.id, MessageStatus.INTERRUPTED)
+                    await self.gateway.db.update_message_status(user_msg.id, MessageStatus.INTERRUPTED)
 
             # Delete the message header entirely on interruption
             try:

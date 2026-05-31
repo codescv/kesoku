@@ -88,7 +88,7 @@ async def test_memory_tools_execution(tmp_path) -> None:
     )
 
     # 1. Attempt to write to a category not in allowed allowlist
-    res = update_memory(
+    res = await update_memory(
         category="forbidden_category",
         key="my_key",
         title="Invalid Title",
@@ -100,7 +100,7 @@ async def test_memory_tools_execution(tmp_path) -> None:
     assert "Write Denied: Category 'forbidden_category' is not recognized" in res
 
     # 2. Force override creating a new category with user permission set
-    res = update_memory(
+    res = await update_memory(
         category="forbidden_category",
         key="my_key",
         title="Invalid Title",
@@ -114,7 +114,7 @@ async def test_memory_tools_execution(tmp_path) -> None:
     assert "Key: `my_key`" in res
 
     # 3. Verify that updating with an invalid key is rejected
-    res_fail = update_memory(
+    res_fail = await update_memory(
         category="progress",
         key="  Standard Japanese Book  ",
         title="《标日》学习进度",
@@ -126,7 +126,7 @@ async def test_memory_tools_execution(tmp_path) -> None:
     assert "Error: Invalid Key" in res_fail
 
     # 4. Normal update on a role-isolated category with a strictly valid key
-    res = update_memory(
+    res = await update_memory(
         category="user_preferences",
         key="funny_asuka_event",
         title="Asuka Day 1",
@@ -140,7 +140,7 @@ async def test_memory_tools_execution(tmp_path) -> None:
 
     # 4. Testing list_memories tool with roleplay segregation
     # Writing a default user_preferences memory
-    update_memory(
+    await update_memory(
         category="user_preferences",
         key="funny_general_event",
         title="General Fun",
@@ -151,19 +151,19 @@ async def test_memory_tools_execution(tmp_path) -> None:
     )
 
     # List memories as Tifa
-    list_tifa = list_memories(category="user_preferences", role="tifa", context=ctx)
+    list_tifa = await list_memories(category="user_preferences", role="tifa", context=ctx)
     # Tifa can see default memories but NOT Asuka's memories
     assert "funny_general_event" in list_tifa
     assert "funny_asuka_event" not in list_tifa
 
     # List memories as Asuka
-    list_asuka = list_memories(category="user_preferences", role="asuka", context=ctx)
+    list_asuka = await list_memories(category="user_preferences", role="asuka", context=ctx)
     # Asuka can see both default and Asuka-specific memories
     assert "funny_general_event" in list_asuka
     assert "funny_asuka_event" in list_asuka
 
     # 5. Testing view_memory tool with dynamic in-memory Markdown aggregation (key=None)
-    view_asuka_all = view_memory(category="user_preferences", key=None, role="asuka", context=ctx)
+    view_asuka_all = await view_memory(category="user_preferences", key=None, role="asuka", context=ctx)
     assert "# Category: user_preferences (scope: asuka)" in view_asuka_all
     assert "## General Fun (key: `funny_general_event`, scope: `default`)" in view_asuka_all
     assert "## Asuka Day 1 (key: `funny_asuka_event`, scope: `asuka`)" in view_asuka_all
@@ -171,11 +171,11 @@ async def test_memory_tools_execution(tmp_path) -> None:
     assert "Asuka was tsundere today" in view_asuka_all
 
     # 6. Testing delete_memory tool
-    delete_res = delete_memory(category="user_preferences", key="funny_asuka_event", role="asuka", context=ctx)
+    delete_res = await delete_memory(category="user_preferences", key="funny_asuka_event", role="asuka", context=ctx)
     assert "Memory successfully deleted" in delete_res
 
     # Verify deletion
-    list_asuka_after = list_memories(category="user_preferences", role="asuka", context=ctx)
+    list_asuka_after = await list_memories(category="user_preferences", role="asuka", context=ctx)
     assert "funny_asuka_event" not in list_asuka_after
 
 
@@ -198,7 +198,7 @@ async def test_category_role_routing_and_play_role(tmp_path) -> None:
     gw = Gateway(context=KesokuContext(config=cfg))
 
     # Bind the channel to a specific role 'tifa'
-    await gw.set_channel_role("discord", "chan_123", "tifa")
+    await gw.db.set_channel_role("discord", "chan_123", "tifa")
 
     # Create a mock user message in channel 'chan_123' to simulate the active channel context
     msg = Message(
@@ -221,7 +221,7 @@ async def test_category_role_routing_and_play_role(tmp_path) -> None:
     )
 
     # 1. Update standard 'progress' memory - it should go to 'default' role scope
-    res = update_memory(
+    res = await update_memory(
         category="progress",
         key="milestone",
         title="Milestone",
@@ -232,7 +232,7 @@ async def test_category_role_routing_and_play_role(tmp_path) -> None:
     assert "Scope: `default`" in res
 
     # 2. Update 'user_preferences' memory - it should go to 'tifa' active role scope
-    res = update_memory(
+    res = await update_memory(
         category="user_preferences",
         key="funny_event",
         title="Funny",
@@ -261,7 +261,7 @@ async def test_category_role_routing_and_play_role(tmp_path) -> None:
     assert "asuka" in play_res
 
     # Verify that database role is updated
-    current_role = await gw.get_channel_role("discord", "chan_123")
+    current_role = await gw.db.get_channel_role("discord", "chan_123")
     assert current_role == "asuka"
 
 
@@ -283,7 +283,7 @@ async def test_memory_length_limit(tmp_path) -> None:
     )
 
     # 1. Valid content length (<= 500 characters)
-    res = update_memory(
+    res = await update_memory(
         category="user_preferences",
         key="valid_len",
         title="Valid Title",
@@ -293,7 +293,7 @@ async def test_memory_length_limit(tmp_path) -> None:
     assert "Memory successfully saved!" in res
 
     # 2. Exceeding content length (> 500 characters)
-    res_fail = update_memory(
+    res_fail = await update_memory(
         category="user_preferences",
         key="invalid_len",
         title="Invalid Title",
@@ -305,7 +305,7 @@ async def test_memory_length_limit(tmp_path) -> None:
     # 3. Exceeding content length with import of MAX_MEMORY_CONTENT_LENGTH
     from kesoku.agent.tools import MAX_MEMORY_CONTENT_LENGTH
 
-    res_fail_constant = update_memory(
+    res_fail_constant = await update_memory(
         category="user_preferences",
         key="invalid_len_constant",
         title="Invalid Title",
@@ -353,7 +353,7 @@ async def test_user_preferences_memory_behavior(tmp_path) -> None:
     gw = Gateway(context=KesokuContext(config=cfg))
 
     # Bind active channel role for the active context message
-    await gw.set_channel_role("discord", "chan_pref", "tifa")
+    await gw.db.set_channel_role("discord", "chan_pref", "tifa")
 
     # Create a mock user message in channel 'chan_pref' to simulate active context
     msg = Message(
@@ -376,7 +376,7 @@ async def test_user_preferences_memory_behavior(tmp_path) -> None:
     )
 
     # 1. Update 'user_preferences' memory - it should dynamically route to 'tifa' role scope
-    res = update_memory(
+    res = await update_memory(
         category="user_preferences",
         key="dont_use_codeblocks",
         title="Code Block Preference",
@@ -388,7 +388,7 @@ async def test_user_preferences_memory_behavior(tmp_path) -> None:
     assert "Scope: `tifa`" in res
 
     # 2. Max content length limit (MAX_MEMORY_CONTENT_LENGTH is 500, let's check it enforces it)
-    res_fail = update_memory(
+    res_fail = await update_memory(
         category="user_preferences",
         key="pref_too_long",
         title="Too Long Preference",

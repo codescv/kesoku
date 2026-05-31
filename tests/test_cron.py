@@ -177,7 +177,9 @@ async def test_cron_manager_min_idle_time_seconds():
     mock_bot.chatbot_id = "discord"
     mock_bot.trigger_cronjob = AsyncMock()
 
-    mock_gateway = AsyncMock()
+    mock_gateway = MagicMock()
+    mock_db = AsyncMock()
+    mock_gateway.db = mock_db
     mock_bot.gateway = mock_gateway
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -197,7 +199,7 @@ async def test_cron_manager_min_idle_time_seconds():
         manager = CronManager(chatbots=[mock_bot], config_dir=tmpdir_real)
 
         # Case 1: Last message was 30 seconds ago (not idle enough)
-        mock_gateway.get_last_message_timestamp.return_value = datetime.datetime.now().timestamp() - 30
+        mock_db.get_last_message_timestamp.return_value = datetime.datetime.now().timestamp() - 30
 
         await manager._check_and_trigger_jobs([job])
         await asyncio.sleep(0.1)
@@ -207,7 +209,7 @@ async def test_cron_manager_min_idle_time_seconds():
         manager.last_executed_minute.clear()
 
         # Case 2: Last message was 90 seconds ago (idle enough)
-        mock_gateway.get_last_message_timestamp.return_value = datetime.datetime.now().timestamp() - 90
+        mock_db.get_last_message_timestamp.return_value = datetime.datetime.now().timestamp() - 90
 
         await manager._check_and_trigger_jobs([job])
         await asyncio.sleep(0.1)
@@ -225,7 +227,9 @@ async def test_cron_manager_daily_target():
     mock_bot.chatbot_id = "discord"
     mock_bot.trigger_cronjob = AsyncMock()
 
-    mock_gateway = AsyncMock()
+    mock_gateway = MagicMock()
+    mock_db = AsyncMock()
+    mock_gateway.db = mock_db
     mock_bot.gateway = mock_gateway
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -245,7 +249,7 @@ async def test_cron_manager_daily_target():
         manager = CronManager(chatbots=[mock_bot], config_dir=tmpdir_real)
 
         # Case 1: Already sent 3 messages today -> should skip
-        mock_gateway.get_cronjob_sent_stats_today.return_value = (3, None)
+        mock_db.get_cronjob_sent_stats_today.return_value = (3, None)
 
         await manager._check_and_trigger_jobs([job])
         await asyncio.sleep(0.1)
@@ -255,7 +259,7 @@ async def test_cron_manager_daily_target():
         manager.last_executed_minute.clear()
 
         # Case 2: Only sent 2 messages today -> should trigger
-        mock_gateway.get_cronjob_sent_stats_today.return_value = (2, None)
+        mock_db.get_cronjob_sent_stats_today.return_value = (2, None)
 
         await manager._check_and_trigger_jobs([job])
         await asyncio.sleep(0.1)
@@ -273,7 +277,9 @@ async def test_cron_manager_min_interval():
     mock_bot.chatbot_id = "discord"
     mock_bot.trigger_cronjob = AsyncMock()
 
-    mock_gateway = AsyncMock()
+    mock_gateway = MagicMock()
+    mock_db = AsyncMock()
+    mock_gateway.db = mock_db
     mock_bot.gateway = mock_gateway
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -293,7 +299,7 @@ async def test_cron_manager_min_interval():
         manager = CronManager(chatbots=[mock_bot], config_dir=tmpdir_real)
 
         # Case 1: Last trigger was 1 hour ago (3600s, less than 7200s) -> should skip
-        mock_gateway.get_cronjob_sent_stats_today.return_value = (1, datetime.datetime.now().timestamp() - 3600)
+        mock_db.get_cronjob_sent_stats_today.return_value = (1, datetime.datetime.now().timestamp() - 3600)
 
         await manager._check_and_trigger_jobs([job])
         await asyncio.sleep(0.1)
@@ -303,7 +309,7 @@ async def test_cron_manager_min_interval():
         manager.last_executed_minute.clear()
 
         # Case 2: Last trigger was 3 hours ago (10800s, more than 7200s) -> should trigger
-        mock_gateway.get_cronjob_sent_stats_today.return_value = (1, datetime.datetime.now().timestamp() - 10800)
+        mock_db.get_cronjob_sent_stats_today.return_value = (1, datetime.datetime.now().timestamp() - 10800)
 
         await manager._check_and_trigger_jobs([job])
         await asyncio.sleep(0.1)
@@ -321,7 +327,9 @@ async def test_cron_manager_progressive_probability():
     mock_bot.chatbot_id = "discord"
     mock_bot.trigger_cronjob = AsyncMock()
 
-    mock_gateway = AsyncMock()
+    mock_gateway = MagicMock()
+    mock_db = AsyncMock()
+    mock_gateway.db = mock_db
     mock_bot.gateway = mock_gateway
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -344,7 +352,7 @@ async def test_cron_manager_progressive_probability():
 
         # Case 1: Completely empty channel (last_msg_ts is None) -> prob = p_max (0.9)
         # random.random() is 0.5 <= 0.9 -> should trigger!
-        mock_gateway.get_last_message_timestamp.return_value = None
+        mock_db.get_last_message_timestamp.return_value = None
 
         from unittest.mock import patch
         with patch("random.random", return_value=0.5):
@@ -364,7 +372,7 @@ async def test_cron_manager_progressive_probability():
         # prob = p_base + (p_max - p_base) * 0.5 = 0.1 + 0.8 * 0.5 = 0.5
         # If random.random is 0.6 (> 0.5) -> should skip!
         now_ts = datetime.datetime.now().timestamp()
-        mock_gateway.get_last_message_timestamp.return_value = now_ts - 1800
+        mock_db.get_last_message_timestamp.return_value = now_ts - 1800
 
         with patch("random.random", return_value=0.6):
             await manager._check_and_trigger_jobs([job])

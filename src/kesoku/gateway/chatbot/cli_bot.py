@@ -128,7 +128,7 @@ class CLIChatbot(Chatbot):
                                 border_style="cyan",
                             )
                         )
-                await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
+                await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
                 self.final_response_event.set()
                 logger.debug(f"CLIChatbot received final response for channel {message.channel_id}")
                 return

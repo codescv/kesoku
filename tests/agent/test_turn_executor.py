@@ -58,7 +58,7 @@ async def test_turn_executor_successful_turn(temp_db: str) -> None:
     tool_runner.tool_registry.get_tools_list.return_value = []
     turn_logger = MagicMock(spec=TurnLogger)
 
-    context = KesokuContext(llm=llm)
+    context = KesokuContext(config=cfg, llm=llm)
     executor = TurnExecutor("sess_1", gw, tool_runner, turn_logger, context=context)
 
     # Configure mock worker
@@ -82,7 +82,7 @@ async def test_turn_executor_successful_turn(temp_db: str) -> None:
         )
 
     # Check final message and status
-    history = await gw.get_session_history("sess_1")
+    history = await gw.db.get_session_history("sess_1")
     assistant_msgs = [m for m in history if m.role == "assistant"]
     assert len(assistant_msgs) == 1
     assert assistant_msgs[0].content == "Hello User! How can I help?"
@@ -132,7 +132,7 @@ async def test_turn_executor_nudging(temp_db: str) -> None:
     tool_runner = MagicMock()
     tool_runner.tool_registry.get_tools_list.return_value = []
     turn_logger = MagicMock(spec=TurnLogger)
-    context = KesokuContext(llm=llm)
+    context = KesokuContext(config=cfg, llm=llm)
     executor = TurnExecutor("sess_nudge", gw, tool_runner, turn_logger, context=context)
 
     # Configure mock worker
@@ -156,7 +156,7 @@ async def test_turn_executor_nudging(temp_db: str) -> None:
         )
 
     # Check messages in session
-    history = await gw.get_session_history("sess_nudge")
+    history = await gw.db.get_session_history("sess_nudge")
     system_msgs = [m for m in history if m.role == "system" and "empty content" in m.content]
     assert len(system_msgs) == 1
 
@@ -234,7 +234,7 @@ async def test_turn_executor_tool_calls(temp_db: str) -> None:
     tool_runner.tool_registry.get_tools_list.return_value = []
 
     turn_logger = MagicMock(spec=TurnLogger)
-    context = KesokuContext(llm=llm)
+    context = KesokuContext(config=cfg, llm=llm)
     executor = TurnExecutor("sess_tools", gw, tool_runner, turn_logger, context=context)
 
     # Configure mock worker
@@ -258,7 +258,7 @@ async def test_turn_executor_tool_calls(temp_db: str) -> None:
         )
 
     # Check messages posted
-    history = await gw.get_session_history("sess_tools")
+    history = await gw.db.get_session_history("sess_tools")
     thoughts = [m for m in history if m.type == "thought"]
     assert len(thoughts) == 1
     assert thoughts[0].content == "Using tool"
@@ -332,7 +332,7 @@ async def test_turn_executor_pivot_resets_nudged(temp_db: str) -> None:
     tool_runner = MagicMock()
     tool_runner.tool_registry.get_tools_list.return_value = []
     turn_logger = MagicMock(spec=TurnLogger)
-    context = KesokuContext(llm=llm)
+    context = KesokuContext(config=cfg, llm=llm)
     executor = TurnExecutor("sess_pivot", gw, tool_runner, turn_logger, context=context)
 
     # Configure mock worker that returns msg1 in first loop, but pivots to msg2 in second loop
@@ -360,7 +360,7 @@ async def test_turn_executor_pivot_resets_nudged(temp_db: str) -> None:
         )
 
     # Check messages in session
-    history = await gw.get_session_history("sess_pivot")
+    history = await gw.db.get_session_history("sess_pivot")
 
     # We expect:
     # 1. First WeChat prompt
@@ -431,7 +431,7 @@ async def test_turn_executor_context_monitor_warning(temp_db: str) -> None:
     tool_runner.tool_registry.get_tools_list.return_value = []
     turn_logger = MagicMock(spec=TurnLogger)
 
-    context = KesokuContext(llm=llm)
+    context = KesokuContext(config=cfg, llm=llm)
     executor = TurnExecutor("sess_warning", gw, tool_runner, turn_logger, context=context)
 
     # Scenario A: Threshold is 80% (percentage is 50%, so no warning should be injected)
@@ -462,7 +462,7 @@ async def test_turn_executor_context_monitor_warning(temp_db: str) -> None:
 
     # Reset status of the message to process it again
     user_msg.status = "pending_agent"
-    await gw.update_message_status(user_msg.id, "pending_agent")
+    await gw.db.update_message_status(user_msg.id, "pending_agent")
 
     # Scenario B: Threshold is 40% (percentage is 50%, so warning should be injected)
     cfg.agent.compact_history_warning_threshold = 40.0
@@ -511,8 +511,8 @@ async def test_turn_executor_user_preferences_injection(temp_db: str) -> None:
     await gw.create_session("sess_pref_inject", title="Preferences Session")
 
     # Add user preferences to database under active role 'tifa'
-    await gw.set_channel_role("cli", "ch_pref", "tifa")
-    gw.db.upsert_agent_memory(
+    await gw.db.set_channel_role("cli", "ch_pref", "tifa")
+    await gw.db.upsert_agent_memory(
         category="user_preferences",
         key="rule_one",
         title="No Codeblocks",
@@ -547,7 +547,7 @@ async def test_turn_executor_user_preferences_injection(temp_db: str) -> None:
     tool_runner.tool_registry.get_tools_list.return_value = []
     turn_logger = MagicMock(spec=TurnLogger)
 
-    context = KesokuContext(llm=llm)
+    context = KesokuContext(config=cfg, llm=llm)
     executor = TurnExecutor("sess_pref_inject", gw, tool_runner, turn_logger, context=context)
 
     worker = MagicMock()
@@ -585,8 +585,8 @@ async def test_turn_executor_user_preferences_truncation(temp_db: str) -> None:
     await gw.create_session("sess_pref_trunc", title="Preferences Truncation Session")
 
     # Add very long user preferences to trigger 500 characters truncation
-    await gw.set_channel_role("cli", "ch_pref_trunc", "tifa")
-    gw.db.upsert_agent_memory(
+    await gw.db.set_channel_role("cli", "ch_pref_trunc", "tifa")
+    await gw.db.upsert_agent_memory(
         category="user_preferences",
         key="rule_long",
         title="Long Preference",
@@ -621,7 +621,7 @@ async def test_turn_executor_user_preferences_truncation(temp_db: str) -> None:
     tool_runner.tool_registry.get_tools_list.return_value = []
     turn_logger = MagicMock(spec=TurnLogger)
 
-    context = KesokuContext(llm=llm)
+    context = KesokuContext(config=cfg, llm=llm)
     executor = TurnExecutor("sess_pref_trunc", gw, tool_runner, turn_logger, context=context)
 
     worker = MagicMock()
@@ -672,15 +672,15 @@ async def test_turn_executor_cross_session_context_injection_and_consolidation(t
     # 1. Create session mapping and channel roles
     await gw.create_session("sess_cs", title="Active Turn Session")
     await gw.create_session("sess_other", title="Other Active Session")
-    await gw.set_active_session_for_channel("cli", "ch_cs", "sess_cs")
-    await gw.set_active_session_for_channel("cli", "ch_other", "sess_other")
-    await gw.set_channel_role("cli", "ch_cs", role)
-    await gw.set_channel_role("cli", "ch_other", role)
+    await gw.db.set_active_session_for_channel("cli", "ch_cs", "sess_cs")
+    await gw.db.set_active_session_for_channel("cli", "ch_other", "sess_other")
+    await gw.db.set_channel_role("cli", "ch_cs", role)
+    await gw.db.set_channel_role("cli", "ch_other", role)
 
     # 2. Insert base CrossSessionContext and message in sibling session
     # Context updated 50 seconds ago
     now = time.time()
-    conn = gw.db._get_connection()
+    conn = gw.context.sync_db._get_connection()
     try:
         with conn:
             conn.execute(
@@ -757,7 +757,7 @@ async def test_turn_executor_cross_session_context_injection_and_consolidation(t
     tool_runner.tool_registry.get_tools_list.return_value = []
     turn_logger = MagicMock(spec=TurnLogger)
 
-    context = KesokuContext(llm=llm)
+    context = KesokuContext(config=cfg, llm=llm)
     executor = TurnExecutor("sess_cs", gw, tool_runner, turn_logger, context=context)
 
     # Worker mock
@@ -792,12 +792,12 @@ async def test_turn_executor_cross_session_context_injection_and_consolidation(t
     assert "Can you write a script for me?" not in content
     assert "Go ahead" in content
     # Assert no background consolidation was triggered yet (status is idle)
-    assert gw.db.get_cross_session_context(role).status == "idle"
+    assert (await gw.db.get_cross_session_context(role)).status == "idle"
 
     # --- Scenario B: Token Overrun (New message tokens > 4000) ---
     # Reset user message status
     user_msg.status = "pending_agent"
-    await gw.update_message_status(user_msg.id, "pending_agent")
+    await gw.db.update_message_status(user_msg.id, "pending_agent")
 
     llm.token_count = 5000  # Force overrun
     worker2 = MagicMock()
@@ -825,7 +825,7 @@ async def test_turn_executor_cross_session_context_injection_and_consolidation(t
     await asyncio.sleep(0.1)
 
     # Assert that the CrossSessionContext has successfully consolidated and released lock!
-    ctx = gw.db.get_cross_session_context(role)
+    ctx = await gw.db.get_cross_session_context(role)
     assert ctx.status == "idle"
     assert ctx.content == "Consolidated memory from background!"
 

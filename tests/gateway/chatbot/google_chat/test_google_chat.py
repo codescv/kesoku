@@ -46,11 +46,13 @@ def mock_config(tmp_path: Any) -> KesokuConfig:
 def mock_gateway() -> MagicMock:
     """Provide a mock Gateway instance."""
     gw = MagicMock(spec=Gateway)
-    gw.get_session_by_channel = AsyncMock(return_value=None)
+    db = AsyncMock()
+    gw.db = db
+    db.get_session_by_channel = AsyncMock(return_value=None)
+    db.update_session_updated_at = AsyncMock()
+    db.update_message_status = AsyncMock()
     gw.create_session = AsyncMock(return_value=Session(id="sess123", title="Test Session"))
-    gw.update_session_updated_at = AsyncMock()
     gw.post = AsyncMock()
-    gw.update_message_status = AsyncMock()
     gw.delete_session = AsyncMock()
     gw.agent = AsyncMock()
     return gw
@@ -189,7 +191,7 @@ async def test_incoming_message_parsing(
         await bot._on_pubsub_message(pubsub_msg)
 
         # Verify that thread/channel ID "spaces/AAA/threads/BBB" was queried
-        mock_gateway.get_session_by_channel.assert_called_once_with("gchat_test", "spaces/AAA/threads/BBB")
+        mock_gateway.db.get_session_by_channel.assert_called_once_with("gchat_test", "spaces/AAA/threads/BBB")
         # Verify that a new session was created with the custom thread prompt
         mock_gateway.create_session.assert_called_once()
 
@@ -239,7 +241,7 @@ async def test_incoming_message_blocked_by_allowlist(
         await bot._on_pubsub_message(pubsub_msg)
 
         # Verify message was ignored and not posted to the gateway
-        mock_gateway.get_session_by_channel.assert_not_called()
+        mock_gateway.db.get_session_by_channel.assert_not_called()
         mock_gateway.post.assert_not_called()
 
 
@@ -356,8 +358,8 @@ async def test_handle_outgoing_message_delivery_foldable_ui(
         assert widget["textSyntax"] == "MARKDOWN"
 
         # Verify delivery statuses were updated
-        mock_gateway.update_message_status.assert_any_call("thought1", MessageStatus.DELIVERED)
-        mock_gateway.update_message_status.assert_any_call("msg999", MessageStatus.DELIVERED)
+        mock_gateway.db.update_message_status.assert_any_call("thought1", MessageStatus.DELIVERED)
+        mock_gateway.db.update_message_status.assert_any_call("msg999", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -945,7 +947,7 @@ async def test_google_chat_slash_command_execution_reply(
     }
 
     # Mock gateway role responses
-    mock_gateway.get_channel_role_with_inheritance = AsyncMock(return_value="default")
+    mock_gateway.db.get_channel_role_with_inheritance = AsyncMock(return_value="default")
     # Mock list_roles behavior inside update_role_by_channel
     mock_config.workspace.roles_dir = "/mock/roles"
 

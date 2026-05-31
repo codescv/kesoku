@@ -87,7 +87,7 @@ async def _list_chat_sessions(gateway: Gateway, console: Console) -> None:
         gateway: Gateway instance.
         console: Rich console instance.
     """
-    sessions = await gateway.list_sessions()
+    sessions = await gateway.db.list_sessions()
     if not sessions:
         logger.info("No chat sessions found.")
         return
@@ -112,7 +112,7 @@ async def _show_session_history(gateway: Gateway, console: Console, session_id: 
         session_id: Target session ID.
         grouped: True to sort history by grouping tool call and result together.
     """
-    session = await gateway.get_session(session_id)
+    session = await gateway.db.get_session(session_id)
     if not session:
         logger.error(f"Session '{session_id}' not found.")
         sys.exit(1)
@@ -177,14 +177,14 @@ async def run_cli_chat_async(
     is_resumed = False
     if resume:
         session_id = resume
-        session = await gateway.get_session(session_id)
+        session = await gateway.db.get_session(session_id)
         if not session:
             logger.error(f"Session '{session_id}' not found. Use -l to list available sessions.")
             sys.exit(1)
-        await gateway.update_session_updated_at(session_id)
+        await gateway.db.update_session_updated_at(session_id, time.time())
         is_resumed = True
     elif resume_latest:
-        latest = await gateway.get_latest_session()
+        latest = await gateway.db.get_latest_session()
         if not latest:
             logger.info("No existing sessions found. Starting a new session.")
             title = message[:40] + ("..." if len(message) > 40 else "")
@@ -193,7 +193,7 @@ async def run_cli_chat_async(
         else:
             session_id = latest.id
             logger.info(f"Resuming latest session: '{session_id}' ({latest.title})")
-            await gateway.update_session_updated_at(session_id)
+            await gateway.db.update_session_updated_at(session_id, time.time())
             is_resumed = True
     else:
         title = message[:40] + ("..." if len(message) > 40 else "")
@@ -208,7 +208,7 @@ async def run_cli_chat_async(
 
     order = "grouped" if grouped else "phased"
     history = await build_clean_history(gateway=gateway, session_id=session_id, order=order, heal_orphans=False)
-    session = await gateway.get_session(session_id)
+    session = await gateway.db.get_session(session_id)
 
     if is_resumed:
         logger.info(f"Resuming Session '{session_id}' History:")

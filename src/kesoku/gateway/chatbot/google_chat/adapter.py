@@ -247,7 +247,7 @@ class GoogleChatChatbot(Chatbot):
 
         foldable = self._foldable_ui_messages.pop(session_id, None)
         if foldable and foldable["name"]:
-            history = await self.gateway.get_session_history(session_id, limit=20)
+            history = await self.gateway.db.get_session_history(session_id, limit=20)
             prev_user_msg = None
             for msg in reversed(history):
                 if msg.role == MessageRole.USER:
@@ -575,7 +575,7 @@ class GoogleChatChatbot(Chatbot):
                         )
                         .execute
                     )
-                await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
+                await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
             except Exception as e:
                 logger.error(f"Failed to send/update Google Chat foldable UI card: {e}", exc_info=True)
             return
@@ -673,7 +673,7 @@ class GoogleChatChatbot(Chatbot):
                     )
                     .execute
                 )
-                await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
+                await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
             except Exception as e:
                 logger.error(f"Failed to send final message to Google Chat space: {e}", exc_info=True)
 

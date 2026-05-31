@@ -33,7 +33,10 @@ class Message(BaseModel):
 class Session(BaseModel):
     """Represents a persistent conversational chat session."""
 
-    id: str = Field(..., description="Unique alphanumeric identifier for the session")
+    id: str = Field(
+        default_factory=lambda: uuid.uuid4().hex[:8],
+        description="Unique alphanumeric identifier for the session",
+    )
     title: str = Field(..., description="Summary title or first message snippet")
     created_at: float = Field(default_factory=time.time, description="Creation unix timestamp")
     updated_at: float = Field(default_factory=time.time, description="Last updated unix timestamp")

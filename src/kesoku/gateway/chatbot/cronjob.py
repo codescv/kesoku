@@ -34,7 +34,7 @@ class CronjobChatbot(Chatbot):
             message: Outgoing message from the agent.
         """
         logger.debug(f"CronjobChatbot '{self.chatbot_id}' silently dropping outgoing message {message.id}")
-        await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
+        await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
 
     async def trigger_cronjob(
         self,

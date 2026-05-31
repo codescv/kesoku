@@ -34,7 +34,7 @@ async def build_clean_history(
     """
     # 1. Detects and heals orphaned tool calls using optimized database query.
     if heal_orphans:
-        orphaned_calls = await gateway.get_orphaned_tool_calls(session_id)
+        orphaned_calls = await gateway.db.get_orphaned_tool_calls(session_id)
         for tc in orphaned_calls:
             logger.warning(
                 f"Found orphaned tool call {tc.id} (tool: {tc.metadata.get('tool_name')}). "
@@ -59,7 +59,7 @@ async def build_clean_history(
             await gateway.post(interrupted_msg)
 
     # 2. Load entire chronological history (limit=0 retrieves all messages in the session)
-    raw_history = await gateway.get_session_history(session_id, limit=0, order=order)
+    raw_history = await gateway.db.get_session_history(session_id, limit=0, order=order)
     # Exclude system-generated assistant notification messages from LLM prompt history
     raw_history = [m for m in raw_history if not (m.role == MessageRole.ASSISTANT and m.sender == "Notification")]
 

@@ -14,7 +14,9 @@ from kesoku.db import Session
 async def test_list_chat_sessions_empty(mock_info: MagicMock) -> None:
     """Test listing chat sessions when none exist."""
     gw = MagicMock()
-    gw.list_sessions = AsyncMock(return_value=[])
+    mock_db = AsyncMock()
+    gw.db = mock_db
+    mock_db.list_sessions = AsyncMock(return_value=[])
     console = MagicMock(spec=Console)
 
     await _list_chat_sessions(gw, console)
@@ -25,7 +27,9 @@ async def test_list_chat_sessions_empty(mock_info: MagicMock) -> None:
 async def test_list_chat_sessions_with_data() -> None:
     """Test listing chat sessions with existing sessions."""
     gw = MagicMock()
-    gw.list_sessions = AsyncMock(
+    mock_db = AsyncMock()
+    gw.db = mock_db
+    mock_db.list_sessions = AsyncMock(
         return_value=[Session(id="s1", title="Test Session", created_at=1000.0, updated_at=1000.0)]
     )
     console = MagicMock(spec=Console)
@@ -49,7 +53,9 @@ async def test_run_cli_chat_async_list(mock_list: AsyncMock, mock_gateway: Magic
 async def test_run_cli_chat_async_show_history_phased(mock_build: AsyncMock, mock_gateway: MagicMock) -> None:
     """Test run_cli_chat_async show_history defaults to phased order."""
     gw_instance = mock_gateway.return_value
-    gw_instance.get_session = AsyncMock(return_value=Session(id="s1", title="T", created_at=1, updated_at=1))
+    mock_db = AsyncMock()
+    gw_instance.db = mock_db
+    mock_db.get_session = AsyncMock(return_value=Session(id="s1", title="T", created_at=1, updated_at=1))
     mock_build.return_value = []
 
     await run_cli_chat_async(
@@ -69,7 +75,9 @@ async def test_run_cli_chat_async_show_history_phased(mock_build: AsyncMock, moc
 async def test_run_cli_chat_async_show_history_grouped(mock_build: AsyncMock, mock_gateway: MagicMock) -> None:
     """Test run_cli_chat_async show_history uses grouped order when grouped=True."""
     gw_instance = mock_gateway.return_value
-    gw_instance.get_session = AsyncMock(return_value=Session(id="s1", title="T", created_at=1, updated_at=1))
+    mock_db = AsyncMock()
+    gw_instance.db = mock_db
+    mock_db.get_session = AsyncMock(return_value=Session(id="s1", title="T", created_at=1, updated_at=1))
     mock_build.return_value = []
 
     await run_cli_chat_async(

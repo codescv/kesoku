@@ -1,5 +1,4 @@
-"""Database persistence manager for Kesoku AI Agent."""
-
+import asyncio
 import datetime
 import json
 import logging
@@ -1012,3 +1011,478 @@ class DatabaseManager:
             with conn:
                 cursor = conn.execute("UPDATE cross_session_contexts SET status = 'idle' WHERE status = 'updating'")
                 return cursor.rowcount
+
+
+class AsyncDatabaseManager:
+    """Asynchronous wrapper around DatabaseManager running blocking calls in executor threads."""
+
+    def __init__(self, sync_db: DatabaseManager) -> None:
+        """Initialize AsyncDatabaseManager wrapping a synchronous DatabaseManager.
+
+        Args:
+            sync_db: The underlying synchronous DatabaseManager instance.
+        """
+        self.sync_db = sync_db
+
+    async def verify_db(self) -> None:
+        """Verify the database connection and schema."""
+        await asyncio.to_thread(self.sync_db.verify_db)
+
+    async def init_tables(self, overwrite: bool = False) -> None:
+        """Initialize database tables.
+
+        Args:
+            overwrite: Whether to overwrite existing tables.
+        """
+        await asyncio.to_thread(self.sync_db.init_tables, overwrite)
+
+    async def create_session(self, session: Session) -> None:
+        """Create a new session in the database.
+
+        Args:
+            session: The session to create.
+        """
+        await asyncio.to_thread(self.sync_db.create_session, session)
+
+    async def get_session(self, session_id: str) -> Session | None:
+        """Retrieve a session by its ID.
+
+        Args:
+            session_id: The ID of the session to retrieve.
+
+        Returns:
+            The session if found, else None.
+        """
+        return await asyncio.to_thread(self.sync_db.get_session, session_id)
+
+    async def update_session_updated_at(self, session_id: str, updated_at: float) -> None:
+        """Update the updated_at timestamp of a session.
+
+        Args:
+            session_id: The ID of the session.
+            updated_at: The new timestamp.
+        """
+        await asyncio.to_thread(self.sync_db.update_session_updated_at, session_id, updated_at)
+
+    async def list_sessions(self) -> list[Session]:
+        """List all sessions.
+
+        Returns:
+            A list of all sessions.
+        """
+        return await asyncio.to_thread(self.sync_db.list_sessions)
+
+    async def get_latest_session(self) -> Session | None:
+        """Retrieve the most recently updated session.
+
+        Returns:
+            The latest session if any, else None.
+        """
+        return await asyncio.to_thread(self.sync_db.get_latest_session)
+
+    async def get_session_by_channel(self, chatbot_id: str, channel_id: str) -> Session | None:
+        """Retrieve the active session for a given chatbot and channel.
+
+        Args:
+            chatbot_id: The ID of the chatbot.
+            channel_id: The ID of the channel.
+
+        Returns:
+            The active session if found, else None.
+        """
+        return await asyncio.to_thread(self.sync_db.get_session_by_channel, chatbot_id, channel_id)
+
+    async def set_active_session_for_channel(self, chatbot_id: str, channel_id: str, session_id: str) -> None:
+        """Set the active session for a given chatbot and channel.
+
+        Args:
+            chatbot_id: The ID of the chatbot.
+            channel_id: The ID of the channel.
+            session_id: The ID of the session to make active.
+        """
+        await asyncio.to_thread(self.sync_db.set_active_session_for_channel, chatbot_id, channel_id, session_id)
+
+    async def delete_session(self, session_id: str) -> None:
+        """Delete a session and its associated messages.
+
+        Args:
+            session_id: The ID of the session to delete.
+        """
+        await asyncio.to_thread(self.sync_db.delete_session, session_id)
+
+    async def save_message(self, msg: Message) -> None:
+        """Save a message to the database.
+
+        Args:
+            msg: The message to save.
+        """
+        await asyncio.to_thread(self.sync_db.save_message, msg)
+
+    async def update_message_status(self, message_id: str, status: str) -> None:
+        """Update the status of a message.
+
+        Args:
+            message_id: The ID of the message.
+            status: The new status.
+        """
+        await asyncio.to_thread(self.sync_db.update_message_status, message_id, status)
+
+    async def claim_message(self, message_id: str, new_status: str, expected_statuses: list[str]) -> bool:
+        """Atomically claim a message by updating its status if it is in one of the expected statuses.
+
+        Args:
+            message_id: The ID of the message.
+            new_status: The new status to set.
+            expected_statuses: The statuses the message is expected to be in.
+
+        Returns:
+            True if the message was successfully claimed, False otherwise.
+        """
+        return await asyncio.to_thread(self.sync_db.claim_message, message_id, new_status, expected_statuses)
+
+    async def update_message_metadata(self, message_id: str, metadata: dict[str, Any]) -> None:
+        """Update the metadata of a message.
+
+        Args:
+            message_id: The ID of the message.
+            metadata: The new metadata dict to merge/set.
+        """
+        await asyncio.to_thread(self.sync_db.update_message_metadata, message_id, metadata)
+
+    async def update_session_system_prompt(self, session_id: str, content: str) -> None:
+        """Update the system prompt of a session.
+
+        Args:
+            session_id: The ID of the session.
+            content: The new system prompt content.
+        """
+        await asyncio.to_thread(self.sync_db.update_session_system_prompt, session_id, content)
+
+    async def get_session_history(
+        self,
+        session_id: str,
+        limit: int = 20,
+        order: Literal["phased", "grouped"] = "phased",
+    ) -> list[Message]:
+        """Retrieve message history for a session.
+
+        Args:
+            session_id: The ID of the session.
+            limit: Maximum number of messages to return.
+            order: The ordering strategy ('phased' or 'grouped').
+
+        Returns:
+            A list of messages.
+        """
+        return await asyncio.to_thread(self.sync_db.get_session_history, session_id, limit, order)
+
+    async def get_messages_by_filters(
+        self,
+        filters: dict[str, Any],
+        limit: int | None = None,
+        exclude_roles: list[str] | None = None,
+    ) -> list[Message]:
+        """Retrieve messages matching specific filters.
+
+        Args:
+            filters: A dictionary of field-value filters.
+            limit: Optional maximum number of messages to return.
+            exclude_roles: Optional list of roles to exclude.
+
+        Returns:
+            A list of matching messages.
+        """
+        return await asyncio.to_thread(self.sync_db.get_messages_by_filters, filters, limit, exclude_roles)
+
+    async def recover_orphaned_processing_messages(self, threshold_seconds: float = 300.0) -> int:
+        """Recover messages stuck in 'processing' status for too long.
+
+        Args:
+            threshold_seconds: The age threshold in seconds to consider a message orphaned.
+
+        Returns:
+            The number of recovered messages.
+        """
+        return await asyncio.to_thread(self.sync_db.recover_orphaned_processing_messages, threshold_seconds)
+
+    async def get_session_turns_count(self, session_id: str) -> int:
+        """Get the number of turns in a session.
+
+        Args:
+            session_id: The ID of the session.
+
+        Returns:
+            The number of turns.
+        """
+        return await asyncio.to_thread(self.sync_db.get_session_turns_count, session_id)
+
+    async def get_session_turn_anchors(self, session_id: str) -> list[dict[str, Any]]:
+        """Get turn anchors for a session.
+
+        Args:
+            session_id: The ID of the session.
+
+        Returns:
+            A list of turn anchor dictionaries.
+        """
+        return await asyncio.to_thread(self.sync_db.get_session_turn_anchors, session_id)
+
+    async def get_session_skill_anchor_ids(self, session_id: str) -> list[str]:
+        """Get skill anchor IDs for a session.
+
+        Args:
+            session_id: The ID of the session.
+
+        Returns:
+            A list of skill anchor IDs.
+        """
+        return await asyncio.to_thread(self.sync_db.get_session_skill_anchor_ids, session_id)
+
+    async def get_orphaned_tool_calls(self, session_id: str) -> list[Message]:
+        """Get orphaned tool calls in a session.
+
+        Args:
+            session_id: The ID of the session.
+
+        Returns:
+            A list of orphaned tool call messages.
+        """
+        return await asyncio.to_thread(self.sync_db.get_orphaned_tool_calls, session_id)
+
+    async def get_session_history_by_ranges(
+        self,
+        session_id: str,
+        ranges: list[tuple[float, float | None]],
+        order: Literal["phased", "grouped"] = "phased",
+    ) -> list[Message]:
+        """Retrieve session history within specific timestamp ranges.
+
+        Args:
+            session_id: The ID of the session.
+            ranges: A list of (start, end) timestamp tuples.
+            order: The ordering strategy ('phased' or 'grouped').
+
+        Returns:
+            A list of messages within the ranges.
+        """
+        return await asyncio.to_thread(self.sync_db.get_session_history_by_ranges, session_id, ranges, order)
+
+    async def upsert_agent_memory(
+        self, category: str, key: str, title: str, content: str, role: str = "default"
+    ) -> None:
+        """Upsert an agent memory entry.
+
+        Args:
+            category: The category of the memory.
+            key: The key of the memory.
+            title: The title of the memory.
+            content: The content of the memory.
+            role: The role associated with the memory.
+        """
+        await asyncio.to_thread(self.sync_db.upsert_agent_memory, category, key, title, content, role)
+
+    async def get_agent_memory(self, category: str, key: str, role: str = "default") -> dict[str, Any] | None:
+        """Retrieve a specific agent memory entry.
+
+        Args:
+            category: The category of the memory.
+            key: The key of the memory.
+            role: The role associated with the memory.
+
+        Returns:
+            The memory entry dict if found, else None.
+        """
+        return await asyncio.to_thread(self.sync_db.get_agent_memory, category, key, role)
+
+    async def get_agent_memories(self, category: str | None = None, role: str | None = None) -> list[dict[str, Any]]:
+        """Retrieve all agent memories, optionally filtered by category or role.
+
+        Args:
+            category: Optional category filter.
+            role: Optional role filter.
+
+        Returns:
+            A list of memory entry dicts.
+        """
+        return await asyncio.to_thread(self.sync_db.get_agent_memories, category, role)
+
+    async def delete_agent_memory(self, category: str, key: str, role: str = "default") -> None:
+        """Delete an agent memory entry.
+
+        Args:
+            category: The category of the memory.
+            key: The key of the memory.
+            role: The role associated with the memory.
+        """
+        await asyncio.to_thread(self.sync_db.delete_agent_memory, category, key, role)
+
+    async def set_channel_role(self, chatbot_id: str, channel_id: str, role: str) -> None:
+        """Set the role for a specific channel.
+
+        Args:
+            chatbot_id: The ID of the chatbot.
+            channel_id: The ID of the channel.
+            role: The role name.
+        """
+        await asyncio.to_thread(self.sync_db.set_channel_role, chatbot_id, channel_id, role)
+
+    async def get_channel_role(self, chatbot_id: str, channel_id: str) -> str | None:
+        """Get the role for a specific channel.
+
+        Args:
+            chatbot_id: The ID of the chatbot.
+            channel_id: The ID of the channel.
+
+        Returns:
+            The role name if set, else None.
+        """
+        return await asyncio.to_thread(self.sync_db.get_channel_role, chatbot_id, channel_id)
+
+    async def get_channel_role_with_inheritance(
+        self, chatbot_id: str, channel_id: str, session_id: str | None = None
+    ) -> str:
+        """Get the role for a channel, inheriting from parent channels if necessary.
+
+        Args:
+            chatbot_id: The ID of the chatbot.
+            channel_id: The ID of the channel.
+            session_id: Optional session ID to help resolve role.
+
+        Returns:
+            The resolved role name.
+        """
+        return await asyncio.to_thread(
+            self.sync_db.get_channel_role_with_inheritance, chatbot_id, channel_id, session_id
+        )
+
+    async def get_channel_by_session(self, session_id: str) -> tuple[str, str] | None:
+        """Get the chatbot ID and channel ID associated with a session.
+
+        Args:
+            session_id: The ID of the session.
+
+        Returns:
+            A tuple of (chatbot_id, channel_id) if found, else None.
+        """
+        return await asyncio.to_thread(self.sync_db.get_channel_by_session, session_id)
+
+    async def get_last_message_timestamp(self, chatbot_id: str, channel_id: str) -> float | None:
+        """Get the timestamp of the last message in a channel.
+
+        Args:
+            chatbot_id: The ID of the chatbot.
+            channel_id: The ID of the channel.
+
+        Returns:
+            The timestamp if any message exists, else None.
+        """
+        return await asyncio.to_thread(self.sync_db.get_last_message_timestamp, chatbot_id, channel_id)
+
+    async def get_cronjob_sent_stats_today(self, chatbot_id: str, channel_id: str) -> tuple[int, float | None]:
+        """Get cronjob sending statistics for today.
+
+        Args:
+            chatbot_id: The ID of the chatbot.
+            channel_id: The ID of the channel.
+
+        Returns:
+            A tuple of (count_today, last_sent_timestamp).
+        """
+        return await asyncio.to_thread(self.sync_db.get_cronjob_sent_stats_today, chatbot_id, channel_id)
+
+    async def get_role_messages_since(
+        self,
+        role: str,
+        since_timestamp: float,
+        exclude_session_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[Message]:
+        """Retrieve messages for a role since a specific timestamp.
+
+        Args:
+            role: The role name.
+            since_timestamp: The start timestamp.
+            exclude_session_id: Optional session ID to exclude.
+            limit: Optional maximum number of messages to return.
+
+        Returns:
+            A list of messages.
+        """
+        return await asyncio.to_thread(
+            self.sync_db.get_role_messages_since, role, since_timestamp, exclude_session_id, limit
+        )
+
+    async def get_cross_session_context(self, role: str) -> CrossSessionContext | None:
+        """Retrieve cross-session context for a role.
+
+        Args:
+            role: The role name.
+
+        Returns:
+            The cross-session context if found, else None.
+        """
+        return await asyncio.to_thread(self.sync_db.get_cross_session_context, role)
+
+    async def upsert_cross_session_context(self, role: str, content: str) -> None:
+        """Upsert cross-session context for a role.
+
+        Args:
+            role: The role name.
+            content: The context content.
+        """
+        await asyncio.to_thread(self.sync_db.upsert_cross_session_context, role, content)
+
+    async def claim_cross_session_context_for_update(self, role: str) -> bool:
+        """Claim cross-session context for update by acquiring a lock.
+
+        Args:
+            role: The role name.
+
+        Returns:
+            True if the lock was acquired, False otherwise.
+        """
+        return await asyncio.to_thread(self.sync_db.claim_cross_session_context_for_update, role)
+
+    async def release_cross_session_context_lock(
+        self, role: str, content: str, updated_at: float | None = None
+    ) -> None:
+        """Release the cross-session context lock and update the content.
+
+        Args:
+            role: The role name.
+            content: The new content.
+            updated_at: Optional timestamp to set for the update.
+        """
+        await asyncio.to_thread(self.sync_db.release_cross_session_context_lock, role, content, updated_at)
+
+    async def recover_orphaned_context_locks(self) -> int:
+        """Recover orphaned cross-session context locks.
+
+        Returns:
+            The number of recovered locks.
+        """
+        return await asyncio.to_thread(self.sync_db.recover_orphaned_context_locks)
+
+    async def get_cross_session_memory_updates(
+        self,
+        role: str,
+        exclude_session_id: str,
+    ) -> tuple[CrossSessionContext | None, list[Message]]:
+        """Get cross-session memory updates for a role, excluding a specific session.
+
+        Args:
+            role: The role name.
+            exclude_session_id: The session ID to exclude from updates.
+
+        Returns:
+            A tuple of (stored_context, new_messages).
+        """
+        stored_ctx = await self.get_cross_session_context(role)
+        last_updated = stored_ctx.updated_at if stored_ctx else 0.0
+
+        new_messages = await self.get_role_messages_since(
+            role=role,
+            since_timestamp=last_updated,
+            exclude_session_id=exclude_session_id,
+        )
+        return stored_ctx, new_messages

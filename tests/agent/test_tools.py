@@ -317,12 +317,12 @@ async def test_compact_history_tool(tmp_path) -> None:
     new_sess_id = ctx.transitioned_to_session
 
     # 5. Fetch the newly created session to verify
-    new_session = await gw.get_session(new_sess_id)
+    new_session = await gw.db.get_session(new_sess_id)
     assert new_session is not None
     assert new_session.title.startswith("Compacted")
 
     # 6. Fetch new session history to verify compacted message and notification
-    new_history = await gw.get_session_history(new_sess_id, limit=10)
+    new_history = await gw.db.get_session_history(new_sess_id, limit=10)
     assert len(new_history) == 2
 
     # The message is the compacted starting message (USER role)
@@ -390,7 +390,7 @@ async def test_manual_compact_command(tmp_path) -> None:
     assert "Initiating history compaction" in reply_msg
 
     # Fetch messages to verify that the trigger signal message was posted with USER role
-    history = await gw.get_session_history("sess_cmd_test", limit=10)
+    history = await gw.db.get_session_history("sess_cmd_test", limit=10)
     trigger_msg = next(
         m for m in history if m.sender == "System" and "manually requested session compaction" in m.content
     )
@@ -459,7 +459,7 @@ async def test_compact_history_tool_completed_turn(tmp_path) -> None:
         new_sess_id = ctx.transitioned_to_session
 
         # 5. Fetch new session history
-        new_history = await gw.get_session_history(new_sess_id, limit=10)
+        new_history = await gw.db.get_session_history(new_sess_id, limit=10)
         # Should have EXACTLY 3 messages: compacted user message,
         # system transition notification, and copied assistant reply!
         assert len(new_history) == 3
@@ -535,7 +535,7 @@ async def test_compact_history_with_cronjob(tmp_path) -> None:
         new_sess_id = ctx.transitioned_to_session
 
         # 5. Fetch new session history
-        new_history = await gw.get_session_history(new_sess_id, limit=10)
+        new_history = await gw.db.get_session_history(new_sess_id, limit=10)
         assert len(new_history) == 2
 
         # The message is the compacted starting message (USER role) with sender "Cronjob"

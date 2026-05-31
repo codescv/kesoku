@@ -795,7 +795,7 @@ You are interacting with the user via WeChat (Weixin).
         async def should_trigger_for_channel(chan: str) -> bool:
             # 1. Idle check
             if min_idle is not None:
-                last_msg_ts = await self.gateway.get_last_message_timestamp(self.chatbot_id, chan)
+                last_msg_ts = await self.gateway.db.get_last_message_timestamp(self.chatbot_id, chan)
                 if last_msg_ts is not None:
                     idle_time = time.time() - last_msg_ts
                     if idle_time < min_idle:
@@ -807,7 +807,7 @@ You are interacting with the user via WeChat (Weixin).
 
             # 2. Daily Target & Min Interval check
             if daily_target is not None or min_interval is not None:
-                count, last_ts = await self.gateway.get_cronjob_sent_stats_today(self.chatbot_id, chan)
+                count, last_ts = await self.gateway.db.get_cronjob_sent_stats_today(self.chatbot_id, chan)
 
                 if daily_target is not None:
                     if count >= daily_target:

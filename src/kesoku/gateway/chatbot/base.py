@@ -294,7 +294,7 @@ class Chatbot(ABC):
 
     async def clear_session_by_channel(self, channel_id: str) -> str:
         """Clear session associated with the channel. Returns status message."""
-        session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
+        session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
         if session:
             await self.clear_session(session.id)
             return "♻️ Session successfully cleared. The next message will initiate a new session."
@@ -302,7 +302,7 @@ class Chatbot(ABC):
 
     async def manual_compact_session_by_channel(self, channel_id: str) -> str:
         """Manually trigger conversation compaction by posting a trigger system user message."""
-        session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
+        session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
         if not session:
             return "⚠️ No active session found for this chat."
 
@@ -330,11 +330,11 @@ class Chatbot(ABC):
 
     async def get_session_status_by_channel(self, channel_id: str) -> str:
         """Get session statistics for the channel."""
-        session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
+        session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
         if not session:
             return "⚠️ No active session found for this chat."
 
-        history = await self.gateway.get_session_history(session.id, limit=100)
+        history = await self.gateway.db.get_session_history(session.id, limit=100)
         metrics = None
         for msg in reversed(history):
             if msg.role == MessageRole.ASSISTANT and msg.metadata and msg.metadata.get("turn_metrics"):
@@ -389,7 +389,7 @@ class Chatbot(ABC):
         Returns:
             The posted Message instance.
         """
-        session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
+        session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
         if not session:
             session_title = title or f"{self.chatbot_id.capitalize()} Scheduled Job {channel_id}"
             session = await self.gateway.create_session(
@@ -400,7 +400,7 @@ class Chatbot(ABC):
                 channel_id=channel_id,
             )
         else:
-            await self.gateway.update_session_updated_at(session.id)
+            await self.gateway.db.update_session_updated_at(session.id, time.time())
 
         now_dt = datetime.datetime.now()
         tz_name = get_local_timezone_name()
@@ -457,7 +457,7 @@ class Chatbot(ABC):
 
     async def handle_tool_result(self, message: Message) -> None:
         """Hook to handle tool result status updates (e.g., updating status indicator in-place)."""
-        await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
+        await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
 
     def format_text(self, text: str) -> str:
         """Format/normalize markdown or lines before chunking.
@@ -506,7 +506,7 @@ class Chatbot(ABC):
             if self.is_intermediate_message(message):
                 if not self.supports_intermediate_messages():
                     # Mark as delivered and return if not supported
-                    await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
+                    await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
                     return
 
                 # Handle intermediate/special message (thought, tool, system)
@@ -545,7 +545,7 @@ class Chatbot(ABC):
                     )
 
             # 4. Update Gateway status to DELIVERED
-            await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
+            await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
 
             # 5. Post-delivery lifecycle hook (e.g., stop typing indicator, update metrics, finalize card/header)
             await self.on_message_delivered(message)
@@ -653,7 +653,7 @@ class Chatbot(ABC):
 
     async def _resolve_or_create_session(self, dto: InboundMessageDTO) -> tuple[Any, bool]:
         """Resolve an existing session or create a new one for the channel."""
-        session = await self.gateway.get_session_by_channel(self.chatbot_id, dto.channel_id)
+        session = await self.gateway.db.get_session_by_channel(self.chatbot_id, dto.channel_id)
         created = False
         if not session:
             title = dto.session_title or f"Session: {dto.text[:30]}"
@@ -670,11 +670,11 @@ class Chatbot(ABC):
             )
             created = True
         else:
-            await self.gateway.update_session_updated_at(session.id)
+            await self.gateway.db.update_session_updated_at(session.id, time.time())
 
             if dto.custom_prompt:
                 new_sys_prompt = build_sys_prompt(custom_prompt=dto.custom_prompt, session=session)
-                await self.gateway.update_session_system_prompt(session.id, new_sys_prompt)
+                await self.gateway.db.update_session_system_prompt(session.id, new_sys_prompt)
 
         return session, created
 
@@ -768,9 +768,9 @@ class Chatbot(ABC):
 
         if not role_name:
             # Query current role
-            session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
+            session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
             session_id = session.id if session else None
-            current_role = await self.gateway.get_channel_role_with_inheritance(
+            current_role = await self.gateway.db.get_channel_role_with_inheritance(
                 self.chatbot_id,
                 channel_id,
                 session_id,
@@ -788,12 +788,12 @@ class Chatbot(ABC):
             )
 
         # 1. Update in database
-        await self.gateway.set_channel_role(self.chatbot_id, channel_id, role_name)
+        await self.gateway.db.set_channel_role(self.chatbot_id, channel_id, role_name)
 
         # 2. Rebuild the active session system prompt if a session exists
-        session = await self.gateway.get_session_by_channel(self.chatbot_id, channel_id)
+        session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
         if session:
             new_sys_prompt = build_sys_prompt(session=session)
-            await self.gateway.update_session_system_prompt(session.id, new_sys_prompt)
+            await self.gateway.db.update_session_system_prompt(session.id, new_sys_prompt)
 
         return f"🎭 Persona for this channel has been successfully changed to **`{role_name}`**."

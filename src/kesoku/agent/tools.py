@@ -235,7 +235,7 @@ async def monitor_background_job(
         channel_id = "system"
         if original_msg_id:
             try:
-                orig_msgs = await asyncio.to_thread(gw.db.get_messages_by_filters, {"id": original_msg_id})
+                orig_msgs = await gw.db.get_messages_by_filters({"id": original_msg_id})
                 if orig_msgs:
                     chatbot_id = orig_msgs[0].chatbot_id
                     channel_id = orig_msgs[0].channel_id
@@ -764,12 +764,12 @@ async def compact_history(summary: str, context: ToolContext) -> str:
         raise ValueError("Gateway instance must be injected in ToolContext to compact history.")
 
     # 1. Retrieve the old session to copy its configuration
-    old_session = await gw.get_session(context.session_id)
+    old_session = await gw.db.get_session(context.session_id)
     if not old_session:
         raise RuntimeError(f"Active session '{context.session_id}' not found.")
 
     # 2. Find the real initiating user message and platform identifiers
-    old_history = await gw.get_session_history(context.session_id, limit=100)
+    old_history = await gw.db.get_session_history(context.session_id, limit=100)
 
     # A. Find the real user message for summary/content copying (skipping System triggers)
     initiating_msg = None
@@ -882,11 +882,11 @@ async def compact_history(summary: str, context: ToolContext) -> str:
 
 
 # Memory System Helpers and Tools
-def get_allowed_categories(db: Any) -> set[str]:
+async def get_allowed_categories(db: Any) -> set[str]:
     """Retrieves the set of all currently permitted or existing memory categories."""
     categories = {"learnings", "progress", "user_preferences"}
     try:
-        memories = db.get_agent_memories()
+        memories = await db.get_agent_memories()
         for m in memories:
             categories.add(m["category"])
     except Exception as e:
@@ -906,7 +906,7 @@ def validate_key(key: str) -> bool:
     return bool(re.match(r"^[a-z0-9_]+$", key))
 
 
-def _resolve_memory_role(category: str, role_param: str | None, context: ToolContext | None) -> str:
+async def _resolve_memory_role(category: str, role_param: str | None, context: ToolContext | None) -> str:
     """Resolve the correct role scope based on the memory category and context rules."""
     category = category.strip().lower()
 
@@ -919,10 +919,12 @@ def _resolve_memory_role(category: str, role_param: str | None, context: ToolCon
         if context and context.gateway and context.original_msg_id:
             db = context.gateway.db
             try:
-                msg_list = db.get_messages_by_filters({"id": context.original_msg_id})
+                msg_list = await db.get_messages_by_filters({"id": context.original_msg_id})
                 if msg_list:
                     msg = msg_list[0]
-                    return db.get_channel_role_with_inheritance(msg.chatbot_id, msg.channel_id, context.session_id)
+                    return await db.get_channel_role_with_inheritance(
+                        msg.chatbot_id, msg.channel_id, context.session_id
+                    )
             except Exception as e:
                 logger.warning(f"Failed to resolve active role for memory category {category}: {e}")
         # Fallback
@@ -933,7 +935,7 @@ def _resolve_memory_role(category: str, role_param: str | None, context: ToolCon
 
 
 @default_registry.register
-def list_memories(
+async def list_memories(
     category: str,
     role: str | None = None,
     context: ToolContext | None = None,
@@ -951,10 +953,10 @@ def list_memories(
     if not context:
         return "Error: ToolContext is missing."
 
-    resolved_role = _resolve_memory_role(category, role, context)
+    resolved_role = await _resolve_memory_role(category, role, context)
     db = context.gateway.db
     try:
-        memories = db.get_agent_memories(category=category, role=resolved_role)
+        memories = await db.get_agent_memories(category=category, role=resolved_role)
         if not memories:
             return f"No memories found in category '{category}' for role scope '{resolved_role}'."
 
@@ -969,7 +971,7 @@ def list_memories(
 
 
 @default_registry.register
-def view_memory(
+async def view_memory(
     category: str,
     key: str | None = None,
     role: str | None = None,
@@ -993,7 +995,7 @@ def view_memory(
     if not context:
         return "Error: ToolContext is missing."
 
-    resolved_role = _resolve_memory_role(category, role, context)
+    resolved_role = await _resolve_memory_role(category, role, context)
     db = context.gateway.db
     try:
         if key:
@@ -1004,12 +1006,12 @@ def view_memory(
                     "underscores, and numbers (regex: ^[a-z0-9_]+$)."
                 )
             sanitized = sanitize_key(key)
-            mem = db.get_agent_memory(category=category, key=sanitized, role=resolved_role)
+            mem = await db.get_agent_memory(category=category, key=sanitized, role=resolved_role)
             if not mem:
                 return f"No memory found for category='{category}', key='{sanitized}', role='{resolved_role}'."
             return f"=== Memory: {mem['title']} (key: {mem['key']}, scope: {mem['role']}) ===\n{mem['content']}"
 
-        memories = db.get_agent_memories(category=category, role=resolved_role)
+        memories = await db.get_agent_memories(category=category, role=resolved_role)
         if not memories:
             return f"No memories found in category '{category}' for role scope '{resolved_role}'."
 
@@ -1024,7 +1026,7 @@ def view_memory(
 
 
 @default_registry.register
-def update_memory(
+async def update_memory(
     category: str,
     key: str,
     title: str,
@@ -1054,10 +1056,10 @@ def update_memory(
     if not context:
         return "Error: ToolContext is missing."
 
-    resolved_role = _resolve_memory_role(category, role, context)
+    resolved_role = await _resolve_memory_role(category, role, context)
     db = context.gateway.db
     try:
-        allowed = get_allowed_categories(db)
+        allowed = await get_allowed_categories(db)
         if category not in allowed and not create_category:
             return (
                 f"Write Denied: Category '{category}' is not recognized.\n"
@@ -1080,7 +1082,7 @@ def update_memory(
             )
 
         sanitized_key = sanitize_key(key)
-        db.upsert_agent_memory(
+        await db.upsert_agent_memory(
             category=category,
             key=sanitized_key,
             title=title,
@@ -1100,7 +1102,7 @@ def update_memory(
 
 
 @default_registry.register
-def delete_memory(
+async def delete_memory(
     category: str,
     key: str,
     role: str | None = None,
@@ -1120,7 +1122,7 @@ def delete_memory(
     if not context:
         return "Error: ToolContext is missing."
 
-    resolved_role = _resolve_memory_role(category, role, context)
+    resolved_role = await _resolve_memory_role(category, role, context)
     db = context.gateway.db
     try:
         if not validate_key(key):
@@ -1131,13 +1133,13 @@ def delete_memory(
             )
 
         sanitized = sanitize_key(key)
-        mem = db.get_agent_memory(category=category, key=sanitized, role=resolved_role)
+        mem = await db.get_agent_memory(category=category, key=sanitized, role=resolved_role)
         if not mem:
             return (
                 f"No memory entry found for category='{category}', key='{sanitized}', role='{resolved_role}' to delete."
             )
 
-        db.delete_agent_memory(category=category, key=sanitized, role=resolved_role)
+        await db.delete_agent_memory(category=category, key=sanitized, role=resolved_role)
         return f"Memory successfully deleted: category='{category}', key='{sanitized}', role='{resolved_role}'."
     except Exception as e:
         logger.error(f"Failed to delete memory: {e}", exc_info=True)
@@ -1176,7 +1178,7 @@ async def play_role(role: str, context: ToolContext) -> str:
 
     # 2. Query original message to find chatbot_id and channel_id
     db = context.gateway.db
-    msg_list = db.get_messages_by_filters({"id": context.original_msg_id})
+    msg_list = await db.get_messages_by_filters({"id": context.original_msg_id})
     if not msg_list:
         return "⚠️ **Error:** Failed to resolve current channel mapping for this tool call."
 
@@ -1185,15 +1187,15 @@ async def play_role(role: str, context: ToolContext) -> str:
     channel_id = msg.channel_id
 
     # 3. Save binding in database
-    db.set_channel_role(chatbot_id, channel_id, role)
+    await db.set_channel_role(chatbot_id, channel_id, role)
 
     # 4. Rebuild active session's system prompt
-    session = await context.gateway.get_session(context.session_id)
+    session = await context.gateway.db.get_session(context.session_id)
     if session:
         from kesoku.agent.prompt import build_sys_prompt
 
         new_sys_prompt = build_sys_prompt(session=session)
-        await context.gateway.update_session_system_prompt(context.session_id, new_sys_prompt)
+        await context.gateway.db.update_session_system_prompt(context.session_id, new_sys_prompt)
 
     return (
         f"🎭 **Persona Switched Successfully!**\n"
@@ -1226,11 +1228,11 @@ async def view_cross_session_memory(context: ToolContext) -> str:
 
 
     # 1. Resolve active role using helper
-    active_role = _resolve_memory_role(category="user_preferences", role_param=None, context=context)
+    active_role = await _resolve_memory_role(category="user_preferences", role_param=None, context=context)
 
     try:
         # 2. Query consolidated timeline and recent messages from Gateway
-        stored_ctx, new_messages = await context.gateway.get_cross_session_memory_updates(
+        stored_ctx, new_messages = await context.gateway.db.get_cross_session_memory_updates(
             role=active_role,
             exclude_session_id=context.session_id,
         )

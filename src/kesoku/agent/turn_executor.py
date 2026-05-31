@@ -56,7 +56,7 @@ class TurnExecutor:
         Returns:
             The count of user messages.
         """
-        return await self.gateway.get_session_turns_count(self.session_id)
+        return await self.context.db.get_session_turns_count(self.session_id)
 
     async def _is_bootstrap_turn(self, history: list[Message], current_msg: Message) -> bool:
         """Determine if this is a Bootstrap Turn (first turn of session or idle > 30 mins)."""
@@ -163,7 +163,7 @@ class TurnExecutor:
                 )
 
                 # Retrieve system prompt directly from session
-                session = await self.gateway.get_session(self.session_id)
+                session = await self.context.db.get_session(self.session_id)
                 system_prompt = session.system_prompt if session else None
 
                 tools_list = self.tool_runner.tool_registry.get_tools_list()
@@ -235,7 +235,7 @@ class TurnExecutor:
                 "turn_time": time.time() - start_time,
                 "status": "interrupted",
             }
-            history = await self.gateway.get_session_history(self.session_id, limit=20)
+            history = await self.context.db.get_session_history(self.session_id, limit=20)
             user_msg = None
             for msg in reversed(history):
                 if msg.role == MessageRole.USER:
@@ -243,7 +243,7 @@ class TurnExecutor:
                     break
             if user_msg:
                 user_msg.metadata["turn_metrics"] = turn_metrics
-                await self.gateway.update_message_metadata(user_msg.id, user_msg.metadata)
+                await self.context.db.update_message_metadata(user_msg.id, user_msg.metadata)
             raise
         except Exception as e:
             logger.error(f"Error in session turn {self.session_id}: {e}", exc_info=True)
@@ -259,7 +259,7 @@ class TurnExecutor:
                 parent_id=current_msg.id,
             )
             await self.gateway.post(error_msg)
-            await self.gateway.update_message_status(current_msg.id, MessageStatus.ERROR)
+            await self.context.db.update_message_status(current_msg.id, MessageStatus.ERROR)
 
     async def _summarize_cross_session_context_bg(
         self, role: str, current_context: str, since_timestamp: float
@@ -274,8 +274,7 @@ class TurnExecutor:
         try:
             logger.info(f"Starting background memory consolidation for role '{role}' since {since_timestamp}")
             # 1. Fetch messages since since_timestamp, capped at 200 to prevent LLM/prompt overrun
-            history_msgs = await asyncio.to_thread(
-                self.gateway.db.get_role_messages_since,
+            history_msgs = await self.context.db.get_role_messages_since(
                 role=role,
                 since_timestamp=since_timestamp,
                 exclude_session_id=None,
@@ -284,8 +283,7 @@ class TurnExecutor:
 
             if not history_msgs:
                 logger.info(f"No new messages to consolidate for role '{role}'. Releasing lock.")
-                await asyncio.to_thread(
-                    self.gateway.db.release_cross_session_context_lock,
+                await self.context.db.release_cross_session_context_lock(
                     role,
                     current_context,
                 )
@@ -328,8 +326,7 @@ class TurnExecutor:
                 logger.warning(
                     f"Consolidation returned empty response for role '{role}'. Releasing lock without change."
                 )
-                await asyncio.to_thread(
-                    self.gateway.db.release_cross_session_context_lock,
+                await self.context.db.release_cross_session_context_lock(
                     role,
                     current_context,
                 )
@@ -337,8 +334,7 @@ class TurnExecutor:
 
             # 4. Save new consolidated summary to DB, releasing lock and checkpointing at the last digested message
             checkpoint_ts = history_msgs[-1].timestamp
-            await asyncio.to_thread(
-                self.gateway.db.release_cross_session_context_lock,
+            await self.context.db.release_cross_session_context_lock(
                 role,
                 new_summary,
                 checkpoint_ts,
@@ -348,8 +344,7 @@ class TurnExecutor:
             logger.error(f"Error in background memory consolidation for role '{role}': {e}", exc_info=True)
             # Ensure lock is safely released even on crash or failure
             try:
-                await asyncio.to_thread(
-                    self.gateway.db.release_cross_session_context_lock,
+                await self.context.db.release_cross_session_context_lock(
                     role,
                     current_context,
                 )
@@ -378,7 +373,7 @@ class TurnExecutor:
         if not latest_user_msg:
             return None
 
-        active_role = await self.gateway.get_channel_role_with_inheritance(
+        active_role = await self.context.db.get_channel_role_with_inheritance(
             current_msg.chatbot_id,
             current_msg.channel_id,
             self.session_id,
@@ -390,8 +385,7 @@ class TurnExecutor:
         # 2. Query user preferences only if this is a bootstrap turn
         pref_content = ""
         if is_bootstrap:
-            user_prefs = await asyncio.to_thread(
-                self.gateway.db.get_agent_memories,
+            user_prefs = await self.context.db.get_agent_memories(
                 category="user_preferences",
                 role=active_role,
             )
@@ -438,7 +432,7 @@ class TurnExecutor:
 
         # 4. Background Consolidation Trigger (Unchanged)
         # Retrieve Cross-Session Memory context parameters solely to check and trigger consolidation asynchronously
-        stored_ctx, new_messages = await self.gateway.get_cross_session_memory_updates(
+        stored_ctx, new_messages = await self.context.db.get_cross_session_memory_updates(
             role=active_role,
             exclude_session_id=self.session_id,
         )
@@ -464,8 +458,7 @@ class TurnExecutor:
         should_consolidate = has_timeout or has_token_overrun
 
         if should_consolidate and lock_status == "idle":
-            locked = await asyncio.to_thread(
-                self.gateway.db.claim_cross_session_context_for_update,
+            locked = await self.context.db.claim_cross_session_context_for_update(
                 active_role,
             )
             if locked:
@@ -594,7 +587,7 @@ class TurnExecutor:
             for coro in exec_tasks:
                 coro.close()
             # Mark the initiating message as interrupted to prevent it from being stuck in processing status
-            await self.gateway.update_message_status(current_msg.id, MessageStatus.INTERRUPTED)
+            await self.context.db.update_message_status(current_msg.id, MessageStatus.INTERRUPTED)
             return False
 
         result_msgs = await asyncio.gather(*exec_tasks)
@@ -611,7 +604,7 @@ class TurnExecutor:
                 "Aborting remaining turn steps and stopping old session worker."
             )
             # Mark the initiating message as processed
-            await self.gateway.mark_message_processed(current_msg.id)
+            await self.context.db.update_message_status(current_msg.id, MessageStatus.PROCESSED)
 
             # Schedule worker stop task in the background so the current execution exits cleanly first
             if self.gateway.agent:
@@ -711,7 +704,7 @@ class TurnExecutor:
             },
         )
         await self.gateway.post(final_msg)
-        await self.gateway.mark_message_processed(current_msg.id)
+        await self.context.db.update_message_status(current_msg.id, MessageStatus.PROCESSED)
         return False, nudged  # should_continue=False, nudged unmodified
 
 

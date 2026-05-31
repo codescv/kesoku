@@ -124,8 +124,8 @@ class SessionWorker:
                 break
 
         for m in new_msgs[:-1]:
-            await self.gateway.update_message_status(m.id, MessageStatus.INTERRUPTED)
-        await self.gateway.update_message_status(current_msg.id, MessageStatus.INTERRUPTED)
+            await self.context.db.update_message_status(m.id, MessageStatus.INTERRUPTED)
+        await self.context.db.update_message_status(current_msg.id, MessageStatus.INTERRUPTED)
         latest_msg = new_msgs[-1]
         logger.info(f"Thought interruption detected in session {self.session_id}! Pivoting to {latest_msg.id}")
         return latest_msg
@@ -149,10 +149,10 @@ class SessionWorker:
                 await asyncio.sleep(1.0)
 
     async def _process_turn(self, current_msg: Message) -> None:
-        session = await self.gateway.get_session(self.session_id)
+        session = await self.context.db.get_session(self.session_id)
         if not session:
             logger.error(f"Session {self.session_id} not found in database. Aborting message processing.")
-            await self.gateway.update_message_status(current_msg.id, MessageStatus.ERROR)
+            await self.context.db.update_message_status(current_msg.id, MessageStatus.ERROR)
             return
 
         folder_name = session.workspace_name
@@ -213,7 +213,7 @@ class Agent:
         logger.info("Kesoku Agent master dispatcher loop started.")
 
         # Recover orphaned processing messages at startup
-        recovered_count = await asyncio.to_thread(self.gateway.db.recover_orphaned_processing_messages)
+        recovered_count = await self.gateway.db.recover_orphaned_processing_messages()
         if recovered_count > 0:
             logger.info(f"Recovered {recovered_count} orphaned processing messages back to pending_agent status.")
 
@@ -224,7 +224,7 @@ class Agent:
 
                 if msg.status == MessageStatus.PENDING_AGENT:
                     # Atomically claim the message to prevent duplicate delivery/processing
-                    success = await self.gateway.claim_message(
+                    success = await self.gateway.db.claim_message(
                         msg.id, MessageStatus.PROCESSING, [MessageStatus.PENDING_AGENT]
                     )
                     if not success:

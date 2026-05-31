@@ -2,6 +2,7 @@
 
 import asyncio
 import sqlite3
+import time
 from typing import Any
 
 import pytest
@@ -23,7 +24,7 @@ class DummyChatbot(Chatbot):
 
     async def handle_message(self, message: Message) -> None:
         self.sent_messages.append((message.channel_id, message.content))
-        await self.gateway.update_message_status(message.id, MessageStatus.DELIVERED)
+        await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
 
 
 @pytest.fixture
@@ -124,7 +125,7 @@ async def test_gateway_history(temp_db: str) -> None:
         )
     )
 
-    history = await gw.get_session_history("sess1")
+    history = await gw.db.get_session_history("sess1")
     assert len(history) == 2
     assert history[0].content == "Msg 1"
     assert history[1].content == "Msg 2"
@@ -239,7 +240,7 @@ async def test_gateway_history_phased_sorting_thought_messages(temp_db: str) -> 
         )
     )
 
-    history = await gw.get_session_history("sess_thought", limit=10)
+    history = await gw.db.get_session_history("sess_thought", limit=10)
     assert len(history) == 6
 
     # The sorted order should be:
@@ -425,7 +426,7 @@ async def test_gateway_history_phased_sorting_multi_iteration(temp_db: str) -> N
         )
     )
 
-    history = await gw.get_session_history("sess_multi", limit=20)
+    history = await gw.db.get_session_history("sess_multi", limit=20)
     assert len(history) == 10
 
     expected_order = [
@@ -451,25 +452,25 @@ async def test_gateway_sessions(temp_db: str) -> None:
     gw = Gateway(context=KesokuContext(config=cfg))
 
     # Initial state: no sessions
-    assert await gw.list_sessions() == []
-    assert await gw.get_latest_session() is None
+    assert await gw.db.list_sessions() == []
+    assert await gw.db.get_latest_session() is None
 
     # Create session 1
     await gw.create_session("s1", "Session One")
-    s1 = await gw.get_session("s1")
+    s1 = await gw.db.get_session("s1")
     assert s1 is not None
     assert s1.id == "s1"
     assert s1.title == "Session One"
 
     # Create session 2
     await gw.create_session("s2", "Session Two")
-    latest = await gw.get_latest_session()
+    latest = await gw.db.get_latest_session()
     assert latest is not None
     assert latest.id == "s2"
 
     # Update session 1
-    await gw.update_session_updated_at("s1")
-    sessions = await gw.list_sessions()
+    await gw.db.update_session_updated_at("s1", time.time())
+    sessions = await gw.db.list_sessions()
     assert len(sessions) == 2
     assert sessions[0].id == "s1"
 
@@ -500,11 +501,11 @@ async def test_gateway_get_session_by_channel(temp_db: str) -> None:
         )
     )
 
-    fetched = await gw.get_session_by_channel("discord_bot", "thread_777")
+    fetched = await gw.db.get_session_by_channel("discord_bot", "thread_777")
     assert fetched is not None
     assert fetched.id == "sess_chan_1"
 
-    not_found = await gw.get_session_by_channel("discord_bot", "thread_999")
+    not_found = await gw.db.get_session_by_channel("discord_bot", "thread_999")
     assert not_found is None
 
 
@@ -533,12 +534,12 @@ async def test_gateway_create_session_created_at(temp_db: str) -> None:
         )
     )
 
-    history = await gw.get_session_history(session.id)
+    history = await gw.db.get_session_history(session.id)
     assert len(history) == 1
     assert history[0].role == MessageRole.USER
 
     # Verify system prompt exists directly on session model
-    fetched_session = await gw.get_session(session.id)
+    fetched_session = await gw.db.get_session(session.id)
     assert fetched_session is not None
     assert fetched_session.system_prompt != ""
 
@@ -606,7 +607,7 @@ async def test_gateway_delete_session(temp_db: str, tmp_path: Any) -> None:
     assert dummy_file.exists()
 
     # Verify session exists in DB
-    assert await gw.get_session("del_sess_1") is not None
+    assert await gw.db.get_session("del_sess_1") is not None
 
     # Post a message
     await gw.post(
@@ -623,15 +624,15 @@ async def test_gateway_delete_session(temp_db: str, tmp_path: Any) -> None:
     )
 
     # Verify messages exist
-    history = await gw.get_session_history("del_sess_1")
+    history = await gw.db.get_session_history("del_sess_1")
     assert len(history) > 0
 
     # Delete session
     await gw.delete_session("del_sess_1")
 
     # Verify DB records deleted
-    assert await gw.get_session("del_sess_1") is None
-    history_after = await gw.get_session_history("del_sess_1")
+    assert await gw.db.get_session("del_sess_1") is None
+    history_after = await gw.db.get_session_history("del_sess_1")
     assert len(history_after) == 0
 
     # Verify workspace deleted from disk
@@ -756,16 +757,16 @@ async def test_gateway_claim_message(temp_db: str) -> None:
     await gw.post(msg)
 
     # First claim should succeed
-    success = await gw.claim_message(msg.id, "processing", [MessageStatus.PENDING_AGENT])
+    success = await gw.db.claim_message(msg.id, "processing", [MessageStatus.PENDING_AGENT])
     assert success is True
 
     # The message status in DB should now be "processing"
-    history = await gw.get_session_history("sess_claim")
+    history = await gw.db.get_session_history("sess_claim")
     assert len(history) == 1
     assert history[0].status == "processing"
 
     # Second claim with original expected status should fail
-    success2 = await gw.claim_message(msg.id, "processing", [MessageStatus.PENDING_AGENT])
+    success2 = await gw.db.claim_message(msg.id, "processing", [MessageStatus.PENDING_AGENT])
     assert success2 is False
 
 
@@ -793,24 +794,24 @@ async def test_gateway_update_system_prompt(temp_db: str) -> None:
     await gw.post(nudge)
 
     # Verify initial state
-    history = await gw.get_session_history("sess_update_sys", limit=10)
+    history = await gw.db.get_session_history("sess_update_sys", limit=10)
     assert len(history) == 1
     assert history[0].role == MessageRole.SYSTEM and history[0].chatbot_id == "discord_bot"
     assert history[0].content == "System nudge"
 
-    fetched_session = await gw.get_session("sess_update_sys")
+    fetched_session = await gw.db.get_session("sess_update_sys")
     assert fetched_session is not None
     assert fetched_session.system_prompt == "Initial prompt"
 
     # Update system prompt
-    await gw.update_session_system_prompt("sess_update_sys", "Updated prompt")
+    await gw.db.update_session_system_prompt("sess_update_sys", "Updated prompt")
 
     # Verify updated state
-    history_after = await gw.get_session_history("sess_update_sys", limit=10)
+    history_after = await gw.db.get_session_history("sess_update_sys", limit=10)
     assert len(history_after) == 1
     assert history_after[0].role == MessageRole.SYSTEM and history_after[0].chatbot_id == "discord_bot"
     assert history_after[0].content == "System nudge"  # Left untouched!
 
-    fetched_session_after = await gw.get_session("sess_update_sys")
+    fetched_session_after = await gw.db.get_session("sess_update_sys")
     assert fetched_session_after is not None
     assert fetched_session_after.system_prompt == "Updated prompt"  # Updated successfully!
