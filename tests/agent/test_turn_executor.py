@@ -832,7 +832,7 @@ async def test_turn_executor_cross_session_context_injection_and_consolidation(t
 
 def test_truncate_context_middle() -> None:
     """Verify that truncate_context_middle preserves start/end and truncates middle correctly."""
-    from kesoku.agent.turn_executor import truncate_context_middle
+    from kesoku.utils.text import truncate_context_middle
 
     # Scenario A: Under limit, should remain completely untouched
     short_text = "Short content timeline."

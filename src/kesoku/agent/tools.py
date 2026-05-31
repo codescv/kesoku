@@ -1205,15 +1205,20 @@ async def play_role(role: str, context: ToolContext) -> str:
 
 @default_registry.register
 async def view_cross_session_memory(context: ToolContext) -> str:
-    """Retrieve a summarized narrative timeline of recent events, conversations, and milestones that occurred in other active threads/channels for the current active persona role.
+    """Retrieve a cross-session narrative timeline of recent events.
 
-    Use this tool when the user refers to external discussions or events that you do not have in your current local conversation history.
+    This includes conversations and milestones that occurred in other active
+    threads/channels for the current active persona role.
+
+    Use this tool when the user refers to external discussions or events that
+    you do not have in your current local conversation history.
 
     Args:
         context: Injected tool execution context (automatically resolved).
 
     Returns:
-        A formatted Markdown string containing the cross-session event timeline and any recent un-consolidated conversations.
+        A formatted Markdown string containing the cross-session event
+        timeline and any recent un-consolidated conversations.
     """
     if not context or not context.gateway:
         return "Error: ToolContext or Gateway is missing."
