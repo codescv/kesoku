@@ -901,7 +901,7 @@ async def _resolve_memory_role(category: str, role_param: str | None, context: T
     category = category.strip().lower()
 
     # Rule 1: Standard categories ALWAYS use "default" role
-    if category in {"progress", "learnings"}:
+    if category in {"progress", "learnings", "memo"}:
         return "default"
 
     # Rule 2: user_preferences category uses current channel's active role
@@ -1021,6 +1021,7 @@ async def update_memory(
     key: str,
     title: str,
     content: str,
+    old_content: str | None = None,
     role: str | None = None,
     create_category: bool = False,
     context: ToolContext | None = None,
@@ -1030,12 +1031,16 @@ async def update_memory(
     This executes a transactionally isolated UPSERT SQL statement, completely protecting other keys.
 
     Note: To prevent memory bloat, each memory entry's content MUST be kept concise.
+    To prevent accidental overwrites, updating an existing memory requires providing the
+    exact current content in `old_content`.
 
     Args:
-        category: The memory category (e.g., 'progress', 'learnings', 'user_preferences').
+        category: The memory category (e.g., 'progress', 'learnings', 'user_preferences', 'memo').
         key: The unique snake_case key.
         title: Human-readable label or title for the entry.
         content: Detailed markdown or JSON content payload (must be <= 200 characters).
+        old_content: The exact expected current content of the memory if it already exists.
+            Must match the existing content to succeed. Required for updating existing keys.
         role: Optional roleplay persona scope (defaults to None for implicit channel/default persona).
         create_category: True if permission was granted to initialize a new category.
         context: Injected tool execution context.
@@ -1072,6 +1077,26 @@ async def update_memory(
             )
 
         sanitized_key = sanitize_key(key)
+
+        # Optimistic locking check to prevent overwrites
+        existing = await db.get_agent_memory(category=category, key=sanitized_key, role=resolved_role)
+        if existing:
+            existing_content = existing.get("content")
+            if old_content is None:
+                return (
+                    f"Write Denied: Memory already exists for key '{sanitized_key}' in category '{category}'.\n"
+                    f"To prevent overwriting, you MUST provide the `old_content` parameter "
+                    f"matching the current content. Use `view_memory` to read it first."
+                )
+            if existing_content != old_content:
+                return (
+                    f"Write Denied: The provided `old_content` does not match the actual existing content "
+                    f"for key '{sanitized_key}' in category '{category}'.\n"
+                    f"Actual content: {existing_content!r}\n"
+                    f"Provided old_content: {old_content!r}\n"
+                    f"Please call `view_memory` to get the latest content, and try again."
+                )
+
         await db.upsert_agent_memory(
             category=category,
             key=sanitized_key,

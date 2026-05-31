@@ -396,3 +396,98 @@ async def test_user_preferences_memory_behavior(tmp_path) -> None:
         context=ctx,
     )
     assert "Error: Content length (501 characters) exceeds the maximum limit of 500 characters" in res_fail
+
+
+@pytest.mark.asyncio
+async def test_update_memory_overwrite_prevention(tmp_path) -> None:
+    """Test that update_memory prevents accidental overwrites using old_content."""
+    from kesoku.gateway.gateway import Gateway
+
+    temp_db = str(tmp_path / "test_overwrite.db")
+    DatabaseManager(temp_db).init_tables()
+
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    ctx = ToolContext(
+        session_id="sess_overwrite_test",
+        session_workspace="test_ws",
+        gateway=gw,
+    )
+
+    # 1. Initial write (new key) - should succeed without old_content
+    res = await update_memory(
+        category="progress",
+        key="my_task",
+        title="My Task",
+        content="Initial State",
+        context=ctx,
+    )
+    assert "Memory successfully saved!" in res
+
+    # 2. Update existing key without old_content - should fail
+    res_fail = await update_memory(
+        category="progress",
+        key="my_task",
+        title="My Task",
+        content="New State",
+        context=ctx,
+    )
+    assert "Write Denied: Memory already exists" in res_fail
+    assert "you MUST provide the `old_content` parameter" in res_fail
+
+    # 3. Update existing key with incorrect old_content - should fail
+    res_fail_wrong = await update_memory(
+        category="progress",
+        key="my_task",
+        title="My Task",
+        content="New State",
+        old_content="Wrong Old State",
+        context=ctx,
+    )
+    assert "Write Denied: The provided `old_content` does not match" in res_fail_wrong
+
+    # 4. Update existing key with correct old_content - should succeed
+    res_success = await update_memory(
+        category="progress",
+        key="my_task",
+        title="My Task",
+        content="New State",
+        old_content="Initial State",
+        context=ctx,
+    )
+    assert "Memory successfully saved!" in res_success
+
+    # Verify the update
+    val = await view_memory(category="progress", key="my_task", context=ctx)
+    assert "New State" in val
+
+
+@pytest.mark.asyncio
+async def test_memo_category(tmp_path) -> None:
+    """Test that 'memo' category is allowed and routes to 'default' role scope."""
+    from kesoku.gateway.gateway import Gateway
+
+    temp_db = str(tmp_path / "test_memo.db")
+    DatabaseManager(temp_db).init_tables()
+
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    ctx = ToolContext(
+        session_id="sess_memo_test",
+        session_workspace="test_ws",
+        gateway=gw,
+    )
+
+    # 'memo' should be allowed by default now
+    res = await update_memory(
+        category="memo",
+        key="daily_event",
+        title="Interesting Event",
+        content="Met a friendly cat",
+        context=ctx,
+    )
+    assert "Memory successfully saved!" in res
+    assert "Category: `memo`" in res
+    assert "Scope: `default`" in res

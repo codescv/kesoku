@@ -749,7 +749,7 @@ class DatabaseManager:
 
     def get_allowed_memory_categories(self) -> set[str]:
         """Retrieves the set of all currently permitted or existing memory categories."""
-        categories = {"learnings", "progress", "user_preferences"}
+        categories = {"learnings", "progress", "user_preferences", "memo"}
         try:
             memories = self.get_agent_memories()
             for m in memories:

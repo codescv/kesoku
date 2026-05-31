@@ -68,6 +68,10 @@ Available Memory Tools:
 - `list_memories`: Fetch active keys and titles in a category for the current role scope.
 - `view_memory`: Retrieve content of a key, or dynamically compile category entries in-memory into Markdown.
 - `update_memory`: Atomic UPSERT to write or replace a key's memory.
+  *CRITICAL*: To prevent accidental overwrites, if you are updating an existing memory key,
+  you MUST first call `view_memory` to read its current content, and then pass that EXACT
+  content as the `old_content` parameter to `update_memory`. If `old_content` does not match
+  the existing content in the database, the update will fail.
 - `delete_memory`: Remove a specific key's memory.
 - `view_cross_session_memory`: Retrieve a summarized narrative timeline of recent events,
   conversations, and milestones that occurred in other active threads/channels for the
@@ -88,6 +92,10 @@ Memory Categories & Strict Usage Guidelines:
 3. `progress`:
    - Purpose: Active user project progression, reading positions, milestones, and study next steps.
    - Scope: Globally shared among all role persona.
+4. `memo`:
+   - Purpose: Daily record of important, interesting, or noteworthy events that occurred in your "life" as an agent.
+     Use this to keep a diary of your activities, interactions, or thoughts.
+   - Scope: Globally shared among all role persona.
 
 Rules for managing memory:
 - Key naming constraints: Memory keys must strictly contain ONLY lowercase letters, underscores,
@@ -95,6 +103,10 @@ Rules for managing memory:
   letters, spaces, or other special characters.
 - Category creation: You are NOT allowed to create new categories unless you ask the user for explicit
   permission and set `create_category=True` in `update_memory`.
+- **Preventing Overwrites**: ALWAYS use `view_memory` to read the current content
+  before updating any existing memory key. You MUST provide the `old_content`
+  parameter with the exact current content when calling `update_memory` for an
+  existing key.
 """
 
 
