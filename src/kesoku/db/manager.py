@@ -1,198 +1,20 @@
-"""Database models and SQLite persistence manager for Kesoku AI Agent."""
+"""Database persistence manager for Kesoku AI Agent."""
 
 import datetime
 import json
 import logging
 import os
-import re
 import shutil
 import sqlite3
 import time
-import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
-
+from kesoku.agent.history_sorter import sort_session_messages
 from kesoku.constants import MessageRole, MessageStatus, MessageType
+from kesoku.db.connection import ConnectionProvider
+from kesoku.db.models import CrossSessionContext, Message, Session
 
 logger = logging.getLogger(__name__)
-
-
-class Message(BaseModel):
-    """Represents a conversational message within the Kesoku framework."""
-
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    session_id: str = Field(..., description="Internal unique conversational session identifier")
-    chatbot_id: str = Field(..., description="Unique identifier of the chatbot platform/instance (e.g., 'cli')")
-    channel_id: str = Field(..., description="External platform-specific channel or room identifier")
-    sender: str = Field(..., description="Sender identifier or username")
-    role: MessageRole = Field(default=MessageRole.USER, description="Role of the message sender")
-    type: MessageType = Field(default=MessageType.TEXT, description="Type of message content or action")
-    content: str = Field(..., description="Text content of the message")
-    metadata: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Extensible metadata for platform-specific attributes (e.g., attachments, guild_id)",
-    )
-    timestamp: float = Field(default_factory=time.time, description="Unix timestamp of when the message was created")
-    status: MessageStatus = Field(default=MessageStatus.PENDING, description="Current lifecycle status of the message")
-    parent_id: str | None = Field(default=None, description="Links tool results or followups to specific message/call")
-
-
-class Session(BaseModel):
-    """Represents a persistent conversational chat session."""
-
-    id: str = Field(..., description="Unique alphanumeric identifier for the session")
-    title: str = Field(..., description="Summary title or first message snippet")
-    created_at: float = Field(default_factory=time.time, description="Creation unix timestamp")
-    updated_at: float = Field(default_factory=time.time, description="Last updated unix timestamp")
-    system_prompt: str = Field(default="", description="The main system prompt instructions for the session")
-
-    @property
-    def workspace_name(self) -> str:
-        """Generate a unique, escaped folder name for the session workspace.
-
-        Returns:
-            An escaped folder name string.
-        """
-        escaped = re.sub(r"[^\w\-]", "_", self.title)
-        escaped = re.sub(r"_+", "_", escaped)
-        escaped = escaped.strip("_")
-        if not escaped:
-            escaped = "session"
-        title_escaped = escaped[:20].strip("_")
-        ts_str = time.strftime("%y%m%d-%H-%M", time.localtime(self.created_at))
-        return f"{ts_str}_{title_escaped}_{self.id}"
-
-
-class AgentMemory(BaseModel):
-    """Represents a structured agent memory record in the SQLite database."""
-
-    id: int | None = Field(default=None, description="Database autoincrement primary key")
-    category: str = Field(..., description="Category: 'progress', 'learnings', 'user_preferences' etc.")
-    key: str = Field(..., description="snake_case unique identifier")
-    title: str = Field(..., description="Human-readable label or title for the entry")
-    content: str = Field(..., description="Markdown text or structured content payload")
-    updated_at: float = Field(default_factory=time.time, description="Unix timestamp of last update")
-    role: str = Field(default="default", description="Optional roleplay-specific character persona binding")
-
-
-class CrossSessionContext(BaseModel):
-    """Represents a cross-session context/memory summary for a specific persona role."""
-
-    role: str = Field(..., description="The unique role/persona identifier")
-    content: str = Field(..., description="The summarized memory/context content string")
-    updated_at: float = Field(default_factory=time.time, description="Unix timestamp of last consolidation")
-    status: str = Field(default="idle", description="Lock status: 'idle' or 'updating'")
-
-
-def _sort_session_messages(all_msgs: list[Message], order: Literal["phased", "grouped"]) -> list[Message]:
-    """Sort historical messages for a specific session ordered logically.
-
-    Args:
-        all_msgs: A list of Message objects to sort.
-        order: Sorting mechanism ("phased" or "grouped").
-
-    Returns:
-        A list of logically sorted Message objects.
-    """
-    if not all_msgs:
-        return []
-
-    msg_map = {m.id: m for m in all_msgs}
-
-    def get_root_timestamp(m: Message) -> float:
-        curr = m
-        while curr.parent_id and curr.parent_id in msg_map:
-            curr = msg_map[curr.parent_id]
-        return curr.timestamp
-
-    def get_tool_group_timestamp(m: Message) -> float:
-        if m.parent_id and m.parent_id in msg_map:
-            parent_msg = msg_map[m.parent_id]
-            if parent_msg.role == MessageRole.TOOL and parent_msg.type == MessageType.TOOL_CALL:
-                return parent_msg.timestamp
-        return m.timestamp
-
-    if order == "grouped":
-        # Grouped sorting simply sorts by root turn timestamp, then tool group timestamp, then actual timestamp
-        return sorted(all_msgs, key=lambda m: (get_root_timestamp(m), get_tool_group_timestamp(m), m.timestamp))
-
-    # Phased sorting logic (default for LLM inputs):
-    # 1. Group messages by turn root timestamp
-    turns: dict[float, list[Message]] = {}
-    for msg in all_msgs:
-        root_ts = get_root_timestamp(msg)
-        turns.setdefault(root_ts, []).append(msg)
-
-    # 2. Sort each turn individually
-    for root_ts, turn_msgs in turns.items():
-        # Identify all tool calls in the current turn
-        tc_map = {m.id: m for m in turn_msgs if m.role == MessageRole.TOOL and m.type == MessageType.TOOL_CALL}
-
-        # Collect and sort tool results by parent tool call timestamp
-        tr_msgs = [m for m in turn_msgs if m.role == MessageRole.TOOL and m.type == MessageType.TOOL_RESULT]
-        tr_msgs.sort(key=lambda m: tc_map[m.parent_id].timestamp if m.parent_id in tc_map else m.timestamp)
-
-        # Group tool results into logical execution batches
-        batches: list[list[Message]] = []
-        current_batch: list[Message] = []
-        last_ts = None
-
-        for tr in tr_msgs:
-            parent_tc = tc_map.get(tr.parent_id)
-            ts = parent_tc.timestamp if parent_tc else tr.timestamp
-
-            if last_ts is None:
-                current_batch.append(tr)
-            elif ts - last_ts < 0.5:
-                current_batch.append(tr)
-            else:
-                if current_batch:
-                    batches.append(current_batch)
-                current_batch = [tr]
-            last_ts = ts
-
-        if current_batch:
-            batches.append(current_batch)
-
-        # Determine maximum timestamp boundary (cutoff) for each batch
-        batch_cutoffs = [max(tr.timestamp for tr in batch) for batch in batches] if batches else []
-
-        # Determine which iteration round a message belongs to based on these boundaries
-        def get_iteration_index(m: Message) -> int:
-            idx = 0
-            for cutoff in batch_cutoffs:
-                if m.timestamp > cutoff:
-                    idx += 1
-            return idx
-
-        # Define the phase sorting inside a single iteration round
-        def get_sorting_phase(m: Message) -> float:
-            if m.role == MessageRole.TOOL and m.type == MessageType.TOOL_CALL:
-                return 1.0
-            elif m.role == MessageRole.TOOL and m.type == MessageType.TOOL_RESULT:
-                return 2.0
-            elif m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT:
-                return 0.0
-            elif m.role == MessageRole.ASSISTANT and m.type != MessageType.THOUGHT:
-                return 3.0
-            return 0.0
-
-        # Sort turn messages in place
-        turn_msgs.sort(
-            key=lambda m: (
-                get_iteration_index(m),
-                m.timestamp,
-                get_sorting_phase(m),
-            )
-        )
-
-    # 3. Flatten all sorted turns chronologically
-    sorted_msgs = []
-    for r_ts in sorted(turns.keys()):
-        sorted_msgs.extend(turns[r_ts])
-
-    return sorted_msgs
 
 
 class DatabaseManager:
@@ -205,6 +27,38 @@ class DatabaseManager:
             db_path: Absolute or relative filesystem path to SQLite database file.
         """
         self.db_path = db_path
+        self.connection_provider = ConnectionProvider(db_path)
+
+    def _get_connection(self) -> sqlite3.Connection:
+        """Expose connection for backward-compatible test mock manipulations."""
+        return self.connection_provider.get_raw_connection()
+
+    def _row_to_message(self, row: sqlite3.Row) -> Message:
+        """Helper to convert a sqlite Row to a Message Pydantic model."""
+        return Message(
+            id=row["id"],
+            session_id=row["session_id"],
+            chatbot_id=row["chatbot_id"],
+            channel_id=row["channel_id"],
+            sender=row["sender"],
+            role=row["role"],
+            type=row["type"],
+            content=row["content"],
+            metadata=json.loads(row["metadata"]),
+            timestamp=row["timestamp"],
+            status=row["status"],
+            parent_id=row["parent_id"],
+        )
+
+    def _row_to_session(self, row: sqlite3.Row) -> Session:
+        """Helper to convert a sqlite Row to a Session Pydantic model."""
+        return Session(
+            id=row["id"],
+            title=row["title"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            system_prompt=row["system_prompt"],
+        )
 
     def _ensure_migrations(self, conn: sqlite3.Connection) -> None:
         """Ensure all required columns exist in messages table."""
@@ -286,42 +140,20 @@ class DatabaseManager:
                 f"Database file '{self.db_path}' does not exist or is empty. "
                 "Please run 'kesoku init' first to initialize the workspace."
             )
-        conn = self._get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='messages'")
-            if not cursor.fetchone():
+        with self.connection_provider.connection() as conn:
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='messages'")
+                if not cursor.fetchone():
+                    raise RuntimeError(
+                        f"Database at '{self.db_path}' is missing required tables. Please run 'kesoku init' first."
+                    )
+                self._ensure_migrations(conn)
+            except sqlite3.DatabaseError as e:
                 raise RuntimeError(
-                    f"Database at '{self.db_path}' is missing required tables. Please run 'kesoku init' first."
-                )
-            self._ensure_migrations(conn)
-        except sqlite3.DatabaseError:
-            raise RuntimeError(f"Database at '{self.db_path}' is invalid or corrupt. Please run 'kesoku init' first.")
-        finally:
-            conn.close()
-
-    def _get_connection(self) -> sqlite3.Connection:
-        """Obtain a configured SQLite database connection.
-
-        Returns:
-            A configured sqlite3.Connection instance.
-        """
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-
-        # Enable WAL (Write-Ahead Logging) mode for high concurrent read/write
-        conn.execute("PRAGMA journal_mode=WAL;")
-
-        # Use NORMAL synchronous mode for faster WAL writes while maintaining app-level crash safety
-        conn.execute("PRAGMA synchronous=NORMAL;")
-
-        # Enforce foreign key constraints
-        conn.execute("PRAGMA foreign_keys=ON;")
-
-        # Set busy timeout to 5000ms to avoid database locked exceptions
-        conn.execute("PRAGMA busy_timeout=5000;")
-
-        return conn
+                    f"Database at '{self.db_path}' is invalid or corrupt. "
+                    "Please run 'kesoku init' first."
+                ) from e
 
     def init_tables(self, overwrite: bool = False) -> None:
         """Initialize SQLite database tables and indices.
@@ -340,82 +172,80 @@ class DatabaseManager:
                 logger.error(f"Failed to backup/overwrite existing database {self.db_path}: {e}")
                 raise
 
-        conn = self._get_connection()
-        try:
-            with conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS messages (
-                        id TEXT PRIMARY KEY,
-                        session_id TEXT NOT NULL,
-                        chatbot_id TEXT NOT NULL,
-                        channel_id TEXT NOT NULL,
-                        sender TEXT NOT NULL,
-                        role TEXT NOT NULL DEFAULT 'user',
-                        type TEXT NOT NULL DEFAULT 'text',
-                        content TEXT NOT NULL,
-                        metadata TEXT NOT NULL,
-                        timestamp REAL NOT NULL,
-                        status TEXT NOT NULL,
-                        parent_id TEXT
-                    );
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS sessions (
-                        id TEXT PRIMARY KEY,
-                        title TEXT NOT NULL,
-                        created_at REAL NOT NULL,
-                        updated_at REAL NOT NULL,
-                        system_prompt TEXT NOT NULL DEFAULT ''
-                    );
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS channel_sessions (
-                        chatbot_id TEXT NOT NULL,
-                        channel_id TEXT NOT NULL,
-                        session_id TEXT NOT NULL,
-                        PRIMARY KEY (chatbot_id, channel_id),
-                        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-                    );
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS channel_roles (
-                        chatbot_id TEXT NOT NULL,
-                        channel_id TEXT NOT NULL,
-                        role TEXT NOT NULL,
-                        PRIMARY KEY (chatbot_id, channel_id)
-                    );
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS cross_session_contexts (
-                        role TEXT PRIMARY KEY,
-                        content TEXT NOT NULL,
-                        updated_at REAL NOT NULL,
-                        status TEXT NOT NULL DEFAULT 'idle'
-                    );
-                    """
-                )
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);")
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp ON messages(session_id, timestamp);"
-                )
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(chatbot_id, channel_id);")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);")
-            self._ensure_migrations(conn)
-            logger.info(f"Database schema initialized successfully at {self.db_path}")
-        except Exception as e:
-            logger.error(f"Failed to initialize database schema: {e}")
-            raise
-        finally:
-            conn.close()
+        with self.connection_provider.connection() as conn:
+            try:
+                with conn:
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS messages (
+                            id TEXT PRIMARY KEY,
+                            session_id TEXT NOT NULL,
+                            chatbot_id TEXT NOT NULL,
+                            channel_id TEXT NOT NULL,
+                            sender TEXT NOT NULL,
+                            role TEXT NOT NULL DEFAULT 'user',
+                            type TEXT NOT NULL DEFAULT 'text',
+                            content TEXT NOT NULL,
+                            metadata TEXT NOT NULL,
+                            timestamp REAL NOT NULL,
+                            status TEXT NOT NULL,
+                            parent_id TEXT
+                        );
+                        """
+                    )
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS sessions (
+                            id TEXT PRIMARY KEY,
+                            title TEXT NOT NULL,
+                            created_at REAL NOT NULL,
+                            updated_at REAL NOT NULL,
+                            system_prompt TEXT NOT NULL DEFAULT ''
+                        );
+                        """
+                    )
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS channel_sessions (
+                            chatbot_id TEXT NOT NULL,
+                            channel_id TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            PRIMARY KEY (chatbot_id, channel_id),
+                            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                        );
+                        """
+                    )
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS channel_roles (
+                            chatbot_id TEXT NOT NULL,
+                            channel_id TEXT NOT NULL,
+                            role TEXT NOT NULL,
+                            PRIMARY KEY (chatbot_id, channel_id)
+                        );
+                        """
+                    )
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS cross_session_contexts (
+                            role TEXT PRIMARY KEY,
+                            content TEXT NOT NULL,
+                            updated_at REAL NOT NULL,
+                            status TEXT NOT NULL DEFAULT 'idle'
+                        );
+                        """
+                    )
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);")
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp ON messages(session_id, timestamp);"
+                    )
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(chatbot_id, channel_id);")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);")
+                self._ensure_migrations(conn)
+                logger.info(f"Database schema initialized successfully at {self.db_path}")
+            except Exception as e:
+                logger.error(f"Failed to initialize database schema: {e}")
+                raise
 
     # Session CRUD
     def create_session(self, session: Session) -> None:
@@ -424,8 +254,7 @@ class DatabaseManager:
         Args:
             session: The Session object to store.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             with conn:
                 conn.execute(
                     """
@@ -435,8 +264,6 @@ class DatabaseManager:
                     """,
                     (session.id, session.title, session.created_at, session.updated_at, session.system_prompt),
                 )
-        finally:
-            conn.close()
 
     def get_session(self, session_id: str) -> Session | None:
         """Retrieve a chat session record by ID.
@@ -447,22 +274,13 @@ class DatabaseManager:
         Returns:
             The Session object if found, None otherwise.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
             row = cursor.fetchone()
             if row:
-                return Session(
-                    id=row["id"],
-                    title=row["title"],
-                    created_at=row["created_at"],
-                    updated_at=row["updated_at"],
-                    system_prompt=row["system_prompt"],
-                )
+                return self._row_to_session(row)
             return None
-        finally:
-            conn.close()
 
     def update_session_updated_at(self, session_id: str, updated_at: float) -> None:
         """Update the updated_at timestamp for a session.
@@ -471,12 +289,9 @@ class DatabaseManager:
             session_id: Target session ID.
             updated_at: New timestamp float.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             with conn:
                 conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (updated_at, session_id))
-        finally:
-            conn.close()
 
     def list_sessions(self) -> list[Session]:
         """List all chat sessions ordered by most recently updated.
@@ -484,23 +299,11 @@ class DatabaseManager:
         Returns:
             List of Session objects.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM sessions ORDER BY updated_at DESC")
             rows = cursor.fetchall()
-            return [
-                Session(
-                    id=row["id"],
-                    title=row["title"],
-                    created_at=row["created_at"],
-                    updated_at=row["updated_at"],
-                    system_prompt=row["system_prompt"],
-                )
-                for row in rows
-            ]
-        finally:
-            conn.close()
+            return [self._row_to_session(row) for row in rows]
 
     def get_latest_session(self) -> Session | None:
         """Retrieve the most recently updated chat session.
@@ -508,22 +311,13 @@ class DatabaseManager:
         Returns:
             The Session object if available, None otherwise.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM sessions ORDER BY updated_at DESC LIMIT 1")
             row = cursor.fetchone()
             if row:
-                return Session(
-                    id=row["id"],
-                    title=row["title"],
-                    created_at=row["created_at"],
-                    updated_at=row["updated_at"],
-                    system_prompt=row["system_prompt"],
-                )
+                return self._row_to_session(row)
             return None
-        finally:
-            conn.close()
 
     def get_session_by_channel(self, chatbot_id: str, channel_id: str) -> Session | None:
         """Retrieve the chat session associated with a specific chatbot channel.
@@ -535,8 +329,7 @@ class DatabaseManager:
         Returns:
             The Session object if found, None otherwise.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -548,16 +341,8 @@ class DatabaseManager:
             )
             row = cursor.fetchone()
             if row:
-                return Session(
-                    id=row["id"],
-                    title=row["title"],
-                    created_at=row["created_at"],
-                    updated_at=row["updated_at"],
-                    system_prompt=row["system_prompt"],
-                )
+                return self._row_to_session(row)
             return None
-        finally:
-            conn.close()
 
     def set_active_session_for_channel(self, chatbot_id: str, channel_id: str, session_id: str) -> None:
         """Bind a session as the active session for a chatbot channel (UPSERT).
@@ -567,8 +352,7 @@ class DatabaseManager:
             channel_id: External channel or thread identifier.
             session_id: Unique session identifier to bind.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             with conn:
                 conn.execute(
                     """
@@ -579,8 +363,6 @@ class DatabaseManager:
                     (chatbot_id, channel_id, session_id),
                 )
                 logger.info(f"Explicitly bound channel '{chatbot_id}:{channel_id}' to active session '{session_id}'")
-        finally:
-            conn.close()
 
     def delete_session(self, session_id: str) -> None:
         """Delete a session and all its associated messages from the database.
@@ -588,15 +370,12 @@ class DatabaseManager:
         Args:
             session_id: The unique session identifier to delete.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             with conn:
                 # Delete all messages belonging to this session
                 conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
                 # Delete the session itself
                 conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-        finally:
-            conn.close()
 
     # Message CRUD
     def save_message(self, msg: Message) -> None:
@@ -605,8 +384,7 @@ class DatabaseManager:
         Args:
             msg: The Message object to store.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             with conn:
                 conn.execute(
                     """
@@ -630,8 +408,6 @@ class DatabaseManager:
                         msg.parent_id,
                     ),
                 )
-        finally:
-            conn.close()
 
     def update_message_status(self, message_id: str, status: str) -> None:
         """Update the operational lifecycle status of a message.
@@ -640,12 +416,9 @@ class DatabaseManager:
             message_id: Target message ID.
             status: New status string.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             with conn:
                 conn.execute("UPDATE messages SET status = ? WHERE id = ?", (status, message_id))
-        finally:
-            conn.close()
 
     def claim_message(self, message_id: str, new_status: str, expected_statuses: list[str]) -> bool:
         """Atomically update message status only if it is currently in one of expected_statuses.
@@ -658,8 +431,7 @@ class DatabaseManager:
         Returns:
             True if exactly one message was updated, False otherwise.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             with conn:
                 placeholders = ", ".join("?" for _ in expected_statuses)
                 cursor = conn.execute(
@@ -667,8 +439,6 @@ class DatabaseManager:
                     [new_status, message_id, *expected_statuses],
                 )
                 return cursor.rowcount == 1
-        finally:
-            conn.close()
 
     def update_message_metadata(self, message_id: str, metadata: dict[str, Any]) -> None:
         """Update the metadata dictionary of a message.
@@ -677,12 +447,9 @@ class DatabaseManager:
             message_id: Target message ID.
             metadata: Dictionary representing the new metadata.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             with conn:
                 conn.execute("UPDATE messages SET metadata = ? WHERE id = ?", (json.dumps(metadata), message_id))
-        finally:
-            conn.close()
 
     def update_session_system_prompt(self, session_id: str, content: str) -> None:
         """Update the main system prompt content for an existing session.
@@ -691,15 +458,12 @@ class DatabaseManager:
             session_id: Target session ID.
             content: New system prompt content string.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             with conn:
                 conn.execute(
                     "UPDATE sessions SET system_prompt = ? WHERE id = ?",
                     (content, session_id),
                 )
-        finally:
-            conn.close()
 
     def get_session_history(
         self, session_id: str, limit: int = 20, order: Literal["phased", "grouped"] = "phased"
@@ -714,8 +478,7 @@ class DatabaseManager:
         Returns:
             List of Message objects ordered by the requested sorting mechanism.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -725,29 +488,11 @@ class DatabaseManager:
                 (session_id,),
             )
             rows = cursor.fetchall()
-            all_msgs = [
-                Message(
-                    id=row["id"],
-                    session_id=row["session_id"],
-                    chatbot_id=row["chatbot_id"],
-                    channel_id=row["channel_id"],
-                    sender=row["sender"],
-                    role=row["role"],
-                    type=row["type"],
-                    content=row["content"],
-                    metadata=json.loads(row["metadata"]),
-                    timestamp=row["timestamp"],
-                    status=row["status"],  # type: ignore
-                    parent_id=row["parent_id"],
-                )
-                for row in rows
-            ]
+            all_msgs = [self._row_to_message(row) for row in rows]
 
-            all_msgs = _sort_session_messages(all_msgs, order)
+            all_msgs = sort_session_messages(all_msgs, order)
 
             return all_msgs[-limit:] if limit else all_msgs
-        finally:
-            conn.close()
 
     def get_messages_by_filters(
         self,
@@ -765,8 +510,7 @@ class DatabaseManager:
         Returns:
             List of matching Message objects.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             query = "SELECT * FROM messages"
             params: list[Any] = []
             clauses = []
@@ -789,25 +533,7 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
-            return [
-                Message(
-                    id=row["id"],
-                    session_id=row["session_id"],
-                    chatbot_id=row["chatbot_id"],
-                    channel_id=row["channel_id"],
-                    sender=row["sender"],
-                    role=row["role"],
-                    type=row["type"],
-                    content=row["content"],
-                    metadata=json.loads(row["metadata"]),
-                    timestamp=row["timestamp"],
-                    status=row["status"],  # type: ignore
-                    parent_id=row["parent_id"],
-                )
-                for row in rows
-            ]
-        finally:
-            conn.close()
+            return [self._row_to_message(row) for row in rows]
 
     def recover_orphaned_processing_messages(self, threshold_seconds: float = 300.0) -> int:
         """Recover messages that got stuck in 'processing' status by reverting them to 'pending_agent'.
@@ -818,8 +544,7 @@ class DatabaseManager:
         Returns:
             The number of messages recovered.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             with conn:
                 cutoff = time.time() - threshold_seconds
                 cursor = conn.execute(
@@ -828,8 +553,6 @@ class DatabaseManager:
                     (cutoff,),
                 )
                 return cursor.rowcount
-        finally:
-            conn.close()
 
     def get_session_turns_count(self, session_id: str) -> int:
         """Count the number of user turns in a session.
@@ -840,16 +563,13 @@ class DatabaseManager:
         Returns:
             The count of user messages.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 f"SELECT COUNT(*) FROM messages WHERE session_id = ? AND role = '{MessageRole.USER}'",
                 (session_id,),
             )
             return cursor.fetchone()[0]
-        finally:
-            conn.close()
 
     def get_session_turn_anchors(self, session_id: str) -> list[dict[str, Any]]:
         """Retrieve list of user and system messages with their ID, role and timestamp.
@@ -860,21 +580,16 @@ class DatabaseManager:
         Returns:
             List of dicts containing message id, role and timestamp.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"""
-                SELECT id, role, timestamp FROM messages
-                WHERE session_id = ? AND role IN ('{MessageRole.USER}', '{MessageRole.SYSTEM}')
-                ORDER BY timestamp ASC
-                """,
+                f"SELECT id, role, timestamp FROM messages "
+                f"WHERE session_id = ? AND role IN ('{MessageRole.USER}', '{MessageRole.SYSTEM}') "
+                f"ORDER BY timestamp ASC",
                 (session_id,),
             )
             rows = cursor.fetchall()
             return [{"id": r["id"], "role": r["role"], "timestamp": r["timestamp"]} for r in rows]
-        finally:
-            conn.close()
 
     def get_session_skill_anchor_ids(self, session_id: str) -> list[str]:
         """Retrieve the user message IDs of turns that loaded a skill successfully.
@@ -885,8 +600,7 @@ class DatabaseManager:
         Returns:
             List of turn anchor message IDs.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 f"""
@@ -901,8 +615,6 @@ class DatabaseManager:
                 (session_id,),
             )
             return [r[0] for r in cursor.fetchall() if r[0]]
-        finally:
-            conn.close()
 
     def get_orphaned_tool_calls(self, session_id: str) -> list[Message]:
         """Retrieve all orphaned tool call messages in a session.
@@ -913,8 +625,7 @@ class DatabaseManager:
         Returns:
             List of orphaned tool call Message objects.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 f"""
@@ -931,25 +642,7 @@ class DatabaseManager:
                 (session_id, session_id),
             )
             rows = cursor.fetchall()
-            return [
-                Message(
-                    id=row["id"],
-                    session_id=row["session_id"],
-                    chatbot_id=row["chatbot_id"],
-                    channel_id=row["channel_id"],
-                    sender=row["sender"],
-                    role=row["role"],
-                    type=row["type"],
-                    content=row["content"],
-                    metadata=json.loads(row["metadata"]),
-                    timestamp=row["timestamp"],
-                    status=row["status"],  # type: ignore
-                    parent_id=row["parent_id"],
-                )
-                for row in rows
-            ]
-        finally:
-            conn.close()
+            return [self._row_to_message(row) for row in rows]
 
     def get_session_history_by_ranges(
         self, session_id: str, ranges: list[tuple[float, float | None]], order: Literal["phased", "grouped"] = "phased"
@@ -967,8 +660,7 @@ class DatabaseManager:
         if not ranges:
             return []
 
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             clauses = []
             params: list[Any] = [session_id]
@@ -987,35 +679,16 @@ class DatabaseManager:
             """
             cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
-            all_msgs = [
-                Message(
-                    id=row["id"],
-                    session_id=row["session_id"],
-                    chatbot_id=row["chatbot_id"],
-                    channel_id=row["channel_id"],
-                    sender=row["sender"],
-                    role=row["role"],
-                    type=row["type"],
-                    content=row["content"],
-                    metadata=json.loads(row["metadata"]),
-                    timestamp=row["timestamp"],
-                    status=row["status"],  # type: ignore
-                    parent_id=row["parent_id"],
-                )
-                for row in rows
-            ]
+            all_msgs = [self._row_to_message(row) for row in rows]
 
-            all_msgs = _sort_session_messages(all_msgs, order)
+            all_msgs = sort_session_messages(all_msgs, order)
 
             return all_msgs
-        finally:
-            conn.close()
 
     # Agent Memory CRUD
     def upsert_agent_memory(self, category: str, key: str, title: str, content: str, role: str = "default") -> None:
         """Atomically insert or replace an agent memory record."""
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             with conn:
                 conn.execute(
                     """
@@ -1025,13 +698,10 @@ class DatabaseManager:
                     """,
                     (category, key, title, content, time.time(), role),
                 )
-        finally:
-            conn.close()
 
     def get_agent_memory(self, category: str, key: str, role: str = "default") -> dict[str, Any] | None:
         """Retrieve a specific agent memory record."""
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT * FROM agent_memories WHERE category = ? AND key = ? AND role = ?",
@@ -1041,16 +711,13 @@ class DatabaseManager:
             if row:
                 return dict(row)
             return None
-        finally:
-            conn.close()
 
     def get_agent_memories(self, category: str | None = None, role: str | None = None) -> list[dict[str, Any]]:
         """Retrieve agent memories, optionally filtered by category and/or role.
 
         If role is provided, retrieves both default memories and role-specific memories.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             query = "SELECT * FROM agent_memories"
             params = []
@@ -1071,25 +738,19 @@ class DatabaseManager:
             cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
-        finally:
-            conn.close()
 
     def delete_agent_memory(self, category: str, key: str, role: str = "default") -> None:
         """Delete a specific agent memory record."""
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             with conn:
                 conn.execute(
                     "DELETE FROM agent_memories WHERE category = ? AND key = ? AND role = ?",
                     (category, key, role),
                 )
-        finally:
-            conn.close()
 
     def set_channel_role(self, chatbot_id: str, channel_id: str, role: str) -> None:
         """Bind a roleplay persona to a chatbot channel/thread."""
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             with conn:
                 conn.execute(
                     """
@@ -1098,13 +759,10 @@ class DatabaseManager:
                     """,
                     (chatbot_id, channel_id, role),
                 )
-        finally:
-            conn.close()
 
     def get_channel_role(self, chatbot_id: str, channel_id: str) -> str | None:
         """Retrieve the roleplay persona bound directly to a chatbot channel/thread."""
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT role FROM channel_roles WHERE chatbot_id = ? AND channel_id = ?",
@@ -1112,8 +770,6 @@ class DatabaseManager:
             )
             row = cursor.fetchone()
             return row["role"] if row else None
-        finally:
-            conn.close()
 
     def get_channel_role_with_inheritance(self, chatbot_id: str, channel_id: str, session_id: str | None = None) -> str:
         """Retrieve the active role bound to a channel/thread with parent inheritance support."""
@@ -1124,33 +780,30 @@ class DatabaseManager:
 
         # 2. Discord parent channel inheritance
         if chatbot_id == "discord" and session_id:
-            conn = self._get_connection()
-            try:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT metadata FROM messages WHERE session_id = ? AND role = 'user' "
-                    "ORDER BY timestamp DESC LIMIT 1",
-                    (session_id,),
-                )
-                row = cursor.fetchone()
-                if row:
-                    meta = json.loads(row["metadata"])
-                    parent_id = meta.get("parent_channel_id")
-                    if parent_id:
-                        role = self.get_channel_role(chatbot_id, parent_id)
-                        if role:
-                            return role
-            except Exception as e:
-                logger.warning(f"Failed to retrieve parent channel role: {e}")
-            finally:
-                conn.close()
+            with self.connection_provider.connection() as conn:
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT metadata FROM messages WHERE session_id = ? AND role = 'user' "
+                        "ORDER BY timestamp DESC LIMIT 1",
+                        (session_id,),
+                    )
+                    row = cursor.fetchone()
+                    if row:
+                        meta = json.loads(row["metadata"])
+                        parent_id = meta.get("parent_channel_id")
+                        if parent_id:
+                            role = self.get_channel_role(chatbot_id, parent_id)
+                            if role:
+                                return role
+                except Exception as e:
+                    logger.warning(f"Failed to retrieve parent channel role: {e}")
 
         return "default"
 
     def get_channel_by_session(self, session_id: str) -> tuple[str, str] | None:
         """Retrieve the chatbot_id and channel_id mapping for a given session ID."""
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT chatbot_id, channel_id FROM channel_sessions WHERE session_id = ?",
@@ -1158,13 +811,10 @@ class DatabaseManager:
             )
             row = cursor.fetchone()
             return (row["chatbot_id"], row["channel_id"]) if row else None
-        finally:
-            conn.close()
 
     def get_last_message_timestamp(self, chatbot_id: str, channel_id: str) -> float | None:
         """Retrieve the timestamp of the most recent user or assistant message in a channel."""
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -1177,8 +827,6 @@ class DatabaseManager:
             )
             row = cursor.fetchone()
             return row["timestamp"] if row else None
-        finally:
-            conn.close()
 
     def get_cronjob_sent_stats_today(self, chatbot_id: str, channel_id: str) -> tuple[int, float | None]:
         """Retrieve count and last timestamp of cron messages sent today (local time) in a channel."""
@@ -1187,8 +835,7 @@ class DatabaseManager:
         midnight = datetime.datetime(now.year, now.month, now.day)
         midnight_ts = midnight.timestamp()
 
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -1203,8 +850,6 @@ class DatabaseManager:
             count = row[0] if row and row[0] is not None else 0
             last_ts = row[1] if row and row[1] is not None else None
             return count, last_ts
-        finally:
-            conn.close()
 
     def get_role_messages_since(
         self,
@@ -1224,8 +869,7 @@ class DatabaseManager:
         Returns:
             List of matching Message objects.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             query = """
                 SELECT m.* FROM messages m
                 JOIN channel_sessions cs ON m.session_id = cs.session_id
@@ -1248,25 +892,7 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
-            return [
-                Message(
-                    id=row["id"],
-                    session_id=row["session_id"],
-                    chatbot_id=row["chatbot_id"],
-                    channel_id=row["channel_id"],
-                    sender=row["sender"],
-                    role=row["role"],
-                    type=row["type"],
-                    content=row["content"],
-                    metadata=json.loads(row["metadata"]),
-                    timestamp=row["timestamp"],
-                    status=row["status"],
-                    parent_id=row["parent_id"],
-                )
-                for row in rows
-            ]
-        finally:
-            conn.close()
+            return [self._row_to_message(row) for row in rows]
 
     # Cross Session Context CRUD
     def get_cross_session_context(self, role: str) -> CrossSessionContext | None:
@@ -1278,8 +904,7 @@ class DatabaseManager:
         Returns:
             The CrossSessionContext object if found, None otherwise.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT * FROM cross_session_contexts WHERE role = ?",
@@ -1294,8 +919,6 @@ class DatabaseManager:
                     status=row["status"],
                 )
             return None
-        finally:
-            conn.close()
 
     def upsert_cross_session_context(self, role: str, content: str) -> None:
         """Insert or replace a cross-session context record.
@@ -1304,8 +927,7 @@ class DatabaseManager:
             role: Persona role identifier.
             content: The text content of the consolidated summary context.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             with conn:
                 conn.execute(
                     """
@@ -1315,8 +937,6 @@ class DatabaseManager:
                     """,
                     (role, content, time.time()),
                 )
-        finally:
-            conn.close()
 
     def claim_cross_session_context_for_update(self, role: str) -> bool:
         """Atomically claim lock to update cross-session context for a role.
@@ -1330,8 +950,7 @@ class DatabaseManager:
         Returns:
             True if lock was claimed successfully, False otherwise.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             with conn:
                 now = time.time()
                 # 1. Ensure a row for this role exists in the table (INSERT OR IGNORE)
@@ -1362,8 +981,6 @@ class DatabaseManager:
                     (now, role),
                 )
                 return cursor.rowcount == 1
-        finally:
-            conn.close()
 
     def release_cross_session_context_lock(self, role: str, content: str, updated_at: float | None = None) -> None:
         """Release lock on cross-session context, updating the summary content.
@@ -1373,8 +990,7 @@ class DatabaseManager:
             content: The newly consolidated summary content.
             updated_at: Optional timestamp to set as the new checkpoint. Defaults to current time.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             with conn:
                 ts = updated_at if updated_at is not None else time.time()
                 conn.execute(
@@ -1385,8 +1001,6 @@ class DatabaseManager:
                     """,
                     (content, ts, role),
                 )
-        finally:
-            conn.close()
 
     def recover_orphaned_context_locks(self) -> int:
         """Reset any lingering updating locks from past server crashes.
@@ -1394,10 +1008,7 @@ class DatabaseManager:
         Returns:
             The number of locks recovered.
         """
-        conn = self._get_connection()
-        try:
+        with self.connection_provider.connection() as conn:
             with conn:
                 cursor = conn.execute("UPDATE cross_session_contexts SET status = 'idle' WHERE status = 'updating'")
                 return cursor.rowcount
-        finally:
-            conn.close()

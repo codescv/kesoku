@@ -12,10 +12,6 @@ from typing import Any
 import discord
 
 from kesoku.agent.prompt import build_sys_prompt
-from kesoku.async_utils import (
-    async_exists,
-    async_realpath,
-)
 from kesoku.config import DiscordChannelOverride, get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
@@ -25,6 +21,10 @@ from kesoku.gateway.chatbot.discord_ui import MessageHeaderView, QuestionView
 from kesoku.gateway.chatbot.discord_voice_message import send_voice_message
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
+from kesoku.utils.async_fs import (
+    async_exists,
+    async_realpath,
+)
 
 logger = setup_logger(__name__)
 

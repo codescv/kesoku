@@ -7,7 +7,6 @@ Provides command-line pairing via barcode and supports text and media messages.
 import asyncio
 import base64
 import hashlib
-import io
 import json
 import mimetypes
 import os
@@ -25,24 +24,39 @@ from urllib.parse import quote, urlparse
 import aiohttp
 import certifi
 import qrcode
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from PIL import Image
 
 from kesoku.agent.prompt import build_sys_prompt
-from kesoku.async_utils import (
-    async_exists,
-    async_read_bytes,
-    async_read_text_file,
-    async_realpath,
-    async_write_binary_file,
-)
 from kesoku.config import get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
+from kesoku.utils.async_fs import (
+    async_exists,
+    async_read_bytes,
+    async_read_text_file,
+    async_realpath,
+    async_write_binary_file,
+)
+from kesoku.utils.crypto import (
+    aes128_ecb_decrypt as _aes128_ecb_decrypt,
+)
+from kesoku.utils.crypto import (
+    aes128_ecb_encrypt as _aes128_ecb_encrypt,
+)
+from kesoku.utils.crypto import (
+    aes_padded_size as _aes_padded_size,
+)
+from kesoku.utils.crypto import (
+    parse_aes_key as _parse_aes_key,
+)
+from kesoku.utils.image import (
+    compress_image as _compress_image,
+)
+from kesoku.utils.image import (
+    detect_image_mime_type as _detect_image_mime_type,
+)
 
 logger = setup_logger(__name__)
 
@@ -109,31 +123,6 @@ def _json_dumps(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
-def _pkcs7_pad(data: bytes, block_size: int = 16) -> bytes:
-    pad_len = block_size - (len(data) % block_size)
-    return data + bytes([pad_len] * pad_len)
-
-
-def _aes128_ecb_encrypt(plaintext: bytes, key: bytes) -> bytes:
-    cipher = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())
-    encryptor = cipher.encryptor()
-    return encryptor.update(_pkcs7_pad(plaintext)) + encryptor.finalize()
-
-
-def _aes128_ecb_decrypt(ciphertext: bytes, key: bytes) -> bytes:
-    cipher = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())
-    decryptor = cipher.decryptor()
-    padded = decryptor.update(ciphertext) + decryptor.finalize()
-    if not padded:
-        return padded
-    pad_len = padded[-1]
-    if 1 <= pad_len <= 16 and padded.endswith(bytes([pad_len]) * pad_len):
-        return padded[:-pad_len]
-    return padded
-
-
-def _aes_padded_size(size: int) -> int:
-    return ((size + 1 + 15) // 16) * 16
 
 
 def _random_wechat_uin() -> str:
@@ -267,17 +256,6 @@ def _cdn_upload_url(cdn_base_url: str, upload_param: str, filekey: str) -> str:
     )
 
 
-def _parse_aes_key(aes_key_b64: str) -> bytes:
-    decoded = base64.b64decode(aes_key_b64)
-    if len(decoded) == 16:
-        return decoded
-    if len(decoded) == 32:
-        text = decoded.decode("ascii", errors="ignore")
-        if text and all(ch in "0123456789abcdefABCDEF" for ch in text):
-            return bytes.fromhex(text)
-    raise ValueError(f"unexpected aes_key format ({len(decoded)} decoded bytes)")
-
-
 def _guess_chat_type(message: dict[str, Any], account_id: str) -> tuple[str, str]:
     room_id = str(message.get("room_id") or message.get("chat_room_id") or "").strip()
     to_user_id = str(message.get("to_user_id") or "").strip()
@@ -287,58 +265,6 @@ def _guess_chat_type(message: dict[str, Any], account_id: str) -> tuple[str, str
     if is_group:
         return "group", room_id or to_user_id or str(message.get("from_user_id") or "")
     return "dm", str(message.get("from_user_id") or "")
-
-
-def _compress_image(data: bytes, max_size: int = 1024 * 1024) -> bytes:
-    """Compress an image to be under max_size bytes.
-
-    Converts the image to RGB and saves it as a JPEG with compression. Resizes
-    the dimensions if the file size remains too large after initial compression.
-
-    Args:
-        data: The original image bytes.
-        max_size: The target maximum file size in bytes.
-
-    Returns:
-        The compressed image bytes, or original bytes if compression fails.
-    """
-    try:
-        img = Image.open(io.BytesIO(data))
-
-        # Convert RGBA or Palette (P) images to RGB for JPEG compatibility
-        if img.mode in ("RGBA", "P"):
-            background = Image.new("RGB", img.size, (255, 255, 255))
-            if img.mode == "RGBA":
-                background.paste(img, mask=img.split()[3])
-            else:
-                background.paste(img)
-            img = background
-        elif img.mode != "RGB":
-            img = img.convert("RGB")
-
-        # Try initial saving with high quality
-        out = io.BytesIO()
-        img.save(out, format="JPEG", quality=85)
-        compressed = out.getvalue()
-
-        # Loop to downscale/compress iteratively until it fits max_size
-        attempts = 0
-        while len(compressed) > max_size and attempts < 4:
-            attempts += 1
-            w, h = img.size
-            # Scale down by 0.7x each time to aggressively reduce resolution
-            img = img.resize((int(w * 0.7), int(h * 0.7)), Image.Resampling.LANCZOS)
-
-            # Reduce quality iteratively
-            quality = max(30, 75 - attempts * 10)
-            out = io.BytesIO()
-            img.save(out, format="JPEG", quality=quality)
-            compressed = out.getvalue()
-
-        return compressed
-    except Exception as exc:
-        logger.warning("WeChat: failed to compress image, sending original: %s", exc)
-        return data
 
 
 async def _api_post(
@@ -603,31 +529,6 @@ async def _download_and_decrypt_media(
 
 def _mime_from_filename(filename: str) -> str:
     return mimetypes.guess_type(filename)[0] or "application/octet-stream"
-
-
-def _detect_image_mime_type(file_bytes: bytes, fallback_mime: str = "image/jpeg") -> tuple[str, str]:
-    """Detect image mime type and matching file extension from magic bytes.
-
-    Returns:
-        A tuple of (mime_type, extension_with_dot).
-    """
-    if file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png", ".png"
-    if file_bytes.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg", ".jpg"
-    if file_bytes.startswith(b"GIF87a") or file_bytes.startswith(b"GIF89a"):
-        return "image/gif", ".gif"
-    if file_bytes.startswith(b"RIFF") and len(file_bytes) >= 12 and file_bytes[8:12] == b"WEBP":
-        return "image/webp", ".webp"
-
-    ext = ".jpg"
-    if fallback_mime == "image/png":
-        ext = ".png"
-    elif fallback_mime == "image/gif":
-        ext = ".gif"
-    elif fallback_mime == "image/webp":
-        ext = ".webp"
-    return fallback_mime, ext
 
 
 def _split_table_row(line: str) -> list[str]:
