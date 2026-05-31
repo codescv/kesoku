@@ -594,6 +594,8 @@ class TurnExecutor:
             logger.info("Interruption detected before launching concurrent tool execution.")
             for coro in exec_tasks:
                 coro.close()
+            # Mark the initiating message as interrupted to prevent it from being stuck in processing status
+            await self.gateway.update_message_status(current_msg.id, MessageStatus.INTERRUPTED)
             return False
 
         result_msgs = await asyncio.gather(*exec_tasks)
