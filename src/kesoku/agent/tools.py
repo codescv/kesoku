@@ -1201,3 +1201,56 @@ async def play_role(role: str, context: ToolContext) -> str:
         f"The instructions from `{role}/intro.md` have been successfully injected into your system prompt. "
         f"Please adopt this persona immediately."
     )
+
+
+@default_registry.register
+async def view_cross_session_memory(context: ToolContext) -> str:
+    """Retrieve a summarized narrative timeline of recent events, conversations, and milestones that occurred in other active threads/channels for the current active persona role.
+
+    Use this tool when the user refers to external discussions or events that you do not have in your current local conversation history.
+
+    Args:
+        context: Injected tool execution context (automatically resolved).
+
+    Returns:
+        A formatted Markdown string containing the cross-session event timeline and any recent un-consolidated conversations.
+    """
+    if not context or not context.gateway:
+        return "Error: ToolContext or Gateway is missing."
+
+    db = context.gateway.db
+
+    # 1. Resolve active role using helper
+    active_role = _resolve_memory_role(category="user_preferences", role_param=None, context=context)
+
+    try:
+        # 2. Query consolidated timeline from DB
+        stored_ctx = await asyncio.to_thread(db.get_cross_session_context, active_role)
+        timeline_content = stored_ctx.content if stored_ctx else ""
+        last_updated = stored_ctx.updated_at if stored_ctx else 0.0
+
+        # 3. Query recent messages written after checkpoint in other sessions
+        new_messages = await asyncio.to_thread(
+            db.get_role_messages_since,
+            role=active_role,
+            since_timestamp=last_updated,
+            exclude_session_id=context.session_id,
+        )
+
+        lines = [f"=== Cross-Session Event Timeline (Role: {active_role}) ==="]
+        if timeline_content.strip():
+            lines.append(timeline_content.strip())
+        else:
+            lines.append("No historical timeline events recorded yet.")
+
+        if new_messages:
+            lines.append("\n=== Recent Activity in other threads (Un-consolidated) ===")
+            for m in new_messages:
+                time_str = time.strftime("%m-%d %H:%M", time.localtime(m.timestamp))
+                lines.append(f"- [{time_str}] {m.sender}: {m.content}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"Failed to view cross-session memory: {e}", exc_info=True)
+        return f"Error retrieving cross-session memory: {e}"
+

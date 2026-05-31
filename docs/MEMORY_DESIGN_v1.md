@@ -123,4 +123,3 @@ To transition from the legacy `memory/*.md` system:
    - Extract sections from `memory/Progress.md` and seed them as `progress` records.
    - Extract rules from `memory/Agent.md` and seed them as `rule` records.
 3. Remove legacy Markdown files to maintain a single source of truth.
-

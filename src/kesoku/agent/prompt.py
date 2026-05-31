@@ -69,6 +69,8 @@ Available Memory Tools:
 - `view_memory`: Retrieve content of a key, or dynamically compile category entries in-memory into Markdown.
 - `update_memory`: Atomic UPSERT to write or replace a key's memory.
 - `delete_memory`: Remove a specific key's memory.
+- `view_cross_session_memory`: Retrieve a summarized narrative timeline of recent events, conversations, and milestones that occurred in other active threads/channels for the current persona role. Use this when you need to synchronize context regarding external tasks.
+
 
 IMPORTANT: When the user asks you to "remember" something, you MUST use the `update_memory` tool to write it
 to the most relevant category defined.

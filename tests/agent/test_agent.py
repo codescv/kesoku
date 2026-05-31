@@ -896,7 +896,8 @@ async def test_llm_turn_logging(temp_db: str, tmp_path: Any) -> None:
         assert len(history) >= 2
         assert history[0]["role"] == "system"
         assert history[1]["role"] == "user"
-        assert history[1]["content"].startswith("Do dummy task")
+        assert "Do dummy task" in history[1]["content"]
+
 
         # Verify tools serialization
         tools = log_data["tools"]

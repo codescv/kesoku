@@ -355,7 +355,6 @@ class TurnExecutor:
         Returns:
             The modified latest User Message, or None if no user message was found to inject context into.
         """
-        # Inject user preferences into the latest user message
         latest_user_msg = None
         for msg in reversed(history):
             if msg.role == MessageRole.USER:
@@ -370,13 +369,69 @@ class TurnExecutor:
             current_msg.channel_id,
             self.session_id,
         )
-        user_prefs = await asyncio.to_thread(
-            self.gateway.db.get_agent_memories,
-            category="user_preferences",
-            role=active_role,
-        )
 
-        # Inject Cross-Session Memory context
+        # 1. Calculate if this is a Bootstrap Turn (first turn of session or idle > 30 mins)
+        turn_count = await self._get_session_turns_count()
+        is_bootstrap = False
+        if turn_count <= 1:
+            is_bootstrap = True
+        else:
+            non_current_msgs = [m for m in history if m.id != current_msg.id]
+            if non_current_msgs:
+                last_msg_time = non_current_msgs[-1].timestamp
+                # 1800 seconds = 30 minutes inactivity
+                if current_msg.timestamp - last_msg_time > 1800:
+                    is_bootstrap = True
+            else:
+                is_bootstrap = True
+
+        # 2. Query user preferences only if this is a bootstrap turn
+        pref_content = ""
+        if is_bootstrap:
+            user_prefs = await asyncio.to_thread(
+                self.gateway.db.get_agent_memories,
+                category="user_preferences",
+                role=active_role,
+            )
+            if user_prefs:
+                pref_content = "\n".join(
+                    f"- {pref['title']}: {pref['content']}" for pref in user_prefs
+                )
+                if len(pref_content) > MAX_TOTAL_USER_PREFERENCES_LENGTH:
+                    pref_content = pref_content[: MAX_TOTAL_USER_PREFERENCES_LENGTH - 3] + "..."
+
+        # 3. Prepend Sync Guidelines and Preferences to the latest user message
+        if is_bootstrap and "[Background Context: Sync Guidelines]" not in latest_user_msg.content:
+            guidelines_prefix = (
+                "[Background Context: Sync Guidelines]\n"
+                "======\n"
+                "# Passive Synchronization Guidelines:\n"
+                f"- 💡 You are playing the active persona role: {active_role}.\n"
+                "- 💡 You have access to the `view_cross_session_memory` tool, which retrieves a summarized chronological timeline of recent events, chats, and developments that occurred in other channels/threads.\n"
+                "- 💡 If the user's current request below refers to external threads, other chats, or events you cannot locate in this session's history, you MUST call `view_cross_session_memory` to synchronize your context before providing a response.\n"
+                "======\n\n"
+            )
+
+            pref_prefix = ""
+            if pref_content:
+                pref_prefix = (
+                    "[User Preferences]\n"
+                    f"{pref_content}\n\n"
+                )
+
+            full_prefix = guidelines_prefix + pref_prefix + "[Current Request]\n"
+
+            msg_idx = history.index(latest_user_msg)
+            copied_msg = latest_user_msg.model_copy()
+            copied_msg.content = full_prefix + copied_msg.content
+            history[msg_idx] = copied_msg
+            latest_user_msg = copied_msg
+            logger.info(
+                f"Prepended bootstrap context blocks (guidelines & preferences) into user message {copied_msg.id}"
+            )
+
+        # 4. Background Consolidation Trigger (Unchanged)
+        # Retrieve Cross-Session Memory context parameters solely to check and trigger consolidation asynchronously
         stored_ctx = await asyncio.to_thread(
             self.gateway.db.get_cross_session_context,
             active_role,
@@ -409,67 +464,6 @@ class TurnExecutor:
 
         should_consolidate = has_timeout or has_token_overrun
 
-        injected_content = stored_content
-        if new_messages:
-            if should_consolidate:
-                # Fallback: inject only the most recent 10 messages
-                fallback_msgs = new_messages[-10:]
-                injected_content += (
-                    "\n\nRecent discussions in other threads (summarization in progress):\n"
-                    + "\n".join(
-                        f"- [{time.strftime('%m-%d %H:%M', time.localtime(m.timestamp))}] "
-                        f"{m.sender}: {m.content}"
-                        for m in fallback_msgs
-                    )
-                )
-            else:
-                # Inject all since they are within safe token limits
-                injected_content += "\n\nRecent discussions in other threads:\n" + "\n".join(
-                    f"- [{time.strftime('%m-%d %H:%M', time.localtime(m.timestamp))}] "
-                    f"{m.sender}: {m.content}"
-                    for m in new_messages
-                )
-
-        pref_content = ""
-        if user_prefs:
-            pref_content = "\n".join(
-                f"- {pref['title']}: {pref['content']}" for pref in user_prefs
-            )
-            if len(pref_content) > MAX_TOTAL_USER_PREFERENCES_LENGTH:
-                pref_content = pref_content[: MAX_TOTAL_USER_PREFERENCES_LENGTH - 3] + "..."
-
-        memory_content = ""
-        if injected_content:
-            memory_content = truncate_context_middle(injected_content)
-
-        injected_blocks = []
-        if pref_content:
-            injected_blocks.append(f"# User Preferences:\n{pref_content}")
-        if memory_content:
-            injected_blocks.append(f"# Cross-Session Memory:\n{memory_content}")
-
-        if injected_blocks and "[Background Context]" not in latest_user_msg.content:
-            joined_blocks = "\n\n".join(injected_blocks)
-            context_prefix = (
-                "[Background Context: User Preferences & Cross-Session Memory]\n"
-                "======\n"
-                f"{joined_blocks}\n"
-                "======\n"
-                "IMPORTANT: The above is provided purely as background context. "
-                "DO NOT reference or discuss these past topics unless the user's current "
-                "request below explicitly asks about or is closely related to them. Focus on responding "
-                "directly and helpfully to the user's current request below.\n\n"
-                "[Current Request]\n"
-            )
-            msg_idx = history.index(latest_user_msg)
-            copied_msg = latest_user_msg.model_copy()
-            copied_msg.content = context_prefix + copied_msg.content
-            history[msg_idx] = copied_msg
-            latest_user_msg = copied_msg
-            logger.info(
-                f"Prepended {len(injected_blocks)} context blocks into user message {copied_msg.id}"
-            )
-
         if should_consolidate and lock_status == "idle":
             locked = await asyncio.to_thread(
                 self.gateway.db.claim_cross_session_context_for_update,
@@ -482,6 +476,7 @@ class TurnExecutor:
                 )
 
         return latest_user_msg
+
 
     async def _monitor_context_window(
         self,
