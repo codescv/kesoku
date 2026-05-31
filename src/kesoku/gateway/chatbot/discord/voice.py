@@ -15,7 +15,6 @@ import tempfile
 from typing import Any
 
 import discord
-
 from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)

@@ -5,7 +5,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from kesoku.gateway.chatbot.wechat_client import (
+from .client import (
     LONG_POLL_TIMEOUT_MS,
     ILinkClient,
 )

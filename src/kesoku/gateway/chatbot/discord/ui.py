@@ -9,9 +9,9 @@ import html
 import io
 from typing import Any
 
-import discord
 import tzlocal
 
+import discord
 from kesoku.agent.history import build_clean_history
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message

@@ -5,11 +5,10 @@ from typing import TYPE_CHECKING
 
 import discord
 from discord import app_commands
-
 from kesoku.logger import setup_logger
 
 if TYPE_CHECKING:
-    from kesoku.gateway.chatbot.discord import DiscordChatbot
+    from .adapter import DiscordChatbot
 
 logger = setup_logger(__name__)
 

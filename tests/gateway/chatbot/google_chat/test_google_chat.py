@@ -63,7 +63,7 @@ async def test_init_disabled_raises_value_error() -> None:
     cfg.google_chat = GoogleChatConfig(enabled=False)
     gw = MagicMock(spec=Gateway)
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=cfg):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=cfg):
         with pytest.raises(ValueError, match="Google Chat chatbot is disabled"):
             GoogleChatChatbot(chatbot_id="gchat", gateway=gw)
 
@@ -75,7 +75,7 @@ async def test_init_missing_params_raises_value_error() -> None:
     cfg.google_chat = GoogleChatConfig(enabled=True, project_id="", topic_id="", subscription_id="")
     gw = MagicMock(spec=Gateway)
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=cfg):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=cfg):
         with pytest.raises(ValueError, match="project_id, topic_id, or subscription_id are not configured"):
             GoogleChatChatbot(chatbot_id="gchat", gateway=gw)
 
@@ -83,7 +83,7 @@ async def test_init_missing_params_raises_value_error() -> None:
 @pytest.mark.asyncio
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
-@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 async def test_load_credentials_adc(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
@@ -94,7 +94,7 @@ async def test_load_credentials_adc(
     """Test loading credentials using Application Default Credentials (ADC)."""
     mock_auth_default.return_value = (MagicMock(), "test-project")
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
         assert bot._project_id == "test-project"
         mock_auth_default.assert_called_once()
@@ -103,7 +103,7 @@ async def test_load_credentials_adc(
 @pytest.mark.asyncio
 @patch("google.auth.load_credentials_from_file")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
-@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 async def test_load_credentials_file(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
@@ -115,7 +115,7 @@ async def test_load_credentials_file(
     mock_config.google_chat.credentials_json = "/path/to/key.json"
     mock_load_file.return_value = (MagicMock(), "file-project")
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
         assert bot._project_id == "file-project"
         mock_load_file.assert_called_once_with(
@@ -131,7 +131,7 @@ async def test_load_credentials_file(
 @patch("google.auth.default")
 @patch("google.auth.impersonated_credentials.Credentials")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
-@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 async def test_load_credentials_impersonation(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
@@ -145,7 +145,7 @@ async def test_load_credentials_impersonation(
     mock_auth_default.return_value = (MagicMock(), None)
     mock_impersonate.return_value = MagicMock()
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
         assert bot._project_id == "test-project"  # Falls back to config project_id
         mock_impersonate.assert_called_once()
@@ -154,7 +154,7 @@ async def test_load_credentials_impersonation(
 @pytest.mark.asyncio
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
-@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 async def test_incoming_message_parsing(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
@@ -179,7 +179,7 @@ async def test_incoming_message_parsing(
         },
     }
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
 
         # Inject mock Pub/Sub message
@@ -206,7 +206,7 @@ async def test_incoming_message_parsing(
 @pytest.mark.asyncio
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
-@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 async def test_incoming_message_blocked_by_allowlist(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
@@ -230,7 +230,7 @@ async def test_incoming_message_blocked_by_allowlist(
         },
     }
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
 
         pubsub_msg = MagicMock(spec=pubsub_v1.subscriber.message.Message)
@@ -246,7 +246,7 @@ async def test_incoming_message_blocked_by_allowlist(
 @pytest.mark.asyncio
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
-@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 async def test_handle_outgoing_message_delivery_foldable_ui(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
@@ -277,7 +277,7 @@ async def test_handle_outgoing_message_delivery_foldable_ui(
     mock_messages.patch = mock_patch
     mock_patch.return_value.execute = MagicMock(return_value={"name": "spaces/AAA/messages/foldable_card_123"})
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
 
         # 1. Post an intermediate thought
@@ -363,7 +363,7 @@ async def test_handle_outgoing_message_delivery_foldable_ui(
 @pytest.mark.asyncio
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
-@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 async def test_handle_outgoing_message_delivery_question(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
@@ -382,7 +382,7 @@ async def test_handle_outgoing_message_delivery_question(
     mock_messages.create = mock_create
     mock_create.return_value.execute = MagicMock(return_value={"name": "spaces/AAA/messages/111"})
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
 
         # Message content containing the question-choice syntax block
@@ -422,7 +422,7 @@ async def test_handle_outgoing_message_delivery_question(
 @pytest.mark.asyncio
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
-@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 async def test_load_user_credentials_adc(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
@@ -433,7 +433,7 @@ async def test_load_user_credentials_adc(
     """Test loading user credentials for reactions using ADC with exact user scopes."""
     mock_auth_default.return_value = (MagicMock(), "user-project")
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
         creds, project = bot._load_user_credentials()
         assert project == "user-project"
@@ -448,7 +448,7 @@ async def test_load_user_credentials_adc(
 @pytest.mark.asyncio
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
-@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 async def test_user_chat_service_initialization(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
@@ -461,7 +461,7 @@ async def test_user_chat_service_initialization(
 
     # Case 1: reaction_emoji is None -> user_chat_service should be None
     mock_config.google_chat.reaction_emoji = None
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
         assert bot._user_chat_service is None
 
@@ -469,7 +469,7 @@ async def test_user_chat_service_initialization(
 
     # Case 2: reaction_emoji is set -> user_chat_service should be initialized
     mock_config.google_chat.reaction_emoji = "👀"
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
         assert bot._user_chat_service is not None
         # The build function should have been called twice (once for _chat_service, once for _user_chat_service)
@@ -479,7 +479,7 @@ async def test_user_chat_service_initialization(
 @pytest.mark.asyncio
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
-@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 async def test_incoming_message_triggers_reaction(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
@@ -516,7 +516,7 @@ async def test_incoming_message_triggers_reaction(
         },
     }
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
 
         pubsub_msg = MagicMock(spec=pubsub_v1.subscriber.message.Message)
@@ -538,7 +538,7 @@ async def test_incoming_message_triggers_reaction(
 @pytest.mark.asyncio
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
-@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 async def test_incoming_message_no_reaction_if_disabled(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
@@ -573,7 +573,7 @@ async def test_incoming_message_no_reaction_if_disabled(
         },
     }
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
 
         pubsub_msg = MagicMock(spec=pubsub_v1.subscriber.message.Message)
@@ -589,7 +589,7 @@ async def test_incoming_message_no_reaction_if_disabled(
 @pytest.mark.asyncio
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
-@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 async def test_add_reaction_toggle_deletion(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
@@ -616,7 +616,7 @@ async def test_add_reaction_toggle_deletion(
     mock_reactions.delete = mock_delete
     mock_delete.return_value.execute = MagicMock()
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
 
         message_name = "spaces/AAA/messages/msg123"
@@ -636,7 +636,7 @@ async def test_add_reaction_toggle_deletion(
 @pytest.mark.asyncio
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
-@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 async def test_add_reaction_409_conflict_triggers_list_and_delete(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
@@ -674,7 +674,7 @@ async def test_add_reaction_409_conflict_triggers_list_and_delete(
     mock_reactions.delete = mock_delete
     mock_delete.return_value.execute = MagicMock()
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
 
         message_name = "spaces/AAA/messages/msg123"
@@ -689,7 +689,7 @@ async def test_add_reaction_409_conflict_triggers_list_and_delete(
 
 def test_parse_emoji_sequence() -> None:
     """Test parse_emoji_sequence correctly segments different emoji sequences."""
-    from kesoku.gateway.chatbot.google_chat import parse_emoji_sequence
+    from kesoku.gateway.chatbot.google_chat.adapter import parse_emoji_sequence
 
     # Case 1: Space separated
     assert parse_emoji_sequence("👀 🛠️ 🚀") == ["👀", "🛠️", "🚀"]
@@ -706,7 +706,7 @@ def test_parse_emoji_sequence() -> None:
 @pytest.mark.asyncio
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
-@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 @patch("random.choice")
 async def test_incoming_message_triggers_random_reaction(
     mock_random_choice: MagicMock,
@@ -748,7 +748,7 @@ async def test_incoming_message_triggers_random_reaction(
         },
     }
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
 
         pubsub_msg = MagicMock(spec=pubsub_v1.subscriber.message.Message)
@@ -811,7 +811,7 @@ async def test_incoming_message_triggers_random_reaction(
 @pytest.mark.asyncio
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
-@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 async def test_google_chat_trigger_cronjob(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
@@ -824,7 +824,7 @@ async def test_google_chat_trigger_cronjob(
     mock_chat_client = MagicMock()
     mock_build.side_effect = [MagicMock(), mock_chat_client]
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
 
         # Run trigger_cronjob
@@ -849,7 +849,7 @@ async def test_google_chat_trigger_cronjob(
 @pytest.mark.asyncio
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
-@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 async def test_google_chat_slash_command_intercept(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
@@ -883,7 +883,7 @@ async def test_google_chat_slash_command_intercept(
         },
     }
 
-    with patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
 
         # Spy/mock bot.commands.execute
@@ -910,7 +910,7 @@ async def test_google_chat_slash_command_intercept(
 @pytest.mark.asyncio
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
-@patch("kesoku.gateway.chatbot.google_chat.build")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 async def test_google_chat_slash_command_execution_reply(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
@@ -950,7 +950,7 @@ async def test_google_chat_slash_command_execution_reply(
     mock_config.workspace.roles_dir = "/mock/roles"
 
     with (
-        patch("kesoku.gateway.chatbot.google_chat.get_config", return_value=mock_config),
+        patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config),
         patch("os.path.exists", return_value=True),
         patch("os.path.isdir", return_value=True),
         patch("os.listdir", return_value=["default", "xiaozhang"]),

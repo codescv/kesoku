@@ -16,8 +16,8 @@ from rich.console import Console
 
 from kesoku.agent.agent import Agent
 from kesoku.agent.tools import get_allowed_categories, sanitize_key, validate_key
-from kesoku.cli_chat import run_cli_chat_async
-from kesoku.cli_service import service_app
+from kesoku.cli.chat import run_cli_chat_async
+from kesoku.cli.service import service_app
 from kesoku.config import get_config, init_config, init_roles, init_skills, load_config
 from kesoku.cron import CronManager
 from kesoku.db import DatabaseManager

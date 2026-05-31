@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 import pytest
 
-from kesoku.gateway.chatbot.discord_voice_message import (
+from kesoku.gateway.chatbot.discord.voice import (
     VoiceFile,
     _generate_pseudo_waveform,
     _get_audio_duration,
@@ -77,7 +77,7 @@ async def test_send_voice_message_success() -> None:
     with patch("os.path.exists", return_value=True):
         with patch("os.unlink") as mock_unlink:
             with patch("subprocess.run") as mock_run:
-                with patch("kesoku.gateway.chatbot.discord_voice_message.VoiceFile") as mock_file_class:
+                with patch("kesoku.gateway.chatbot.discord.voice.VoiceFile") as mock_file_class:
                     # Configure mock file instance to serialize properly
                     mock_file_instance = MagicMock(spec=discord.File)
                     mock_file_instance.to_dict.return_value = {"id": 0, "filename": "voice.ogg"}

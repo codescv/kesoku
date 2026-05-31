@@ -7,7 +7,8 @@ import discord
 import pytest
 from discord import app_commands
 
-from kesoku.gateway.chatbot.discord_command import setup_discord_commands
+from kesoku.gateway.chatbot.discord.command import setup_discord_commands
+from kesoku.utils.service import _get_kesoku_executable
 
 
 @pytest.fixture
@@ -24,7 +25,6 @@ def mock_chatbot() -> MagicMock:
 
     # Bind real methods
     chatbot.restart_service = Chatbot.restart_service.__get__(chatbot, Chatbot)
-    chatbot._get_kesoku_executable = Chatbot._get_kesoku_executable.__get__(chatbot, Chatbot)
 
     # Bind real CommandRegistry containing default commands
     registry = CommandRegistry()
@@ -79,7 +79,7 @@ async def test_restart_command_success(mock_chatbot: MagicMock) -> None:
     interaction.followup = AsyncMock()
     interaction.followup.send = AsyncMock()
 
-    kesoku_bin = mock_chatbot._get_kesoku_executable()
+    kesoku_bin = _get_kesoku_executable()
 
     # Case 1: Default behavior without specific service env variables (defaults to --user, no name)
     with (

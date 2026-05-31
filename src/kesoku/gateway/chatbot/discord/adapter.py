@@ -10,21 +10,21 @@ from collections import defaultdict
 from typing import Any
 
 import discord
-
 from kesoku.agent.prompt import build_sys_prompt
 from kesoku.config import DiscordChannelOverride, get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.attachment_manager import AttachmentManager
 from kesoku.gateway.chatbot.base import Chatbot, DeliveryAbortedError, get_local_timezone_name
-from kesoku.gateway.chatbot.discord_command import setup_discord_commands
-from kesoku.gateway.chatbot.discord_ui import MessageHeaderView, QuestionView
-from kesoku.gateway.chatbot.discord_voice_message import send_voice_message
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 from kesoku.utils.async_fs import (
     async_exists,
 )
+
+from .command import setup_discord_commands
+from .ui import MessageHeaderView, QuestionView
+from .voice import send_voice_message
 
 logger = setup_logger(__name__)
 

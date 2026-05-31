@@ -54,7 +54,7 @@ async def test_init_missing_token() -> None:
     cfg = KesokuConfig()
     cfg.discord = DiscordConfig(enabled=True, bot_token=None, chatbot_id="discord")
     with (
-        patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg),
+        patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=cfg),
         patch.dict("os.environ", {"DISCORD_TOKEN": ""}),
     ):
         gw = MagicMock(spec=Gateway)
@@ -68,7 +68,7 @@ async def test_init_with_env_token() -> None:
     cfg = KesokuConfig()
     cfg.discord = DiscordConfig(enabled=True, bot_token=None, chatbot_id="discord")
     with (
-        patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg),
+        patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=cfg),
         patch.dict("os.environ", {"DISCORD_TOKEN": "env_token_value"}),
     ):
         gw = MagicMock(spec=Gateway)
@@ -79,7 +79,7 @@ async def test_init_with_env_token() -> None:
 @pytest.mark.asyncio
 async def test_on_message_ignore_self(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test bot ignores its own messages."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -93,7 +93,7 @@ async def test_on_message_ignore_self(mock_config: KesokuConfig, mock_gateway: M
 @pytest.mark.asyncio
 async def test_on_message_allowlist(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test allowlist filtering behavior."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -149,7 +149,7 @@ async def test_on_message_allowlist(mock_config: KesokuConfig, mock_gateway: Mag
 @pytest.mark.asyncio
 async def test_on_message_concurrent_thread_creation(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test recovering when create_thread raises HTTPException due to peer bot creating thread first."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -189,7 +189,7 @@ async def test_on_message_concurrent_thread_creation(mock_config: KesokuConfig, 
 @pytest.mark.asyncio
 async def test_handle_message_chunking(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test outgoing message > 2000 chars is chunked by newlines."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -222,7 +222,7 @@ async def test_handle_message_chunking(mock_config: KesokuConfig, mock_gateway: 
 @pytest.mark.asyncio
 async def test_handle_message_with_files_split_and_upload(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test that messages containing valid file blocks are split and uploaded correctly."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -264,7 +264,7 @@ async def test_handle_message_with_files_split_and_upload(mock_config: KesokuCon
 @pytest.mark.asyncio
 async def test_handle_message_with_non_existent_file(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test that missing files trigger a user-facing warning message."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -296,7 +296,7 @@ async def test_handle_message_with_non_existent_file(mock_config: KesokuConfig, 
 @pytest.mark.asyncio
 async def test_handle_message_fetch_channel_deleted(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test that fetching channel NotFound (404) marks message DELIVERED to avoid retries."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -331,7 +331,7 @@ async def test_handle_message_fetch_channel_deleted(mock_config: KesokuConfig, m
 @pytest.mark.asyncio
 async def test_handle_message_fetch_channel_forbidden(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test that fetching channel Forbidden (403) marks message DELIVERED to avoid retries."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -366,7 +366,7 @@ async def test_handle_message_fetch_channel_forbidden(mock_config: KesokuConfig,
 @pytest.mark.asyncio
 async def test_handle_message_with_empty_whitespace_guards(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test that empty or whitespace-only text segments are guarded and not sent."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -399,7 +399,7 @@ async def test_handle_message_with_empty_whitespace_guards(mock_config: KesokuCo
 @pytest.mark.asyncio
 async def test_on_message_timestamp_formatting(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test that incoming Discord messages have timestamps formatted in readable local time."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -431,7 +431,7 @@ async def test_on_message_timestamp_formatting(mock_config: KesokuConfig, mock_g
             mock_gateway.post.assert_called_once()
             posted_msg = mock_gateway.post.call_args[0][0]
 
-            from kesoku.gateway.chatbot.discord import _get_local_timezone_name
+            from kesoku.gateway.chatbot.discord.adapter import _get_local_timezone_name
 
             tz_name = _get_local_timezone_name()
             local_time_str = dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
@@ -441,7 +441,7 @@ async def test_on_message_timestamp_formatting(mock_config: KesokuConfig, mock_g
 
 def test_build_discord_custom_prompt_dm() -> None:
     """Test prompt construction for Direct Messages."""
-    from kesoku.gateway.chatbot.discord import _build_discord_custom_prompt
+    from kesoku.gateway.chatbot.discord.adapter import _build_discord_custom_prompt
 
     mock_dm = MagicMock(spec=discord.DMChannel)
     mock_dm.guild = None
@@ -461,7 +461,7 @@ def test_build_discord_custom_prompt_dm() -> None:
 
 def test_build_discord_custom_prompt_thread_with_topic() -> None:
     """Test prompt construction for a thread with a parent channel topic."""
-    from kesoku.gateway.chatbot.discord import _build_discord_custom_prompt
+    from kesoku.gateway.chatbot.discord.adapter import _build_discord_custom_prompt
 
     mock_parent = MagicMock(spec=discord.TextChannel)
     mock_parent.name = "general"
@@ -489,7 +489,7 @@ def test_build_discord_custom_prompt_thread_with_topic() -> None:
 @pytest.mark.asyncio
 async def test_typing_status_lifecycle(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test typing status is started on message receive and stopped on final response delivery."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -566,7 +566,7 @@ async def test_typing_status_lifecycle(mock_config: KesokuConfig, mock_gateway: 
 @pytest.mark.asyncio
 async def test_typing_status_cleanup_on_stop(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test that all active typing tasks are cancelled when the bot is stopped."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -590,7 +590,7 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
     """Test refined tool display formatting with arguments in DiscordChatbot."""
     from kesoku.constants import MessageRole, MessageType
 
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -680,7 +680,7 @@ async def test_handle_message_tool_result_in_place_edit(mock_config: KesokuConfi
     """Test that a tool result edits the original tool call message in-place on Discord."""
     from kesoku.constants import MessageRole, MessageType
 
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -723,7 +723,7 @@ async def test_handle_message_special_message_truncation(mock_config: KesokuConf
     """Test that special messages exceeding 2000 characters are truncated with ' (omitted)'."""
     from kesoku.constants import MessageRole, MessageType
 
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -790,7 +790,7 @@ async def test_handle_message_individual_tool_call_edit_truncation(
     """Test that individual tool call message edits exceeding 2000 characters are truncated."""
     from kesoku.constants import MessageRole, MessageType
 
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -825,7 +825,7 @@ async def test_handle_message_individual_tool_call_edit_truncation(
 @pytest.mark.asyncio
 async def test_handle_message_with_voice_success(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test that a voice block successfully sends a native voice message via Discord API."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -845,7 +845,7 @@ async def test_handle_message_with_voice_success(mock_config: KesokuConfig, mock
             )
 
             with patch("os.path.exists", return_value=True) as mock_exists:
-                with patch("kesoku.gateway.chatbot.discord.send_voice_message") as mock_send_voice:
+                with patch("kesoku.gateway.chatbot.discord.adapter.send_voice_message") as mock_send_voice:
                     await bot.handle_message(msg)
 
                     mock_exists.assert_called_once_with("/tmp/voice.ogg")
@@ -857,7 +857,7 @@ async def test_handle_message_with_voice_success(mock_config: KesokuConfig, mock
 @pytest.mark.asyncio
 async def test_handle_message_with_voice_fallback(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test that a voice block falls back to standard file attachment if native sending fails."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -878,7 +878,10 @@ async def test_handle_message_with_voice_fallback(mock_config: KesokuConfig, moc
 
             mock_file = MagicMock(spec=discord.File)
             with patch("os.path.exists", return_value=True) as mock_exists:
-                with patch("kesoku.gateway.chatbot.discord.send_voice_message", side_effect=Exception("API Error")):
+                with patch(
+                    "kesoku.gateway.chatbot.discord.adapter.send_voice_message",
+                    side_effect=Exception("API Error"),
+                ):
                     with patch("discord.File", return_value=mock_file) as mock_file_class:
                         await bot.handle_message(msg)
 
@@ -900,7 +903,7 @@ async def test_on_message_no_auto_thread_by_channel_id(mock_gateway: MagicMock) 
         chatbot_id="discord_test",
         channels=[DiscordChannelOverride(channels=["999888"], auto_thread=False)],
     )
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=cfg):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -945,7 +948,7 @@ async def test_on_message_no_auto_thread_by_channel_name(mock_gateway: MagicMock
         chatbot_id="discord_test",
         channels=[DiscordChannelOverride(channels=["no-thread-channel"], auto_thread=False)],
     )
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=cfg):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -989,7 +992,7 @@ async def test_on_message_in_existing_thread_inside_no_thread_channel(mock_gatew
         chatbot_id="discord_test",
         channels=[DiscordChannelOverride(channels=["no-thread-channel"], auto_thread=False)],
     )
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=cfg):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -1032,7 +1035,7 @@ async def test_handle_message_intermediate_special_messages_tracking(
     """Test that intermediate special messages (thoughts, tool calls, system) are tracked."""
     from kesoku.constants import MessageRole, MessageType
 
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -1099,7 +1102,7 @@ async def test_handle_message_intermediate_special_messages_deletion(
     mock_config: KesokuConfig, mock_gateway: MagicMock
 ) -> None:
     """Test that intermediate special messages are deleted when final assistant response is reached."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -1142,7 +1145,7 @@ async def test_trigger_cronjob_auto_thread(mock_gateway: MagicMock) -> None:
         chatbot_id="discord_test",
         channels=[DiscordChannelOverride(channels=["no-thread-channel"], auto_thread=False)],
     )
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=cfg):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -1197,7 +1200,7 @@ async def test_handle_message_removes_stop_button_on_final_response(
     mock_config: KesokuConfig, mock_gateway: MagicMock
 ) -> None:
     """Test that the stop button is removed from the header view when final response is delivered."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -1236,7 +1239,7 @@ async def test_handle_message_removes_stop_button_on_final_response(
 @pytest.mark.asyncio
 async def test_handle_message_with_question(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test that a question block in the message triggers sending a QuestionView to the channel."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -1255,7 +1258,7 @@ async def test_handle_message_with_question(mock_config: KesokuConfig, mock_gate
                 content=content,
             )
 
-            with patch("kesoku.gateway.chatbot.discord.QuestionView") as mock_question_view_class:
+            with patch("kesoku.gateway.chatbot.discord.adapter.QuestionView") as mock_question_view_class:
                 mock_view = MagicMock()
                 mock_question_view_class.return_value = mock_view
 
@@ -1290,7 +1293,7 @@ async def test_channel_override_auto_thread_matching(mock_gateway: MagicMock) ->
         chatbot_id="discord_test",
         channels=[DiscordChannelOverride(channels=["parent-channel-id"], auto_thread=False)],
     )
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=cfg):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=cfg):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -1303,7 +1306,7 @@ async def test_channel_override_auto_thread_matching(mock_gateway: MagicMock) ->
 @pytest.mark.asyncio
 async def test_on_message_with_attachments(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test that incoming Discord attachments are saved and tracked in metadata."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
@@ -1361,7 +1364,7 @@ async def test_on_message_with_attachments(mock_config: KesokuConfig, mock_gatew
 @pytest.mark.asyncio
 async def test_on_message_resolves_and_passes_role(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
     """Test that on_message resolves role (direct or via parent channel) and passes it during create_session."""
-    with patch("kesoku.gateway.chatbot.discord.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)

@@ -197,7 +197,7 @@ def test_cli_service_dry_run() -> None:
     """Verify service command dry-run generated systemd unit content."""
     with (
         patch("sys.platform", "linux"),
-        patch("kesoku.cli_service.load_config", return_value=KesokuConfig()),
+        patch("kesoku.cli.service.load_config", return_value=KesokuConfig()),
         patch(
             "os.path.abspath",
             side_effect=lambda p: (
@@ -248,7 +248,7 @@ def test_cli_service_inherited_envs() -> None:
     }
     with (
         patch("sys.platform", "linux"),
-        patch("kesoku.cli_service.load_config", return_value=KesokuConfig()),
+        patch("kesoku.cli.service.load_config", return_value=KesokuConfig()),
         patch(
             "os.path.abspath",
             side_effect=lambda p: (
@@ -296,7 +296,7 @@ def test_cli_service_install_discord_validation() -> None:
 
     with (
         patch("sys.platform", "linux"),
-        patch("kesoku.cli_service.load_config", return_value=cfg_no_token),
+        patch("kesoku.cli.service.load_config", return_value=cfg_no_token),
         patch(
             "os.path.abspath",
             side_effect=lambda p: (
@@ -317,7 +317,7 @@ def test_cli_service_install_discord_validation() -> None:
 
     with (
         patch("sys.platform", "linux"),
-        patch("kesoku.cli_service.load_config", return_value=cfg_config_token),
+        patch("kesoku.cli.service.load_config", return_value=cfg_config_token),
         patch(
             "os.path.abspath",
             side_effect=lambda p: (
@@ -333,7 +333,7 @@ def test_cli_service_install_discord_validation() -> None:
     # Case 3: Discord enabled, token is set in shell environment -> Success
     with (
         patch("sys.platform", "linux"),
-        patch("kesoku.cli_service.load_config", return_value=cfg_no_token),
+        patch("kesoku.cli.service.load_config", return_value=cfg_no_token),
         patch(
             "os.path.abspath",
             side_effect=lambda p: (
@@ -350,7 +350,7 @@ def test_cli_service_install_discord_validation() -> None:
     # Case 4: Discord enabled, token is passed as command line option -> Success
     with (
         patch("sys.platform", "linux"),
-        patch("kesoku.cli_service.load_config", return_value=cfg_no_token),
+        patch("kesoku.cli.service.load_config", return_value=cfg_no_token),
         patch(
             "os.path.abspath",
             side_effect=lambda p: (
@@ -371,7 +371,7 @@ def test_cli_service_install_discord_validation() -> None:
 
     with (
         patch("sys.platform", "linux"),
-        patch("kesoku.cli_service.load_config", return_value=cfg_disabled),
+        patch("kesoku.cli.service.load_config", return_value=cfg_disabled),
         patch(
             "os.path.abspath",
             side_effect=lambda p: (
@@ -397,7 +397,7 @@ def test_cli_service_install_user() -> None:
 
     with (
         patch("sys.platform", "linux"),
-        patch("kesoku.cli_service.load_config", return_value=KesokuConfig()),
+        patch("kesoku.cli.service.load_config", return_value=KesokuConfig()),
         patch(
             "os.path.abspath",
             side_effect=lambda p: (
@@ -441,7 +441,7 @@ def test_cli_service_permission_error() -> None:
 
     with (
         patch("sys.platform", "linux"),
-        patch("kesoku.cli_service.load_config", return_value=KesokuConfig()),
+        patch("kesoku.cli.service.load_config", return_value=KesokuConfig()),
         patch(
             "os.path.abspath",
             side_effect=lambda p: (
@@ -461,7 +461,7 @@ def test_cli_service_uninstall() -> None:
     """Verify successful service uninstallation."""
     with (
         patch("sys.platform", "linux"),
-        patch("kesoku.cli.load_config"),
+        patch("kesoku.cli.entrypoint.load_config"),
         patch("os.path.exists", return_value=True),
         patch("os.remove") as mock_remove,
         patch("subprocess.run") as mock_run,
@@ -527,7 +527,7 @@ def test_cli_service_named_instances() -> None:
     # 1. Test named install dry-run
     with (
         patch("sys.platform", "linux"),
-        patch("kesoku.cli_service.load_config", return_value=KesokuConfig()),
+        patch("kesoku.cli.service.load_config", return_value=KesokuConfig()),
         patch(
             "os.path.abspath",
             side_effect=lambda p: (
@@ -594,7 +594,7 @@ def test_cli_service_named_instances() -> None:
     # 3. Test named uninstall
     with (
         patch("sys.platform", "linux"),
-        patch("kesoku.cli.load_config"),
+        patch("kesoku.cli.entrypoint.load_config"),
         patch("os.path.exists", return_value=True),
         patch("os.remove") as mock_remove,
         patch("subprocess.run") as mock_run,

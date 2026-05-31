@@ -29,7 +29,24 @@ from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.attachment_manager import AttachmentManager
 from kesoku.gateway.chatbot.base import Chatbot
-from kesoku.gateway.chatbot.wechat_client import (
+from kesoku.gateway.gateway import Gateway
+from kesoku.logger import setup_logger
+from kesoku.utils.async_fs import (
+    async_exists,
+    async_read_bytes,
+    async_read_text_file,
+)
+from kesoku.utils.crypto import (
+    aes_padded_size as _aes_padded_size,
+)
+from kesoku.utils.image import (
+    compress_image as _compress_image,
+)
+from kesoku.utils.image import (
+    detect_image_mime_type as _detect_image_mime_type,
+)
+
+from .client import (
     ILINK_BASE_URL,
     ITEM_FILE,
     ITEM_IMAGE,
@@ -47,24 +64,8 @@ from kesoku.gateway.chatbot.wechat_client import (
     WEIXIN_CDN_BASE_URL,
     ILinkClient,
 )
-from kesoku.gateway.chatbot.wechat_listener import WeChatListener
-from kesoku.gateway.chatbot.wechat_media import WeChatMediaManager
-from kesoku.gateway.gateway import Gateway
-from kesoku.logger import setup_logger
-from kesoku.utils.async_fs import (
-    async_exists,
-    async_read_bytes,
-    async_read_text_file,
-)
-from kesoku.utils.crypto import (
-    aes_padded_size as _aes_padded_size,
-)
-from kesoku.utils.image import (
-    compress_image as _compress_image,
-)
-from kesoku.utils.image import (
-    detect_image_mime_type as _detect_image_mime_type,
-)
+from .listener import WeChatListener
+from .media import WeChatMediaManager
 
 logger = setup_logger(__name__)
 

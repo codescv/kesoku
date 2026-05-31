@@ -4,12 +4,6 @@ import hashlib
 import logging
 from urllib.parse import urlparse
 
-from kesoku.gateway.chatbot.wechat_client import (
-    WEIXIN_CDN_BASE_URL,
-    ILinkClient,
-    cdn_download_url,
-    cdn_upload_url,
-)
 from kesoku.utils.crypto import (
     aes128_ecb_decrypt as _aes128_ecb_decrypt,
 )
@@ -21,6 +15,13 @@ from kesoku.utils.crypto import (
 )
 from kesoku.utils.crypto import (
     parse_aes_key as _parse_aes_key,
+)
+
+from .client import (
+    WEIXIN_CDN_BASE_URL,
+    ILinkClient,
+    cdn_download_url,
+    cdn_upload_url,
 )
 
 logger = logging.getLogger(__name__)

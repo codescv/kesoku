@@ -10,7 +10,7 @@ import pytest
 from kesoku.config import KesokuConfig, WechatConfig
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message, Session
-from kesoku.gateway.chatbot.wechat import (
+from kesoku.gateway.chatbot.wechat.adapter import (
     WechatChatbot,
     _guess_chat_type,
     _looks_like_chatty_line_for_weixin,
@@ -122,7 +122,7 @@ async def test_init_disabled_raises_value_error() -> None:
     cfg.wechat = WechatConfig(enabled=False)
     gw = MagicMock(spec=Gateway)
 
-    with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=cfg):
+    with patch("kesoku.gateway.chatbot.wechat.adapter.get_config", return_value=cfg):
         with pytest.raises(ValueError, match="WeChat chatbot is disabled"):
             WechatChatbot(chatbot_id="wechat", gateway=gw)
 
@@ -134,7 +134,7 @@ async def test_init_missing_params_raises_value_error() -> None:
     cfg.wechat = WechatConfig(enabled=True, account_id="", token="")
     gw = MagicMock(spec=Gateway)
 
-    with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=cfg):
+    with patch("kesoku.gateway.chatbot.wechat.adapter.get_config", return_value=cfg):
         with pytest.raises(ValueError, match="account_id or token is missing"):
             WechatChatbot(chatbot_id="wechat", gateway=gw)
 
@@ -156,7 +156,7 @@ async def test_wechat_chatbot_process_message(
     mock_session.get = MagicMock()
     mock_http_method(mock_session.get)
 
-    with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.wechat.adapter.get_config", return_value=mock_config):
         bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
         bot._poll_session = mock_session
         bot._send_session = mock_session
@@ -216,7 +216,7 @@ async def test_wechat_chatbot_process_message_with_sys_prompt_file(
     try:
         mock_config.wechat.sys_prompt_file = tmp_sys_prompt_path
 
-        with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
+        with patch("kesoku.gateway.chatbot.wechat.adapter.get_config", return_value=mock_config):
             bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
             bot._poll_session = mock_session
             bot._send_session = mock_session
@@ -253,7 +253,7 @@ async def test_wechat_chatbot_send_text(
     mock_session.post = MagicMock()
     mock_http_method(mock_session.post, response_json='{"ret": 0, "errcode": 0}')
 
-    with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.wechat.adapter.get_config", return_value=mock_config):
         bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
         bot._poll_session = mock_session
         bot._send_session = mock_session
@@ -298,7 +298,7 @@ async def test_wechat_chatbot_slash_command_clear(
     mock_session.post = MagicMock()
     mock_http_method(mock_session.post, response_json='{"ret": 0, "errcode": 0}')
 
-    with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.wechat.adapter.get_config", return_value=mock_config):
         bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
         bot._poll_session = mock_session
         bot._send_session = mock_session
@@ -338,7 +338,7 @@ async def test_wechat_chatbot_slash_command_status(
     mock_session.post = MagicMock()
     mock_http_method(mock_session.post, response_json='{"ret": 0, "errcode": 0}')
 
-    with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.wechat.adapter.get_config", return_value=mock_config):
         bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
         bot._poll_session = mock_session
         bot._send_session = mock_session
@@ -414,7 +414,7 @@ async def test_wechat_chatbot_trigger_cronjob(
     mock_session.get = MagicMock()
     mock_http_method(mock_session.get)
 
-    with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.wechat.adapter.get_config", return_value=mock_config):
         bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
         bot._poll_session = mock_session
         bot._send_session = mock_session
@@ -454,7 +454,7 @@ async def test_wechat_chatbot_trigger_cronjob_auto_resolve(
     mock_session.get = MagicMock()
     mock_http_method(mock_session.get)
 
-    with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.wechat.adapter.get_config", return_value=mock_config):
         bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
         bot._poll_session = mock_session
         bot._send_session = mock_session
@@ -490,7 +490,7 @@ async def test_wechat_chatbot_trigger_cronjob_auto_resolve(
 
 def test_context_token_store_get_all_channels() -> None:
     """Test that ContextTokenStore.get_all_channels returns only channels for the given account."""
-    from kesoku.gateway.chatbot.wechat import ContextTokenStore
+    from kesoku.gateway.chatbot.wechat.adapter import ContextTokenStore
 
     store = ContextTokenStore(persist_path=None)
     store.set("acc1", "userA", "tokA")
@@ -523,9 +523,9 @@ async def test_wechat_inbound_image_mime_sniffing(
     from unittest.mock import mock_open
 
     with (
-        patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config),
+        patch("kesoku.gateway.chatbot.wechat.adapter.get_config", return_value=mock_config),
         patch(
-            "kesoku.gateway.chatbot.wechat.WeChatMediaManager.download_and_decrypt",
+            "kesoku.gateway.chatbot.wechat.adapter.WeChatMediaManager.download_and_decrypt",
             return_value=png_bytes,
         ) as mock_dl,
         patch("builtins.open", mock_open()) as mock_file_open,
@@ -571,7 +571,7 @@ def test_compress_large_image() -> None:
 
     from PIL import Image, ImageDraw
 
-    from kesoku.gateway.chatbot.wechat import _compress_image
+    from kesoku.gateway.chatbot.wechat.adapter import _compress_image
 
     # Generate a large 2000x2000 RGBA image with random high-entropy lines to prevent PNG compression
     img = Image.new("RGBA", (2000, 2000), (255, 255, 255, 255))
@@ -622,7 +622,7 @@ async def test_wechat_chatbot_send_file_retry_success(
     dummy_file = tmp_path / "test.png"
     dummy_file.write_bytes(b"dummy_content")
 
-    with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.wechat.adapter.get_config", return_value=mock_config):
         bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
         bot._poll_session = mock_session
         bot._send_session = mock_session
@@ -672,7 +672,7 @@ async def test_wechat_chatbot_send_voice_reverted(
     mock_session = MagicMock()
     mock_session_cls.return_value = mock_session
 
-    with patch("kesoku.gateway.chatbot.wechat.get_config", return_value=mock_config):
+    with patch("kesoku.gateway.chatbot.wechat.adapter.get_config", return_value=mock_config):
         bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
         bot._poll_session = mock_session
         bot._send_session = mock_session

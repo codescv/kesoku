@@ -20,9 +20,10 @@ from kesoku.config import get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot, parse_message_content
-from kesoku.gateway.chatbot.google_chat_cards import GoogleChatCardBuilder
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
+
+from .cards import GoogleChatCardBuilder
 
 logger = setup_logger(__name__)
 
