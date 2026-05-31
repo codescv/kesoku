@@ -5,6 +5,7 @@ import datetime
 import os
 import re
 import time
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -19,6 +20,7 @@ from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 from kesoku.utils.service import restart_service as utils_restart_service
+from kesoku.utils.table import parse_markdown_tables, render_table_to_image
 from kesoku.utils.text import format_text, split_text_into_chunks
 
 logger = setup_logger(__name__)
@@ -518,7 +520,32 @@ class Chatbot(ABC):
                 await self.handle_tool_result(message)
                 return
 
-            # 3. Parse message content to extract text, file, voice, or question segments
+            # 3. Preprocess markdown tables: render to image files and replace with file tags
+            from kesoku.utils.async_fs import async_write_binary_file
+            tables = parse_markdown_tables(message.content)
+            if tables:
+                session = await self.gateway.db.get_session(message.session_id)
+                if session:
+                    staging_dir = self.get_session_staging_dir(session.workspace_name)
+                    content = message.content
+                    for table in reversed(tables):
+                        try:
+                            png_bytes = render_table_to_image(
+                                headers=table.headers,
+                                alignments=table.alignments,
+                                rows=table.rows,
+                            )
+                            img_filename = f"table_{uuid.uuid4().hex[:8]}.png"
+                            img_path = os.path.join(staging_dir, img_filename)
+                            await async_write_binary_file(img_path, png_bytes)
+
+                            file_tag = f"\n[file: {img_path}]\n"
+                            content = content[:table.start_idx] + file_tag + content[table.end_idx:]
+                        except Exception as re:
+                            logger.error(f"Failed to render markdown table to image: {re}", exc_info=True)
+                    message.content = content
+
+            # 4. Parse message content to extract text, file, voice, or question segments
             segments = parse_message_content(message.content)
 
             for segment in segments:
