@@ -626,9 +626,18 @@ class GeminiLLM(BaseLLM):
         try:
             turns, resolved_system_prompt = history_to_turns(history, prompt, system_prompt)
             native_input = self._build_native_input(turns, resolved_system_prompt, tools)
+
+            if not native_input.get("contents"):
+                return self.estimate_tokens_fallback(prompt, resolved_system_prompt or system_prompt, history)
+
+            count_config = types.CountTokensConfig()
+            if resolved_system_prompt:
+                count_config.system_instruction = resolved_system_prompt
+
             res = self.client.models.count_tokens(
                 model=self.model_name,
                 contents=native_input["contents"],
+                config=count_config,
             )
             return res.total_tokens
         except Exception as e:

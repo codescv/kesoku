@@ -450,3 +450,85 @@ def test_image_resizing_and_compression() -> None:
     # Should be scaled down such that max dimension is 1024
     assert width == 1024
     assert height == 512
+
+
+def test_gemini_llm_count_tokens_success() -> None:
+    """Verify GeminiLLM.count_tokens successfully calls Gemini API with CountTokensConfig."""
+    mock_client = MagicMock()
+    mock_res = MagicMock()
+    mock_res.total_tokens = 42
+    mock_client.models.count_tokens.return_value = mock_res
+
+    msg = Message(
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="User",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Count me!",
+    )
+
+    with patch("google.genai.Client", return_value=mock_client):
+        gemini = GeminiLLM()
+        tokens = gemini.count_tokens(
+            prompt="Additional prompt",
+            system_prompt="Strict instructions",
+            history=[msg],
+        )
+
+        assert tokens == 42
+        mock_client.models.count_tokens.assert_called_once()
+        called_kwargs = mock_client.models.count_tokens.call_args[1]
+        assert called_kwargs["model"] == gemini.model_name
+        assert len(called_kwargs["contents"]) == 1
+        assert len(called_kwargs["contents"][0].parts) == 2
+
+        config = called_kwargs["config"]
+        assert config is not None
+        assert config.system_instruction == "Strict instructions"
+
+
+def test_gemini_llm_count_tokens_empty_bypass() -> None:
+    """Verify GeminiLLM.count_tokens gracefully bypasses Gemini API and uses fallback for empty contents."""
+    mock_client = MagicMock()
+
+    with patch("google.genai.Client", return_value=mock_client):
+        gemini = GeminiLLM()
+        # Empty inputs
+        tokens = gemini.count_tokens(prompt="", system_prompt="System prompt only", history=[])
+
+        # Since contents are empty, it must bypass models.count_tokens
+        mock_client.models.count_tokens.assert_not_called()
+        # Fallback estimation should be used (e.g., 18 chars -> 4 tokens)
+        assert tokens == 4
+
+
+def test_gemini_llm_count_tokens_exception_fallback() -> None:
+    """Verify GeminiLLM.count_tokens logs warning and falls back to estimation on API exception."""
+    mock_client = MagicMock()
+    mock_client.models.count_tokens.side_effect = Exception("API limit exceeded")
+
+    msg = Message(
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="User",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Calculate my length.",
+    )
+
+    with (
+        patch("google.genai.Client", return_value=mock_client),
+        patch("kesoku.agent.llm.logger.warning") as mock_warn,
+    ):
+        gemini = GeminiLLM()
+        tokens = gemini.count_tokens(prompt="More text", history=[msg])
+
+        # Fallback estimation: 21 chars + 9 chars = 30 chars / 4 = 7 tokens
+        assert tokens == 7
+        mock_client.models.count_tokens.assert_called_once()
+        mock_warn.assert_called_once()
+        assert "Failed to count tokens via Gemini API" in mock_warn.call_args[0][0]
+
