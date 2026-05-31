@@ -108,7 +108,13 @@ class ILinkClient:
             raw = await response.text()
             if not response.ok:
                 raise RuntimeError(f"iLink POST {endpoint} HTTP {response.status}: {raw[:200]}")
-            return json.loads(raw)
+            res_data = json.loads(raw)
+            if isinstance(res_data, dict) and res_data.get("ret", 0) != 0:
+                raise RuntimeError(
+                    f"iLink POST {endpoint} failed: ret={res_data['ret']}, "
+                    f"errmsg={res_data.get('errmsg', 'unknown')}"
+                )
+            return res_data
 
     async def _get(self, endpoint: str, timeout_ms: int) -> dict[str, Any]:
         url = f"{self.base_url}/{endpoint}"
@@ -208,10 +214,19 @@ class ILinkClient:
         timeout = aiohttp.ClientTimeout(total=120)  # Large timeout for media upload
         async with self.session.post(upload_url, data=ciphertext, timeout=timeout) as response:
             raw = await response.text()
+            logger.info("WeChat: CDN upload raw response: %s", raw)
             if not response.ok:
                 raise RuntimeError(f"WeChat: CDN upload failed HTTP {response.status}: {raw[:200]}")
+
+            # Try to get from header first (common for newer CDN endpoints)
+            header_param = response.headers.get("x-encrypted-param")
+            if header_param:
+                logger.info("WeChat: CDN upload success, found x-encrypted-param in headers")
+                return header_param.strip()
+
             try:
                 res_data = json.loads(raw)
+                logger.info("WeChat: CDN upload JSON response: %s", res_data)
                 return str(res_data.get("encrypted_query_param") or "")
             except Exception:
                 # Fallback if response is not JSON

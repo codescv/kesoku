@@ -692,3 +692,55 @@ async def test_wechat_chatbot_send_voice_reverted(
         )
         await bot.send_voice_segment("u1", "voice.wav", outbound_msg)
         bot.send_file_segment.assert_called_once_with("u1", "voice.wav", outbound_msg)
+
+
+@pytest.mark.asyncio
+@patch("aiohttp.ClientSession")
+async def test_ilink_client_upload_ciphertext_success_header(
+    mock_session_cls: MagicMock,
+) -> None:
+    """Test upload_ciphertext successfully retrieves param from x-encrypted-param header."""
+    from kesoku.gateway.chatbot.wechat.client import ILinkClient
+
+    mock_session = MagicMock()
+    mock_session_cls.return_value = mock_session
+
+    mock_response = MagicMock()
+    mock_response.ok = True
+    mock_response.status = 200
+    mock_response.text = AsyncMock(return_value="")
+    mock_response.headers = {"x-encrypted-param": "header_param_value"}
+
+    mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_session.post.return_value.__aexit__ = AsyncMock()
+
+    client = ILinkClient(mock_session, base_url="https://test.ilink.com", token="token")
+    result = await client.upload_ciphertext(b"ciphertext", "https://upload.url")
+
+    assert result == "header_param_value"
+
+
+@pytest.mark.asyncio
+@patch("aiohttp.ClientSession")
+async def test_ilink_client_upload_ciphertext_success_json(
+    mock_session_cls: MagicMock,
+) -> None:
+    """Test upload_ciphertext falls back to JSON body if header is missing."""
+    from kesoku.gateway.chatbot.wechat.client import ILinkClient
+
+    mock_session = MagicMock()
+    mock_session_cls.return_value = mock_session
+
+    mock_response = MagicMock()
+    mock_response.ok = True
+    mock_response.status = 200
+    mock_response.text = AsyncMock(return_value='{"encrypted_query_param": "json_param_value"}')
+    mock_response.headers = {}
+
+    mock_session.post.return_value.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_session.post.return_value.__aexit__ = AsyncMock()
+
+    client = ILinkClient(mock_session, base_url="https://test.ilink.com", token="token")
+    result = await client.upload_ciphertext(b"ciphertext", "https://upload.url")
+
+    assert result == "json_param_value"
