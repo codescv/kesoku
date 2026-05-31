@@ -6,7 +6,7 @@ This document provides a comprehensive specification of the `Message` data model
 
 ## 1. Core Architecture Overview
 
-Kesoku operates on a highly decoupled, asynchronous **Pure Broker Architecture**. At the center of this framework is the `Message` model (defined in [src/kesoku/db.py](file:///usr/local/google/home/chii/Developer/kesoku/src/kesoku/db.py#L20-L43)), persisted locally in SQLite and broadcast across in-memory subscribers via the `Gateway` broker (defined in [src/kesoku/gateway/gateway.py](file:///usr/local/google/home/chii/Developer/kesoku/src/kesoku/gateway/gateway.py)). 
+Kesoku operates on a highly decoupled, asynchronous **Pure Broker Architecture**. At the center of this framework is the `Message` model (defined in [src/kesoku/db/models.py](file:///usr/local/google/home/chii/Developer/kesoku/src/kesoku/db/models.py#L13)), persisted locally in SQLite and broadcast across in-memory subscribers via the `Gateway` broker (defined in [src/kesoku/gateway/gateway.py](file:///usr/local/google/home/chii/Developer/kesoku/src/kesoku/gateway/gateway.py)). 
 
 This decoupled approach allows multiple chatbots (e.g., CLI, Discord, Google Chat, WeChat) and backend agent workers to communicate entirely through state-driven messages.
 

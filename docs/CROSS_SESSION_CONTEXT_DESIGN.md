@@ -42,7 +42,7 @@ sequenceDiagram
 
 ---
 
-## 2. Database Layer Changes (`src/kesoku/db.py`)
+## 2. Database Layer Changes (`src/kesoku/db/`)
 
 ### 2.1 Schema Definition
 A new table `cross_session_contexts` will store the synchronized context state per role.

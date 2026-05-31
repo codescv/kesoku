@@ -126,7 +126,7 @@ Kesoku includes a highly modular Google Chat chatbot adapter (`GoogleChatChatbot
 
 
 ## Systemd Service Integration
-To support running Kesoku as a continuous background daemon in production environments on Linux, the CLI provides a `service` command group implemented modularly inside `src/kesoku/cli_service.py`. This command group automates generating, registering, running, and removing the systemd unit file (`kesoku.service`).
+To support running Kesoku as a continuous background daemon in production environments on Linux, the CLI provides a `service` command group implemented modularly inside `src/kesoku/cli/service.py`. This command group automates generating, registering, running, and removing the systemd unit file (`kesoku.service`).
 
 ### Service Subcommands Design
 - **Main Command**: `kesoku service` (mounted as a sub-Typer application group)
