@@ -250,7 +250,8 @@ async def test_handle_message_with_files_split_and_upload(mock_config: KesokuCon
                     await bot.handle_message(msg)
 
                     # Verify path existence was checked
-                    mock_exists.assert_called_once_with("/tmp/test_image.png")
+                    assert mock_exists.call_count >= 1
+                    mock_exists.assert_any_call("/tmp/test_image.png")
                     # Verify discord.File was instantiated with path
                     mock_file_class.assert_called_once_with("/tmp/test_image.png")
 
@@ -287,7 +288,8 @@ async def test_handle_message_with_non_existent_file(mock_config: KesokuConfig, 
 
             with patch("os.path.exists", return_value=False) as mock_exists:
                 await bot.handle_message(msg)
-                mock_exists.assert_called_once_with("/tmp/ghost.png")
+                assert mock_exists.call_count >= 1
+                mock_exists.assert_any_call("/tmp/ghost.png")
 
                 # channel.send should be called 2 times: text segment and warning segment
                 assert mock_channel.send.call_count == 2
@@ -849,7 +851,8 @@ async def test_handle_message_with_voice_success(mock_config: KesokuConfig, mock
                 with patch("kesoku.gateway.chatbot.discord.adapter.send_voice_message") as mock_send_voice:
                     await bot.handle_message(msg)
 
-                    mock_exists.assert_called_once_with("/tmp/voice.ogg")
+                    assert mock_exists.call_count >= 1
+                    mock_exists.assert_any_call("/tmp/voice.ogg")
                     mock_send_voice.assert_called_once_with(mock_channel, "/tmp/voice.ogg")
                     mock_channel.send.assert_called_once_with("Listen here: ")
                     mock_gateway.db.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
@@ -886,7 +889,8 @@ async def test_handle_message_with_voice_fallback(mock_config: KesokuConfig, moc
                     with patch("discord.File", return_value=mock_file) as mock_file_class:
                         await bot.handle_message(msg)
 
-                        mock_exists.assert_called_once_with("/tmp/voice.ogg")
+                        assert mock_exists.call_count >= 1
+                        mock_exists.assert_any_call("/tmp/voice.ogg")
                         mock_channel.send.assert_any_call("Listen here: ")
                         mock_channel.send.assert_any_call(file=mock_file)
                         mock_gateway.db.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)

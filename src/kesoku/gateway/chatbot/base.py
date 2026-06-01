@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime
+import difflib
 import os
 import re
 import time
@@ -19,9 +20,13 @@ from kesoku.constants import SYSTEM_START_TIME, MessageRole, MessageStatus, Mess
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
+from kesoku.utils.async_fs import async_exists, async_realpath
 from kesoku.utils.service import restart_service as utils_restart_service
 from kesoku.utils.table import parse_markdown_tables, render_table_to_image
 from kesoku.utils.text import format_text, split_text_into_chunks
+
+PATH_RESOLUTION_CONFIDENCE_THRESHOLD = 0.9
+"""Similarity score threshold for auto path resolution of misspelled absolute paths."""
 
 logger = setup_logger(__name__)
 
@@ -437,6 +442,84 @@ class Chatbot(ABC):
         os.makedirs(staging_dir, exist_ok=True)
         return staging_dir
 
+    async def resolve_outbound_path(self, raw_path: str, session_id: str) -> str:
+        """Resolve a potentially misspelled absolute path by fuzzy matching against files in STAGING_DIR.
+
+        If the path exists exactly as given, it is returned immediately.
+        Otherwise, it searches all files recursively in the session's staging directory,
+        calculating a similarity score that comprehensively considers:
+        - The match score of the filename (60% weight)
+        - The match score of the full absolute path (40% weight)
+
+        If a strong match (score >= PATH_RESOLUTION_CONFIDENCE_THRESHOLD) is found, the corrected path is returned.
+
+        Args:
+            raw_path: The raw absolute file path written by the agent.
+            session_id: Active session ID context.
+
+        Returns:
+            The resolved corrected absolute path, or the original path if not matched.
+        """
+        # Clean up raw path
+        cleaned_path = raw_path.strip()
+        if not cleaned_path:
+            return raw_path
+
+        # 1. Check if the exact path exists
+        if await async_exists(cleaned_path):
+            return await async_realpath(cleaned_path)
+
+        # 2. Get session staging directory
+        staging_dir = None
+        session = await self.gateway.db.get_session(session_id)
+        if session:
+            staging_dir = self.get_session_staging_dir(session.workspace_name)
+
+        # 3. Fuzzy matching inside the session's staging directory
+        if staging_dir and await async_exists(staging_dir):
+            try:
+                # List all files in staging directory with their real absolute paths
+                def _list_staging_files_abs(s_dir: str) -> list[str]:
+                    files = []
+                    for root, _, filenames in os.walk(s_dir):
+                        for f in filenames:
+                            files.append(os.path.realpath(os.path.join(root, f)))
+                    return files
+
+                abs_staging_files = await asyncio.to_thread(_list_staging_files_abs, staging_dir)
+                if not abs_staging_files:
+                    return raw_path
+
+                raw_abs_path = await async_realpath(cleaned_path)
+                raw_filename = os.path.basename(raw_abs_path)
+
+                best_candidate = None
+                best_score = 0.0
+
+                for candidate in abs_staging_files:
+                    candidate_filename = os.path.basename(candidate)
+
+                    # 60% weight for filename similarity, 40% weight for full path similarity
+                    fn_ratio = difflib.SequenceMatcher(None, raw_filename, candidate_filename).ratio()
+                    path_ratio = difflib.SequenceMatcher(None, raw_abs_path, candidate).ratio()
+
+                    score = 0.6 * fn_ratio + 0.4 * path_ratio
+                    if score > best_score:
+                        best_score = score
+                        best_candidate = candidate
+
+                # If we found a high confidence match
+                if best_candidate and best_score >= PATH_RESOLUTION_CONFIDENCE_THRESHOLD:
+                    logger.warning(
+                        f"Fuzzy matched misspelled path '{raw_path}' (score={best_score:.3f}) to: {best_candidate}"
+                    )
+                    return best_candidate
+            except Exception as e:
+                logger.warning(f"Failed during fuzzy path resolution: {e}")
+
+        # Fallback to original
+        return raw_path
+
     def sanitize_filename(self, filename: str) -> str:
         """Sanitize a filename to prevent path traversal."""
         return "".join(c for c in filename if c.isalnum() or c in "._-")
@@ -561,10 +644,12 @@ class Chatbot(ABC):
                         await self.send_text_chunks(message.channel_id, chunks, message)
 
                 elif segment["type"] == "file":
-                    await self.send_file_segment(message.channel_id, segment["path"], message)
+                    resolved_path = await self.resolve_outbound_path(segment["path"], message.session_id)
+                    await self.send_file_segment(message.channel_id, resolved_path, message)
 
                 elif segment["type"] == "voice":
-                    await self.send_voice_segment(message.channel_id, segment["path"], message)
+                    resolved_path = await self.resolve_outbound_path(segment["path"], message.session_id)
+                    await self.send_voice_segment(message.channel_id, resolved_path, message)
 
                 elif segment["type"] == "question":
                     await self.send_question_segment(

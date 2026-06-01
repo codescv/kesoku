@@ -5,7 +5,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from kesoku.constants import MessageRole, MessageType
+from kesoku.constants import (
+    MessageRole,
+    MessageType,
+)
 from kesoku.db import Message, Session
 from kesoku.gateway.chatbot.base import Chatbot, _format_uptime
 from kesoku.gateway.gateway import Gateway
@@ -102,3 +105,70 @@ def test_format_text_headers_shifting() -> None:
     input_text = "## Header A\n### Header B\n"
     expected = "# Header A\n\n## Header B\n"
     assert chatbot.format_text(input_text) == expected
+
+
+@pytest.mark.asyncio
+async def test_resolve_outbound_path(tmp_path) -> None:
+    """Test resolve_outbound_path under fuzzy matching for misspelled absolute paths."""
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+
+    # Create test files in staging
+    file_in_staging = staging_dir / "cat.png"
+    file_in_staging.write_text("staging cat")
+
+    # Create a nested file to test path scoring
+    nested_dir = staging_dir / "output"
+    nested_dir.mkdir()
+    nested_file = nested_dir / "result.png"
+    nested_file.write_text("nested result")
+
+    flat_file = staging_dir / "result.png"
+    flat_file.write_text("flat result")
+
+    mock_gateway = MagicMock(spec=Gateway)
+    chatbot = MockChatbot(chatbot_id="mock_bot", gateway=mock_gateway)
+
+    from kesoku.config import AgentConfig, KesokuConfig, WorkspaceConfig
+    mock_cfg = KesokuConfig(
+        workspace=WorkspaceConfig(sessions_dir=str(tmp_path / "sessions"), db_path=":memory:"),
+        agent=AgentConfig(user_prompts=[]),
+        agent_working_dir=str(tmp_path / "awd"),
+    )
+
+    with patch("kesoku.gateway.chatbot.base.get_config", return_value=mock_cfg):
+        # Mock session retrieval and staging dir resolution
+        mock_session = Session(id="session123", title="Test Session", workspace_name="test_ws")
+        mock_gateway.db = AsyncMock()
+        mock_gateway.db.get_session = AsyncMock(return_value=mock_session)
+        chatbot.get_session_staging_dir = MagicMock(return_value=str(staging_dir))
+
+        # 1. Existing absolute path
+        abs_path = str(file_in_staging.resolve())
+        resolved = await chatbot.resolve_outbound_path(abs_path, "session123")
+        assert resolved == abs_path
+
+        # 2. Fuzzy match misspelled filename (catt.png -> cat.png) with absolute path typo
+        staging_dir_abs = str(staging_dir.resolve())
+        misspelled_abs = staging_dir_abs.replace("staging", "stating") + "/catt.png"
+        resolved = await chatbot.resolve_outbound_path(misspelled_abs, "session123")
+        assert resolved == str(file_in_staging.resolve())
+
+        # 3. Fuzzy match path with nested files (comprehensive check):
+        # R: "stating/output/results.png"
+        # C1 (nested): "staging/output/result.png" -> score will be higher
+        # C2 (flat): "staging/result.png"
+        misspelled_nested = str(nested_file.resolve())
+        misspelled_nested = misspelled_nested.replace("staging", "stating").replace("result.png", "results.png")
+        resolved = await chatbot.resolve_outbound_path(misspelled_nested, "session123")
+        assert resolved == str(nested_file.resolve())
+
+        misspelled_flat = str(flat_file.resolve())
+        misspelled_flat = misspelled_flat.replace("staging", "stating").replace("result.png", "results.png")
+        resolved = await chatbot.resolve_outbound_path(misspelled_flat, "session123")
+        assert resolved == str(flat_file.resolve())
+
+        # 4. Path not found / low confidence (score < PATH_RESOLUTION_CONFIDENCE_THRESHOLD), returns original
+        low_confidence_path = staging_dir_abs.replace("staging", "stating") + "/completely_different.png"
+        resolved = await chatbot.resolve_outbound_path(low_confidence_path, "session123")
+        assert resolved == low_confidence_path
