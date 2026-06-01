@@ -271,3 +271,56 @@ async def test_get_role_messages_since_default_unbound_channels(tmp_path) -> Non
     # Should successfully find the unbound channel message since its role defaults to 'default'!
     assert len(res) == 1
     assert res[0].id == "msg_du"
+
+
+@pytest.mark.asyncio
+async def test_get_role_messages_since_thread_inheritance(tmp_path) -> None:
+    """Test that get_role_messages_since respects thread role inheritance for Discord."""
+    from kesoku.constants import MessageRole, MessageStatus, MessageType
+    from kesoku.db import Message, Session
+
+    temp_db = str(tmp_path / "test_thread_inheritance.db")
+    db = DatabaseManager(temp_db)
+    db.init_tables()
+
+    role = "developer"
+    parent_channel_id = "parent_chan_123"
+    thread_channel_id = "thread_chan_456"
+    session_id = "sess_thread"
+
+    # 1. Set parent channel role to 'developer'
+    db.set_channel_role("discord", parent_channel_id, role)
+
+    # 2. Create session mapping for the thread
+    db.create_session(Session(id=session_id, title="Thread Session"))
+    db.set_active_session_for_channel("discord", thread_channel_id, session_id)
+
+    # 3. Save a user message in the thread session with parent_channel_id in metadata
+    metadata = {"parent_channel_id": parent_channel_id}
+    msg_user = Message(
+        id="msg_thread_u",
+        session_id=session_id,
+        chatbot_id="discord",
+        channel_id=thread_channel_id,
+        sender="User",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Hello in thread",
+        timestamp=100.0,
+        status=MessageStatus.RESPONDED,
+        metadata=metadata,
+    )
+    db.save_message(msg_user)
+
+    # 4. Fetch messages for role 'developer'
+    res_dev = db.get_role_messages_since(role, since_timestamp=50.0)
+    # This should pass if inheritance is respected by get_role_messages_since
+    assert len(res_dev) == 1
+    assert res_dev[0].id == "msg_thread_u"
+
+    # 5. Fetch messages for role 'default'
+    res_def = db.get_role_messages_since("default", since_timestamp=50.0)
+    # Thread message should NOT be treated as 'default'
+    assert len(res_def) == 0
+
+

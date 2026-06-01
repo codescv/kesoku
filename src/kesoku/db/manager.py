@@ -883,13 +883,27 @@ class DatabaseManager:
             query = """
                 SELECT m.* FROM messages m
                 JOIN channel_sessions cs ON m.session_id = cs.session_id
-                LEFT JOIN channel_roles cr ON cs.chatbot_id = cr.chatbot_id AND cs.channel_id = cr.channel_id
-                WHERE (cr.role = ? OR (? = 'default' AND cr.role IS NULL))
+                LEFT JOIN channel_roles cr_direct
+                  ON cs.chatbot_id = cr_direct.chatbot_id
+                 AND cs.channel_id = cr_direct.channel_id
+                LEFT JOIN (
+                    SELECT session_id,
+                           json_extract(metadata, '$.parent_channel_id') as parent_channel_id
+                    FROM messages
+                    WHERE role = 'user' AND metadata LIKE '%parent_channel_id%'
+                    GROUP BY session_id
+                ) parent_info
+                  ON m.session_id = parent_info.session_id
+                 AND cs.chatbot_id = 'discord'
+                LEFT JOIN channel_roles cr_parent
+                  ON cs.chatbot_id = cr_parent.chatbot_id
+                 AND parent_info.parent_channel_id = cr_parent.channel_id
+                WHERE COALESCE(cr_direct.role, cr_parent.role, 'default') = ?
                   AND m.timestamp > ?
                   AND m.role IN ('user', 'assistant')
                   AND m.type = 'text'
             """
-            params: list[Any] = [role, role, since_timestamp]
+            params: list[Any] = [role, since_timestamp]
             if exclude_session_id:
                 query += " AND m.session_id != ?"
                 params.append(exclude_session_id)

@@ -16,13 +16,6 @@
 ## Unit Tests
 - Add extensive unit tests for every module you write. Always keep unit tests up to date and run them after any changes.
 
-## Integration Tests
-Run integration tests if there are major feature changes or refactor (>50 lines of code).
-- Plan ahead how you can automatically test it.
-- Use `private/` as the workspace for integration testing. You are free to reinitialize / delete the db file in this directory.
-- After you make the changes, run integration test using the CLI command with real model.
-- Summarize your test result and send it to the user.
-
 ## Code Style
 - Run `uv run ruff check` after your changes and make sure there are no lint errors and fix them if there are any.
 
