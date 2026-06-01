@@ -667,3 +667,107 @@ def test_cli_memory_export(tmp_path: Any) -> None:
     assert exported_data["asuka"]["notes"]["funny_event"]["title"] == "Funny"
     assert exported_data["asuka"]["notes"]["funny_event"]["content"] == "Haha"
     assert exported_data["asuka"]["notes"]["funny_event"]["updated_at"] == 678.90
+
+
+def test_cli_memory_import(tmp_path: Any) -> None:
+    """Test 'kesoku memory import' subcommand."""
+    config_path = tmp_path / "config.toml"
+    db_path = tmp_path / "kesoku.db"
+    import_path = tmp_path / "import_memory.toml"
+
+    # Initialize workspace
+    runner.invoke(app, ["init", "-w", str(tmp_path)])
+
+    # Create a valid TOML file to import
+    valid_toml = """
+[default.progress.japanese_study]
+title = "Japanese Study Progress"
+content = "Studying N3 grammar."
+updated_at = 99999.9
+
+[asuka.learnings.favorite_food]
+title = "Favorite Food"
+content = "Melon pan"
+"""
+    import_path.write_text(valid_toml, encoding="utf-8")
+
+    # 1. Import valid memories (standard categories)
+    result = runner.invoke(app, ["memory", "import", "-c", str(config_path), str(import_path)])
+    assert result.exit_code == 0
+    assert "Successfully imported 2 memory records from TOML" in strip_ansi(result.stdout)
+
+    # Verify inside DB
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM agent_memories WHERE role = 'default' AND category = 'progress' AND key = 'japanese_study'"
+    )
+    row = cursor.fetchone()
+    assert row is not None
+    assert row["title"] == "Japanese Study Progress"
+    assert row["content"] == "Studying N3 grammar."
+
+    cursor.execute(
+        "SELECT * FROM agent_memories WHERE role = 'asuka' AND category = 'learnings' AND key = 'favorite_food'"
+    )
+    row = cursor.fetchone()
+    assert row is not None
+    assert row["title"] == "Favorite Food"
+    assert row["content"] == "Melon pan"
+    conn.close()
+
+    # 2. Attempt to import unknown category without --create-category
+    invalid_cat_toml = """
+[default.custom_cat.my_key]
+title = "Custom Title"
+content = "Custom Content"
+"""
+    import_path.write_text(invalid_cat_toml, encoding="utf-8")
+    result = runner.invoke(app, ["memory", "import", "-c", str(config_path), str(import_path)])
+    assert result.exit_code == 1
+    assert "is not recognized" in strip_ansi(result.stdout)
+
+    # 3. Import unknown category WITH --create-category
+    result = runner.invoke(app, ["memory", "import", "--create-category", "-c", str(config_path), str(import_path)])
+    assert result.exit_code == 0
+    assert "Successfully imported 1 memory records from TOML" in strip_ansi(result.stdout)
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM agent_memories WHERE category = 'custom_cat' AND key = 'my_key'")
+    row = cursor.fetchone()
+    assert row is not None
+    conn.close()
+
+    # 4. Import invalid TOML format (syntax error)
+    syntax_error_toml = """
+[default.progress.key
+title = "Missing bracket"
+"""
+    import_path.write_text(syntax_error_toml, encoding="utf-8")
+    result = runner.invoke(app, ["memory", "import", "-c", str(config_path), str(import_path)])
+    assert result.exit_code == 1
+    assert "Invalid TOML format" in strip_ansi(result.stdout)
+
+    # 5. Import TOML with invalid structure (e.g. missing title)
+    missing_title_toml = """
+[default.progress.no_title]
+content = "Just content, no title"
+"""
+    import_path.write_text(missing_title_toml, encoding="utf-8")
+    result = runner.invoke(app, ["memory", "import", "-c", str(config_path), str(import_path)])
+    assert result.exit_code == 1
+    assert "is missing 'title'" in strip_ansi(result.stdout)
+
+    # 6. Import TOML with invalid key (e.g. uppercase)
+    invalid_key_toml = """
+[default.progress.INVALID_KEY]
+title = "Invalid key"
+content = "Capital letters not allowed"
+"""
+    import_path.write_text(invalid_key_toml, encoding="utf-8")
+    result = runner.invoke(app, ["memory", "import", "-c", str(config_path), str(import_path)])
+    assert result.exit_code == 1
+    assert "Invalid Key 'INVALID_KEY'" in strip_ansi(result.stdout)
+

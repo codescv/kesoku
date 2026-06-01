@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import time
+import tomllib
 from typing import Annotated
 
 import tomli_w
@@ -259,6 +260,121 @@ def cli_memory_export(
         )
     except Exception as e:
         console.print(f"[bold red]Error exporting memories: {e}[/bold red]")
+        sys.exit(1)
+
+
+@memory_app.command("import")
+def cli_memory_import(
+    input_path: Annotated[str, typer.Argument(help="Target filepath to read the imported TOML file")],
+    create_category: Annotated[
+        bool, typer.Option("--create-category", help="Override validation to create new categories if they don't exist")
+    ] = False,
+    config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
+) -> None:
+    """Import agent memories from a structured TOML file into the SQLite database."""
+    load_config(config)
+    cfg = get_config()
+    db = DatabaseManager(cfg.workspace.db_path)
+    db.verify_db()
+
+    console = Console()
+
+    if not os.path.exists(input_path):
+        console.print(f"[bold red]Error: File not found: {input_path}[/bold red]")
+        sys.exit(1)
+
+    try:
+        with open(input_path, "rb") as f:
+            import_data = tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        console.print(f"[bold red]Error: Invalid TOML format: {e}[/bold red]")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"[bold red]Error reading file: {e}[/bold red]")
+        sys.exit(1)
+
+    if not isinstance(import_data, dict):
+        console.print("[bold red]Error: Top-level structure of TOML must be a table.[/bold red]")
+        sys.exit(1)
+
+    allowed_categories = db.get_allowed_memory_categories()
+    valid_records = []
+
+    for role, categories in import_data.items():
+        if not isinstance(categories, dict):
+            console.print(f"[bold red]Error: Role '{role}' must map to a category table.[/bold red]")
+            sys.exit(1)
+        for category, keys in categories.items():
+            if not isinstance(keys, dict):
+                console.print(
+                    f"[bold red]Error: Category '{category}' under role '{role}' "
+                    "must map to a key table.[/bold red]"
+                )
+                sys.exit(1)
+
+            if category not in allowed_categories and not create_category:
+                console.print(
+                    f"[bold red]Error: Category '{category}' under role '{role}' is not recognized.[/bold red]\n"
+                    f"Permitted categories: {sorted(list(allowed_categories))}.\n"
+                    "Use '--create-category' to explicitly force importing unknown categories."
+                )
+                sys.exit(1)
+
+            for key, record in keys.items():
+                if not isinstance(record, dict):
+                    console.print(
+                        f"[bold red]Error: Key '{key}' under category '{category}' "
+                        f"and role '{role}' must map to a table.[/bold red]"
+                    )
+                    sys.exit(1)
+
+                if not validate_key(key):
+                    console.print(
+                        f"[bold red]Error: Invalid Key '{key}' under category '{category}' "
+                        f"and role '{role}'.[/bold red]\n"
+                        "Memory keys must strictly contain only lowercase letters, "
+                        "underscores, and numbers (regex: ^[a-z0-9_]+$)."
+                    )
+                    sys.exit(1)
+
+                if "title" not in record or not isinstance(record["title"], str):
+                    console.print(
+                        f"[bold red]Error: Record '{role}.{category}.{key}' "
+                        "is missing 'title' or it is not a string.[/bold red]"
+                    )
+                    sys.exit(1)
+                if "content" not in record or not isinstance(record["content"], str):
+                    console.print(
+                        f"[bold red]Error: Record '{role}.{category}.{key}' "
+                        "is missing 'content' or it is not a string.[/bold red]"
+                    )
+                    sys.exit(1)
+
+                sanitized = sanitize_key(key)
+
+                valid_records.append({
+                    "role": role,
+                    "category": category,
+                    "key": sanitized,
+                    "title": record["title"],
+                    "content": record["content"],
+                })
+
+    try:
+        for rec in valid_records:
+            db.upsert_agent_memory(
+                category=rec["category"],
+                key=rec["key"],
+                title=rec["title"],
+                content=rec["content"],
+                role=rec["role"],
+            )
+
+        console.print(
+            f"\n[bold green]Successfully imported {len(valid_records)} memory records from TOML![/bold green]"
+        )
+    except Exception as e:
+        console.print(f"[bold red]Error importing memories: {e}[/bold red]")
         sys.exit(1)
 
 
