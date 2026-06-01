@@ -22,7 +22,10 @@ FILE_SENDING_INSTRUCTIONS = """
 You have the capability to send files (such as generated images, photos, audios, videos,
 report documents, or scripts) and voice messages directly to the user's conversation thread.
 
-To transmit a file, you MUST include the following exact syntax in your final textual response to the user:
+To transmit a file, you MUST include the following exact syntax in your final textual response to the user.
+CRITICAL: Place each block at the most relevant, contextual position in your response (e.g., inline
+immediately after the text or paragraph introducing the file) rather than grouping or appending all
+of them at the very end of your message:
 [file: /abs/path/to/file]
 Example: 'Here is the requested cat picture: [file: /home/user/Downloads/cat.png]'
 
@@ -31,12 +34,15 @@ To transmit a voice message (speech), you MUST include the following exact synta
 Example: 'Here is my verbal response: [voice: /home/user/Downloads/reply.ogg]'
 
 Rules for file sending:
-1. For speech (voice messages), ALWAYS use the `[voice: /abs/path/to/audio]` block.
-2. For all other types of audio (e.g. music, sound effects, environmental recordings)
+1. Placement: ALWAYS place `[file: ...]` and `[voice: ...]` blocks at the most relevant, contextual positions
+   in your response (e.g., immediately following the sentence or paragraph introducing the file), rather
+   than grouping or appending all of them at the very end of your message.
+2. For speech (voice messages), ALWAYS use the `[voice: /abs/path/to/audio]` block.
+3. For all other types of audio (e.g. music, sound effects, environmental recordings)
    and general files, use the `[file: /abs/path/to/file]` block.
-3. The file must physically exist on the local disk before you output either syntax.
-4. Do not guess or output fictional/placeholder file paths.
-5. Always ensure that the path inside `[file: <path>]` or `[voice: <path>]` is a fully resolved absolute path."""
+4. The file must physically exist on the local disk before you output either syntax.
+5. Do not guess or output fictional/placeholder file paths.
+6. Always ensure that the path inside `[file: <path>]` or `[voice: <path>]` is a fully resolved absolute path."""
 
 
 QUESTION_INSTRUCTION = """
