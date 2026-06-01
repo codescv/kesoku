@@ -67,3 +67,34 @@ def test_split_text_into_chunks_code_block() -> None:
         # If chunk contains code lines, it must be wrapped in ```
         if "line1" in chunk or "line2" in chunk or "line3" in chunk:
             assert chunk.startswith("```python") or chunk.endswith("```")
+
+
+def test_clean_latex() -> None:
+    """Test cleaning of LaTeX formulas to readable unicode/plain text."""
+    from kesoku.utils.text import clean_latex
+
+    # Test inline math $...$
+    assert clean_latex(r"Let $x = \alpha + \beta^2$.") == "Let x = α + β²."
+
+    # Test inline math with braces and subscripts
+    assert clean_latex(r"We have $x_{i} = y_{j+1}$.") == "We have xᵢ = yⱼ₊₁."
+
+
+    # Test fractions
+    assert clean_latex(r"Ratio is $\frac{a}{b}$.") == "Ratio is (a)/(b)."
+
+    # Test square roots
+    assert clean_latex(r"Value is $\sqrt{x} + \sqrt[3]{y}$.") == "Value is √(x) + ³√(y)."
+
+    # Test block math $$...$$
+    block_input = "Formula:\n$$\nE = mc^2\n$$"
+    expected_block = "Formula:\n\n> E = mc²\n"
+    assert clean_latex(block_input) == expected_block
+
+    # Test code block preservation
+    code_input = "Math $x^2$ and code:\n```python\nx = y ** 2\n```\nMore math $y^3$."
+    expected_code = "Math x² and code:\n```python\nx = y ** 2\n```\nMore math y³."
+    assert clean_latex(code_input) == expected_code
+
+
+

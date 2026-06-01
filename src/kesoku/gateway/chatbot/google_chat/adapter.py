@@ -316,9 +316,10 @@ class GoogleChatChatbot(Chatbot):
         space_name = space_data.get("name")  # e.g., "spaces/AAAAxxxx"
         thread_name = thread_data.get("name")  # e.g., "spaces/AAAAxxxx/threads/YYYY"
 
+        sender_email = sender_data.get("email") or ""
+
         # Security: Filter via user allowlist if configured
         if self.config.user_allowlist:
-            sender_email = sender_data.get("email")
             if sender_id not in self.config.user_allowlist and sender_email not in self.config.user_allowlist:
                 logger.warning(f"Google Chat: Ignoring unauthorized sender {sender_name} ({sender_id}/{sender_email})")
                 return
@@ -340,10 +341,15 @@ class GoogleChatChatbot(Chatbot):
             timestamp=time.time(),
             raw_metadata={
                 "message_name": message_data.get("name"),
+                "google_chat_sender_email": sender_email,
+                "sender_name": f"{sender_name} (Email: {sender_email})" if sender_email else sender_name,
+
             },
+
             session_title=f"Google Chat Session: {text[:30]}",
             custom_prompt=custom_prompt,
         )
+
 
         async def reply_func(reply_text: str) -> None:
             body = {"text": reply_text}

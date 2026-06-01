@@ -262,3 +262,259 @@ def truncate_context_middle(text: str, max_len: int = 3000) -> str:
     char_end = int(max_len * 0.45)
     return text[:char_start] + "\n\n... [Timeline Truncated for Brevity] ...\n\n" + text[-char_end:]
 
+
+# LaTeX to Unicode symbol mapping for Discord readability
+LATEX_SYMBOL_MAP = {
+    # Greek letters (lowercase)
+    r"\alpha": "α",
+    r"\beta": "β",
+    r"\gamma": "γ",
+    r"\delta": "δ",
+    r"\epsilon": "ε",
+    r"\zeta": "ζ",
+    r"\eta": "η",
+    r"\theta": "θ",
+    r"\iota": "ι",
+    r"\kappa": "κ",
+    r"\lambda": "λ",
+    r"\mu": "μ",
+    r"\nu": "ν",
+    r"\xi": "ξ",
+    r"\pi": "π",
+    r"\rho": "ρ",
+    r"\sigma": "σ",
+    r"\tau": "τ",
+    r"\upsilon": "υ",
+    r"\phi": "φ",
+    r"\chi": "χ",
+    r"\psi": "ψ",
+    r"\omega": "ω",
+    # Greek letters (uppercase)
+    r"\Gamma": "Γ",
+    r"\Delta": "Δ",
+    r"\Theta": "Θ",
+    r"\Lambda": "Λ",
+    r"\Xi": "Ξ",
+    r"\Pi": "Π",
+    r"\Sigma": "Σ",
+    r"\Upsilon": "Υ",
+    r"\Phi": "Φ",
+    r"\Psi": "Ψ",
+    r"\Omega": "Ω",
+    # Operators & Relations
+    r"\sum": "∑",
+    r"\prod": "∏",
+    r"\int": "∫",
+    r"\approx": "≈",
+    r"\neq": "≠",
+    r"\le": "≤",
+    r"\leq": "≤",
+    r"\ge": "≥",
+    r"\geq": "≥",
+    r"\times": "×",
+    r"\cdot": "·",
+    r"\div": "÷",
+    r"\pm": "±",
+    r"\infty": "∞",
+    r"\to": "→",
+    r"\rightarrow": "→",
+    r"\leftarrow": "←",
+    r"\Rightarrow": "⇒",
+    r"\Leftarrow": "⇐",
+    r"\leftrightarrow": "↔",
+    r"\Leftrightarrow": "⇔",
+    r"\in": "∈",
+    r"\notin": "∉",
+    r"\subset": "⊂",
+    r"\supset": "⊃",
+    r"\subseteq": "⊆",
+    r"\supseteq": "⊇",
+    r"\cap": "∩",
+    r"\cup": "∪",
+    r"\forall": "∀",
+    r"\exists": "∃",
+    r"\nabla": "∇",
+    r"\partial": "∂",
+    r"\empty": "∅",
+    r"\emptyset": "∅",
+    r"\sqrt": "√",
+}
+
+SUPERSCRIPT_MAP = {
+    "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+    "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+    "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾",
+    "n": "ⁿ", "i": "ⁱ", "x": "ˣ",
+}
+
+SUBSCRIPT_MAP = {
+    "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄",
+    "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
+    "+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎",
+    "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ",
+    "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ",
+    "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ",
+    "v": "ᵥ", "x": "ₓ",
+}
+
+
+def _to_superscript(text: str) -> str | None:
+    res = []
+    for c in text:
+        if c in SUPERSCRIPT_MAP:
+            res.append(SUPERSCRIPT_MAP[c])
+        else:
+            return None
+    return "".join(res)
+
+
+def _to_subscript(text: str) -> str | None:
+    res = []
+    for c in text:
+        if c in SUBSCRIPT_MAP:
+            res.append(SUBSCRIPT_MAP[c])
+        else:
+            return None
+    return "".join(res)
+
+
+def _clean_latex_expression(expr: str) -> str:
+    expr = expr.strip()
+    if not expr:
+        return ""
+
+    # 1. Fractions: \frac{num}{den} -> (num)/(den)
+    prev = ""
+    while prev != expr:
+        prev = expr
+        expr = re.sub(r'\\frac\s*{(.*?)}\s*{(.*?)}', r'(\1)/(\2)', expr)
+
+    # 2. Square roots: \sqrt{expr} -> √(expr), \sqrt[n]{expr} -> ⁿ√(expr)
+    prev = ""
+    while prev != expr:
+        prev = expr
+        expr = re.sub(
+            r'\\sqrt\s*\[(.*?)\]\s*{(.*?)}',
+            lambda m: f"{_to_superscript(m.group(1)) or f'({m.group(1)})'}√({m.group(2)})",
+            expr,
+        )
+        expr = re.sub(r'\\sqrt\s*{(.*?)}', r'√(\1)', expr)
+
+    # 3. Superscripts and Subscripts
+    expr = re.sub(
+        r'\^{(.*?)}',
+        lambda m: _to_superscript(content := m.group(1)) or f"^({content})",
+        expr,
+    )
+    expr = re.sub(
+        r'_{(.*?)}',
+        lambda m: _to_subscript(content := m.group(1)) or f"_({content})",
+        expr,
+    )
+
+    expr = re.sub(
+        r'\^([a-zA-Z0-9+-=])',
+        lambda m: _to_superscript(m.group(1)) or f"^({m.group(1)})",
+        expr,
+    )
+    expr = re.sub(
+        r'_([a-zA-Z0-9+-=])',
+        lambda m: _to_subscript(m.group(1)) or f"_({m.group(1)})",
+        expr,
+    )
+
+    # 4. Replace LaTeX symbols
+    sorted_symbols = sorted(LATEX_SYMBOL_MAP.keys(), key=len, reverse=True)
+    for sym in sorted_symbols:
+        expr = expr.replace(sym, LATEX_SYMBOL_MAP[sym])
+
+    # 5. Remove common LaTeX formatting commands
+    expr = re.sub(r'\\mathbf\s*{(.*?)}', r'**\1**', expr)
+    expr = re.sub(r'\\mathit\s*{(.*?)}', r'*\1*', expr)
+    expr = re.sub(r'\\mathrm\s*{(.*?)}', r'\1', expr)
+    expr = re.sub(r'\\text\s*{(.*?)}', r'\1', expr)
+    expr = re.sub(r'\\label\s*{(.*?)}', '', expr)
+
+    # 6. Clean up remaining backslashes
+    expr = re.sub(r'\\([\,>\s])', r'\1', expr)
+    expr = re.sub(r'\\([{}])', r'\1', expr)
+
+    # Remove environments
+    expr = re.sub(r'\\begin{[a-zA-Z]*?}', '', expr)
+    expr = re.sub(r'\\end{[a-zA-Z]*?}', '', expr)
+
+    expr = re.sub(r'\s+', ' ', expr)
+
+    return expr.strip()
+
+
+def _clean_latex_inline(expr: str) -> str:
+    return _clean_latex_expression(expr)
+
+
+def _clean_latex_block(expr: str) -> str:
+    cleaned = _clean_latex_expression(expr)
+    lines = [
+        f"> {line.strip()}"
+        for line in cleaned.splitlines()
+        if line.strip()
+    ]
+    if not lines:
+        return ""
+    return "\n" + "\n".join(lines) + "\n"
+
+
+def _clean_latex_outside_code_block(text: str) -> str:
+    # Replace block math \[...\]
+    text = re.sub(
+        r'\\\[(.*?)\\\]',
+        lambda m: _clean_latex_block(m.group(1)),
+        text,
+        flags=re.DOTALL,
+    )
+
+    # Replace block math $$...$$
+    text = re.sub(
+        r'\$\$(.*?)\$\$',
+        lambda m: _clean_latex_block(m.group(1)),
+        text,
+        flags=re.DOTALL,
+    )
+
+    # Replace inline math \(...\)
+    text = re.sub(
+        r'\\\((.*?)\\\)',
+        lambda m: _clean_latex_inline(m.group(1)),
+        text,
+    )
+
+    # Replace inline math $...$
+    text = re.sub(
+        r'\$(?!\s)(.*?)(?<!\s)\$',
+        lambda m: _clean_latex_inline(m.group(1)),
+        text,
+    )
+
+    return text
+
+
+def clean_latex(text: str) -> str:
+    """Replace LaTeX formulas with plain text or rich text symbols for readability.
+
+    Args:
+        text: The input text containing LaTeX formulas.
+
+    Returns:
+        Text with LaTeX formulas replaced by readable unicode representations.
+    """
+    if not text:
+        return text
+
+    parts = text.split("```")
+    for i in range(len(parts)):
+        if i % 2 == 0:  # Even index means outside code block
+            parts[i] = _clean_latex_outside_code_block(parts[i])
+
+    return "```".join(parts)
+
+

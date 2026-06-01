@@ -647,8 +647,9 @@ async def test_turn_executor_user_preferences_truncation(temp_db: str) -> None:
     from kesoku.agent.turn_executor import MAX_TOTAL_USER_PREFERENCES_LENGTH
 
     # Check the prefix to ensure proper capping (excluding indicator suffix)
-    end_idx = content.index("[Current Request]", content.index("[User Preferences]")) - 2
+    end_idx = content.index("[Current Time Context]", content.index("[User Preferences]")) - 2
     preference_part = content[content.index("[User Preferences]") : end_idx]
+
     assert len(preference_part) == len("[User Preferences]\n") + MAX_TOTAL_USER_PREFERENCES_LENGTH
     assert preference_part.endswith("...")
 
@@ -906,11 +907,13 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     await gw.post(msg1)
     content1 = await run_turn(msg1)
 
-    # MUST contain both Sync Guidelines and User Preferences
+    # MUST contain both Sync Guidelines, User Preferences, and Time Context
     assert "[Background Context: Sync Guidelines]" in content1
     assert "[User Preferences]" in content1
     assert "- Lang: Python" in content1
+    assert "[Current Time Context]" in content1
     assert "First message" in content1
+
 
     # --- TURN 2: Normal Turn (Not Bootstrap) ---
     # Mark previous assistant message as responded to ensure it's in history
@@ -932,11 +935,13 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     await gw.post(msg2)
     content2 = await run_turn(msg2)
 
-    # MUST NOT contain Sync Guidelines, but MUST contain User Preferences
+    # MUST NOT contain Sync Guidelines, but MUST contain User Preferences and Time Context
     assert "[Background Context: Sync Guidelines]" not in content2
     assert "[User Preferences]" in content2
     assert "- Lang: Python" in content2
+    assert "[Current Time Context]" in content2
     assert "Second message" in content2
+
 
     # --- TURN 3: Bootstrap Turn (Idle resumption) ---
     history = await gw.db.get_session_history("sess_dynamic")
@@ -957,11 +962,13 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     await gw.post(msg3)
     content3 = await run_turn(msg3)
 
-    # MUST contain both again due to idle resumption
+    # MUST contain both again due to idle resumption, and Time Context
     assert "[Background Context: Sync Guidelines]" in content3
     assert "[User Preferences]" in content3
     assert "- Lang: Python" in content3
+    assert "[Current Time Context]" in content3
     assert "Third message" in content3
+
 
 
 def test_truncate_context_middle() -> None:
@@ -990,3 +997,112 @@ def test_truncate_context_middle() -> None:
     # Newline boundaries must be clean
     assert truncated.startswith("Line 1:")
     assert truncated.endswith("Line 40: This is some lengthy timeline memory content.")
+
+
+@pytest.mark.asyncio
+async def test_turn_executor_user_context_injection(temp_db: str) -> None:
+    """Verify that TurnExecutor injects User Context based on chatbot platform (Discord/Google Chat)."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.create_session("sess_user_ctx", title="User Context Session")
+
+    # --- Test Discord Injection ---
+    discord_msg = Message(
+        session_id="sess_user_ctx",
+        chatbot_id="discord",
+        channel_id="ch_user_ctx",
+        sender="Tifa Lockhart",
+        role="user",
+        content="Hello",
+        status="pending_agent",
+        metadata={
+            "discord_author_id": "123456",
+            "sender_name": "Tifa Lockhart (ID: 123456)",
+        },
+
+    )
+
+    await gw.post(discord_msg)
+
+    class CaptureLLM(BaseLLM):
+        def __init__(self) -> None:
+            self.captured_history = []
+
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+        ) -> LLMResponse:
+            self.captured_history = list(history or [])
+            return LLMResponse(content="Replied", total_tokens=5)
+
+    llm = CaptureLLM()
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    turn_logger = MagicMock(spec=TurnLogger)
+    context = KesokuContext(config=cfg, llm=llm)
+
+    executor = TurnExecutor("sess_user_ctx", gw, tool_runner, turn_logger, context=context)
+    worker = MagicMock()
+    type(worker).running = PropertyMock(side_effect=[True, False])
+
+    async def mock_pivot(m: Message) -> Message:
+        return m
+
+    worker.drain_queue_and_pivot.side_effect = mock_pivot
+    worker.queue_empty.return_value = True
+
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor.process_turn(
+            current_msg=discord_msg,
+            worker=worker,
+            session_staging_dir="/tmp/sess_user_ctx",
+        )
+
+    assert len(llm.captured_history) == 1
+    discord_content = llm.captured_history[0].content
+    assert "[User Context]" in discord_content
+    assert "- Sender: Tifa Lockhart (ID: 123456)" in discord_content
+
+    # --- Test Google Chat Injection ---
+    # Mark previous turn processed to start a clean turn
+    history = await gw.db.get_session_history("sess_user_ctx")
+    for m in history:
+        if m.status == "pending":
+            await gw.db.update_message_status(m.id, "responded")
+
+    gchat_msg = Message(
+        session_id="sess_user_ctx",
+        chatbot_id="google_chat",
+        channel_id="ch_user_ctx",
+        sender="Cloud Strife",
+        role="user",
+        content="Hi",
+        status="pending_agent",
+        metadata={
+            "google_chat_sender_email": "cloud@shinra.com",
+            "sender_name": "Cloud Strife (Email: cloud@shinra.com)",
+        },
+
+    )
+
+    await gw.post(gchat_msg)
+
+    # Re-init helper with fresh side effects
+    type(worker).running = PropertyMock(side_effect=[True, False])
+
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor.process_turn(
+            current_msg=gchat_msg,
+            worker=worker,
+            session_staging_dir="/tmp/sess_user_ctx",
+        )
+
+    assert len(llm.captured_history) > 0
+    gchat_content = llm.captured_history[-1].content
+    assert "[User Context]" in gchat_content
+    assert "- Sender: Cloud Strife (Email: cloud@shinra.com)" in gchat_content
+

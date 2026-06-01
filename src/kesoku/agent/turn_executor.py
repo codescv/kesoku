@@ -1,6 +1,7 @@
 """Orchestrates conversational turn execution, including LLM inference, thought logging, and tool calling."""
 
 import asyncio
+import datetime
 import json
 import time
 from typing import TYPE_CHECKING
@@ -395,7 +396,7 @@ class TurnExecutor:
             if len(pref_content) > MAX_TOTAL_USER_PREFERENCES_LENGTH:
                 pref_content = pref_content[: MAX_TOTAL_USER_PREFERENCES_LENGTH - 3] + "..."
 
-        # 3. Prepend Sync Guidelines (if Bootstrap) and Preferences (Always)
+        # 3. Prepend Sync Guidelines (if Bootstrap), Preferences (If present), and Time Context (Always)
         guidelines_prefix = ""
         if is_bootstrap:
             guidelines_prefix = (
@@ -419,18 +420,38 @@ class TurnExecutor:
                 f"{pref_content}\n\n"
             )
 
-        if guidelines_prefix or pref_prefix:
-            full_prefix = guidelines_prefix + pref_prefix + "[Current Request]\n"
+        # Format current time context using the current message timestamp
+        msg_time = datetime.datetime.fromtimestamp(current_msg.timestamp).astimezone()
+        time_str = msg_time.strftime("%Y-%m-%d %H:%M:%S (%A) %Z")
+        time_prefix = (
+            "[Current Time Context]\n"
+            f"- Current Time: {time_str}\n\n"
+        )
 
-            msg_idx = history.index(latest_user_msg)
-            copied_msg = latest_user_msg.model_copy()
-            copied_msg.content = full_prefix + copied_msg.content
-            history[msg_idx] = copied_msg
-            latest_user_msg = copied_msg
-            logger.info(
-                f"Prepended context blocks (guidelines: {is_bootstrap}, preferences: {bool(pref_content)}) "
-                f"into user message {copied_msg.id}"
+        # Format user context from metadata if provided by the chatbot adapter
+        user_prefix = ""
+        sender_name = current_msg.metadata.get("sender_name")
+        if sender_name:
+            user_prefix = (
+                "[User Context]\n"
+                f"- Sender: {sender_name}\n\n"
             )
+
+
+
+        full_prefix = guidelines_prefix + pref_prefix + time_prefix + user_prefix + "[Current Request]\n"
+
+
+        msg_idx = history.index(latest_user_msg)
+        copied_msg = latest_user_msg.model_copy()
+        copied_msg.content = full_prefix + copied_msg.content
+        history[msg_idx] = copied_msg
+        latest_user_msg = copied_msg
+        logger.info(
+            f"Prepended context blocks (guidelines: {is_bootstrap}, preferences: {bool(pref_content)}, time: True) "
+            f"into user message {copied_msg.id}"
+        )
+
 
 
         # 4. Background Consolidation Trigger (Unchanged)

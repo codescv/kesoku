@@ -435,12 +435,9 @@ async def test_on_message_timestamp_formatting(mock_config: KesokuConfig, mock_g
             mock_gateway.post.assert_called_once()
             posted_msg = mock_gateway.post.call_args[0][0]
 
-            from kesoku.gateway.chatbot.discord.adapter import _get_local_timezone_name
-
-            tz_name = _get_local_timezone_name()
-            local_time_str = dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-            expected_content = f"`Allowed` <@222> at `{local_time_str} {tz_name}`:\nHello test"
+            expected_content = "`Allowed` <@222>:\nHello test"
             assert posted_msg.content == expected_content
+
 
 
 def test_build_discord_custom_prompt_dm() -> None:

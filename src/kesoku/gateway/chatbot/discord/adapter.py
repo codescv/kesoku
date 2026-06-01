@@ -26,6 +26,7 @@ from kesoku.logger import setup_logger
 from kesoku.utils.async_fs import (
     async_exists,
 )
+from kesoku.utils.text import clean_latex
 
 from .command import setup_discord_commands
 from .ui import MessageHeaderView, QuestionView
@@ -68,8 +69,9 @@ def _build_discord_custom_prompt(
         members_section = f"\n## Users on the server\n\n{members_str}\n"
 
     time_section = """\n## Time
-The user message contains their user id and the **real** time that the message is sent.
+The current time is injected in the context header of your latest request.
 The time is very important to prevent your hallucination about the world status.\n"""
+
 
     # Build location instruction and channel topic
     if is_dm:
@@ -205,7 +207,13 @@ class DiscordChatbot(Chatbot):
         if not self.bot.is_closed():
             asyncio.create_task(self.bot.close())
 
+    def format_text(self, text: str) -> str:
+        """Clean, normalize, and apply LaTeX filter for Discord compatibility."""
+        formatted = super().format_text(text)
+        return clean_latex(formatted)
+
     async def _keep_typing(
+
         self, channel: discord.Thread | discord.DMChannel | discord.GroupChannel | discord.TextChannel
     ) -> None:
         """Keep sending typing status to Discord channel/thread in a loop.
@@ -434,12 +442,11 @@ class DiscordChatbot(Chatbot):
             if isinstance(parent_role, str):
                 role = parent_role
 
-        tz_name = get_local_timezone_name()
         discord_msg_content = (
-            f"`{message.author.display_name}` <@{message.author.id}> "
-            f"at `{message.created_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')} {tz_name}`:\n"
+            f"`{message.author.display_name}` <@{message.author.id}>:\n"
             f"{message.content}"
         )
+
 
         # Construct metadata with parent/thread identifiers
         channel_name = getattr(target_channel, "name", "") or ""
@@ -455,7 +462,10 @@ class DiscordChatbot(Chatbot):
             "discord_message_id": str(message.id),
             "discord_author_id": str(message.author.id),
             "channel_name": channel_name,
+            "sender_name": f"{message.author.display_name} (ID: {message.author.id})",
+
         }
+
         if parent_channel_id:
             msg_metadata["parent_channel_id"] = parent_channel_id
         if parent_channel_name:
