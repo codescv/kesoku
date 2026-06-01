@@ -435,8 +435,9 @@ async def test_on_message_timestamp_formatting(mock_config: KesokuConfig, mock_g
             mock_gateway.post.assert_called_once()
             posted_msg = mock_gateway.post.call_args[0][0]
 
-            expected_content = "`Allowed` <@222>:\nHello test"
+            expected_content = "Hello test"
             assert posted_msg.content == expected_content
+
 
 
 

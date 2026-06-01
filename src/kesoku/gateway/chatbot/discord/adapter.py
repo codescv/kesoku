@@ -442,10 +442,8 @@ class DiscordChatbot(Chatbot):
             if isinstance(parent_role, str):
                 role = parent_role
 
-        discord_msg_content = (
-            f"`{message.author.display_name}` <@{message.author.id}>:\n"
-            f"{message.content}"
-        )
+        discord_msg_content = message.content
+
 
 
         # Construct metadata with parent/thread identifiers
