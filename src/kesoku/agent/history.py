@@ -1,5 +1,6 @@
 """History cleaning and optimization utilities for Kesoku."""
 
+import datetime
 import logging
 import os
 from typing import Literal
@@ -116,6 +117,16 @@ async def build_clean_history(
     # 5. Flatten turns and construct the final chronological context history.
     final_history = []
     for turn in cleaned_turns:
-        final_history.extend(turn)
+        for m in turn:
+            if m.role == MessageRole.USER:
+                m_copy = m.model_copy()
+                msg_time = datetime.datetime.fromtimestamp(m_copy.timestamp).astimezone()
+                time_str = msg_time.strftime("%Y-%m-%d %H:%M:%S (%A) %Z")
+                sender_name = m_copy.metadata.get("sender_name") or m_copy.sender
+                header = f"[{sender_name} at {time_str}]:\n"
+                m_copy.content = header + m_copy.content
+                final_history.append(m_copy)
+            else:
+                final_history.append(m)
 
     return final_history

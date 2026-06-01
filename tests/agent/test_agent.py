@@ -389,7 +389,7 @@ async def test_system_prompt_and_pinned_turns_turn_based(temp_db: str) -> None:
     assert len(history) == 12
     history_contents = [m.content for m in history]
     for i in range(1, 7):
-        assert f"User Prompt {i}" in history_contents
+        assert any(f"User Prompt {i}" in content for content in history_contents)
         assert f"Response {i}" in history_contents
 
 

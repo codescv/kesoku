@@ -647,7 +647,7 @@ async def test_turn_executor_user_preferences_truncation(temp_db: str) -> None:
     from kesoku.agent.turn_executor import MAX_TOTAL_USER_PREFERENCES_LENGTH
 
     # Check the prefix to ensure proper capping (excluding indicator suffix)
-    end_idx = content.index("[Current Time Context]", content.index("[User Preferences]")) - 2
+    end_idx = content.index("[Current Request]", content.index("[User Preferences]")) - 2
     preference_part = content[content.index("[User Preferences]") : end_idx]
 
     assert len(preference_part) == len("[User Preferences]\n") + MAX_TOTAL_USER_PREFERENCES_LENGTH
@@ -911,7 +911,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     assert "[Background Context: Sync Guidelines]" in content1
     assert "[User Preferences]" in content1
     assert "- Lang: Python" in content1
-    assert "[Current Time Context]" in content1
+    assert "[u1 at " in content1
     assert "First message" in content1
 
 
@@ -939,7 +939,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     assert "[Background Context: Sync Guidelines]" not in content2
     assert "[User Preferences]" in content2
     assert "- Lang: Python" in content2
-    assert "[Current Time Context]" in content2
+    assert "[u1 at " in content2
     assert "Second message" in content2
 
 
@@ -966,7 +966,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     assert "[Background Context: Sync Guidelines]" in content3
     assert "[User Preferences]" in content3
     assert "- Lang: Python" in content3
-    assert "[Current Time Context]" in content3
+    assert "[u1 at " in content3
     assert "Third message" in content3
 
 
@@ -1064,8 +1064,7 @@ async def test_turn_executor_user_context_injection(temp_db: str) -> None:
 
     assert len(llm.captured_history) == 1
     discord_content = llm.captured_history[0].content
-    assert "[User Context]" in discord_content
-    assert "- Sender: Tifa Lockhart (ID: 123456)" in discord_content
+    assert "[Tifa Lockhart (ID: 123456) at " in discord_content
 
     # --- Test Google Chat Injection ---
     # Mark previous turn processed to start a clean turn
@@ -1103,6 +1102,5 @@ async def test_turn_executor_user_context_injection(temp_db: str) -> None:
 
     assert len(llm.captured_history) > 0
     gchat_content = llm.captured_history[-1].content
-    assert "[User Context]" in gchat_content
-    assert "- Sender: Cloud Strife (Email: cloud@shinra.com)" in gchat_content
+    assert "[Cloud Strife (Email: cloud@shinra.com) at " in gchat_content
 
