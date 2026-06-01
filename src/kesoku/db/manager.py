@@ -829,11 +829,12 @@ class DatabaseManager:
             cursor.execute(
                 """
                 SELECT timestamp FROM messages
-                WHERE chatbot_id = ? AND channel_id = ?
+                WHERE chatbot_id = ?
+                  AND (channel_id = ? OR json_extract(metadata, '$.parent_channel_id') = ?)
                   AND role IN ('user', 'assistant')
                 ORDER BY timestamp DESC LIMIT 1
                 """,
-                (chatbot_id, channel_id),
+                (chatbot_id, channel_id, channel_id),
             )
             row = cursor.fetchone()
             return row["timestamp"] if row else None
@@ -850,11 +851,12 @@ class DatabaseManager:
             cursor.execute(
                 """
                 SELECT COUNT(*), MAX(timestamp) FROM messages
-                WHERE chatbot_id = ? AND channel_id = ?
+                WHERE chatbot_id = ?
+                  AND (channel_id = ? OR json_extract(metadata, '$.parent_channel_id') = ?)
                   AND sender = 'Cronjob'
                   AND timestamp >= ?
                 """,
-                (chatbot_id, channel_id, midnight_ts),
+                (chatbot_id, channel_id, channel_id, midnight_ts),
             )
             row = cursor.fetchone()
             count = row[0] if row and row[0] is not None else 0

@@ -252,3 +252,61 @@ def test_cross_session_context_stale_lock_self_healing(db_manager):
     # Claim lock should heal the stale lock and return True
     locked = db_manager.claim_cross_session_context_for_update("coder_role")
     assert locked is True
+
+
+def test_cronjob_thread_aware_stats_and_timestamp(db_manager):
+    """Tests that get_cronjob_sent_stats_today and get_last_message_timestamp
+    correctly match parent channels from thread metadata.
+    """
+    session = Session(
+        id="sess_thread_test",
+        title="Thread Test",
+        created_at=time.time(),
+        updated_at=time.time(),
+    )
+    db_manager.create_session(session)
+
+    now = time.time()
+
+    # 1. Save a cronjob message inside a thread (thread_1) whose parent is parent_chan_1
+    msg_cron_thread = Message(
+        id="msg_cron_t1",
+        session_id="sess_thread_test",
+        chatbot_id="discord",
+        channel_id="thread_1",
+        sender="Cronjob",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Scheduled review question",
+        timestamp=now - 60,
+        metadata={"parent_channel_id": "parent_chan_1", "is_cronjob": True},
+        status=MessageStatus.PENDING,
+    )
+    db_manager.save_message(msg_cron_thread)
+
+    # 2. Save a regular user message inside another thread (thread_2) whose parent is parent_chan_1
+    msg_user_thread = Message(
+        id="msg_user_t2",
+        session_id="sess_thread_test",
+        chatbot_id="discord",
+        channel_id="thread_2",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="User reply",
+        timestamp=now - 30,
+        metadata={"parent_channel_id": "parent_chan_1"},
+        status=MessageStatus.PENDING,
+    )
+    db_manager.save_message(msg_user_thread)
+
+    # 3. Query cronjob stats on the parent channel. It should find the cron message sent in thread_1.
+    count, last_ts = db_manager.get_cronjob_sent_stats_today(chatbot_id="discord", channel_id="parent_chan_1")
+    assert count == 1
+    assert last_ts is not None
+    assert abs(last_ts - (now - 60)) < 1e-3
+
+    # 4. Query last message timestamp on the parent channel. It should find the user reply in thread_2.
+    last_msg_ts = db_manager.get_last_message_timestamp(chatbot_id="discord", channel_id="parent_chan_1")
+    assert last_msg_ts is not None
+    assert abs(last_msg_ts - (now - 30)) < 1e-3
