@@ -787,7 +787,8 @@ async def test_turn_executor_cross_session_context_injection_and_consolidation(t
     assert len(llm.captured_history) == 1
     content = llm.captured_history[0].content
     assert "[Background Context: Sync Guidelines]" in content
-    assert "view_cross_session_memory" in content
+    assert "view_chat_history_summary" in content
+
     assert "Initial context summary." not in content
     assert "Can you write a script for me?" not in content
     assert "Go ahead" in content

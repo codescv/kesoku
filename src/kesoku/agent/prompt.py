@@ -73,10 +73,9 @@ Available Memory Tools:
   content as the `old_content` parameter to `update_memory`. If `old_content` does not match
   the existing content in the database, the update will fail.
 - `delete_memory`: Remove a specific key's memory.
-- `view_cross_session_memory`: Retrieve a summarized narrative timeline of recent events,
-  conversations, and milestones that occurred in other active threads/channels for the
-  current persona role. Use this when you need to synchronize context regarding external tasks.
-
+- `view_chat_history_summary`: Retrieve a consolidated chat history summary and timeline of recent
+  events/discussions across all active channels/threads for the current active persona role.
+  Use this to read global context and synchronize your knowledge about external discussions.
 
 IMPORTANT: When the user asks you to "remember" something, you MUST use the `update_memory` tool to write it
 to the most relevant category defined.
@@ -95,7 +94,7 @@ Memory Categories & Strict Usage Guidelines:
 4. `memo`:
    - Purpose: Daily record of important, interesting, or noteworthy events that occurred in your "life" as an agent.
      Use this to keep a diary of your activities, interactions, or thoughts.
-   - Scope: Globally shared among all role persona.
+   - Scope: Role-isolated and bound to the current active roleplay persona scope.
 
 Rules for managing memory:
 - Key naming constraints: Memory keys must strictly contain ONLY lowercase letters, underscores,

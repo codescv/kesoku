@@ -403,14 +403,15 @@ class TurnExecutor:
                 "======\n"
                 "# Passive Synchronization Guidelines:\n"
                 f"- 💡 You are playing the active persona role: {active_role}.\n"
-                "- 💡 You have access to the `view_cross_session_memory` tool, which retrieves a "
-                "summarized chronological timeline of recent events, chats, and developments that "
-                "occurred in other channels/threads.\n"
+                "- 💡 You have access to the `view_chat_history_summary` tool, which retrieves a "
+                "consolidated chat history summary and chronological timeline "
+                "of recent events across active threads/channels.\n"
                 "- 💡 If the user's current request below refers to external threads, other chats, "
                 "or events you cannot locate in this session's history, you MUST call "
-                "`view_cross_session_memory` to synchronize your context before providing a response.\n"
+                "`view_chat_history_summary` to read the global context and synchronize before providing a response.\n"
                 "======\n\n"
             )
+
 
             pref_prefix = ""
             if pref_content:

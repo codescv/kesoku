@@ -242,6 +242,17 @@ async def test_category_role_routing_and_play_role(tmp_path) -> None:
     )
     assert "Scope: `tifa`" in res
 
+    # 2b. Update 'memo' memory - it should also go to 'tifa' active role scope
+    res_memo = await update_memory(
+        category="memo",
+        key="interesting_event",
+        title="Interesting",
+        content="An interesting thing happened",
+        role="default",  # Passed explicitly but should be overridden
+        context=ctx,
+    )
+    assert "Scope: `tifa`" in res_memo
+
     # 3. Test play_role tool to switch role to asuka
     # First let's ensure asuka and tifa directories exist under workspace roles_dir
     roles_dir = str(tmp_path / "roles")

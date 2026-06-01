@@ -50,8 +50,8 @@ graph TD
     C --> E[Execute LLM Inference]
     D --> E
     E --> F{LLM needs external history?}
-    F -- Yes --> G[Call view_cross_session_memory tool]
-    G --> H[Analyze external timeline]
+    F -- Yes --> G[Call view_chat_history_summary tool]
+    G --> H[Analyze external summary timeline]
     H --> E
     F -- No --> I[Generate final response]
     I --> J[Trigger background consolidation check]
@@ -111,8 +111,8 @@ On a Bootstrap Turn, the `TurnExecutor` queries the database for `user_preferenc
 ======
 # Passive Synchronization Guidelines:
 - 💡 You are playing the active persona role: {active_role}.
-- 💡 You have access to the `view_cross_session_memory` tool, which retrieves a summarized chronological timeline of recent events, chats, and developments that occurred in other channels/threads.
-- 💡 If the user's current request below refers to external threads, other chats, or events you cannot locate in this session's history, you MUST call `view_cross_session_memory` to synchronize your context before providing a response.
+- 💡 You have access to the `view_chat_history_summary` tool, which retrieves a consolidated chat history summary and chronological timeline of recent events across active threads/channels.
+- 💡 If the user's current request below refers to external threads, other chats, or events you cannot locate in this session's history, you MUST call `view_chat_history_summary` to read the global context and synchronize before providing a response.
 ======
 
 [User Preferences]
@@ -130,29 +130,29 @@ On a Bootstrap Turn, the `TurnExecutor` queries the database for `user_preferenc
 
 When the LLM receives a request that implies external dependencies, it utilizes the dedicated Pull tool to synchronize its knowledge.
 
-### 5.1 The `view_cross_session_memory` Tool
-*   **Signature**: `view_cross_session_memory(context: ToolContext)`
+### 5.1 The `view_chat_history_summary` Tool
+*   **Signature**: `view_chat_history_summary(context: ToolContext)`
 *   **Execution Flow**:
     1.  Resolves the current active persona role.
     2.  Queries the `cross_session_contexts` table for the role's narrative timeline.
-    3.  Queries `get_role_messages_since` in the `messages` table to fetch any recent messages written *after* the last consolidation checkpoint (`updated_at`), ensuring real-time updates are not missed.
-    4.  Outputs a consolidated Markdown text block containing both the chronological timeline and recent pending chats.
+    3.  Queries `get_role_messages_since` in the `messages` table to fetch any recent active messages written *after* the last consolidation checkpoint (`updated_at`), ensuring real-time updates are not missed.
+    4.  Outputs a consolidated Markdown text block combining both the consolidated summary timeline and recent active messages.
 
 ### 5.2 Concrete Execution Example (The "Pull" Turn)
 
 1.  **User Request**: "刚才在 Discord 里讨论的那个并发 bug，ConnectionProvider 的测试用例你写完了吗？"
-2.  **LLM Turn Boot**: Because this is a new/idle turn, the **Bootstrap Injection** template is prepended. The LLM sees it has access to the `view_cross_session_memory` tool.
-3.  **LLM Analysis**: The LLM analyzes the request and realizes it does not have "Discord并发bug" or "ConnectionProvider" in its current local history, but it's told it has a tool to check other channels.
+2.  **LLM Turn Boot**: Because this is a new/idle turn, the **Bootstrap Injection** template is prepended. The LLM sees it has access to the `view_chat_history_summary` tool to read global context.
+3.  **LLM Analysis**: The LLM analyzes the request and realizes it does not have "Discord并发bug" or "ConnectionProvider" in its current local history, but it's told it has a tool to read the global chat history summary.
 4.  **Tool Call**:
     ```json
     {
-      "name": "view_cross_session_memory",
+      "name": "view_chat_history_summary",
       "arguments": {}
     }
     ```
 5.  **Tool Output**:
     ```markdown
-    === Cross-Session Event Timeline (Role: default) ===
+    === Consolidated Chat History Summary (Role: default) ===
     - [05-30 18:20] User initiated a refactor of DatabaseManager connection pool on Discord.
     - [05-30 19:05] Discussed ConnectionProvider to isolate SQLite handle management.
     - [05-31 10:30] Encountered concurrency thread-safety failures in tests. Resolved via connection check-in hooks.

@@ -901,11 +901,11 @@ async def _resolve_memory_role(category: str, role_param: str | None, context: T
     category = category.strip().lower()
 
     # Rule 1: Standard categories ALWAYS use "default" role
-    if category in {"progress", "learnings", "memo"}:
+    if category in {"progress", "learnings"}:
         return "default"
 
-    # Rule 2: user_preferences category uses current channel's active role
-    if category in {"user_preferences"}:
+    # Rule 2: user_preferences and memo categories use current channel's active role
+    if category in {"user_preferences", "memo"}:
         if context and context.gateway and context.original_msg_id:
             db = context.gateway.db
             try:
@@ -1221,26 +1221,20 @@ async def play_role(role: str, context: ToolContext) -> str:
 
 
 @default_registry.register
-async def view_cross_session_memory(context: ToolContext) -> str:
-    """Retrieve a cross-session narrative timeline of recent events.
+async def view_chat_history_summary(context: ToolContext) -> str:
+    """Retrieve the consolidated chat history summary and recent active messages for the current role persona.
 
-    This includes conversations and milestones that occurred in other active
-    threads/channels for the current active persona role.
-
-    Use this tool when the user refers to external discussions or events that
-    you do not have in your current local conversation history.
+    Use this tool to read global context and synchronize knowledge about external conversations,
+    stories, and milestones that occurred across all channels/threads.
 
     Args:
         context: Injected tool execution context (automatically resolved).
 
     Returns:
-        A formatted Markdown string containing the cross-session event
-        timeline and any recent un-consolidated conversations.
+        A formatted Markdown string containing the consolidated summary and recent active messages.
     """
     if not context or not context.gateway:
         return "Error: ToolContext or Gateway is missing."
-
-
 
     # 1. Resolve active role using helper
     active_role = await _resolve_memory_role(category="user_preferences", role_param=None, context=context)
@@ -1253,20 +1247,21 @@ async def view_cross_session_memory(context: ToolContext) -> str:
         )
         timeline_content = stored_ctx.content if stored_ctx else ""
 
-        lines = [f"=== Cross-Session Event Timeline (Role: {active_role}) ==="]
+        lines = [f"=== Consolidated Chat History Summary (Role: {active_role}) ==="]
         if timeline_content.strip():
             lines.append(timeline_content.strip())
         else:
-            lines.append("No historical timeline events recorded yet.")
+            lines.append("No consolidated history recorded yet.")
 
         if new_messages:
-            lines.append("\n=== Recent Activity in other threads (Un-consolidated) ===")
+            lines.append("\n=== Recent Active Messages ===")
             for m in new_messages:
                 time_str = time.strftime("%m-%d %H:%M", time.localtime(m.timestamp))
                 lines.append(f"- [{time_str}] {m.sender}: {m.content}")
 
         return "\n".join(lines)
     except Exception as e:
-        logger.error(f"Failed to view cross-session memory: {e}", exc_info=True)
-        return f"Error retrieving cross-session memory: {e}"
+        logger.error(f"Failed to retrieve chat history summary: {e}", exc_info=True)
+        return f"Error retrieving chat history summary: {e}"
+
 
