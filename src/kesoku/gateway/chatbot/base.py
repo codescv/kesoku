@@ -343,7 +343,7 @@ class Chatbot(ABC):
                 metrics = msg.metadata.get("turn_metrics")
                 break
 
-        session_turns = len([m for m in history if m.role == MessageRole.USER])
+        session_turns = await self.gateway.db.get_session_turns_count(session.id)
         context_tokens = metrics.get("context_tokens", 0) if metrics else 0
         cached_tokens = metrics.get("cached_tokens", 0) if metrics else 0
         turn_tool_calls = (

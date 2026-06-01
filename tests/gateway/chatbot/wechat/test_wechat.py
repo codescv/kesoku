@@ -380,6 +380,7 @@ async def test_wechat_chatbot_slash_command_status(
             ),
         ]
         mock_gateway.db.get_session_history.return_value = mock_history
+        mock_gateway.db.get_session_turns_count = AsyncMock(return_value=1)
 
         inbound_payload = {
             "from_user_id": "user_alice",

@@ -831,6 +831,139 @@ async def test_turn_executor_cross_session_context_injection_and_consolidation(t
     assert ctx.content == "Consolidated memory from background!"
 
 
+
+@pytest.mark.asyncio
+async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_db: str) -> None:
+    """Verify dynamic injection rules: Sync Guidelines are Bootstrap-only, while Preferences are unconditional."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.create_session("sess_dynamic", title="Dynamic Injection Session")
+
+    # 1. Set role and user preferences
+    role = "tifa"
+    await gw.db.set_channel_role("cli", "ch_dyn", role)
+    await gw.db.upsert_agent_memory(
+        category="user_preferences",
+        key="pref_lang",
+        title="Lang",
+        content="Python",
+        role=role,
+    )
+
+    class CaptureLLM(BaseLLM):
+        def __init__(self) -> None:
+            self.captured_history = []
+
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+        ) -> LLMResponse:
+            self.captured_history = list(history or [])
+            return LLMResponse(content="Replied to user", total_tokens=5)
+
+    llm = CaptureLLM()
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    turn_logger = MagicMock(spec=TurnLogger)
+    context = KesokuContext(config=cfg, llm=llm)
+
+    # Helper to run turn
+    async def run_turn(msg: Message) -> str:
+        executor = TurnExecutor("sess_dynamic", gw, tool_runner, turn_logger, context=context)
+        worker = MagicMock()
+        type(worker).running = PropertyMock(side_effect=[True, False])
+        async def mock_pivot(m: Message) -> Message:
+            return m
+        worker.drain_queue_and_pivot.side_effect = mock_pivot
+        worker.queue_empty.return_value = True
+
+        with patch("kesoku.context.get_config", return_value=cfg):
+            await executor.process_turn(
+                current_msg=msg,
+                worker=worker,
+                session_staging_dir="/tmp/sess_dynamic",
+            )
+        assert len(llm.captured_history) > 0
+        return llm.captured_history[-1].content
+
+    now = time.time()
+
+    # --- TURN 1: Bootstrap Turn (New Session) ---
+    msg1 = Message(
+        session_id="sess_dynamic",
+        chatbot_id="cli",
+        channel_id="ch_dyn",
+        sender="u1",
+        role="user",
+        content="First message",
+        status="pending_agent",
+        timestamp=now,
+    )
+    await gw.post(msg1)
+    content1 = await run_turn(msg1)
+
+    # MUST contain both Sync Guidelines and User Preferences
+    assert "[Background Context: Sync Guidelines]" in content1
+    assert "[User Preferences]" in content1
+    assert "- Lang: Python" in content1
+    assert "First message" in content1
+
+    # --- TURN 2: Normal Turn (Not Bootstrap) ---
+    # Mark previous assistant message as responded to ensure it's in history
+    history = await gw.db.get_session_history("sess_dynamic")
+    for m in history:
+        if m.role == "assistant" and m.status == "pending":
+            await gw.db.update_message_status(m.id, "responded")
+
+    msg2 = Message(
+        session_id="sess_dynamic",
+        chatbot_id="cli",
+        channel_id="ch_dyn",
+        sender="u1",
+        role="user",
+        content="Second message",
+        status="pending_agent",
+        timestamp=now + 10,  # Only 10 seconds later (well below 30-min idle threshold)
+    )
+    await gw.post(msg2)
+    content2 = await run_turn(msg2)
+
+    # MUST NOT contain Sync Guidelines, but MUST contain User Preferences
+    assert "[Background Context: Sync Guidelines]" not in content2
+    assert "[User Preferences]" in content2
+    assert "- Lang: Python" in content2
+    assert "Second message" in content2
+
+    # --- TURN 3: Bootstrap Turn (Idle resumption) ---
+    history = await gw.db.get_session_history("sess_dynamic")
+    for m in history:
+        if m.role == "assistant" and m.status == "pending":
+            await gw.db.update_message_status(m.id, "responded")
+
+    msg3 = Message(
+        session_id="sess_dynamic",
+        chatbot_id="cli",
+        channel_id="ch_dyn",
+        sender="u1",
+        role="user",
+        content="Third message",
+        status="pending_agent",
+        timestamp=now + 10 + 2000,  # 2000 seconds later (> 1800 seconds / 30 min idle threshold)
+    )
+    await gw.post(msg3)
+    content3 = await run_turn(msg3)
+
+    # MUST contain both again due to idle resumption
+    assert "[Background Context: Sync Guidelines]" in content3
+    assert "[User Preferences]" in content3
+    assert "- Lang: Python" in content3
+    assert "Third message" in content3
+
+
 def test_truncate_context_middle() -> None:
     """Verify that truncate_context_middle preserves start/end and truncates middle correctly."""
     from kesoku.utils.text import truncate_context_middle

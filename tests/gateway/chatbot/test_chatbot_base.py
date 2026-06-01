@@ -69,6 +69,7 @@ async def test_get_session_status_by_channel() -> None:
         ),
     ]
     mock_db.get_session_history = AsyncMock(return_value=history)
+    mock_db.get_session_turns_count = AsyncMock(return_value=1)
 
     chatbot = MockChatbot(chatbot_id="mock_bot", gateway=mock_gateway)
 

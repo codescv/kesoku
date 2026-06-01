@@ -382,22 +382,22 @@ class TurnExecutor:
         # 1. Calculate if this is a Bootstrap Turn (first turn of session or idle > 30 mins)
         is_bootstrap = await self._is_bootstrap_turn(history, current_msg)
 
-        # 2. Query user preferences only if this is a bootstrap turn
+        # 2. Query user preferences ALWAYS (unconditional)
         pref_content = ""
-        if is_bootstrap:
-            user_prefs = await self.context.db.get_agent_memories(
-                category="user_preferences",
-                role=active_role,
+        user_prefs = await self.context.db.get_agent_memories(
+            category="user_preferences",
+            role=active_role,
+        )
+        if user_prefs:
+            pref_content = "\n".join(
+                f"- {pref['title']}: {pref['content']}" for pref in user_prefs
             )
-            if user_prefs:
-                pref_content = "\n".join(
-                    f"- {pref['title']}: {pref['content']}" for pref in user_prefs
-                )
-                if len(pref_content) > MAX_TOTAL_USER_PREFERENCES_LENGTH:
-                    pref_content = pref_content[: MAX_TOTAL_USER_PREFERENCES_LENGTH - 3] + "..."
+            if len(pref_content) > MAX_TOTAL_USER_PREFERENCES_LENGTH:
+                pref_content = pref_content[: MAX_TOTAL_USER_PREFERENCES_LENGTH - 3] + "..."
 
-        # 3. Prepend Sync Guidelines and Preferences to the latest user message
-        if is_bootstrap and "[Background Context: Sync Guidelines]" not in latest_user_msg.content:
+        # 3. Prepend Sync Guidelines (if Bootstrap) and Preferences (Always)
+        guidelines_prefix = ""
+        if is_bootstrap:
             guidelines_prefix = (
                 "[Background Context: Sync Guidelines]\n"
                 "======\n"
@@ -412,14 +412,14 @@ class TurnExecutor:
                 "======\n\n"
             )
 
+        pref_prefix = ""
+        if pref_content:
+            pref_prefix = (
+                "[User Preferences]\n"
+                f"{pref_content}\n\n"
+            )
 
-            pref_prefix = ""
-            if pref_content:
-                pref_prefix = (
-                    "[User Preferences]\n"
-                    f"{pref_content}\n\n"
-                )
-
+        if guidelines_prefix or pref_prefix:
             full_prefix = guidelines_prefix + pref_prefix + "[Current Request]\n"
 
             msg_idx = history.index(latest_user_msg)
@@ -428,8 +428,10 @@ class TurnExecutor:
             history[msg_idx] = copied_msg
             latest_user_msg = copied_msg
             logger.info(
-                f"Prepended bootstrap context blocks (guidelines & preferences) into user message {copied_msg.id}"
+                f"Prepended context blocks (guidelines: {is_bootstrap}, preferences: {bool(pref_content)}) "
+                f"into user message {copied_msg.id}"
             )
+
 
         # 4. Background Consolidation Trigger (Unchanged)
         # Retrieve Cross-Session Memory context parameters solely to check and trigger consolidation asynchronously

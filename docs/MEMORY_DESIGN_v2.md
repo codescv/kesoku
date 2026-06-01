@@ -4,7 +4,7 @@
 
 This document details the production architecture of the **Kesoku Memory System (v2)**. It addresses the critical "Attention Distraction" and "Context Drift" vulnerabilities identified in passive full-injection memory architectures (v1). 
 
-By combining **Bootstrap-Triggered Injection** (injecting preferences only on session start or idle resumption) with **On-Demand Pull Retrieval** (wrapping cross-session timelines into a dedicated LLM Tool accompanied by passive hints), Kesoku v2 achieves an optimal balance of developer-level execution focus, token efficiency, and cross-channel smart awareness.
+By combining **Unconditional Preferences Injection** (always injecting active user preferences to ensure consistent instruction adherence) and **Bootstrap-Triggered Guidelines Injection** (injecting passive sync guidelines only on session start or idle resumption) with **On-Demand Pull Retrieval** (wrapping cross-session timelines into a dedicated LLM Tool), Kesoku v2 achieves an optimal balance of developer-level execution focus, token efficiency, and cross-channel smart awareness.
 
 ---
 
@@ -45,16 +45,19 @@ The memory system decouples static metadata, rule-based user profiles, and volat
 ```mermaid
 graph TD
     A[Start Turn] --> B{Is Bootstrap Turn?}
-    B -- Yes --> C[Prepend guidelines & preferences to user message]
-    B -- No --> D[Keep user message pristine]
-    C --> E[Execute LLM Inference]
-    D --> E
-    E --> F{LLM needs external history?}
-    F -- Yes --> G[Call view_chat_history_summary tool]
-    G --> H[Analyze external summary timeline]
-    H --> E
-    F -- No --> I[Generate final response]
-    I --> J[Trigger background consolidation check]
+    B -- Yes --> C[Prepend Guidelines & Preferences to user message]
+    B -- No --> D{Has User Preferences?}
+    D -- Yes --> E[Prepend Preferences only to user message]
+    D -- No --> F[Keep user message pristine]
+    C --> G[Execute LLM Inference]
+    E --> G
+    F --> G
+    G --> H{LLM needs external history?}
+    H -- Yes --> I[Call view_chat_history_summary tool]
+    I --> J[Analyze external summary timeline]
+    J --> G
+    H -- No --> K[Generate final response]
+    K --> L[Trigger background consolidation check]
 ```
 
 ---
@@ -90,22 +93,22 @@ CREATE TABLE IF NOT EXISTS cross_session_contexts (
 
 ---
 
-## 4. Dynamic Bootstrap Context Injection
+## 4. Dynamic Context Injection
 
 To protect the LLM's attention span during active conversation turns, **Cross-Session Memory is never passively injected into regular dialog turns**. 
 
-Instead, Kesoku employs a **Bootstrap-Triggered Injection** strategy, pushing profile preferences and dynamic hints only when a conversation is initiated or resumed.
+Instead, Kesoku employs a hybrid injection strategy: **Sync Guidelines** are injected only on Bootstrap Turns (new session or idle resumption), whereas **User Preferences** are injected unconditionally on every turn (if they exist).
 
-### 4.1 Bootstrap Trigger Conditions
-A turn is flagged as a `Bootstrap Turn` if and only if:
-1.  **New Session**: The turn count in the current session is `0` or `1`.
-2.  **Idle Session Resumption**: The idle duration (current message timestamp minus the timestamp of the last session message) exceeds the **Idle Threshold** (default: `1800` seconds / 30 minutes).
+### 4.1 Injection Conditions
+- **Sync Guidelines**: Injected on **Bootstrap Turns** only. A turn is flagged as a `Bootstrap Turn` if and only if:
+  1.  **New Session**: The turn count in the current session is `0` or `1`.
+  2.  **Idle Session Resumption**: The idle duration (current message timestamp minus the timestamp of the last session message) exceeds the **Idle Threshold** (default: `1800` seconds / 30 minutes).
+- **User Preferences**: Injected **on every turn** (unconditional), provided that the user has defined preferences in the database.
 
-For all other turns, the system operates in a **Zero-Distraction Mode**, injecting absolutely nothing into the user message.
+### 4.2 Injection Templates
 
-### 4.2 Bootstrap Injection Template
-On a Bootstrap Turn, the `TurnExecutor` queries the database for `user_preferences` and prepends the following block to the latest user message. Notice that `User Preferences` are decoupled from the background context and placed directly above the current request so they are never ignored:
-
+#### Case A: Bootstrap Turn (With User Preferences)
+Both Guidelines and Preferences are injected:
 ```markdown
 [Background Context: Sync Guidelines]
 ======
@@ -123,6 +126,21 @@ On a Bootstrap Turn, the `TurnExecutor` queries the database for `user_preferenc
 [Current Request]
 {original_user_message_content}
 ```
+
+#### Case B: Non-Bootstrap Turn (With User Preferences)
+Only Preferences are injected:
+```markdown
+[User Preferences]
+- Preferred Programming Language: Python
+- Code Style: PEP 8 compliant, explicit type hints
+- Preferred Test Framework: pytest with uv run
+
+[Current Request]
+{original_user_message_content}
+```
+
+#### Case C: Non-Bootstrap Turn (Without User Preferences)
+No injection occurs; the user message remains pristine.
 
 ---
 
