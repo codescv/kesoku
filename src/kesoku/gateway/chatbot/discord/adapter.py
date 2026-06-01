@@ -19,7 +19,6 @@ from kesoku.gateway.chatbot.base import (
     DeliveryAbortedError,
     InboundMessageAttachment,
     InboundMessageDTO,
-    get_local_timezone_name,
 )
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
@@ -34,7 +33,6 @@ from .voice import send_voice_message
 
 logger = setup_logger(__name__)
 
-_get_local_timezone_name = get_local_timezone_name
 
 
 DISCORD_MAX_CONTENT_LENGTH = 2000

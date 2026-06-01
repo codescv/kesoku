@@ -11,7 +11,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-import tzlocal
 from pydantic import BaseModel, Field
 
 from kesoku.agent.prompt import build_sys_prompt
@@ -91,15 +90,6 @@ class DeliveryAbortedError(Exception):
     """Exception raised to immediately halt outgoing message delivery."""
 
     pass
-
-
-def get_local_timezone_name() -> str:
-    """Retrieve the local system timezone name (e.g., 'Asia/Shanghai')."""
-    try:
-        return tzlocal.get_localzone().key or "UTC"
-    except Exception:
-        return datetime.datetime.now().astimezone().tzname() or "UTC"
-
 
 def _format_uptime(td: datetime.timedelta) -> str:
     """Format a timedelta into a concise string representing uptime.
@@ -410,10 +400,8 @@ class Chatbot(ABC):
             await self.gateway.db.update_session_updated_at(session.id, time.time())
 
         now_dt = datetime.datetime.now()
-        tz_name = get_local_timezone_name()
-        now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        msg_content = prompt_content
 
-        msg_content = f"`{sender_name}` at `{now_str} {tz_name}`:\n{prompt_content}"
 
         msg_metadata = {"is_cronjob": True}
         if metadata:
