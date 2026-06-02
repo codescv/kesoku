@@ -322,32 +322,44 @@ class Chatbot(ABC):
         return "⚠️ No active session found for this chat."
 
     async def manual_compact_session_by_channel(self, channel_id: str) -> str:
-        """Manually trigger conversation compaction by posting a trigger system user message."""
+        """Manually trigger OpenLCM context compaction on the active history of this channel."""
         session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
         if not session:
             return "⚠️ No active session found for this chat."
 
-        # Create system trigger user message
-        # Note: MUST use MessageRole.USER so the agent dispatcher listens to and picks it up to run the turn!
-        trigger_content = (
-            "[System Notification] The user has manually requested session compaction.\n"
-            "Please write a comprehensive summary of the conversation history so far "
-            "using the defined structured template (including the 'Key Commands & Executions' section "
-            "with the most commonly used/successful shell commands under active skills), "
-            "and call the 'compact_history' tool immediately to transition this channel to a clean session."
-        )
-        trigger_msg = Message(
-            session_id=session.id,
-            chatbot_id=self.chatbot_id,
-            channel_id=channel_id,
-            sender="System",
-            role=MessageRole.USER,
-            type=MessageType.TEXT,
-            content=trigger_content,
-            status=MessageStatus.PENDING_AGENT,
-        )
-        await self.gateway.post(trigger_msg)
-        return "🔄 Initiating history compaction. Please wait a moment..."
+        # Fetch active history
+        history = await self.gateway.db.get_session_history(session.id, limit=200)
+        if not history:
+            return "⚠️ Active session has no messages to compact."
+
+        lcm_engine = self.gateway.context.lcm_engine
+        original_session_id = lcm_engine.current_session_id
+
+        try:
+            lcm_engine.bind_session(session.id)
+            lcm_input = messages_to_openlcm_dicts(history)
+
+            # Prepend system prompt
+            if session.system_prompt:
+                lcm_input.insert(0, {"role": "system", "content": session.system_prompt})
+
+            # Check if there is eligible raw backlog
+            eligible, reason = lcm_engine._leaf_compaction_candidate_status(lcm_input)
+            if not eligible:
+                return f"ℹ️ Context compaction is not needed right now: {reason}."
+
+            # Force compress
+            await lcm_engine.compress(lcm_input)
+            return (
+                "🔄 Lossless Context Compaction completed successfully! "
+                "Old turns have been compacted into summary nodes."
+            )
+        except Exception as e:
+            logger.error(f"Failed manual compaction for session {session.id}: {e}")
+            return f"⚠️ Failed to compact history: {e}"
+        finally:
+            if original_session_id and original_session_id != session.id:
+                lcm_engine.bind_session(original_session_id)
 
     async def get_session_status_by_channel(self, channel_id: str) -> str:
         """Get session statistics for the channel."""

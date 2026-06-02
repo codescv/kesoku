@@ -178,14 +178,11 @@ class TurnExecutor:
                     current_msg=current_msg,
                 )
 
-                latest_user_msg = await self._inject_context_and_trigger_consolidation(
+                await self._inject_context_and_trigger_consolidation(
                     history, current_msg, llm
                 )
 
-                # Calculate and monitor context window limit
-                await self._monitor_context_window(
-                    history, latest_user_msg, system_prompt, tools_list, llm, cfg
-                )
+
 
 
                 # LLM inference
@@ -537,56 +534,7 @@ class TurnExecutor:
         return history
 
 
-    async def _monitor_context_window(
 
-        self,
-        history: list[Message],
-        latest_user_msg: Message | None,
-        system_prompt: str | None,
-        tools_list: list,
-        llm: BaseLLM,
-        cfg,
-    ) -> int:
-        """Estimate context window usage and prepend context monitoring warning to latest_user_msg in place if needed.
-
-        Returns:
-            The calculated or estimated context token count.
-        """
-        try:
-            context_tokens = await asyncio.to_thread(
-                llm.count_tokens,
-                prompt=None,
-                system_prompt=system_prompt,
-                history=history,
-                tools=tools_list,
-            )
-        except Exception as te:
-            logger.warning(f"Failed to count context tokens: {te}")
-            context_tokens = llm.estimate_tokens_fallback(None, system_prompt, history)
-
-        limit = getattr(llm, "context_window_limit", 1048576)
-        percentage = (context_tokens / limit) * 100
-
-        threshold = cfg.agent.compact_history_warning_threshold
-        if latest_user_msg and percentage >= threshold:
-            monitor_suffix = (
-                f"\n\n[Context Monitor: Currently using {context_tokens:,} tokens, "
-                f"which is {percentage:.1f}% of your {limit:,} window limit. "
-                "It is highly recommended that you call the 'compact_history' "
-                "tool now to reset the context window.]"
-            )
-            if "[Context Monitor:" not in latest_user_msg.content:
-                # Clone to avoid mutating shared database/cached states in place
-                msg_idx = history.index(latest_user_msg)
-                copied_msg = latest_user_msg.model_copy()
-                copied_msg.content += monitor_suffix
-                history[msg_idx] = copied_msg
-                logger.info(
-                    f"Injected context monitor warning into user message {copied_msg.id}: "
-                    f"{context_tokens} tokens ({percentage:.1f}%)"
-                )
-
-        return context_tokens
 
     async def _execute_tool_calls(
         self,
