@@ -500,15 +500,34 @@ class Chatbot(ABC):
                 role = msg.get("role")
                 content = msg.get("content") or ""
 
-                bubble_class = "user" if role == "user" else "assistant" if role == "assistant" else "system"
+                bubble_class = (
+                    "user"
+                    if role == "user"
+                    else "assistant"
+                    if role == "assistant"
+                    else "tool"
+                    if role == "tool"
+                    else "system"
+                )
                 if role == "user":
                     role_label = "User"
                 elif role == "assistant":
                     role_label = "Assistant"
+                elif role == "tool":
+                    role_label = "Tool Result"
                 else:
                     role_label = str(role).capitalize()
 
-                safe_content = html.escape(content).replace("\n", "<br>")
+                if role == "tool":
+                    tool_name = msg.get("name") or "unknown_tool"
+                    safe_content = f"""
+                    <div class="tool-response-block">
+                        📥 <strong>Tool Output (<code>{tool_name}</code>):</strong><br>
+                        <pre class="tool-response-pre">{html.escape(content)}</pre>
+                    </div>
+                    """
+                else:
+                    safe_content = html.escape(content).replace("\n", "<br>")
 
                 # Display embedded tool calls if present inside the assistant role message
                 if role == "assistant" and msg.get("tool_calls"):
@@ -669,6 +688,11 @@ class Chatbot(ABC):
             margin-right: auto;
             align-items: flex-start;
         }}
+        .chat-bubble.tool {{
+            margin-right: auto;
+            align-items: flex-start;
+            width: 100%;
+        }}
         .bubble-content {{
             padding: 12px 16px;
             border-radius: 18px;
@@ -684,6 +708,13 @@ class Chatbot(ABC):
             color: #e1e8ed;
             border-bottom-left-radius: 4px;
         }}
+        .chat-bubble.tool .bubble-content {{
+            background-color: #14221f;
+            color: #e1e8ed;
+            border-bottom-left-radius: 4px;
+            width: 100%;
+            box-sizing: border-box;
+        }}
         .tool-call-block {{
             background-color: #1e2732;
             border: 1px solid #2f3336;
@@ -692,6 +723,26 @@ class Chatbot(ABC):
             margin-top: 10px;
             font-size: 0.9rem;
             align-self: stretch;
+        }}
+        .tool-response-block {{
+            background-color: #14221f;
+            border: 1px solid #10b981;
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 10px;
+            font-size: 0.9rem;
+            align-self: stretch;
+        }}
+        .tool-response-pre {{
+            background-color: #0d1512;
+            color: #34d399;
+            padding: 8px;
+            border-radius: 4px;
+            font-family: "Fira Code", Consolas, Monaco, monospace;
+            font-size: 0.85rem;
+            margin: 8px 0 0 0;
+            border: 1px solid #10b981;
+            white-space: pre-wrap;
         }}
         .tool-args-pre {{
             background-color: #0f1419;
