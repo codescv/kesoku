@@ -1,6 +1,7 @@
 """History cleaning and optimization utilities for Kesoku."""
 
 import datetime
+import json
 import logging
 import os
 from typing import Any, Literal
@@ -135,6 +136,10 @@ async def build_clean_history(
 def messages_to_openlcm_dicts(history: list[Message]) -> list[dict[str, Any]]:
     """Convert Kesoku Message list to OpenLCM dictionary format.
 
+    Groups consecutive assistant thoughts and tool calls into standard OpenAI
+    assistant message dictionaries to prevent them from being sanitized out
+    by OpenLCM tool-pair guardrails.
+
     Args:
         history: A list of Kesoku Message objects.
 
@@ -142,19 +147,64 @@ def messages_to_openlcm_dicts(history: list[Message]) -> list[dict[str, Any]]:
         A list of raw dictionaries matching the OpenAI/Anthropic format expected by OpenLCM.
     """
     lcm_msgs = []
+    current_thought: str | None = None
+    current_tool_calls: list[dict[str, Any]] = []
+
+    def flush_assistant():
+        nonlocal current_thought, current_tool_calls
+        if current_thought is not None or current_tool_calls:
+            d = {
+                "role": "assistant",
+                "content": current_thought,
+            }
+            if current_tool_calls:
+                d["tool_calls"] = current_tool_calls
+            lcm_msgs.append(d)
+            current_thought = None
+            current_tool_calls = []
+
     for msg in history:
-        role_val = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
-        d = {
-            "role": role_val,
-            "content": msg.content,
-        }
-        if msg.role == MessageRole.TOOL:
-            d["tool_call_id"] = msg.metadata.get("tool_call_id") or msg.parent_id or ""
-            d["name"] = msg.metadata.get("tool_name") or msg.sender
-        elif msg.role == MessageRole.ASSISTANT:
-            if msg.metadata.get("tool_calls"):
-                d["tool_calls"] = msg.metadata["tool_calls"]
-        lcm_msgs.append(d)
+        if msg.role == MessageRole.ASSISTANT and msg.type == MessageType.THOUGHT:
+            flush_assistant()
+            current_thought = msg.content
+        elif msg.role == MessageRole.TOOL and msg.type == MessageType.TOOL_CALL:
+            tool_call_id = msg.metadata.get("tool_call_id") or msg.id
+            tool_name = msg.metadata.get("tool_name") or msg.sender
+            tool_arguments = msg.metadata.get("tool_arguments") or {}
+            if isinstance(tool_arguments, dict):
+                tool_arguments_str = json.dumps(tool_arguments, ensure_ascii=False)
+            else:
+                tool_arguments_str = str(tool_arguments)
+
+            tc_dict = {
+                "id": tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": tool_arguments_str,
+                },
+            }
+            current_tool_calls.append(tc_dict)
+        elif msg.role == MessageRole.TOOL and msg.type == MessageType.TOOL_RESULT:
+            flush_assistant()
+            tool_call_id = msg.metadata.get("tool_call_id") or msg.parent_id or ""
+            tool_name = msg.metadata.get("tool_name") or msg.sender
+            tool_result_content = msg.metadata.get("tool_result") or msg.content
+            lcm_msgs.append({
+                "role": "tool",
+                "content": tool_result_content,
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+            })
+        else:
+            flush_assistant()
+            role_val = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
+            lcm_msgs.append({
+                "role": role_val,
+                "content": msg.content,
+            })
+
+    flush_assistant()
     return lcm_msgs
 
 
@@ -165,6 +215,10 @@ def openlcm_dicts_to_messages(
     channel_id: str,
 ) -> list[Message]:
     """Reconstruct Kesoku Message list from OpenLCM dictionaries.
+
+    Unpacks consolidated assistant message dictionaries (which might contain
+    embedded tool_calls) back into separate assistant thought and tool call
+    messages to match Kesoku's database schema and prompt builder formatting.
 
     Args:
         dicts: A list of dictionaries returned by OpenLCM.
@@ -184,15 +238,6 @@ def openlcm_dicts_to_messages(
         msg_type = MessageType.TEXT
         metadata = {}
 
-        if role == MessageRole.TOOL:
-            msg_type = MessageType.TOOL_RESULT
-            metadata["tool_name"] = d.get("name") or "unknown_tool"
-            metadata["tool_call_id"] = d.get("tool_call_id") or ""
-        elif role == MessageRole.ASSISTANT:
-            if d.get("tool_calls"):
-                msg_type = MessageType.TOOL_CALL
-                metadata["tool_calls"] = d["tool_calls"]
-
         # Determine sender name
         if role == MessageRole.SYSTEM:
             sender = "System"
@@ -203,18 +248,94 @@ def openlcm_dicts_to_messages(
         else:
             sender = "User"
 
-        msgs.append(
-            Message(
-                session_id=session_id,
-                chatbot_id=chatbot_id,
-                channel_id=channel_id,
-                sender=sender,
-                role=role,
-                type=msg_type,
-                content=content,
-                metadata=metadata,
-                status=MessageStatus.RESPONDED,
+        if role == MessageRole.TOOL:
+            msg_type = MessageType.TOOL_RESULT
+            metadata["tool_name"] = d.get("name") or "unknown_tool"
+            metadata["tool_call_id"] = d.get("tool_call_id") or ""
+            msgs.append(
+                Message(
+                    session_id=session_id,
+                    chatbot_id=chatbot_id,
+                    channel_id=channel_id,
+                    sender=sender,
+                    role=role,
+                    type=msg_type,
+                    content=content,
+                    metadata=metadata,
+                    status=MessageStatus.RESPONDED,
+                )
             )
-        )
+        elif role == MessageRole.ASSISTANT:
+            if d.get("tool_calls"):
+                # Unpack consolidated assistant message into separate thought and tool calls!
+                if content:
+                    msgs.append(
+                        Message(
+                            session_id=session_id,
+                            chatbot_id=chatbot_id,
+                            channel_id=channel_id,
+                            sender=sender,
+                            role=MessageRole.ASSISTANT,
+                            type=MessageType.THOUGHT,
+                            content=content,
+                            status=MessageStatus.RESPONDED,
+                        )
+                    )
+                for tc in d["tool_calls"]:
+                    fn = tc.get("function", {})
+                    fn_name = fn.get("name", "unknown_tool")
+                    fn_args = fn.get("arguments", {})
+                    if isinstance(fn_args, str):
+                        try:
+                            fn_args = json.loads(fn_args)
+                        except Exception:
+                            pass
+
+                    call_args_json = json.dumps(fn_args, indent=2, ensure_ascii=False)
+                    msgs.append(
+                        Message(
+                            session_id=session_id,
+                            chatbot_id=chatbot_id,
+                            channel_id=channel_id,
+                            sender=sender,
+                            role=MessageRole.TOOL,
+                            type=MessageType.TOOL_CALL,
+                            content=f"Calling tool `{fn_name}` with arguments:\n```json\n{call_args_json}\n```",
+                            metadata={
+                                "tool_name": fn_name,
+                                "tool_arguments": fn_args,
+                                "tool_call_id": tc.get("id") or "",
+                            },
+                            status=MessageStatus.RESPONDED,
+                        )
+                    )
+            else:
+                msgs.append(
+                    Message(
+                        session_id=session_id,
+                        chatbot_id=chatbot_id,
+                        channel_id=channel_id,
+                        sender=sender,
+                        role=role,
+                        type=MessageType.TEXT,
+                        content=content,
+                        metadata=metadata,
+                        status=MessageStatus.RESPONDED,
+                    )
+                )
+        else:
+            msgs.append(
+                Message(
+                    session_id=session_id,
+                    chatbot_id=chatbot_id,
+                    channel_id=channel_id,
+                    sender=sender,
+                    role=role,
+                    type=msg_type,
+                    content=content,
+                    metadata=metadata,
+                    status=MessageStatus.RESPONDED,
+                )
+            )
     return msgs
 

@@ -17,6 +17,7 @@ from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
+from kesoku.utils.async_fs import async_exists
 
 logger = setup_logger(__name__)
 
@@ -93,6 +94,43 @@ class MessageHeaderView(discord.ui.View):
             logger.error(f"Failed to generate trajectory for session {self.session_id}: {e}", exc_info=True)
             await interaction.followup.send(
                 content=f"⚠️ Failed to generate trajectory: {e}",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(
+        style=discord.ButtonStyle.secondary,
+        emoji="📖",
+        custom_id="btn_view_lcm_context",
+    )
+    async def view_lcm_context(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        """Callback triggered when 'View LCM Context' button is clicked."""
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            if not self.chatbot:
+                await interaction.followup.send(
+                    content="⚠️ Discord chatbot adapter reference is unavailable.",
+                    ephemeral=True,
+                )
+                return
+
+            res = await self.chatbot.get_session_lcm_context_by_channel(str(interaction.channel_id))
+            if await async_exists(res):
+                discord_file = discord.File(res, filename="lcm_active_context.html")
+                await interaction.followup.send(
+                    content="📖 Here is the complete lossless active context (what the Agent currently sees):",
+                    file=discord_file,
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    content=res,
+                    ephemeral=True,
+                )
+        except Exception as e:
+            logger.error(f"Failed to retrieve LCM context via button for session {self.session_id}: {e}", exc_info=True)
+            await interaction.followup.send(
+                content=f"⚠️ Failed to retrieve LCM context: {e}",
                 ephemeral=True,
             )
 

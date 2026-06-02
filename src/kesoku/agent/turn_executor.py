@@ -515,6 +515,8 @@ class TurnExecutor:
 
         # Convert custom Kesoku Messages to OpenLCM raw dictionaries
         lcm_input = messages_to_openlcm_dicts(history)
+        if system_prompt:
+            lcm_input.insert(0, {"role": "system", "content": system_prompt})
 
         # Pre-flight check: should we compress?
         if lcm_engine.should_compress_preflight(lcm_input):

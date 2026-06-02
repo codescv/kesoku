@@ -4,6 +4,7 @@ import asyncio
 import datetime
 import difflib
 import html
+import json
 import os
 import re
 import tempfile
@@ -419,6 +420,9 @@ class Chatbot(ABC):
             if remaining_messages and remaining_messages[0].get("role") == "system":
                 system_message = remaining_messages.pop(0)
 
+            if not system_message and session.system_prompt:
+                system_message = {"role": "system", "content": session.system_prompt}
+
             assembled = lcm_engine._assemble_context(system_message, remaining_messages)
 
             sys_msg = ""
@@ -493,6 +497,35 @@ class Chatbot(ABC):
                     role_label = str(role).capitalize()
 
                 safe_content = html.escape(content).replace("\n", "<br>")
+
+                # Display embedded tool calls if present inside the assistant role message
+                if role == "assistant" and msg.get("tool_calls"):
+                    tool_call_html_parts = []
+                    for tc in msg["tool_calls"]:
+                        fn = tc.get("function", {})
+                        name = fn.get("name", "unknown_tool")
+                        arguments = fn.get("arguments", "")
+                        try:
+                            if isinstance(arguments, str):
+                                args_dict = json.loads(arguments)
+                                arguments_pretty = json.dumps(args_dict, indent=2, ensure_ascii=False)
+                            else:
+                                arguments_pretty = json.dumps(arguments, indent=2, ensure_ascii=False)
+                        except Exception:
+                            arguments_pretty = str(arguments)
+
+                        tool_call_html_parts.append(
+                            f'<div class="tool-call-block">'
+                            f'🔧 <strong>Called Tool:</strong> <code>{name}</code><br>'
+                            f'<pre class="tool-args-pre">{html.escape(arguments_pretty)}</pre>'
+                            f'</div>'
+                        )
+
+                    tool_calls_html = "\n".join(tool_call_html_parts)
+                    if safe_content:
+                        safe_content += f"<br><br>{tool_calls_html}"
+                    else:
+                        safe_content = tool_calls_html
 
                 msg_html = f"""
                 <div class="chat-bubble {bubble_class}">
@@ -638,6 +671,26 @@ class Chatbot(ABC):
             background-color: #2f3336;
             color: #e1e8ed;
             border-bottom-left-radius: 4px;
+        }}
+        .tool-call-block {{
+            background-color: #1e2732;
+            border: 1px solid #2f3336;
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 10px;
+            font-size: 0.9rem;
+            align-self: stretch;
+        }}
+        .tool-args-pre {{
+            background-color: #0f1419;
+            color: #ffaa00;
+            padding: 8px;
+            border-radius: 4px;
+            font-family: "Fira Code", Consolas, Monaco, monospace;
+            font-size: 0.85rem;
+            margin: 8px 0 0 0;
+            border: 1px solid #2f3336;
+            white-space: pre-wrap;
         }}
     </style>
 </head>
