@@ -283,24 +283,46 @@ class DiscordChatbot(Chatbot):
         if task:
             task.cancel()
 
-        intermediate_msgs = self._intermediate_messages.pop(channel_id, [])
-        if intermediate_msgs:
-            for msg in intermediate_msgs:
+        # Check if the agent is actually processing a turn for this session
+        agent = self.gateway.agent
+        is_interrupted = False
+        if agent:
+            worker = agent.workers.get(session_id)
+            if worker and worker.running and worker._processing_turn:
+                is_interrupted = True
+
+        if is_interrupted:
+            intermediate_msgs = self._intermediate_messages.pop(channel_id, [])
+            if intermediate_msgs:
+                for msg in intermediate_msgs:
+                    try:
+                        await msg.delete()
+                    except Exception as de:
+                        logger.warning(f"Failed to delete intermediate message {msg.id} on interruption: {de}")
+
+            # Find the active turn's header view to delete
+            history = await self.gateway.db.get_session_history(session_id, limit=20)
+            active_user_msg = None
+            for msg in reversed(history):
+                if msg.role == MessageRole.USER:
+                    active_user_msg = msg
+                    break
+
+            turn_id = active_user_msg.id if active_user_msg else session_id
+
+            # Fallback: if turn_id not in _header_views, try session_id
+            if turn_id not in self._header_views and session_id in self._header_views:
+                turn_id = session_id
+
+            if turn_id in self._header_views:
+                header_msg, header_view = self._header_views.pop(turn_id)
                 try:
-                    await msg.delete()
-                except Exception as de:
-                    logger.warning(f"Failed to delete intermediate message {msg.id} on interruption: {de}")
+                    await header_msg.delete()
+                except Exception as he:
+                    logger.warning(f"Failed to delete header message {header_msg.id} on interruption: {he}")
 
-        active_turn_ids = [tid for tid in self._header_views if tid == session_id or tid.startswith(session_id)]
-        for tid in active_turn_ids:
-            header_msg, header_view = self._header_views.pop(tid)
-            try:
-                await header_msg.delete()
-            except Exception as he:
-                logger.warning(f"Failed to delete header message {header_msg.id} on interruption: {he}")
-
-        self._turn_special_items.pop(session_id, None)
-        self._turn_special_msg.pop(session_id, None)
+            self._turn_special_items.pop(session_id, None)
+            self._turn_special_msg.pop(session_id, None)
 
     async def process_attachments_hook(
         self, session: Any, dto: InboundMessageDTO, raw_message: Any
@@ -781,7 +803,7 @@ class DiscordChatbot(Chatbot):
             # Remove stop button from the header view for this turn
             turn_id = message.parent_id or message.session_id
             if turn_id in self._header_views:
-                header_msg, header_view = self._header_views[turn_id]
+                header_msg, header_view = self._header_views.pop(turn_id)
                 try:
                     header_view.remove_item(header_view.stop_turn)
 

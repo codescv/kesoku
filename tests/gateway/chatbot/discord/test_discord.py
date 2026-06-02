@@ -1413,3 +1413,104 @@ async def test_on_message_resolves_and_passes_role(mock_config: KesokuConfig, mo
             assert call_kwargs["chatbot_id"] == "discord_test"
             assert call_kwargs["channel_id"] == "12345"
             assert call_kwargs["role"] == "asuka"
+
+
+@pytest.mark.asyncio
+async def test_pre_ingest_interruption_hook_deletes_correct_header(
+    mock_config: KesokuConfig, mock_gateway: MagicMock
+) -> None:
+    """Test deleting only the active header matching session ID on interruption."""
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+
+            # Create mock messages and views
+            mock_msg_target = AsyncMock(spec=discord.Message)
+            mock_msg_target.id = 111
+            mock_view_target = MagicMock()
+            mock_view_target.session_id = "session_target"
+
+            mock_msg_other = AsyncMock(spec=discord.Message)
+            mock_msg_other.id = 222
+            mock_view_other = MagicMock()
+            mock_view_other.session_id = "session_other"
+
+            # Populate _header_views
+            bot._header_views = {
+                "msg_user_target": (mock_msg_target, mock_view_target),
+                "msg_user_other": (mock_msg_other, mock_view_other),
+            }
+
+            # Mock agent and worker to simulate ACTIVE processing for session_target
+            mock_agent = MagicMock()
+            mock_worker = MagicMock()
+            mock_worker.running = True
+            mock_worker._processing_turn = True
+            mock_agent.workers = {"session_target": mock_worker}
+            mock_gateway.agent = mock_agent
+
+            # Mock database history
+            mock_db_msg_target = MagicMock(spec=Message)
+            mock_db_msg_target.id = "msg_user_target"
+            mock_db_msg_target.role = MessageRole.USER
+
+            mock_gateway.db.get_session_history = AsyncMock(return_value=[mock_db_msg_target])
+
+            # Mock session and DTO
+            mock_session = MagicMock()
+            mock_session.id = "session_target"
+            mock_dto = MagicMock()
+            mock_dto.channel_id = "channel123"
+
+            # Call hook
+            await bot.pre_ingest_interruption_hook(mock_session, mock_dto)
+
+            # Verify target header was deleted
+            mock_msg_target.delete.assert_called_once()
+            # Verify other header was NOT deleted
+            mock_msg_other.delete.assert_not_called()
+
+            # Verify cache updates
+            assert "msg_user_target" not in bot._header_views
+            assert "msg_user_other" in bot._header_views
+
+
+@pytest.mark.asyncio
+async def test_pre_ingest_interruption_hook_does_not_delete_if_not_active(
+    mock_config: KesokuConfig, mock_gateway: MagicMock
+) -> None:
+    """Test that pre_ingest_interruption_hook does not delete header if turn is not active (not processing)."""
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+
+            mock_msg_target = AsyncMock(spec=discord.Message)
+            mock_view_target = MagicMock()
+            mock_view_target.session_id = "session_target"
+
+            bot._header_views = {
+                "msg_user_target": (mock_msg_target, mock_view_target),
+            }
+
+            # Mock agent and worker to simulate INACTIVE processing
+            mock_agent = MagicMock()
+            mock_worker = MagicMock()
+            mock_worker.running = True
+            mock_worker._processing_turn = False  # NOT processing
+            mock_agent.workers = {"session_target": mock_worker}
+            mock_gateway.agent = mock_agent
+
+            mock_session = MagicMock()
+            mock_session.id = "session_target"
+            mock_dto = MagicMock()
+            mock_dto.channel_id = "channel123"
+
+            await bot.pre_ingest_interruption_hook(mock_session, mock_dto)
+
+            # Verify header was NOT deleted
+            mock_msg_target.delete.assert_not_called()
+            # Verify cache still has it
+            assert "msg_user_target" in bot._header_views
+
