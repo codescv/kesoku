@@ -83,11 +83,23 @@ def test_load_cronjobs_multiple():
         os.unlink(tmp_path)
 
 
+def create_mock_bot(chatbot_id="discord"):
+    bot = MagicMock()
+    bot.chatbot_id = chatbot_id
+    bot.trigger_cronjob = AsyncMock()
+
+    gateway = MagicMock()
+    db = AsyncMock()
+    db.get_cronjob_sent_stats_today.return_value = (0, None)
+    db.get_last_message_timestamp.return_value = None
+    gateway.db = db
+    bot.gateway = gateway
+    return bot, db
+
+
 @pytest.mark.asyncio
 async def test_cron_manager_duplicates_and_trigger():
-    mock_bot = MagicMock()
-    mock_bot.chatbot_id = "discord"
-    mock_bot.trigger_cronjob = AsyncMock()
+    mock_bot, _ = create_mock_bot()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_real = os.path.realpath(tmpdir)
@@ -123,9 +135,7 @@ async def test_cron_manager_duplicates_and_trigger():
 
 @pytest.mark.asyncio
 async def test_cron_manager_path_traversal():
-    mock_bot = MagicMock()
-    mock_bot.chatbot_id = "discord"
-    mock_bot.trigger_cronjob = AsyncMock()
+    mock_bot, _ = create_mock_bot()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_real = os.path.realpath(tmpdir)
@@ -144,9 +154,7 @@ async def test_cron_manager_path_traversal():
 
 @pytest.mark.asyncio
 async def test_cron_manager_wechat_optional_channel():
-    mock_bot = MagicMock()
-    mock_bot.chatbot_id = "wechat"
-    mock_bot.trigger_cronjob = AsyncMock()
+    mock_bot, _ = create_mock_bot(chatbot_id="wechat")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_real = os.path.realpath(tmpdir)
@@ -173,14 +181,7 @@ async def test_cron_manager_wechat_optional_channel():
 
 @pytest.mark.asyncio
 async def test_cron_manager_min_idle_time():
-    mock_bot = MagicMock()
-    mock_bot.chatbot_id = "discord"
-    mock_bot.trigger_cronjob = AsyncMock()
-
-    mock_gateway = MagicMock()
-    mock_db = AsyncMock()
-    mock_gateway.db = mock_db
-    mock_bot.gateway = mock_gateway
+    mock_bot, mock_db = create_mock_bot()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_real = os.path.realpath(tmpdir)
@@ -223,14 +224,7 @@ async def test_cron_manager_min_idle_time():
 
 @pytest.mark.asyncio
 async def test_cron_manager_max_messages():
-    mock_bot = MagicMock()
-    mock_bot.chatbot_id = "discord"
-    mock_bot.trigger_cronjob = AsyncMock()
-
-    mock_gateway = MagicMock()
-    mock_db = AsyncMock()
-    mock_gateway.db = mock_db
-    mock_bot.gateway = mock_gateway
+    mock_bot, mock_db = create_mock_bot()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_real = os.path.realpath(tmpdir)
@@ -273,9 +267,7 @@ async def test_cron_manager_max_messages():
 
 @pytest.mark.asyncio
 async def test_cron_manager_accumulating_probability():
-    mock_bot = MagicMock()
-    mock_bot.chatbot_id = "discord"
-    mock_bot.trigger_cronjob = AsyncMock()
+    mock_bot, _ = create_mock_bot()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_real = os.path.realpath(tmpdir)
@@ -331,9 +323,7 @@ async def test_cron_manager_accumulating_probability():
 
 @pytest.mark.asyncio
 async def test_cron_manager_probability_daily_reset():
-    mock_bot = MagicMock()
-    mock_bot.chatbot_id = "discord"
-    mock_bot.trigger_cronjob = AsyncMock()
+    mock_bot, _ = create_mock_bot()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_real = os.path.realpath(tmpdir)

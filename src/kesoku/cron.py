@@ -196,22 +196,26 @@ class CronManager:
                     logger.warning(f"Job {idx} is missing chatbot_id or prompt.")
                     continue
 
+                # Retrieve count of messages sent today if channel_id is available
+                sent_today_count = 0
+                if channel_id and chatbot_id:
+                    bot = self.chatbots.get(chatbot_id)
+                    if bot:
+                        sent_today_count, _ = await bot.gateway.db.get_cronjob_sent_stats_today(chatbot_id, channel_id)
+
                 # Check max_messages if channel_id is available
                 max_messages = job.get("max_messages")
                 if max_messages is not None and channel_id and chatbot_id:
-                    bot = self.chatbots.get(chatbot_id)
-                    if bot:
-                        try:
-                            target = int(max_messages)
-                            count, _ = await bot.gateway.db.get_cronjob_sent_stats_today(chatbot_id, channel_id)
-                            if count >= target:
-                                logger.info(
-                                    f"Job {idx} matched schedule but was skipped because the daily limit "
-                                    f"of {target} messages has already been reached today ({count} sent)."
-                                )
-                                continue
-                        except ValueError:
-                            logger.warning(f"Invalid max_messages format for job {idx}: {max_messages}")
+                    try:
+                        target = int(max_messages)
+                        if sent_today_count >= target:
+                            logger.info(
+                                f"Job {idx} matched schedule but was skipped because the daily limit "
+                                f"of {target} messages has already been reached today ({sent_today_count} sent)."
+                            )
+                            continue
+                    except ValueError:
+                        logger.warning(f"Invalid max_messages format for job {idx}: {max_messages}")
 
                 # Check min_idle_time if channel_id is available
                 min_idle = job.get("min_idle_time") or job.get("min_idle_time_seconds")
@@ -262,14 +266,20 @@ class CronManager:
                     new_p = min(1.0, current_p * 1.1)
                     state["current_p"] = new_p
                     logger.info(
-                        f"Job {idx} matched schedule but was skipped by probability filter (p={current_p:.4f}). "
+                        f"Job {idx} matched schedule but was skipped by probability filter "
+                        f"(p={current_p:.4f}, r={r:.4f}). "
                         f"Probability increased to {new_p:.4f} for next tick."
                     )
                     continue
                 else:
                     # Triggered, reset p
                     state["current_p"] = base_prob
-                    logger.info(f"Job {idx} passed probability filter (p={current_p:.4f}). Resetting p to {base_prob}.")
+                    logger.info(
+                        f"🚀 Triggering Job {idx} (chatbot: {chatbot_id}, "
+                        f"channel: {channel_id or 'auto-resolved'}). "
+                        f"Stats: p={current_p:.4f}, r={r:.4f}, sent_today={sent_today_count}. "
+                        f"Resetting p to {base_prob}."
+                    )
 
                 # Run the job asynchronously in the background
                 asyncio.create_task(self._execute_job(job, idx))
