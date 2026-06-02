@@ -10,6 +10,9 @@ llm = "gemini"
 raw_llm_logs = true
 # Threshold percentage of context window limit before warning is shown (default: 80.0)
 compact_history_warning_threshold = 50.0
+# Threshold for automatic in-place history compaction (if >1 raw tokens, if <1 window ratio, default: 0.8)
+compact_history_threshold = 0.8
+
 
 
 [gemini]

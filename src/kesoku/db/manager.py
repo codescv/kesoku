@@ -376,6 +376,23 @@ class DatabaseManager:
                 # Delete the session itself
                 conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
 
+    def delete_messages_by_ids(self, message_ids: list[str]) -> None:
+        """Delete specific messages from the database by their IDs.
+
+        Args:
+            message_ids: List of message ID strings to delete.
+        """
+        if not message_ids:
+            return
+        with self.connection_provider.connection() as conn:
+            with conn:
+                placeholders = ",".join("?" for _ in message_ids)
+                conn.execute(
+                    f"DELETE FROM messages WHERE id IN ({placeholders})",
+                    tuple(message_ids),
+                )
+
+
     # Message CRUD
     def save_message(self, msg: Message) -> None:
         """Persist a new conversational message record.
@@ -1128,7 +1145,6 @@ class AsyncDatabaseManager:
             session_id: The ID of the session to make active.
         """
         await asyncio.to_thread(self.sync_db.set_active_session_for_channel, chatbot_id, channel_id, session_id)
-
     async def delete_session(self, session_id: str) -> None:
         """Delete a session and its associated messages.
 
@@ -1136,6 +1152,15 @@ class AsyncDatabaseManager:
             session_id: The ID of the session to delete.
         """
         await asyncio.to_thread(self.sync_db.delete_session, session_id)
+
+    async def delete_messages_by_ids(self, message_ids: list[str]) -> None:
+        """Delete specific messages from the database by their IDs.
+
+        Args:
+            message_ids: List of message ID strings to delete.
+        """
+        await asyncio.to_thread(self.sync_db.delete_messages_by_ids, message_ids)
+
 
     async def save_message(self, msg: Message) -> None:
         """Save a message to the database.

@@ -81,6 +81,11 @@ class AgentConfig(BaseModel):
         default=80.0,
         description="Threshold percentage of context window limit before warning is shown",
     )
+    compact_history_threshold: float = Field(
+        default=0.8,
+        description="Threshold for automatic in-place history compaction (if >1 raw tokens, if <1 window ratio)",
+    )
+
 
 
 class GeminiConfig(BaseModel):

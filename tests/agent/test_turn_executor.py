@@ -1104,3 +1104,175 @@ async def test_turn_executor_user_context_injection(temp_db: str) -> None:
     gchat_content = llm.captured_history[-1].content
     assert "[Cloud Strife (Email: cloud@shinra.com) at " in gchat_content
 
+
+async def test_turn_executor_auto_compaction(temp_db: str) -> None:
+    """Verify that TurnExecutor automatically triggers in-place history compaction when threshold is exceeded."""
+    from kesoku.constants import MessageRole
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.create_session("sess_auto_compact", title="Auto Compact Session")
+
+    # Create a history with 3 turns (User -> Assistant -> User -> Assistant -> User)
+    # Note: user prompts must be marked PROCESSED so they are completed turns
+    msg1 = Message(
+        session_id="sess_auto_compact",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="Turn 1 user",
+        status="processed",
+        timestamp=time.time() - 100,
+    )
+    await gw.post(msg1)
+    msg2 = Message(
+        session_id="sess_auto_compact",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="Turn 1 reply",
+        status="delivered",
+        timestamp=time.time() - 90,
+    )
+    await gw.post(msg2)
+
+    msg3 = Message(
+        session_id="sess_auto_compact",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="Turn 2 user",
+        status="processed",
+        timestamp=time.time() - 80,
+    )
+    await gw.post(msg3)
+    msg4 = Message(
+        session_id="sess_auto_compact",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="Turn 2 reply",
+        status="delivered",
+        timestamp=time.time() - 70,
+    )
+    await gw.post(msg4)
+
+    active_msg = Message(
+        session_id="sess_auto_compact",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="Turn 3 active",
+        status="pending_agent",
+        timestamp=time.time(),
+    )
+    await gw.post(active_msg)
+
+
+    # Mock LLM
+    class CompactLLM(BaseLLM):
+        def __init__(self) -> None:
+            self.generate_calls = []
+            self.captured_history = []
+
+        @property
+        def context_window_limit(self) -> int:
+            return 1000
+
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+        ) -> LLMResponse:
+            self.generate_calls.append({
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "history": list(history or [])
+            })
+
+            # Summarization calls logic
+            if system_prompt and "expert context compressor" in system_prompt:
+                if prompt and "structured <state_snapshot>" in prompt:
+                    # Turn 1 summarizer call
+                    return LLMResponse(content="Initial State Snapshot Content", total_tokens=50)
+                else:
+                    # Turn 2 verification call
+                    return LLMResponse(content="FINAL Improved State Snapshot Content", total_tokens=50)
+
+            # Final actual chat inference call
+            self.captured_history = list(history or [])
+            return LLMResponse(content="Final Assistant Turn Response", total_tokens=10)
+
+        def count_tokens(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+        ) -> int:
+            hist_len = len(history or [])
+            if hist_len >= 5:
+                return 900  # Trigger threshold 0.8 of 1000
+            return 200
+
+    llm = CompactLLM()
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    turn_logger = MagicMock(spec=TurnLogger)
+
+    context = KesokuContext(config=cfg, llm=llm)
+    executor = TurnExecutor("sess_auto_compact", gw, tool_runner, turn_logger, context=context)
+
+    cfg.agent.compact_history_threshold = 0.8  # 80% of 1000 = 800 tokens
+
+    worker = MagicMock()
+    type(worker).running = PropertyMock(side_effect=[True, False])
+
+    async def mock_pivot(m: Message) -> Message:
+        return m
+    worker.drain_queue_and_pivot.side_effect = mock_pivot
+    worker.queue_empty.return_value = True
+
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor.process_turn(
+            current_msg=active_msg,
+            worker=worker,
+            session_staging_dir="/tmp/sess_auto_compact",
+        )
+
+    # Assertions
+    assert len(llm.generate_calls) == 3
+
+    c1 = llm.generate_calls[0]
+    assert "expert context compressor" in c1["system_prompt"]
+    assert len(c1["history"]) > 0
+
+    c2 = llm.generate_calls[1]
+    assert "expert context compressor" in c2["system_prompt"]
+    assert c2["history"][-2].content == "Initial State Snapshot Content"
+    assert "Critically evaluate" in c2["history"][-1].content
+
+    assert len(llm.captured_history) > 0
+    snapshot_msg = llm.captured_history[0]
+    assert snapshot_msg.role == MessageRole.SYSTEM
+    assert "[Conversation History State Snapshot]" in snapshot_msg.content
+    assert "FINAL Improved State Snapshot Content" in snapshot_msg.content
+
+    notification_msg = llm.captured_history[1]
+    assert "Conversation history has been automatically compacted in-place" in notification_msg.content
+
+    db_history = await gw.db.get_session_history("sess_auto_compact", limit=0)
+    db_ids = [m.id for m in db_history]
+    assert msg1.id not in db_ids
+    assert msg2.id not in db_ids
+    assert snapshot_msg.id in db_ids
+    assert notification_msg.id in db_ids
+
+
