@@ -18,6 +18,7 @@ from rich.console import Console
 from kesoku.agent.agent import Agent
 from kesoku.agent.tools import sanitize_key, validate_key
 from kesoku.cli.chat import run_cli_chat_async
+from kesoku.cli.lcm import lcm_app
 from kesoku.cli.service import service_app
 from kesoku.config import get_config, init_config, init_roles, init_skills, load_config
 from kesoku.cron import CronManager
@@ -39,6 +40,8 @@ app.add_typer(wechat_app, name="wechat")
 
 memory_app = typer.Typer(help="Inspect, audit, and configure agent memories.")
 app.add_typer(memory_app, name="memory")
+
+app.add_typer(lcm_app, name="lcm")
 
 
 @memory_app.command("list")
