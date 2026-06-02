@@ -278,3 +278,48 @@ async def test_lcm_command_response_splitting(mock_chatbot: MagicMock) -> None:
     # Assert that send was called multiple times due to chunking
     assert interaction.followup.send.call_count > 1
 
+
+@pytest.mark.asyncio
+async def test_lcm_command_file_attachment(mock_chatbot: MagicMock) -> None:
+    """Test that if get_session_lcm_context_by_channel returns a valid file path, /lcm sends it as an attachment."""
+    setup_discord_commands(mock_chatbot)
+
+    commands = mock_chatbot.tree.get_commands()
+    lcm_cmd = next((cmd for cmd in commands if cmd.name == "lcm"), None)
+    assert lcm_cmd is not None
+
+    # Mock interaction
+    interaction = AsyncMock(spec=discord.Interaction)
+    interaction.user = MagicMock(spec=discord.User)
+    interaction.user.name = "test_user"
+    interaction.user.id = 123456789
+    interaction.channel_id = 987654321
+
+    interaction.response = AsyncMock()
+    interaction.followup = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    # Create a temporary mock HTML file on disk to simulate the output
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix="_test.html", delete=False) as tmp:
+        tmp.write(b"<html>Mock Context</html>")
+        tmp_path = tmp.name
+
+    try:
+        mock_chatbot.get_session_lcm_context_by_channel = AsyncMock(return_value=tmp_path)
+
+        await lcm_cmd.callback(interaction)
+
+        # Assert the interaction followup was called with a File parameter
+        args, kwargs = interaction.followup.send.call_args
+        assert kwargs.get("file") is not None
+        assert isinstance(kwargs.get("file"), discord.File)
+        assert kwargs.get("file").filename == "lcm_context.html"
+        assert kwargs.get("content") == "📖 Here is your beautifully formatted LCM Active Context HTML download:"
+    finally:
+        # Clean up
+        import os
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+

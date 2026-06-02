@@ -70,12 +70,16 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
                     # Acknowledge the interaction first by deferring
                     await interaction.response.defer()
 
-                    async def reply_func(text: str) -> None:
-                        from kesoku.utils.text import split_text_into_chunks
-                        chunks = split_text_into_chunks(text, 2000)
-                        for chunk in chunks:
-                            if chunk.strip():
-                                await interaction.followup.send(chunk)
+                    async def reply_func(text: str, file_path: str | None = None) -> None:
+                        if file_path:
+                            file = discord.File(file_path, filename="lcm_context.html")
+                            await interaction.followup.send(content=text, file=file)
+                        else:
+                            from kesoku.utils.text import split_text_into_chunks
+                            chunks = split_text_into_chunks(text, 2000)
+                            for chunk in chunks:
+                                if chunk.strip():
+                                    await interaction.followup.send(chunk)
 
                     try:
                         if c_name in {"clear", "reset", "status", "compact", "lcm", "context"}:

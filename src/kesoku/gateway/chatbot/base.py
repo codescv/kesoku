@@ -3,8 +3,10 @@
 import asyncio
 import datetime
 import difflib
+import html
 import os
 import re
+import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -221,9 +223,15 @@ class Chatbot(ABC):
             status_msg = await self.update_role_by_channel(channel_id, role_name)
             await reply_func(status_msg)
 
-        async def handle_lcm(reply_func: Callable[[str], Awaitable[None]], channel_id: str) -> None:
-            status_msg = await self.get_session_lcm_context_by_channel(channel_id)
-            await reply_func(status_msg)
+        async def handle_lcm(reply_func: Callable[..., Awaitable[None]], channel_id: str) -> None:
+            res = await self.get_session_lcm_context_by_channel(channel_id)
+            if await async_exists(res):
+                await reply_func(
+                    "📖 Here is your beautifully formatted LCM Active Context HTML download:",
+                    file_path=res
+                )
+            else:
+                await reply_func(res)
 
         self.commands.register("restart", "Restart the Kesoku service.", handle_restart)
         self.commands.register("clear", "Clear the active conversation session.", handle_clear)
@@ -413,8 +421,7 @@ class Chatbot(ABC):
 
             assembled = lcm_engine._assemble_context(system_message, remaining_messages)
 
-            scaffold_msg = None
-            sys_msg = None
+            sys_msg = ""
             fresh_msgs = []
 
             for msg in assembled:
@@ -423,7 +430,7 @@ class Chatbot(ABC):
                 if role == "system":
                     sys_msg = content
                 elif role == "user" and "[Note: This conversation uses Lossless Context Management" in content:
-                    scaffold_msg = content
+                    continue
                 elif role == "assistant" and (
                     "I have access to the full conversation history through LCM tools" in content
                 ):
@@ -431,40 +438,260 @@ class Chatbot(ABC):
                 else:
                     fresh_msgs.append(msg)
 
-            output = [f"### 📖 LCM Processed Context (Session: `{session.id}`)"]
-
             all_nodes = lcm_engine._dag.get_session_nodes(session.id)
-            output.append(f"⚡ **DAG Summaries**: {len(all_nodes)} nodes | **Fresh Tail**: {len(fresh_msgs)} messages")
 
-            if sys_msg:
-                sys_lines = sys_msg.strip().split("\n")
-                sys_preview = "\n".join(sys_lines[:5])
-                if len(sys_lines) > 5:
-                    sys_preview += "\n..."
-                output.append(f"\n**🛠️ System Prompt Preview**:\n```\n{sys_preview}\n```")
+            from openlcm.core.tokens import count_messages_tokens
+            total_tokens = count_messages_tokens(assembled)
 
-            if scaffold_msg:
-                output.append(f"\n**📦 Incremental Summaries**:\n```markdown\n{scaffold_msg}\n```")
-            else:
-                output.append("\n*(No active summaries in context yet. History is within thresholds.)*")
+            summary_nodes_html = []
+            from collections import defaultdict
+            by_depth = defaultdict(list)
+            for node in all_nodes:
+                by_depth[node.depth].append(node)
 
-            if fresh_msgs:
-                output.append("\n**🧵 Active Fresh Tail**:")
-                for msg in fresh_msgs:
-                    role_val = msg.get("role")
-                    if role_val == "user":
-                        role_label = "User"
-                    elif role_val == "assistant":
-                        role_label = "Assistant"
-                    else:
-                        role_label = str(role_val).capitalize()
+            max_dag_depth = max(by_depth.keys()) if by_depth else -1
+            for depth in range(max_dag_depth, -1, -1):
+                nodes_at_depth = sorted(by_depth.get(depth, []), key=lambda nd: nd.created_at)
+                depth_label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(depth, f"Depth-{depth}")
+                for node in nodes_at_depth:
+                    safe_summary = html.escape(node.summary).replace("\n", "<br>")
+                    savings = round(node.source_token_count / node.token_count, 1) if node.token_count > 0 else 1
+                    hint_text = node.expand_hint or f"lcm_expand(node_id={node.node_id}) to retrieve details"
+                    safe_hint = html.escape(hint_text)
 
-                    content = msg.get("content") or ""
-                    if len(content) > 200:
-                        content = content[:200] + "..."
-                    output.append(f"- **[{role_label}]**: {content}")
+                    node_html = f"""
+                    <div class="node-card">
+                        <div class="node-header">
+                            <span class="badge depth-{node.depth}">{depth_label} Node {node.node_id}</span>
+                            <span style="font-size:0.85rem;color:#8899a6;">
+                                {node.source_token_count} tokens &rarr; {node.token_count} tokens ({savings}x savings)
+                            </span>
+                        </div>
+                        <div style="white-space: pre-wrap; font-size:0.95rem;">{safe_summary}</div>
+                        <div style="font-size:0.8rem;color:#1d9bf0;margin-top:8px;font-style:italic;">
+                            Hint: {safe_hint}
+                        </div>
+                    </div>
+                    """
+                    summary_nodes_html.append(node_html)
 
-            return "\n".join(output)
+            summary_nodes_html_str = (
+                "\n".join(summary_nodes_html) if summary_nodes_html else "<p>*(No active compacted summary nodes)*</p>"
+            )
+
+            fresh_tail_html = []
+            for msg in fresh_msgs:
+                role = msg.get("role")
+                content = msg.get("content") or ""
+
+                bubble_class = "user" if role == "user" else "assistant" if role == "assistant" else "system"
+                if role == "user":
+                    role_label = "User"
+                elif role == "assistant":
+                    role_label = "Assistant"
+                else:
+                    role_label = str(role).capitalize()
+
+                safe_content = html.escape(content).replace("\n", "<br>")
+
+                msg_html = f"""
+                <div class="chat-bubble {bubble_class}">
+                    <div class="bubble-content">
+                        <strong>{role_label}:</strong><br>
+                        {safe_content}
+                    </div>
+                </div>
+                """
+                fresh_tail_html.append(msg_html)
+
+            fresh_tail_html_str = "\n".join(fresh_tail_html) if fresh_tail_html else "<p>*(Fresh tail is empty)*</p>"
+
+            html_template = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>LCM Active Context - Session {session.id}</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #0f1419;
+            color: #e1e8ed;
+            margin: 0;
+            padding: 20px;
+            line-height: 1.5;
+        }}
+        .container {{
+            max-width: 1000px;
+            margin: 0 auto;
+        }}
+        header {{
+            background-color: #15181c;
+            border: 1px solid #2f3336;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }}
+        h1 {{
+            margin-top: 0;
+            font-size: 1.5rem;
+            color: #1d9bf0;
+        }}
+        .stats-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }}
+        .stat-card {{
+            background-color: #1e2732;
+            border-radius: 6px;
+            padding: 10px 15px;
+            border-left: 4px solid #1d9bf0;
+        }}
+        .stat-label {{
+            font-size: 0.8rem;
+            color: #8899a6;
+            text-transform: uppercase;
+        }}
+        .stat-value {{
+            font-size: 1.2rem;
+            font-weight: bold;
+            margin-top: 5px;
+        }}
+        details {{
+            background-color: #15181c;
+            border: 1px solid #2f3336;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            padding: 15px;
+        }}
+        summary {{
+            font-weight: bold;
+            cursor: pointer;
+            outline: none;
+            user-select: none;
+            color: #1d9bf0;
+        }}
+        pre {{
+            background-color: #000000;
+            color: #00ff00;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-family: "Fira Code", Consolas, Monaco, monospace;
+            font-size: 0.9rem;
+            border: 1px solid #202327;
+            white-space: pre-wrap;
+        }}
+        .node-card {{
+            background-color: #1e2732;
+            border: 1px solid #2f3336;
+            border-radius: 6px;
+            padding: 15px;
+            margin-bottom: 10px;
+        }}
+        .node-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #2f3336;
+            padding-bottom: 8px;
+            margin-bottom: 10px;
+        }}
+        .badge {{
+            background-color: #1d9bf0;
+            color: #ffffff;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: bold;
+        }}
+        .badge.depth-0 {{ background-color: #10b981; }}
+        .badge.depth-1 {{ background-color: #f59e0b; }}
+        .badge.depth-2 {{ background-color: #ef4444; }}
+
+        .chat-bubble {{
+            display: flex;
+            flex-direction: column;
+            margin-bottom: 15px;
+            max-width: 85%;
+        }}
+        .chat-bubble.user {{
+            margin-left: auto;
+            align-items: flex-end;
+        }}
+        .chat-bubble.assistant {{
+            margin-right: auto;
+            align-items: flex-start;
+        }}
+        .bubble-content {{
+            padding: 12px 16px;
+            border-radius: 18px;
+            font-size: 0.95rem;
+        }}
+        .chat-bubble.user .bubble-content {{
+            background-color: #1d9bf0;
+            color: #ffffff;
+            border-bottom-right-radius: 4px;
+        }}
+        .chat-bubble.assistant .bubble-content {{
+            background-color: #2f3336;
+            color: #e1e8ed;
+            border-bottom-left-radius: 4px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📖 Lossless Context Management (LCM) Active Context</h1>
+            <p style="margin:0;color:#8899a6;">Session: <strong>{session.id}</strong></p>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">Summaries</div>
+                    <div class="stat-value">{len(all_nodes)} Nodes</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Fresh Tail</div>
+                    <div class="stat-value">{len(fresh_msgs)} Messages</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Total Active Context Size</div>
+                    <div class="stat-value">{total_tokens} Tokens</div>
+                </div>
+            </div>
+        </header>
+
+        <details>
+            <summary>🛠️ System Message Instructions</summary>
+            <pre>{html.escape(sys_msg)}</pre>
+        </details>
+
+        <details open>
+            <summary>📦 Compacted Summary Scaffold (DAG Nodes)</summary>
+            <div style="margin-top: 15px;">
+                {summary_nodes_html_str}
+            </div>
+        </details>
+
+        <details open>
+            <summary>🧵 Active Fresh Tail (Chronological Messages)</summary>
+            <div style="margin-top: 15px; display: flex; flex-direction: column;">
+                {fresh_tail_html_str}
+            </div>
+        </details>
+    </div>
+</body>
+</html>"""
+
+            # Write to a temporary HTML file safely
+            temp_file = tempfile.NamedTemporaryFile(
+                suffix="_lcm_context.html", delete=False, mode="w", encoding="utf-8"
+            )
+            temp_file.write(html_template)
+            temp_file.close()
+
+            return temp_file.name
         except Exception as e:
             logger.error(f"Failed to get LCM context by channel: {e}")
             return f"⚠️ Failed to retrieve LCM context: {e}"
