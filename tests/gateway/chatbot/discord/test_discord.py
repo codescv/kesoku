@@ -47,6 +47,7 @@ def mock_gateway() -> MagicMock:
     db.update_message_status = AsyncMock()
     gw.create_session = AsyncMock(return_value=Session(id="thread123", title="Test Session"))
     gw.post = AsyncMock()
+    gw.agent = None
     return gw
 
 
