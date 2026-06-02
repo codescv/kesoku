@@ -145,17 +145,17 @@ class CronManager:
         """
         self.chatbots = {bot.chatbot_id: bot for bot in chatbots}
         self.config_dir = config_dir
+        self.cron_toml_path = os.path.join(config_dir, "cronjob.toml")
         self.last_executed_minute: dict[int, int] = {}
         self.job_states: dict[tuple[str, str | None, str], dict[str, Any]] = {}
 
     async def start(self) -> None:
         """Start the background cron task checking loop."""
         logger.info("CronManager background loop started.")
-        cron_toml_path = os.path.join(self.config_dir, "cronjob.toml")
 
         while True:
             try:
-                jobs = load_cronjobs(cron_toml_path)
+                jobs = self.get_all_jobs()
                 if jobs:
                     await self._check_and_trigger_jobs(jobs)
             except asyncio.CancelledError:
@@ -369,3 +369,25 @@ class CronManager:
                 logger.error(f"Chatbot '{chatbot_id}' does not support trigger_cronjob.")
         except Exception as e:
             logger.error(f"Failed executing scheduled cronjob {job_idx}: {e}", exc_info=True)
+
+    def get_all_jobs(self) -> list[dict[str, Any]]:
+        """Load and return all configured cronjobs."""
+        return load_cronjobs(self.cron_toml_path)
+
+    async def trigger_jobs_by_tag(self, tag: str) -> int:
+        """Trigger all cronjobs matching the given tag immediately.
+
+        Args:
+            tag: The tag to match.
+
+        Returns:
+            The number of jobs triggered.
+        """
+        jobs = self.get_all_jobs()
+        triggered_count = 0
+        for idx, job in enumerate(jobs):
+            if job.get("tag") == tag:
+                logger.info(f"Manually triggering Job {idx} with tag '{tag}'")
+                asyncio.create_task(self._execute_job(job, idx))
+                triggered_count += 1
+        return triggered_count

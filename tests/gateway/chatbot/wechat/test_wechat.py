@@ -305,6 +305,11 @@ async def test_wechat_chatbot_slash_command_clear(
         bot._poll_session = mock_session
         bot._send_session = mock_session
 
+        # Mock active agent
+        mock_agent = MagicMock()
+        mock_agent.stop_session_worker = AsyncMock()
+        mock_gateway.agent = mock_agent
+
         # Mock existing session
         mock_gateway.db.get_session_by_channel.return_value = Session(id="sess123", title="Active Session")
 

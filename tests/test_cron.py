@@ -360,3 +360,102 @@ async def test_cron_manager_probability_daily_reset():
         assert manager.job_states[job_key]["last_reset_date"] == datetime.date.today()
         # Since it skipped, it should have increased the RESET p (0.1 * 1.1 = 0.11)
         assert manager.job_states[job_key]["current_p"] == pytest.approx(0.11)
+
+
+@pytest.mark.asyncio
+async def test_cron_manager_get_all_jobs():
+    mock_bot, _ = create_mock_bot()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_real = os.path.realpath(tmpdir)
+        cron_toml_path = os.path.join(tmpdir_real, "cronjob.toml")
+        toml_data = {
+            "job": [
+                {
+                    "schedule": "0 10 * * *",
+                    "prompt": "1.md",
+                    "channel_id": "1",
+                    "chatbot_id": "discord",
+                    "tag": "tag1",
+                },
+                {
+                    "schedule": "0 11 * * *",
+                    "prompt": "2.md",
+                    "channel_id": "2",
+                    "chatbot_id": "discord",
+                },
+            ]
+        }
+        with open(cron_toml_path, "wb") as f:
+            tomli_w.dump(toml_data, f)
+
+        manager = CronManager(chatbots=[mock_bot], config_dir=tmpdir_real)
+        jobs = manager.get_all_jobs()
+        assert len(jobs) == 2
+        assert jobs[0]["tag"] == "tag1"
+        assert "tag" not in jobs[1]
+
+
+@pytest.mark.asyncio
+async def test_cron_manager_trigger_jobs_by_tag():
+    mock_bot, _ = create_mock_bot()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_real = os.path.realpath(tmpdir)
+        cron_toml_path = os.path.join(tmpdir_real, "cronjob.toml")
+
+        # Create prompt files
+        prompt1_path = os.path.join(tmpdir_real, "1.md")
+        with open(prompt1_path, "w") as f:
+            f.write("Prompt 1")
+        prompt2_path = os.path.join(tmpdir_real, "2.md")
+        with open(prompt2_path, "w") as f:
+            f.write("Prompt 2")
+
+        toml_data = {
+            "job": [
+                {
+                    "schedule": "0 10 * * *",
+                    "prompt": "1.md",
+                    "channel_id": "1",
+                    "chatbot_id": "discord",
+                    "tag": "trigger_me",
+                },
+                {
+                    "schedule": "0 11 * * *",
+                    "prompt": "2.md",
+                    "channel_id": "2",
+                    "chatbot_id": "discord",
+                    "tag": "dont_trigger_me",
+                },
+                {
+                    "schedule": "0 12 * * *",
+                    "prompt": "1.md",
+                    "channel_id": "3",
+                    "chatbot_id": "discord",
+                    "tag": "trigger_me",
+                },
+            ]
+        }
+        with open(cron_toml_path, "wb") as f:
+            tomli_w.dump(toml_data, f)
+
+        manager = CronManager(chatbots=[mock_bot], config_dir=tmpdir_real)
+
+        # Trigger "trigger_me"
+        count = await manager.trigger_jobs_by_tag("trigger_me")
+        assert count == 2
+        await asyncio.sleep(0.1)  # yield to background tasks
+
+        assert mock_bot.trigger_cronjob.call_count == 2
+        # Verify calls
+        calls = mock_bot.trigger_cronjob.call_args_list
+        assert calls[0][1]["channel_id"] == "1"
+        assert calls[0][1]["prompt_content"] == "Prompt 1"
+        assert calls[1][1]["channel_id"] == "3"
+        assert calls[1][1]["prompt_content"] == "Prompt 1"
+
+        # Trigger non-existent tag
+        mock_bot.trigger_cronjob.reset_mock()
+        count = await manager.trigger_jobs_by_tag("non_existent")
+        assert count == 0
+        await asyncio.sleep(0.1)
+        mock_bot.trigger_cronjob.assert_not_called()

@@ -147,14 +147,10 @@ class MessageHeaderView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
 
         try:
-            # 1. Locate the active dispatcher agent and session worker, and stop the turn
+            # 1. Locate the active dispatcher agent and stop the session worker immediately
             agent = self.gateway.agent
             if agent:
-                worker = agent.workers.get(self.session_id)
-                if worker:
-                    worker.stop()
-                    # Remove worker reference to allow clean subsequent turns
-                    agent.workers.pop(self.session_id, None)
+                await agent.stop_session_worker(self.session_id, immediate=True)
 
             # Allow the cancelled worker to write the turn metrics to database
             await asyncio.sleep(0.15)
@@ -225,13 +221,10 @@ class MessageHeaderView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
 
         try:
-            # 1. Locate the active dispatcher agent and session worker, and stop the turn if running
+            # 1. Locate the active dispatcher agent and stop the session worker immediately if running
             agent = self.gateway.agent
             if agent:
-                worker = agent.workers.get(self.session_id)
-                if worker:
-                    worker.stop()
-                    agent.workers.pop(self.session_id, None)
+                await agent.stop_session_worker(self.session_id, immediate=True)
 
             # 2. Delete the session and its history/workspace via Gateway
             await self.gateway.delete_session(self.session_id)

@@ -247,8 +247,8 @@ async def test_run_shell_command_failure_truncation(tmp_path) -> None:
 
         ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
 
-        # Generate extremely long output (more than 10000 characters)
-        long_cmd = "python3 -c 'print(\"a\" * 12000); exit(1)'"
+        # Generate extremely long output (more than 30000 characters)
+        long_cmd = "python3 -c 'print(\"a\" * 40000); exit(1)'"
         with pytest.raises(ShellCommandError) as exc_info:
             await run_shell_command(long_cmd, context=ctx)
 
@@ -264,7 +264,7 @@ async def test_run_shell_command_failure_truncation(tmp_path) -> None:
         assert os.path.exists(filepath)
         with open(filepath, encoding="utf-8") as f:
             content = f.read()
-            assert "a" * 12000 in content
+            assert "a" * 40000 in content
     finally:
         kesoku.config._global_config = original_config
 

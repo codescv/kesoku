@@ -49,6 +49,7 @@ class Gateway:
         self._listeners: set[Listener] = set()
         self.context.sync_db.verify_db()
         self.agent: Any | None = None
+        self.cron_manager: Any | None = None
 
     def register_agent(self, agent: Any) -> None:
         """Register an active Agent dispatcher instance.
@@ -57,6 +58,14 @@ class Gateway:
             agent: The active Agent instance.
         """
         self.agent = agent
+
+    def register_cron_manager(self, cron_manager: Any) -> None:
+        """Register the active CronManager instance.
+
+        Args:
+            cron_manager: The active CronManager instance.
+        """
+        self.cron_manager = cron_manager
 
     async def create_session(
         self,

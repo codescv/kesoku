@@ -239,6 +239,7 @@ async def test_stop_turn_callback(mock_gateway: MagicMock) -> None:
     # Mock active agent and session worker
     mock_worker = MagicMock()
     mock_agent = MagicMock()
+    mock_agent.stop_session_worker = AsyncMock()
     mock_agent.workers = {"s123": mock_worker}
     mock_gateway.agent = mock_agent
 
@@ -286,10 +287,8 @@ async def test_stop_turn_callback(mock_gateway: MagicMock) -> None:
     # Message containing the view should be deleted entirely
     mock_message.delete.assert_called_once()
     mock_message.edit.assert_not_called()
-    # Worker stop should be called
-    mock_worker.stop.assert_called_once()
-    # Worker should be removed from agent
-    assert "s123" not in mock_agent.workers
+    # stop_session_worker should be called
+    mock_agent.stop_session_worker.assert_called_once_with("s123", immediate=True)
     # Message status updated to interrupted
     mock_gateway.db.update_message_status.assert_called_once_with("msg_u1", MessageStatus.INTERRUPTED)
     # Typing task cancelled
@@ -309,6 +308,7 @@ async def test_clear_session_callback(mock_gateway: MagicMock) -> None:
     """Test successful click of the 'Clear Session' button."""
     mock_worker = MagicMock()
     mock_agent = MagicMock()
+    mock_agent.stop_session_worker = AsyncMock()
     mock_agent.workers = {"s123": mock_worker}
     mock_gateway.agent = mock_agent
     mock_gateway.delete_session = AsyncMock()
@@ -335,8 +335,8 @@ async def test_clear_session_callback(mock_gateway: MagicMock) -> None:
 
     # Asserts:
     mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
-    # Worker stop should be called
-    mock_worker.stop.assert_called_once()
+    # stop_session_worker should be called
+    mock_agent.stop_session_worker.assert_called_once_with("s123", immediate=True)
     # delete_session called on Gateway
     mock_gateway.delete_session.assert_called_once_with("s123")
     # Typing task cancelled
@@ -359,6 +359,7 @@ async def test_stop_turn_callback_with_metrics(mock_gateway: MagicMock) -> None:
     # Mock active agent and session worker
     mock_worker = MagicMock()
     mock_agent = MagicMock()
+    mock_agent.stop_session_worker = AsyncMock()
     mock_agent.workers = {"s123": mock_worker}
     mock_gateway.agent = mock_agent
 

@@ -55,7 +55,7 @@ from kesoku.utils.async_fs import (
 
 logger = setup_logger(__name__)
 
-MAX_TOOL_OUTPUT_LENGTH = 3000
+MAX_TOOL_OUTPUT_LENGTH = 30000
 TIMEOUT_SECONDS = 1800
 MAX_MEMORY_CONTENT_LENGTH = 500
 
@@ -478,7 +478,7 @@ async def run_shell_command(
       and write at most 4000 characters per command.
     - NEVER run commands that are more than 5000 characters just to be safe.
     - If you have a command that is very long, only emit 1 tool call to avoid token limit exceed error.
-    - Tool output is capped at 3000 characters to save tokens. If you need to view
+    - Tool output is capped at 30000 characters to save tokens. If you need to view
       a large file, read it by chunks of lines.
     - You are encouraged to combine commands using '|', '&&', ';' etc to save turns.
     - If you think the output of the command is long or not important, redirect it to

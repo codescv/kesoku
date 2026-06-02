@@ -59,6 +59,37 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
                 description=description,
                 callback=role_callback,
             )
+        elif cmd_name == "cronjob":
+
+            async def cronjob_callback(interaction: discord.Interaction, tag: str = "") -> None:
+                logger.info(
+                    f"Received /cronjob slash command with tag='{tag}' from user {interaction.user.name} "
+                    f"(ID: {interaction.user.id}) in channel {interaction.channel_id}"
+                )
+                await interaction.response.defer()
+
+                async def reply_func(text: str) -> None:
+                    from kesoku.utils.text import split_text_into_chunks
+                    chunks = split_text_into_chunks(text, 2000)
+                    for chunk in chunks:
+                        if chunk.strip():
+                            await interaction.followup.send(chunk)
+
+                try:
+                    await chatbot.commands.execute(
+                        "cronjob",
+                        reply_func,
+                        tag=tag,
+                    )
+                except Exception as e:
+                    logger.error(f"Discord command /cronjob execution failed: {e}")
+                    await reply_func(f"⚠️ Failed to execute command: {e}")
+
+            cmd = app_commands.Command(
+                name="cronjob",
+                description=description,
+                callback=cronjob_callback,
+            )
         else:
 
             def make_callback(c_name: str) -> Callable[[discord.Interaction], Awaitable[None]]:

@@ -555,6 +555,7 @@ def start_cmd(
             bots.append(cronjob_bot)
 
             cron_manager = CronManager(chatbots=bots, config_dir=config_dir)
+            gateway.register_cron_manager(cron_manager)
             logger.info(f"Loaded cronjobs configuration from {cron_toml_path}")
 
     async def _service_runner() -> None:

@@ -255,9 +255,64 @@ class Chatbot(ABC):
             handle_lcm,
         )
 
+        async def handle_cronjob(
+            reply_func: Callable[[str], Awaitable[None]],
+            tag: str = "",
+        ) -> None:
+            if tag:
+                status_msg = await self.trigger_cronjobs_by_tag(tag)
+            else:
+                status_msg = await self.list_cronjobs()
+            await reply_func(status_msg)
+
+        self.commands.register(
+            "cronjob",
+            "List all cronjobs or trigger them by tag immediately.",
+            handle_cronjob,
+        )
+
     async def restart_service(self) -> None:
         """Restart the Kesoku service."""
         await utils_restart_service(self.chatbot_id, self.stop)
+
+    async def list_cronjobs(self) -> str:
+        """List all configured cronjobs."""
+        cron_mgr = getattr(self.gateway, "cron_manager", None)
+        if not cron_mgr:
+            return "⚠️ CronManager is not initialized or active."
+
+        try:
+            jobs = cron_mgr.get_all_jobs()
+            if not jobs:
+                return "ℹ️ No cronjobs configured."
+
+            lines = ["📋 **Configured Cronjobs:**"]
+            for idx, job in enumerate(jobs):
+                tag_str = f" | tag: `{job.get('tag')}`" if job.get("tag") else ""
+                lines.append(
+                    f"  {idx+1}. **{job.get('chatbot_id')}** -> `{job.get('prompt')}`\n"
+                    f"     schedule: `{job.get('schedule')}`{tag_str} | channel: `{job.get('channel_id') or 'auto'}`"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error(f"Failed to list cronjobs: {e}", exc_info=True)
+            return f"⚠️ Failed to list cronjobs: {e}"
+
+    async def trigger_cronjobs_by_tag(self, tag: str) -> str:
+        """Trigger cronjobs matching the given tag immediately."""
+        cron_mgr = getattr(self.gateway, "cron_manager", None)
+        if not cron_mgr:
+            return "⚠️ CronManager is not initialized or active."
+
+        try:
+            count = await cron_mgr.trigger_jobs_by_tag(tag)
+            if count > 0:
+                return f"🚀 Successfully triggered {count} cronjob(s) with tag `{tag}`."
+            else:
+                return f"⚠️ No cronjobs found matching tag `{tag}`."
+        except Exception as e:
+            logger.error(f"Failed to trigger cronjobs for tag {tag}: {e}", exc_info=True)
+            return f"⚠️ Failed to trigger cronjobs: {e}"
 
     async def execute_command_from_text(
         self,
@@ -296,6 +351,9 @@ class Chatbot(ABC):
                 await self.commands.execute("role", reply_func, channel_id=channel_id, role_name=role_name)
             elif command == "restart":
                 await self.commands.execute(command, reply_func)
+            elif command == "cronjob":
+                tag = " ".join(parts[1:]) if len(parts) > 1 else ""
+                await self.commands.execute("cronjob", reply_func, tag=tag)
             else:
                 await reply_func(f"⚠️ Unrecognized command: /{command}")
         except Exception as e:
@@ -307,10 +365,7 @@ class Chatbot(ABC):
         logger.info(f"Chatbot '{self.chatbot_id}' clearing session '{session_id}'.")
         agent = self.gateway.agent
         if agent:
-            worker = agent.workers.get(session_id)
-            if worker:
-                worker.stop()
-                agent.workers.pop(session_id, None)
+            await agent.stop_session_worker(session_id, immediate=True)
         await self.gateway.delete_session(session_id)
 
     async def clear_session_by_channel(self, channel_id: str) -> str:
