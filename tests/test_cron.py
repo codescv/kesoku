@@ -172,7 +172,7 @@ async def test_cron_manager_wechat_optional_channel():
 
 
 @pytest.mark.asyncio
-async def test_cron_manager_min_idle_time_seconds():
+async def test_cron_manager_min_idle_time():
     mock_bot = MagicMock()
     mock_bot.chatbot_id = "discord"
     mock_bot.trigger_cronjob = AsyncMock()
@@ -193,7 +193,7 @@ async def test_cron_manager_min_idle_time_seconds():
             "prompt": "test_prompt.md",
             "channel_id": "999",
             "chatbot_id": "discord",
-            "min_idle_time_seconds": 60,
+            "min_idle_time": 60,
         }
 
         manager = CronManager(chatbots=[mock_bot], config_dir=tmpdir_real)
@@ -217,12 +217,12 @@ async def test_cron_manager_min_idle_time_seconds():
             channel_id="999",
             prompt_content="Hello!",
             mention_user_id=None,
-            min_idle_time_seconds=60.0,
+            min_idle_time=60.0,
         )
 
 
 @pytest.mark.asyncio
-async def test_cron_manager_daily_target():
+async def test_cron_manager_max_messages():
     mock_bot = MagicMock()
     mock_bot.chatbot_id = "discord"
     mock_bot.trigger_cronjob = AsyncMock()
@@ -243,7 +243,7 @@ async def test_cron_manager_daily_target():
             "prompt": "test_prompt.md",
             "channel_id": "999",
             "chatbot_id": "discord",
-            "daily_target": 3,
+            "max_messages": 3,
         }
 
         manager = CronManager(chatbots=[mock_bot], config_dir=tmpdir_real)
@@ -267,20 +267,15 @@ async def test_cron_manager_daily_target():
             channel_id="999",
             prompt_content="Hello!",
             mention_user_id=None,
-            daily_target=3,
+            max_messages=3,
         )
 
 
 @pytest.mark.asyncio
-async def test_cron_manager_min_interval():
+async def test_cron_manager_accumulating_probability():
     mock_bot = MagicMock()
     mock_bot.chatbot_id = "discord"
     mock_bot.trigger_cronjob = AsyncMock()
-
-    mock_gateway = MagicMock()
-    mock_db = AsyncMock()
-    mock_gateway.db = mock_db
-    mock_bot.gateway = mock_gateway
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_real = os.path.realpath(tmpdir)
@@ -293,103 +288,85 @@ async def test_cron_manager_min_interval():
             "prompt": "test_prompt.md",
             "channel_id": "999",
             "chatbot_id": "discord",
-            "min_interval_seconds": 7200,
+            "probability": 0.1,
         }
 
         manager = CronManager(chatbots=[mock_bot], config_dir=tmpdir_real)
 
-        # Case 1: Last trigger was 1 hour ago (3600s, less than 7200s) -> should skip
-        mock_db.get_cronjob_sent_stats_today.return_value = (1, datetime.datetime.now().timestamp() - 3600)
-
-        await manager._check_and_trigger_jobs([job])
-        await asyncio.sleep(0.1)
-        mock_bot.trigger_cronjob.assert_not_called()
-
-        # Reset minutes cache in manager to allow checking again
-        manager.last_executed_minute.clear()
-
-        # Case 2: Last trigger was 3 hours ago (10800s, more than 7200s) -> should trigger
-        mock_db.get_cronjob_sent_stats_today.return_value = (1, datetime.datetime.now().timestamp() - 10800)
-
-        await manager._check_and_trigger_jobs([job])
-        await asyncio.sleep(0.1)
-        mock_bot.trigger_cronjob.assert_called_once_with(
-            channel_id="999",
-            prompt_content="Hello!",
-            mention_user_id=None,
-            min_interval_seconds=7200.0,
-        )
-
-
-@pytest.mark.asyncio
-async def test_cron_manager_progressive_probability():
-    mock_bot = MagicMock()
-    mock_bot.chatbot_id = "discord"
-    mock_bot.trigger_cronjob = AsyncMock()
-
-    mock_gateway = MagicMock()
-    mock_db = AsyncMock()
-    mock_gateway.db = mock_db
-    mock_bot.gateway = mock_gateway
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_real = os.path.realpath(tmpdir)
-        prompt_file_path = os.path.join(tmpdir_real, "test_prompt.md")
-        with open(prompt_file_path, "w") as f:
-            f.write("Hello!")
-
-        job = {
-            "schedule": "* * * * *",
-            "prompt": "test_prompt.md",
-            "channel_id": "999",
-            "chatbot_id": "discord",
-            "probability_base": 0.1,
-            "probability_max": 0.9,
-            "ramp_up_seconds": 3600,
-        }
-
-        manager = CronManager(chatbots=[mock_bot], config_dir=tmpdir_real)
-
-        # Case 1: Completely empty channel (last_msg_ts is None) -> prob = p_max (0.9)
-        # random.random() is 0.5 <= 0.9 -> should trigger!
-        mock_db.get_last_message_timestamp.return_value = None
-
+        # Tick 1: random.random() is 0.2 (> 0.1) -> should skip.
+        # p should increase to 0.1 * 1.1 = 0.11
         from unittest.mock import patch
-        with patch("random.random", return_value=0.5):
-            await manager._check_and_trigger_jobs([job])
-            await asyncio.sleep(0.1)
-            mock_bot.trigger_cronjob.assert_called_once_with(
-                channel_id="999",
-                prompt_content="Hello!",
-                mention_user_id=None,
-            )
-
-        # Reset minutes cache and mock_bot
-        manager.last_executed_minute.clear()
-        mock_bot.trigger_cronjob.reset_mock()
-
-        # Case 2: Idle time is 1800s (half of ramp_up_seconds 3600s)
-        # prob = p_base + (p_max - p_base) * 0.5 = 0.1 + 0.8 * 0.5 = 0.5
-        # If random.random is 0.6 (> 0.5) -> should skip!
-        now_ts = datetime.datetime.now().timestamp()
-        mock_db.get_last_message_timestamp.return_value = now_ts - 1800
-
-        with patch("random.random", return_value=0.6):
+        with patch("random.random", return_value=0.2):
             await manager._check_and_trigger_jobs([job])
             await asyncio.sleep(0.1)
             mock_bot.trigger_cronjob.assert_not_called()
 
-        # Reset
-        manager.last_executed_minute.clear()
-        mock_bot.trigger_cronjob.reset_mock()
+        job_key = ("discord", "999", "test_prompt.md")
+        assert manager.job_states[job_key]["current_p"] == pytest.approx(0.11)
 
-        # Case 3: Idle time is 1800s (prob = 0.5)
-        # If random.random is 0.4 (<= 0.5) -> should trigger!
-        with patch("random.random", return_value=0.4):
+        # Reset minutes cache
+        manager.last_executed_minute.clear()
+
+        # Tick 2: random.random() is 0.12 (> 0.11) -> should skip.
+        # p should increase to 0.11 * 1.1 = 0.121
+        with patch("random.random", return_value=0.12):
             await manager._check_and_trigger_jobs([job])
             await asyncio.sleep(0.1)
-            mock_bot.trigger_cronjob.assert_called_once_with(
-                channel_id="999",
-                prompt_content="Hello!",
-                mention_user_id=None,
-            )
+            mock_bot.trigger_cronjob.assert_not_called()
+
+        assert manager.job_states[job_key]["current_p"] == pytest.approx(0.121)
+
+        # Reset minutes cache
+        manager.last_executed_minute.clear()
+
+        # Tick 3: random.random() is 0.10 (<= 0.121) -> should trigger!
+        # p should reset to 0.1
+        with patch("random.random", return_value=0.10):
+            await manager._check_and_trigger_jobs([job])
+            await asyncio.sleep(0.1)
+            mock_bot.trigger_cronjob.assert_called_once()
+
+        assert manager.job_states[job_key]["current_p"] == pytest.approx(0.1)
+
+
+@pytest.mark.asyncio
+async def test_cron_manager_probability_daily_reset():
+    mock_bot = MagicMock()
+    mock_bot.chatbot_id = "discord"
+    mock_bot.trigger_cronjob = AsyncMock()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_real = os.path.realpath(tmpdir)
+        prompt_file_path = os.path.join(tmpdir_real, "test_prompt.md")
+        with open(prompt_file_path, "w") as f:
+            f.write("Hello!")
+
+        job = {
+            "schedule": "* * * * *",
+            "prompt": "test_prompt.md",
+            "channel_id": "999",
+            "chatbot_id": "discord",
+            "probability": 0.1,
+        }
+
+        manager = CronManager(chatbots=[mock_bot], config_dir=tmpdir_real)
+        job_key = ("discord", "999", "test_prompt.md")
+
+        # Manually set state with increased p and yesterday's date
+        yesterday = datetime.date.today() - datetime.timedelta(days=1)
+        manager.job_states[job_key] = {
+            "current_p": 0.5,
+            "last_reset_date": yesterday
+        }
+
+        # Tick: should reset p to 0.1 because of new day
+        # random.random() is 0.2 (> 0.1) -> should skip
+        from unittest.mock import patch
+        with patch("random.random", return_value=0.2):
+            await manager._check_and_trigger_jobs([job])
+            await asyncio.sleep(0.1)
+            mock_bot.trigger_cronjob.assert_not_called()
+
+        assert manager.job_states[job_key]["last_reset_date"] == datetime.date.today()
+        # Since it skipped, it should have increased the RESET p (0.1 * 1.1 = 0.11)
+        assert manager.job_states[job_key]["current_p"] == pytest.approx(0.11)

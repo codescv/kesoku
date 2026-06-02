@@ -17,21 +17,18 @@
 # # The chatbot adapter ID configured in config.toml.
 # chatbot_id = "discord"
 #
-# # Optional: Trigger probability (between 0.0 and 1.0).
+# # Optional: Initial trigger probability (between 0.0 and 1.0).
 # # If set to 0.02, the job will run with a 2% chance on scheduled ticks.
-# # Omit this option to always run the job on schedule.
+# # If skipped, probability increases by 10% (* 1.1) on next tick, and resets on trigger or new day.
+# # Omit this option to always run the job on schedule (defaults to 1.0).
 # probability = 0.02
 #
 # # Optional: Minimum idle time in seconds.
 # # If the channel has active human/agent messages within this period, the job is skipped.
-# # min_idle_time_seconds = 1800
+# # min_idle_time = 1800
 #
 # # Optional: Maximum number of cron messages allowed per day in this channel.
-# # daily_target = 3
-#
-# # Optional: Minimum interval spacing required in seconds between triggers.
-# # min_interval_seconds = 7200
-
+# # max_messages = 3
 
 
 # [[job]]

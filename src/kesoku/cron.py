@@ -146,6 +146,7 @@ class CronManager:
         self.chatbots = {bot.chatbot_id: bot for bot in chatbots}
         self.config_dir = config_dir
         self.last_executed_minute: dict[int, int] = {}
+        self.job_states: dict[tuple[str, str | None, str], dict[str, Any]] = {}
 
     async def start(self) -> None:
         """Start the background cron task checking loop."""
@@ -173,6 +174,7 @@ class CronManager:
         """
         now = datetime.datetime.now()
         current_minute_epoch = int(now.timestamp() // 60)
+        today = now.date()
 
         for idx, job in enumerate(jobs):
             schedule = job.get("schedule")
@@ -188,111 +190,86 @@ class CronManager:
 
                 chatbot_id = job.get("chatbot_id")
                 channel_id = job.get("channel_id")
+                prompt_path = job.get("prompt")
 
-                probability = job.get("probability")
-                prob_base = job.get("probability_base")
-                prob_max = job.get("probability_max")
-                ramp_up = job.get("ramp_up_seconds")
+                if not chatbot_id or not prompt_path:
+                    logger.warning(f"Job {idx} is missing chatbot_id or prompt.")
+                    continue
 
-                prob = None
-                if prob_base is not None and prob_max is not None and ramp_up is not None:
-                    try:
-                        p_base = float(prob_base)
-                        p_max = float(prob_max)
-                        r_up = float(ramp_up)
-
-                        if chatbot_id and channel_id:
-                            bot = self.chatbots.get(chatbot_id)
-                            if bot:
-                                last_msg_ts = await bot.gateway.db.get_last_message_timestamp(chatbot_id, channel_id)
-                                if last_msg_ts is None:
-                                    # Completely empty channel, use max probability
-                                    prob = p_max
-                                else:
-                                    idle_time = now.timestamp() - last_msg_ts
-                                    if r_up <= 0:
-                                        prob = p_max
-                                    else:
-                                        ratio = min(1.0, max(0.0, idle_time / r_up))
-                                        prob = p_base + (p_max - p_base) * ratio
-
-                        if prob is None:
-                            # Fallback if chatbot or channel is not resolved
-                            prob = p_max
-                    except ValueError:
-                        logger.warning(
-                            f"Invalid progressive probability formats for job {idx}: "
-                            f"base={prob_base}, max={prob_max}, ramp_up={ramp_up}"
-                        )
-
-                if prob is None and probability is not None:
-                    try:
-                        prob = float(probability)
-                    except ValueError:
-                        logger.warning(f"Invalid probability format for job {idx}: {probability}")
-
-                if prob is not None:
-                    if random.random() > prob:
-                        logger.info(
-                            f"Job {idx} matched schedule but was skipped by probability filter (p={prob:.4f})."
-                        )
-                        continue
-
-                # Check min_idle_time_seconds if channel_id is explicitly provided
-                min_idle_time_seconds = job.get("min_idle_time_seconds")
-                if min_idle_time_seconds is not None:
-                    try:
-                        min_idle = float(min_idle_time_seconds)
-                        if channel_id and chatbot_id:
-                            bot = self.chatbots.get(chatbot_id)
-                            if bot:
-                                last_msg_ts = await bot.gateway.db.get_last_message_timestamp(chatbot_id, channel_id)
-                                if last_msg_ts is not None:
-                                    idle_time = now.timestamp() - last_msg_ts
-                                    if idle_time < min_idle:
-                                        logger.info(
-                                            f"Job {idx} matched schedule but was skipped because channel {channel_id} "
-                                            f"has been idle for only {idle_time:.1f}s (required {min_idle}s)."
-                                        )
-                                        continue
-                    except ValueError:
-                        logger.warning(f"Invalid min_idle_time_seconds format for job {idx}: {min_idle_time_seconds}")
-
-                # Check daily_target and min_interval_seconds if channel_id is explicitly provided
-                daily_target = job.get("daily_target")
-                min_interval_seconds = job.get("min_interval_seconds")
-                if (daily_target is not None or min_interval_seconds is not None) and channel_id and chatbot_id:
+                # Check max_messages if channel_id is available
+                max_messages = job.get("max_messages")
+                if max_messages is not None and channel_id and chatbot_id:
                     bot = self.chatbots.get(chatbot_id)
                     if bot:
-                        count, last_ts = await bot.gateway.db.get_cronjob_sent_stats_today(chatbot_id, channel_id)
-
-                        if daily_target is not None:
-                            try:
-                                target = int(daily_target)
-                                if count >= target:
-                                    logger.info(
-                                        f"Job {idx} matched schedule but was skipped because the daily target "
-                                        f"of {target} messages has already been reached today ({count} sent)."
-                                    )
-                                    continue
-                            except ValueError:
-                                logger.warning(f"Invalid daily_target format for job {idx}: {daily_target}")
-
-                        if min_interval_seconds is not None and last_ts is not None:
-                            try:
-                                min_interval = float(min_interval_seconds)
-                                elapsed = now.timestamp() - last_ts
-                                if elapsed < min_interval:
-                                    logger.info(
-                                        f"Job {idx} matched schedule but was skipped because minimum interval "
-                                        f"of {min_interval}s has not elapsed since last trigger "
-                                        f"({elapsed:.1f}s elapsed)."
-                                    )
-                                    continue
-                            except ValueError:
-                                logger.warning(
-                                    f"Invalid min_interval_seconds format for job {idx}: {min_interval_seconds}"
+                        try:
+                            target = int(max_messages)
+                            count, _ = await bot.gateway.db.get_cronjob_sent_stats_today(chatbot_id, channel_id)
+                            if count >= target:
+                                logger.info(
+                                    f"Job {idx} matched schedule but was skipped because the daily limit "
+                                    f"of {target} messages has already been reached today ({count} sent)."
                                 )
+                                continue
+                        except ValueError:
+                            logger.warning(f"Invalid max_messages format for job {idx}: {max_messages}")
+
+                # Check min_idle_time if channel_id is available
+                min_idle = job.get("min_idle_time") or job.get("min_idle_time_seconds")
+                if min_idle is not None and channel_id and chatbot_id:
+                    bot = self.chatbots.get(chatbot_id)
+                    if bot:
+                        try:
+                            min_idle_val = float(min_idle)
+                            last_msg_ts = await bot.gateway.db.get_last_message_timestamp(chatbot_id, channel_id)
+                            if last_msg_ts is not None:
+                                idle_time = now.timestamp() - last_msg_ts
+                                if idle_time < min_idle_val:
+                                    logger.info(
+                                        f"Job {idx} matched schedule but was skipped because channel {channel_id} "
+                                        f"has been idle for only {idle_time:.1f}s (required {min_idle_val}s)."
+                                    )
+                                    continue
+                        except ValueError:
+                            logger.warning(f"Invalid min_idle_time format for job {idx}: {min_idle}")
+
+                # Probability Logic
+                base_prob = job.get("probability", 1.0)
+                try:
+                    base_prob = float(base_prob)
+                except ValueError:
+                    logger.warning(f"Invalid probability format for job {idx}: {base_prob}")
+                    base_prob = 1.0
+
+                job_key = (chatbot_id, channel_id, prompt_path)
+                state = self.job_states.get(job_key)
+
+                if not state:
+                    state = {
+                        "current_p": base_prob,
+                        "last_reset_date": today
+                    }
+                    self.job_states[job_key] = state
+                elif state["last_reset_date"] != today:
+                    # New day, reset p
+                    state["current_p"] = base_prob
+                    state["last_reset_date"] = today
+                    logger.info(f"Job {idx} probability reset for new day to {base_prob}")
+
+                current_p = state["current_p"]
+                r = random.random()
+                if r > current_p:
+                    # Did not trigger, increase p by 10%
+                    new_p = min(1.0, current_p * 1.1)
+                    state["current_p"] = new_p
+                    logger.info(
+                        f"Job {idx} matched schedule but was skipped by probability filter (p={current_p:.4f}). "
+                        f"Probability increased to {new_p:.4f} for next tick."
+                    )
+                    continue
+                else:
+                    # Triggered, reset p
+                    state["current_p"] = base_prob
+                    logger.info(f"Job {idx} passed probability filter (p={current_p:.4f}). Resetting p to {base_prob}.")
 
                 # Run the job asynchronously in the background
                 asyncio.create_task(self._execute_job(job, idx))
@@ -358,24 +335,17 @@ class CronManager:
         try:
             if hasattr(bot, "trigger_cronjob"):
                 kwargs = {}
-                min_idle_time_seconds = job.get("min_idle_time_seconds")
-                if min_idle_time_seconds is not None:
+                min_idle = job.get("min_idle_time") or job.get("min_idle_time_seconds")
+                if min_idle is not None:
                     try:
-                        kwargs["min_idle_time_seconds"] = float(min_idle_time_seconds)
+                        kwargs["min_idle_time"] = float(min_idle)
                     except ValueError:
                         pass
 
-                daily_target = job.get("daily_target")
-                if daily_target is not None:
+                max_messages = job.get("max_messages")
+                if max_messages is not None:
                     try:
-                        kwargs["daily_target"] = int(daily_target)
-                    except ValueError:
-                        pass
-
-                min_interval_seconds = job.get("min_interval_seconds")
-                if min_interval_seconds is not None:
-                    try:
-                        kwargs["min_interval_seconds"] = float(min_interval_seconds)
+                        kwargs["max_messages"] = int(max_messages)
                     except ValueError:
                         pass
 

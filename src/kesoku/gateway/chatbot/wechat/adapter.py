@@ -788,9 +788,8 @@ You are interacting with the user via WeChat (Weixin).
         **kwargs: Any,
     ) -> None:
         """Trigger a scheduled cronjob in the specified WeChat chat/room."""
-        min_idle = kwargs.get("min_idle_time_seconds")
-        daily_target = kwargs.get("daily_target")
-        min_interval = kwargs.get("min_interval_seconds")
+        min_idle = kwargs.get("min_idle_time") or kwargs.get("min_idle_time_seconds")
+        max_messages = kwargs.get("max_messages")
 
         async def should_trigger_for_channel(chan: str) -> bool:
             # 1. Idle check
@@ -805,26 +804,15 @@ You are interacting with the user via WeChat (Weixin).
                         )
                         return False
 
-            # 2. Daily Target & Min Interval check
-            if daily_target is not None or min_interval is not None:
-                count, last_ts = await self.gateway.db.get_cronjob_sent_stats_today(self.chatbot_id, chan)
-
-                if daily_target is not None:
-                    if count >= daily_target:
-                        logger.info(
-                            f"WeChat: Skip channel {chan} because daily target of {daily_target} "
-                            f"has already been reached today ({count} sent)."
-                        )
-                        return False
-
-                if min_interval is not None and last_ts is not None:
-                    elapsed = time.time() - last_ts
-                    if elapsed < min_interval:
-                        logger.info(
-                            f"WeChat: Skip channel {chan} because minimum interval of {min_interval}s "
-                            f"has not elapsed since last trigger ({elapsed:.1f}s elapsed)."
-                        )
-                        return False
+            # 2. Max Messages check
+            if max_messages is not None:
+                count, _ = await self.gateway.db.get_cronjob_sent_stats_today(self.chatbot_id, chan)
+                if count >= max_messages:
+                    logger.info(
+                        f"WeChat: Skip channel {chan} because daily max messages limit of {max_messages} "
+                        f"has already been reached today ({count} sent)."
+                    )
+                    return False
             return True
 
         if not channel_id:
