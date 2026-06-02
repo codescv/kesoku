@@ -387,10 +387,45 @@ class DatabaseManager:
         with self.connection_provider.connection() as conn:
             with conn:
                 placeholders = ",".join("?" for _ in message_ids)
-                conn.execute(
+                cursor = conn.execute(
                     f"DELETE FROM messages WHERE id IN ({placeholders})",
                     tuple(message_ids),
                 )
+                logger.info(f"Database deleted {cursor.rowcount} messages out of {len(message_ids)} requested IDs.")
+
+
+
+    def delete_messages_before_timestamp(
+        self, session_id: str, timestamp: float, exclude_ids: list[str] | None = None
+    ) -> int:
+        """Delete all messages in a session that are older than a specific timestamp.
+
+        Args:
+            session_id: The session identifier.
+            timestamp: Cutoff unix timestamp. Messages older than this are deleted.
+            exclude_ids: Optional list of message IDs to protect from deletion.
+
+        Returns:
+            The number of messages deleted.
+        """
+        with self.connection_provider.connection() as conn:
+            with conn:
+                query = "DELETE FROM messages WHERE session_id = ? AND timestamp < ?"
+                params = [session_id, timestamp]
+                if exclude_ids:
+                    placeholders = ",".join("?" for _ in exclude_ids)
+                    query += f" AND id NOT IN ({placeholders})"
+                    params.extend(exclude_ids)
+                cursor = conn.execute(query, tuple(params))
+                deleted_count = cursor.rowcount
+                logger.info(
+                    f"Database deleted {deleted_count} messages older than {timestamp} "
+                    f"(excluding {len(exclude_ids) if exclude_ids else 0} IDs) in session {session_id}."
+                )
+                return deleted_count
+
+
+
 
 
     # Message CRUD
@@ -1160,6 +1195,25 @@ class AsyncDatabaseManager:
             message_ids: List of message ID strings to delete.
         """
         await asyncio.to_thread(self.sync_db.delete_messages_by_ids, message_ids)
+
+    async def delete_messages_before_timestamp(
+        self, session_id: str, timestamp: float, exclude_ids: list[str] | None = None
+    ) -> int:
+        """Delete all messages in a session that are older than a specific timestamp.
+
+        Args:
+            session_id: The session identifier.
+            timestamp: Cutoff unix timestamp. Messages older than this are deleted.
+            exclude_ids: Optional list of message IDs to protect from deletion.
+
+        Returns:
+            The number of messages deleted.
+        """
+        return await asyncio.to_thread(
+            self.sync_db.delete_messages_before_timestamp, session_id, timestamp, exclude_ids
+        )
+
+
 
 
     async def save_message(self, msg: Message) -> None:

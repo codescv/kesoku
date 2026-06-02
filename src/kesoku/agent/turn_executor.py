@@ -640,6 +640,8 @@ class TurnExecutor:
             return history
 
         # 4. Construct the compacted message and notification message
+        # Set timestamps to be just before the oldest kept turn to preserve correct chronological rendering order
+        oldest_kept_ts = turns_to_keep[0][0].timestamp
         compacted_content = f"[Conversation History State Snapshot]\n{final_summary}"
         compacted_msg = Message(
             session_id=self.session_id,
@@ -650,6 +652,7 @@ class TurnExecutor:
             type=MessageType.TEXT,
             content=compacted_content,
             status=MessageStatus.RESPONDED,
+            timestamp=oldest_kept_ts - 0.002,
         )
 
         notification_msg = Message(
@@ -661,19 +664,20 @@ class TurnExecutor:
             type=MessageType.TEXT,
             content="🔄 Conversation history has been automatically compacted in-place to optimize response speed.",
             status=MessageStatus.RESPONDED,
+            timestamp=oldest_kept_ts - 0.001,
         )
 
         # 5. Prune DB records and persist new summary
-        message_ids_to_delete = [m.id for turn in turns_to_compress for m in turn]
         try:
             # Save compacted message and notification first to prevent blank history on crash
             await self.gateway.post(compacted_msg)
             await self.gateway.post(notification_msg)
 
-            # Delete pruned messages
-            await self.context.db.delete_messages_by_ids(message_ids_to_delete)
+            deleted_count = await self.context.db.delete_messages_before_timestamp(
+                self.session_id, oldest_kept_ts, exclude_ids=[compacted_msg.id, notification_msg.id]
+            )
             logger.info(
-                f"Successfully pruned {len(message_ids_to_delete)} old messages and saved new snapshot in-place."
+                f"Successfully pruned {deleted_count} older messages in database and saved new snapshot in-place."
             )
 
         except Exception as dbe:
