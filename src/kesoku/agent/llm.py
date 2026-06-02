@@ -395,6 +395,9 @@ def _detect_image_mime_type(file_bytes: bytes, fallback_mime: str = "image/jpeg"
 class BaseLLM(ABC):
     """Abstract base class defining the interface for LLM providers."""
 
+    context_window_limit: int = 1048576  # Default context window limit (1M tokens)
+
+
     async def generate(
         self,
         prompt: str | None = None,

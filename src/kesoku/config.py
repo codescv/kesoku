@@ -206,6 +206,10 @@ class KesokuConfig(BaseModel):
     google_chat: GoogleChatConfig = Field(default_factory=GoogleChatConfig)
     wechat: WechatConfig = Field(default_factory=WechatConfig)
     shell: ShellConfig = Field(default_factory=ShellConfig)
+    env: dict[str, str | int | float | bool] = Field(
+        default_factory=dict,
+        description="Custom environment variables injected into os.environ on startup",
+    )
     agent_working_dir: str | None = Field(
         default=None, exclude=True, description="Absolute path of the directory containing the config file"
     )
@@ -265,6 +269,15 @@ def load_config(config_path: str) -> KesokuConfig:
             data = tomllib.load(f)
         cfg = KesokuConfig.model_validate(data)
         cfg.resolve_paths(config_path)
+
+        # Inject custom environment variables
+        for k, v in cfg.env.items():
+            if isinstance(v, bool):
+                os.environ[k] = str(v).lower()
+            else:
+                os.environ[k] = str(v)
+            logger.debug(f"Injected env var: {k}={os.environ[k]}")
+
         logger.info(f"Loaded configuration from {config_path}")
         _global_config = cfg
         return cfg

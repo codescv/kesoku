@@ -3,7 +3,7 @@
 import datetime
 import logging
 import os
-from typing import Literal
+from typing import Any, Literal
 
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
@@ -130,3 +130,91 @@ async def build_clean_history(
                 final_history.append(m)
 
     return final_history
+
+
+def messages_to_openlcm_dicts(history: list[Message]) -> list[dict[str, Any]]:
+    """Convert Kesoku Message list to OpenLCM dictionary format.
+
+    Args:
+        history: A list of Kesoku Message objects.
+
+    Returns:
+        A list of raw dictionaries matching the OpenAI/Anthropic format expected by OpenLCM.
+    """
+    lcm_msgs = []
+    for msg in history:
+        role_val = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
+        d = {
+            "role": role_val,
+            "content": msg.content,
+        }
+        if msg.role == MessageRole.TOOL:
+            d["tool_call_id"] = msg.metadata.get("tool_call_id") or msg.parent_id or ""
+            d["name"] = msg.metadata.get("tool_name") or msg.sender
+        elif msg.role == MessageRole.ASSISTANT:
+            if msg.metadata.get("tool_calls"):
+                d["tool_calls"] = msg.metadata["tool_calls"]
+        lcm_msgs.append(d)
+    return lcm_msgs
+
+
+def openlcm_dicts_to_messages(
+    dicts: list[dict[str, Any]],
+    session_id: str,
+    chatbot_id: str,
+    channel_id: str,
+) -> list[Message]:
+    """Reconstruct Kesoku Message list from OpenLCM dictionaries.
+
+    Args:
+        dicts: A list of dictionaries returned by OpenLCM.
+        session_id: Target conversational session identifier.
+        chatbot_id: Unique chatbot platform identifier.
+        channel_id: External platform channel identifier.
+
+    Returns:
+        A reconstructed list of Kesoku Message objects.
+    """
+    msgs = []
+    for d in dicts:
+        role_str = d["role"]
+        role = MessageRole(role_str) if role_str in MessageRole._value2member_map_ else MessageRole.USER
+        content = d.get("content") or ""
+
+        msg_type = MessageType.TEXT
+        metadata = {}
+
+        if role == MessageRole.TOOL:
+            msg_type = MessageType.TOOL_RESULT
+            metadata["tool_name"] = d.get("name") or "unknown_tool"
+            metadata["tool_call_id"] = d.get("tool_call_id") or ""
+        elif role == MessageRole.ASSISTANT:
+            if d.get("tool_calls"):
+                msg_type = MessageType.TOOL_CALL
+                metadata["tool_calls"] = d["tool_calls"]
+
+        # Determine sender name
+        if role == MessageRole.SYSTEM:
+            sender = "System"
+        elif role == MessageRole.USER and "[Note: This conversation uses Lossless Context" in content:
+            sender = "System"  # Scaffold header
+        elif role == MessageRole.ASSISTANT:
+            sender = "Kesoku"
+        else:
+            sender = "User"
+
+        msgs.append(
+            Message(
+                session_id=session_id,
+                chatbot_id=chatbot_id,
+                channel_id=channel_id,
+                sender=sender,
+                role=role,
+                type=msg_type,
+                content=content,
+                metadata=metadata,
+                status=MessageStatus.RESPONDED,
+            )
+        )
+    return msgs
+

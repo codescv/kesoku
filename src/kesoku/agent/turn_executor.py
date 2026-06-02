@@ -5,7 +5,11 @@ import json
 import time
 from typing import TYPE_CHECKING
 
-from kesoku.agent.history import build_clean_history
+from kesoku.agent.history import (
+    build_clean_history,
+    messages_to_openlcm_dicts,
+    openlcm_dicts_to_messages,
+)
 from kesoku.agent.llm import BaseLLM
 from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.turn_logger import TurnLogger
@@ -494,202 +498,42 @@ class TurnExecutor:
         cfg,
         current_msg: Message,
     ) -> list[Message]:
-        """Check context window usage and automatically compact history in-place if it exceeds threshold.
+        """Check context window usage and automatically compact history in-place using OpenLCM.
 
         Returns:
-            The active message history list (potentially compacted).
+            The active message history list (potentially compacted with OpenLCM scaffold).
         """
         if not history:
             return history
 
-        try:
-            context_tokens = await asyncio.to_thread(
-                llm.count_tokens,
-                prompt=None,
-                system_prompt=system_prompt,
-                history=history,
-                tools=tools_list,
-            )
-        except Exception as te:
-            logger.warning(f"Failed to count context tokens for auto-compaction check: {te}")
-            context_tokens = llm.estimate_tokens_fallback(None, system_prompt, history)
-
-        limit = getattr(llm, "context_window_limit", 1048576)
-        threshold_val = getattr(cfg.agent, "compact_history_threshold", 0.8)
-
-        if threshold_val <= 1.0:
-            # Percentage of context limit
-            threshold_tokens = threshold_val * limit
-        else:
-            # Absolute token count
-            threshold_tokens = threshold_val
-
-        if context_tokens < threshold_tokens:
-            return history
-
-        logger.info(
-            f"Context window usage ({context_tokens:,} tokens) exceeded auto-compaction threshold "
-            f"({threshold_tokens:,} tokens). Initiating automatic in-place compaction."
-        )
-
-        # 1. Group historical messages into logical conversational turns
-        turns: list[list[Message]] = []
-        current_turn: list[Message] = []
-        for m in history:
-            if m.role == MessageRole.ASSISTANT and m.sender == "Notification":
-                continue
-            if m.role in (MessageRole.USER, MessageRole.SYSTEM):
-                if current_turn:
-                    turns.append(current_turn)
-                current_turn = [m]
-            else:
-                if current_turn:
-                    current_turn.append(m)
-                else:
-                    current_turn = [m]
-        if current_turn:
-            turns.append(current_turn)
-
-        # Ensure we have enough turns to make compaction meaningful (minimum 3 turns)
-        if len(turns) < 3:
-            logger.warning("History has too few turns to safely compact. Skipping automatic compaction.")
-            return history
-
-        # 2. Preserving threshold (e.g., preserve 30% of the newest turns, minimum 2)
-        preserve_count = max(2, int(len(turns) * 0.3))
-        turns_to_compress = turns[:-preserve_count]
-        turns_to_keep = turns[-preserve_count:]
-
-        messages_to_compress = [m for turn in turns_to_compress for m in turn]
-        if not messages_to_compress:
-            return history
-
-        # 3. Invoke double-turn LLM summarization with self-correction
-        logger.info(
-            f"Summarizing older {len(turns_to_compress)} turns containing {len(messages_to_compress)} messages."
-        )
-
-
-        system_instruction = (
-            "You are an expert context compressor. Your job is to summarize the conversation history so far "
-            "into a highly concise and structured state snapshot. You MUST focus on preserving:\n"
-            "- Tasks (Completed and In Progress)\n"
-            "- Critical States & Facts (Key facts, files, variables)\n"
-            "- User Preferences (Custom rules, coding style, formatting)\n"
-            "- Key Commands & Executions (Avoid re-exploring successfully run commands)\n"
-            "Omit all conversational filler and logs. Return ONLY the structured snapshot."
-        )
-
-        prompt_t1 = (
-            "Critically summarize the entire conversation history above into a structured <state_snapshot>. "
-            "Identify all completed tasks, active in-progress goals, critical file paths, established "
-            "user rules/preferences, and key command results."
-        )
-
-        try:
-            # Turn 1: Generate initial summary
-            res1 = await llm.generate(
-                system_prompt=system_instruction,
-                history=messages_to_compress,
-                prompt=prompt_t1,
-            )
-            summary1 = res1.content.strip()
-
-            if not summary1:
-                logger.warning("Compaction Turn 1 generated empty summary. Aborting compaction.")
-                return history
-
-            # Turn 2: Probe verification (self-correction)
-            # Construct simulated history for the verification turn
-            verification_history = messages_to_compress + [
-                Message(
-                    session_id=self.session_id,
-                    chatbot_id=current_msg.chatbot_id,
-                    channel_id=current_msg.channel_id,
-                    sender="Kesoku",
-                    role=MessageRole.ASSISTANT,
-                    type=MessageType.TEXT,
-                    content=summary1,
-                    status=MessageStatus.RESPONDED,
-                ),
-                Message(
-                    session_id=self.session_id,
-                    chatbot_id=current_msg.chatbot_id,
-                    channel_id=current_msg.channel_id,
-                    sender="System",
-                    role=MessageRole.SYSTEM,
-                    type=MessageType.TEXT,
-                    content=(
-                        "Critically evaluate the <state_snapshot> you just generated. Did you omit any specific "
-                        "technical details, file paths, tool results, or user constraints mentioned in the history? "
-                        "If anything is missing or could be more precise, generate a FINAL, improved <state_snapshot>. "
-                        "Otherwise, repeat the exact same <state_snapshot> again."
-                    ),
-                    status=MessageStatus.RESPONDED,
-                )
-            ]
-
-            res2 = await llm.generate(
-                system_prompt=system_instruction,
-                history=verification_history,
-            )
-            final_summary = res2.content.strip() or summary1
-
-        except Exception as e:
-            logger.error(f"API invocation failed during history compaction: {e}", exc_info=True)
-            return history
-
-        # 4. Construct the compacted message and notification message
-        # Set timestamps to be just before the oldest kept turn to preserve correct chronological rendering order
-        oldest_kept_ts = turns_to_keep[0][0].timestamp
-        compacted_content = f"[Conversation History State Snapshot]\n{final_summary}"
-        compacted_msg = Message(
+        # Initialize/Bind the active session to OpenLCM engine
+        lcm_engine = self.context.lcm_engine
+        lcm_engine.bind_session(
             session_id=self.session_id,
-            chatbot_id=current_msg.chatbot_id,
-            channel_id=current_msg.channel_id,
-            sender="System",
-            role=MessageRole.SYSTEM,
-            type=MessageType.TEXT,
-            content=compacted_content,
-            status=MessageStatus.RESPONDED,
-            timestamp=oldest_kept_ts - 0.002,
+            context_length=llm.context_window_limit,
         )
 
-        notification_msg = Message(
-            session_id=self.session_id,
-            chatbot_id=current_msg.chatbot_id,
-            channel_id=current_msg.channel_id,
-            sender="Notification",
-            role=MessageRole.ASSISTANT,
-            type=MessageType.TEXT,
-            content="🔄 Conversation history has been automatically compacted in-place to optimize response speed.",
-            status=MessageStatus.RESPONDED,
-            timestamp=oldest_kept_ts - 0.001,
-        )
+        # Convert custom Kesoku Messages to OpenLCM raw dictionaries
+        lcm_input = messages_to_openlcm_dicts(history)
 
-        # 5. Prune DB records and persist new summary
-        try:
-            # Save compacted message and notification first to prevent blank history on crash
-            await self.gateway.post(compacted_msg)
-            await self.gateway.post(notification_msg)
-
-            deleted_count = await self.context.db.delete_messages_before_timestamp(
-                self.session_id, oldest_kept_ts, exclude_ids=[compacted_msg.id, notification_msg.id]
-            )
+        # Pre-flight check: should we compress?
+        if lcm_engine.should_compress_preflight(lcm_input):
             logger.info(
-                f"Successfully pruned {deleted_count} older messages in database and saved new snapshot in-place."
+                f"Initiating Lossless Context Compaction via OpenLCM for session {self.session_id}."
+            )
+            # Compresses old backlog turns recursively and injects summaries scaffold
+            compressed_lcm_msgs = await lcm_engine.compress(lcm_input)
+
+            # Translate OpenLCM output dictionaries back to Kesoku Messages
+            history = openlcm_dicts_to_messages(
+                compressed_lcm_msgs,
+                session_id=self.session_id,
+                chatbot_id=current_msg.chatbot_id,
+                channel_id=current_msg.channel_id,
             )
 
-        except Exception as dbe:
-            logger.error(f"Database pruning failed during history compaction: {dbe}", exc_info=True)
-            return history
+        return history
 
-        # 6. Return in-memory reconstructed history for the current active execution turn immediately
-        new_history = [compacted_msg, notification_msg]
-        for turn in turns_to_keep:
-            new_history.extend(turn)
-
-        return new_history
 
     async def _monitor_context_window(
 

@@ -79,3 +79,13 @@ background_threshold_seconds = 300.0
 
 [shell.env]
 # CUSTOM_VAR = "value"
+
+[env]
+# OpenLCM custom configurations injected as environment variables on startup
+# See openlcm documentation for all tunables
+LCM_CONTEXT_THRESHOLD = 0.75
+LCM_FRESH_TAIL_COUNT = 64
+LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED = true
+LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED = true
+LCM_RESERVE_TOKENS_FLOOR = 50000
+

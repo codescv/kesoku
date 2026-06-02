@@ -25,16 +25,19 @@ def mock_chatbot() -> MagicMock:
 
     # Bind real methods
     chatbot.restart_service = Chatbot.restart_service.__get__(chatbot, Chatbot)
+    chatbot._register_default_commands = Chatbot._register_default_commands.__get__(chatbot, Chatbot)
 
     # Bind real CommandRegistry containing default commands
     registry = CommandRegistry()
+    chatbot.commands = registry
+    chatbot._register_default_commands()
 
+    # Preserve test specific restart overwrite
     async def handle_restart(reply_func):
         await reply_func("🔄 Restarting service...")
         await chatbot.restart_service()
 
     registry.register("restart", "Restart the Kesoku service.", handle_restart)
-    chatbot.commands = registry
 
     if hasattr(chatbot, "tree"):
         delattr(chatbot, "tree")
@@ -206,3 +209,72 @@ async def test_restart_command_total_failure(mock_chatbot: MagicMock) -> None:
 
         # Verify followup error message is sent
         interaction.followup.send.assert_any_call("Failed to restart service: Command not found")
+
+
+@pytest.mark.asyncio
+async def test_lcm_command_success(mock_chatbot: MagicMock) -> None:
+    """Test that the /lcm slash command executes successfully and replies with LCM context."""
+    setup_discord_commands(mock_chatbot)
+
+    commands = mock_chatbot.tree.get_commands()
+    lcm_cmd = next((cmd for cmd in commands if cmd.name == "lcm"), None)
+    assert lcm_cmd is not None
+
+    # Mock interaction
+    interaction = AsyncMock(spec=discord.Interaction)
+    interaction.user = MagicMock(spec=discord.User)
+    interaction.user.name = "test_user"
+    interaction.user.id = 123456789
+    interaction.channel_id = 987654321
+
+    interaction.response = AsyncMock()
+    interaction.followup = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    # Mock get_session_lcm_context_by_channel response
+    mock_context_msg = (
+        "### 📖 LCM Processed Context\n"
+        "⚡ **DAG Summaries**: 2 nodes\n"
+        "- **[User]**: hello\n"
+        "- **[Assistant]**: hi"
+    )
+    mock_chatbot.get_session_lcm_context_by_channel = AsyncMock(return_value=mock_context_msg)
+
+    await lcm_cmd.callback(interaction)
+
+    # Assert context retrieval was called with correct channel ID
+    mock_chatbot.get_session_lcm_context_by_channel.assert_called_once_with("987654321")
+
+    # Assert the message was sent
+    interaction.followup.send.assert_called_once_with(mock_context_msg)
+
+
+@pytest.mark.asyncio
+async def test_lcm_command_response_splitting(mock_chatbot: MagicMock) -> None:
+    """Test that /lcm slash command splits response into chunks if it exceeds 2000 characters."""
+    setup_discord_commands(mock_chatbot)
+
+    commands = mock_chatbot.tree.get_commands()
+    lcm_cmd = next((cmd for cmd in commands if cmd.name == "lcm"), None)
+    assert lcm_cmd is not None
+
+    # Mock interaction
+    interaction = AsyncMock(spec=discord.Interaction)
+    interaction.user = MagicMock(spec=discord.User)
+    interaction.user.name = "test_user"
+    interaction.user.id = 123456789
+    interaction.channel_id = 987654321
+
+    interaction.response = AsyncMock()
+    interaction.followup = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    # Mock extremely long context response (3500 characters)
+    long_msg = "A" * 3500
+    mock_chatbot.get_session_lcm_context_by_channel = AsyncMock(return_value=long_msg)
+
+    await lcm_cmd.callback(interaction)
+
+    # Assert that send was called multiple times due to chunking
+    assert interaction.followup.send.call_count > 1
+

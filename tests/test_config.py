@@ -90,3 +90,51 @@ user_allowlist = ["users/111", "users/222"]
     assert cfg.google_chat.impersonate_service_account == "sa@my-gcp-project.iam.gserviceaccount.com"
     assert "users/111" in cfg.google_chat.user_allowlist
     assert "users/222" in cfg.google_chat.user_allowlist
+
+
+def test_config_env_injection(tmp_path: Any) -> None:
+    """Verify that custom environment variables under [env] are correctly parsed and injected."""
+    config_path = tmp_path / "config.toml"
+    toml_content = """
+[workspace]
+db_path = "kesoku.db"
+
+[env]
+LCM_CONTEXT_THRESHOLD = 0.75
+LCM_FRESH_TAIL_COUNT = 64
+LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED = true
+LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED = false
+LCM_RESERVE_TOKENS_FLOOR = 50000
+CUSTOM_DUMMY_ENV = "hello_world"
+"""
+    with open(config_path, "w") as f:
+        f.write(toml_content)
+
+    # Clean up if they were already set
+    for k in [
+        "LCM_CONTEXT_THRESHOLD",
+        "LCM_FRESH_TAIL_COUNT",
+        "LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED",
+        "LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED",
+        "LCM_RESERVE_TOKENS_FLOOR",
+        "CUSTOM_DUMMY_ENV",
+    ]:
+        os.environ.pop(k, None)
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.env["LCM_CONTEXT_THRESHOLD"] == 0.75
+    assert cfg.env["LCM_FRESH_TAIL_COUNT"] == 64
+    assert cfg.env["LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED"] is True
+    assert cfg.env["LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED"] is False
+    assert cfg.env["LCM_RESERVE_TOKENS_FLOOR"] == 50000
+    assert cfg.env["CUSTOM_DUMMY_ENV"] == "hello_world"
+
+    # Check injection
+    assert os.environ["LCM_CONTEXT_THRESHOLD"] == "0.75"
+    assert os.environ["LCM_FRESH_TAIL_COUNT"] == "64"
+    assert os.environ["LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED"] == "true"
+    assert os.environ["LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED"] == "false"
+    assert os.environ["LCM_RESERVE_TOKENS_FLOOR"] == "50000"
+    assert os.environ["CUSTOM_DUMMY_ENV"] == "hello_world"
+

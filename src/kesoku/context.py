@@ -3,6 +3,10 @@
 This avoids global mutable state and supports dependency injection.
 """
 
+import os
+
+from openlcm import LCMEngine
+
 from kesoku.agent.llm import BaseLLM, get_llm
 from kesoku.agent.tools import ActiveJobsRegistry, ToolRegistry, default_registry
 from kesoku.config import KesokuConfig, get_config
@@ -33,6 +37,20 @@ class KesokuContext:
         self.tool_registry: ToolRegistry = tool_registry or default_registry
         self._llm = llm
         self.active_jobs = ActiveJobsRegistry()
+
+        # Define dynamic LLM summarization bridge for OpenLCM
+        async def lcm_summarize_fn(prompt: str, max_tokens: int) -> str:
+            # Dynamically fetch configured LLM provider
+            model_client = self.get_llm()
+            res = await model_client.generate(prompt=prompt)
+            return res.content
+
+        # Resolve OpenLCM SQLite DB path relative to kesoku.db directory
+        lcm_db_path = os.path.join(os.path.dirname(self.config.workspace.db_path), "lcm.db")
+        self.lcm_engine = LCMEngine(
+            summarize_fn=lcm_summarize_fn,
+            db_path=lcm_db_path,
+        )
 
     @property
     def config(self) -> KesokuConfig:

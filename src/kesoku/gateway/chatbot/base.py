@@ -13,6 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from kesoku.agent.history import messages_to_openlcm_dicts
 from kesoku.agent.prompt import build_sys_prompt
 from kesoku.config import get_config
 from kesoku.constants import SYSTEM_START_TIME, MessageRole, MessageStatus, MessageType
@@ -220,6 +221,10 @@ class Chatbot(ABC):
             status_msg = await self.update_role_by_channel(channel_id, role_name)
             await reply_func(status_msg)
 
+        async def handle_lcm(reply_func: Callable[[str], Awaitable[None]], channel_id: str) -> None:
+            status_msg = await self.get_session_lcm_context_by_channel(channel_id)
+            await reply_func(status_msg)
+
         self.commands.register("restart", "Restart the Kesoku service.", handle_restart)
         self.commands.register("clear", "Clear the active conversation session.", handle_clear)
         self.commands.register("reset", "Clear the active conversation session.", handle_clear)
@@ -229,6 +234,16 @@ class Chatbot(ABC):
             "role",
             "Update or view the active roleplay persona for the current channel.",
             handle_role,
+        )
+        self.commands.register(
+            "lcm",
+            "View the currently active Lossless Context Management (LCM) context.",
+            handle_lcm,
+        )
+        self.commands.register(
+            "context",
+            "View the currently active Lossless Context Management (LCM) context.",
+            handle_lcm,
         )
 
     async def restart_service(self) -> None:
@@ -371,6 +386,91 @@ class Chatbot(ABC):
             f"  - Tokens: {turn_k}\n"
             f"  - Time: {turn_time:.1f}s"
         )
+
+    async def get_session_lcm_context_by_channel(self, channel_id: str) -> str:
+        """Get the currently active assembled LCM context (what the LLM sees) for the channel."""
+        session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
+        if not session:
+            return "⚠️ No active session found for this chat."
+
+        history = await self.gateway.db.get_session_history(session.id, limit=200)
+        if not history:
+            return "⚠️ Active session has no messages."
+
+        lcm_engine = self.gateway.context.lcm_engine
+        original_session_id = lcm_engine.current_session_id
+
+        try:
+            # Ensure session is bound to read summaries correctly from openlcm.db
+            lcm_engine.bind_session(session.id)
+
+            lcm_input = messages_to_openlcm_dicts(history)
+
+            system_message = None
+            remaining_messages = list(lcm_input)
+            if remaining_messages and remaining_messages[0].get("role") == "system":
+                system_message = remaining_messages.pop(0)
+
+            assembled = lcm_engine._assemble_context(system_message, remaining_messages)
+
+            scaffold_msg = None
+            sys_msg = None
+            fresh_msgs = []
+
+            for msg in assembled:
+                role = msg.get("role")
+                content = msg.get("content") or ""
+                if role == "system":
+                    sys_msg = content
+                elif role == "user" and "[Note: This conversation uses Lossless Context Management" in content:
+                    scaffold_msg = content
+                elif role == "assistant" and (
+                    "I have access to the full conversation history through LCM tools" in content
+                ):
+                    continue
+                else:
+                    fresh_msgs.append(msg)
+
+            output = [f"### 📖 LCM Processed Context (Session: `{session.id}`)"]
+
+            all_nodes = lcm_engine._dag.get_session_nodes(session.id)
+            output.append(f"⚡ **DAG Summaries**: {len(all_nodes)} nodes | **Fresh Tail**: {len(fresh_msgs)} messages")
+
+            if sys_msg:
+                sys_lines = sys_msg.strip().split("\n")
+                sys_preview = "\n".join(sys_lines[:5])
+                if len(sys_lines) > 5:
+                    sys_preview += "\n..."
+                output.append(f"\n**🛠️ System Prompt Preview**:\n```\n{sys_preview}\n```")
+
+            if scaffold_msg:
+                output.append(f"\n**📦 Incremental Summaries**:\n```markdown\n{scaffold_msg}\n```")
+            else:
+                output.append("\n*(No active summaries in context yet. History is within thresholds.)*")
+
+            if fresh_msgs:
+                output.append("\n**🧵 Active Fresh Tail**:")
+                for msg in fresh_msgs:
+                    role_val = msg.get("role")
+                    if role_val == "user":
+                        role_label = "User"
+                    elif role_val == "assistant":
+                        role_label = "Assistant"
+                    else:
+                        role_label = str(role_val).capitalize()
+
+                    content = msg.get("content") or ""
+                    if len(content) > 200:
+                        content = content[:200] + "..."
+                    output.append(f"- **[{role_label}]**: {content}")
+
+            return "\n".join(output)
+        except Exception as e:
+            logger.error(f"Failed to get LCM context by channel: {e}")
+            return f"⚠️ Failed to retrieve LCM context: {e}"
+        finally:
+            if original_session_id and original_session_id != session.id:
+                lcm_engine.bind_session(original_session_id)
 
     async def trigger_cronjob_message(
         self,

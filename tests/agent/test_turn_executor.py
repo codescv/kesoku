@@ -1176,13 +1176,7 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
 
     # Mock LLM
     class CompactLLM(BaseLLM):
-        def __init__(self) -> None:
-            self.generate_calls = []
-            self.captured_history = []
-
-        @property
-        def context_window_limit(self) -> int:
-            return 1000
+        context_window_limit: int = 1000
 
         async def generate(
             self,
@@ -1191,43 +1185,29 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
             history: list[Message] | None = None,
             tools: list[Any] | None = None,
         ) -> LLMResponse:
-            self.generate_calls.append({
-                "prompt": prompt,
-                "system_prompt": system_prompt,
-                "history": list(history or [])
-            })
-
-            # Summarization calls logic
-            if system_prompt and "expert context compressor" in system_prompt:
-                if prompt and "structured <state_snapshot>" in prompt:
-                    # Turn 1 summarizer call
-                    return LLMResponse(content="Initial State Snapshot Content", total_tokens=50)
-                else:
-                    # Turn 2 verification call
-                    return LLMResponse(content="FINAL Improved State Snapshot Content", total_tokens=50)
-
-            # Final actual chat inference call
             self.captured_history = list(history or [])
             return LLMResponse(content="Final Assistant Turn Response", total_tokens=10)
-
-        def count_tokens(
-            self,
-            prompt: str | None = None,
-            system_prompt: str | None = None,
-            history: list[Message] | None = None,
-            tools: list[Any] | None = None,
-        ) -> int:
-            hist_len = len(history or [])
-            if hist_len >= 5:
-                return 900  # Trigger threshold 0.8 of 1000
-            return 200
 
     llm = CompactLLM()
     tool_runner = MagicMock()
     tool_runner.tool_registry.get_tools_list.return_value = []
     turn_logger = MagicMock(spec=TurnLogger)
 
+    # Mock the OpenLCM engine
+    mock_lcm = MagicMock()
+    mock_lcm.should_compress_preflight.return_value = True
+
+    async def mock_compress(messages):
+        return [
+            {"role": "system", "content": "[Note: This conversation uses Lossless Context Compression]"},
+            {"role": "user", "content": "Simulated user message"},
+            {"role": "assistant", "content": "Simulated assistant message"},
+        ]
+    mock_lcm.compress.side_effect = mock_compress
+
     context = KesokuContext(config=cfg, llm=llm)
+    context.lcm_engine = mock_lcm
+
     executor = TurnExecutor("sess_auto_compact", gw, tool_runner, turn_logger, context=context)
 
     cfg.agent.compact_history_threshold = 0.8  # 80% of 1000 = 800 tokens
@@ -1247,32 +1227,31 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
             session_staging_dir="/tmp/sess_auto_compact",
         )
 
-    # Assertions
-    assert len(llm.generate_calls) == 3
+    # Assertions: Verify that the OpenLCM engine was correctly bound, checked, and executed
+    mock_lcm.bind_session.assert_called_once_with(
+        session_id="sess_auto_compact",
+        context_length=1000
+    )
+    mock_lcm.should_compress_preflight.assert_called_once()
+    mock_lcm.compress.assert_called_once()
 
-    c1 = llm.generate_calls[0]
-    assert "expert context compressor" in c1["system_prompt"]
-    assert len(c1["history"]) > 0
+    # Reconstructed messages verify they match the OpenLCM dictionaries
+    assert len(llm.captured_history) == 3
+    assert llm.captured_history[0].role == MessageRole.SYSTEM
+    assert "[Note: This conversation uses Lossless Context" in llm.captured_history[0].content
+    assert llm.captured_history[1].role == MessageRole.USER
+    assert "Simulated user message" in llm.captured_history[1].content
+    assert llm.captured_history[2].role == MessageRole.ASSISTANT
+    assert llm.captured_history[2].content == "Simulated assistant message"
 
-    c2 = llm.generate_calls[1]
-    assert "expert context compressor" in c2["system_prompt"]
-    assert c2["history"][-2].content == "Initial State Snapshot Content"
-    assert "Critically evaluate" in c2["history"][-1].content
-
-    assert len(llm.captured_history) > 0
-    snapshot_msg = llm.captured_history[0]
-    assert snapshot_msg.role == MessageRole.SYSTEM
-    assert "[Conversation History State Snapshot]" in snapshot_msg.content
-    assert "FINAL Improved State Snapshot Content" in snapshot_msg.content
-
-    notification_msg = llm.captured_history[1]
-    assert "Conversation history has been automatically compacted in-place" in notification_msg.content
-
+    # Verify database is completely lossless (nothing was physically deleted!)
     db_history = await gw.db.get_session_history("sess_auto_compact", limit=0)
     db_ids = [m.id for m in db_history]
-    assert msg1.id not in db_ids
-    assert msg2.id not in db_ids
-    assert snapshot_msg.id in db_ids
-    assert notification_msg.id in db_ids
+    assert msg1.id in db_ids
+    assert msg2.id in db_ids
+    assert msg3.id in db_ids
+    assert msg4.id in db_ids
+    assert active_msg.id in db_ids
+
 
 
