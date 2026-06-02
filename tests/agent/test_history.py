@@ -162,3 +162,62 @@ def test_openlcm_dicts_to_messages_unpacking() -> None:
     assert msgs[3].role == MessageRole.ASSISTANT
     assert msgs[3].type == MessageType.TEXT
     assert msgs[3].content == "The result is 10."
+
+
+def test_messages_to_openlcm_dicts_thought_text_merging() -> None:
+    """Verify thought and text are merged into a single assistant message using tags."""
+    history = [
+        Message(
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.THOUGHT,
+            content="My thought process here.",
+        ),
+        Message(
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="Hello, user!",
+        ),
+    ]
+
+    dicts = messages_to_openlcm_dicts(history)
+    assert len(dicts) == 1
+    assert dicts[0] == {
+        "role": "assistant",
+        "content": "<thought>My thought process here.</thought>\n\nHello, user!",
+    }
+
+
+def test_openlcm_dicts_to_messages_thought_text_unpacking() -> None:
+    """Verify that merged assistant messages with thought tags are parsed and unpacked."""
+    dicts = [
+        {
+            "role": "assistant",
+            "content": "<thought>My thought process here.</thought>\n\nHello, user!",
+        }
+    ]
+
+    msgs = openlcm_dicts_to_messages(
+        dicts,
+        session_id="sess1",
+        chatbot_id="cli",
+        channel_id="chan1",
+    )
+
+    assert len(msgs) == 2
+
+    assert msgs[0].role == MessageRole.ASSISTANT
+    assert msgs[0].type == MessageType.THOUGHT
+    assert msgs[0].content == "My thought process here."
+
+    assert msgs[1].role == MessageRole.ASSISTANT
+    assert msgs[1].type == MessageType.TEXT
+    assert msgs[1].content == "Hello, user!"
+

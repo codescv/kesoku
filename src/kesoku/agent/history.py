@@ -4,6 +4,7 @@ import datetime
 import json
 import logging
 import os
+import re
 from typing import Any, Literal
 
 from kesoku.constants import MessageRole, MessageStatus, MessageType
@@ -196,6 +197,19 @@ def messages_to_openlcm_dicts(history: list[Message]) -> list[dict[str, Any]]:
                 "tool_call_id": tool_call_id,
                 "name": tool_name,
             })
+        elif msg.role == MessageRole.ASSISTANT and msg.type == MessageType.TEXT:
+            if current_thought is not None:
+                merged_content = f"<thought>{current_thought}</thought>\n\n{msg.content}"
+                lcm_msgs.append({
+                    "role": "assistant",
+                    "content": merged_content,
+                })
+                current_thought = None
+            else:
+                lcm_msgs.append({
+                    "role": "assistant",
+                    "content": msg.content,
+                })
         else:
             flush_assistant()
             role_val = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
@@ -310,19 +324,50 @@ def openlcm_dicts_to_messages(
                         )
                     )
             else:
-                msgs.append(
-                    Message(
-                        session_id=session_id,
-                        chatbot_id=chatbot_id,
-                        channel_id=channel_id,
-                        sender=sender,
-                        role=role,
-                        type=MessageType.TEXT,
-                        content=content,
-                        metadata=metadata,
-                        status=MessageStatus.RESPONDED,
+                match = re.match(r"^<thought>(.*?)</thought>\s*(.*)$", content, re.DOTALL)
+                if match:
+                    thought_content = match.group(1)
+                    reply_content = match.group(2)
+                    msgs.append(
+                        Message(
+                            session_id=session_id,
+                            chatbot_id=chatbot_id,
+                            channel_id=channel_id,
+                            sender=sender,
+                            role=MessageRole.ASSISTANT,
+                            type=MessageType.THOUGHT,
+                            content=thought_content,
+                            status=MessageStatus.RESPONDED,
+                        )
                     )
-                )
+                    if reply_content.strip():
+                        msgs.append(
+                            Message(
+                                session_id=session_id,
+                                chatbot_id=chatbot_id,
+                                channel_id=channel_id,
+                                sender=sender,
+                                role=role,
+                                type=MessageType.TEXT,
+                                content=reply_content.strip(),
+                                metadata=metadata,
+                                status=MessageStatus.RESPONDED,
+                            )
+                        )
+                else:
+                    msgs.append(
+                        Message(
+                            session_id=session_id,
+                            chatbot_id=chatbot_id,
+                            channel_id=channel_id,
+                            sender=sender,
+                            role=role,
+                            type=MessageType.TEXT,
+                            content=content,
+                            metadata=metadata,
+                            status=MessageStatus.RESPONDED,
+                        )
+                    )
         else:
             msgs.append(
                 Message(
