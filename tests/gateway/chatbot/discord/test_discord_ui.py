@@ -446,7 +446,9 @@ async def test_question_view_init_and_callback(mock_gateway: MagicMock) -> None:
     assert len(view.children) == 2
     assert isinstance(view.children[0], discord.ui.Button)
     assert view.children[0].label == "Red"
+    assert view.children[0].custom_id == "btn_q_s123_0_Red"
     assert view.children[1].label == "Blue"
+    assert view.children[1].custom_id == "btn_q_s123_1_Blue"
 
     # Mock interaction
     mock_interaction = AsyncMock(spec=discord.Interaction)
@@ -501,3 +503,24 @@ async def test_question_view_init_and_callback(mock_gateway: MagicMock) -> None:
 
     # 6. Chatbot typing task is started
     assert "chan_abc" in mock_chatbot._typing_tasks
+
+
+@pytest.mark.asyncio
+async def test_question_view_duplicate_prefixes(mock_gateway: MagicMock) -> None:
+    """Test that QuestionView generates unique custom_ids even with same prefix choices."""
+    mock_chatbot = MagicMock()
+    choices = [
+        "This is a very long option A",
+        "This is a very long option B",
+    ]
+    view = QuestionView(
+        gateway=mock_gateway,
+        session_id="s123",
+        chatbot=mock_chatbot,
+        question="Select one",
+        choices=choices,
+    )
+    assert len(view.children) == 2
+    assert view.children[0].custom_id == "btn_q_s123_0_This is a very long "
+    assert view.children[1].custom_id == "btn_q_s123_1_This is a very long "
+    assert view.children[0].custom_id != view.children[1].custom_id

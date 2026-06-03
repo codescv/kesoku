@@ -618,11 +618,11 @@ class QuestionView(discord.ui.View):
         self.question = question
         self.choices = choices
 
-        for choice in choices:
+        for idx, choice in enumerate(choices):
             button = discord.ui.Button(
                 style=discord.ButtonStyle.primary,
                 label=choice,
-                custom_id=f"btn_q_{session_id}_{choice[:20]}",
+                custom_id=f"btn_q_{session_id}_{idx}_{choice[:20]}",
             )
             button.callback = self.make_callback(choice)
             self.add_item(button)
