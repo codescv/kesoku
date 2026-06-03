@@ -255,6 +255,32 @@ class Chatbot(ABC):
             handle_lcm,
         )
 
+        async def handle_debug(
+            reply_func: Callable[[str], Awaitable[None]],
+            channel_id: str,
+        ) -> None:
+            cfg = get_config()
+            cfg.agent.raw_llm_logs = not cfg.agent.raw_llm_logs
+            if cfg.agent.raw_llm_logs:
+                session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
+                if session:
+                    staging_dir = self.get_session_staging_dir(session.workspace_name)
+                    await reply_func(
+                        f"🐞 Debug mode enabled.\nraw_llm_logs = True\nStaging dir: `{staging_dir}`"
+                    )
+                else:
+                    await reply_func(
+                        "🐞 Debug mode enabled.\nraw_llm_logs = True\n⚠️ No active session found to resolve staging dir."
+                    )
+            else:
+                await reply_func("🐞 Debug mode disabled.\nraw_llm_logs = False")
+
+        self.commands.register(
+            "debug",
+            "Toggle debug mode (raw LLM logs and staging directory visibility).",
+            handle_debug,
+        )
+
         async def handle_cronjob(
             reply_func: Callable[[str], Awaitable[None]],
             tag: str = "",
@@ -338,7 +364,7 @@ class Chatbot(ABC):
         command = raw_command.lower().lstrip("/")
 
         try:
-            if command in {"clear", "reset", "status", "compact"}:
+            if command in {"clear", "reset", "status", "compact", "debug"}:
                 if not channel_id:
                     await reply_func("⚠️ Channel ID is required for this command.")
                     return
