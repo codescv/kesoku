@@ -271,8 +271,9 @@ def openlcm_dicts_to_messages(
 
         if role == MessageRole.TOOL:
             msg_type = MessageType.TOOL_RESULT
+            tool_call_id = d.get("tool_call_id") or ""
             metadata["tool_name"] = d.get("name") or "unknown_tool"
-            metadata["tool_call_id"] = d.get("tool_call_id") or ""
+            metadata["tool_call_id"] = tool_call_id
             msgs.append(
                 Message(
                     session_id=session_id,
@@ -283,6 +284,7 @@ def openlcm_dicts_to_messages(
                     type=msg_type,
                     content=content,
                     metadata=metadata,
+                    parent_id=tool_call_id or None,
                     status=MessageStatus.RESPONDED,
                 )
             )
@@ -313,23 +315,25 @@ def openlcm_dicts_to_messages(
                             pass
 
                     call_args_json = json.dumps(fn_args, indent=2, ensure_ascii=False)
-                    msgs.append(
-                        Message(
-                            session_id=session_id,
-                            chatbot_id=chatbot_id,
-                            channel_id=channel_id,
-                            sender=sender,
-                            role=MessageRole.TOOL,
-                            type=MessageType.TOOL_CALL,
-                            content=f"Calling tool `{fn_name}` with arguments:\n```json\n{call_args_json}\n```",
-                            metadata={
-                                "tool_name": fn_name,
-                                "tool_arguments": fn_args,
-                                "tool_call_id": tc.get("id") or "",
-                            },
-                            status=MessageStatus.RESPONDED,
-                        )
-                    )
+                    tc_id = tc.get("id") or ""
+                    msg_kwargs = {
+                        "session_id": session_id,
+                        "chatbot_id": chatbot_id,
+                        "channel_id": channel_id,
+                        "sender": sender,
+                        "role": MessageRole.TOOL,
+                        "type": MessageType.TOOL_CALL,
+                        "content": f"Calling tool `{fn_name}` with arguments:\n```json\n{call_args_json}\n```",
+                        "metadata": {
+                            "tool_name": fn_name,
+                            "tool_arguments": fn_args,
+                            "tool_call_id": tc_id,
+                        },
+                        "status": MessageStatus.RESPONDED,
+                    }
+                    if tc_id:
+                        msg_kwargs["id"] = tc_id
+                    msgs.append(Message(**msg_kwargs))
             else:
                 match = re.match(r"^<thought>(.*?)</thought>\s*(.*)$", content, re.DOTALL)
                 if match:

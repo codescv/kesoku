@@ -277,9 +277,9 @@ def history_to_turns(
                         res_str = msg.metadata.get("tool_result", msg.content)
                         is_error = False
 
-                    tool_call_id = tool_call_ids.get(msg.parent_id)
+                    tool_call_id = msg.metadata.get("tool_call_id")
                     if not tool_call_id:
-                        tool_call_id = msg.parent_id
+                        tool_call_id = tool_call_ids.get(msg.parent_id) or msg.parent_id or msg.id or "unknown"
 
                     add_blocks(
                         MessageRole.TOOL,
