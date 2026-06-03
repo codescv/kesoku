@@ -12,7 +12,7 @@ from typing import Any
 import tzlocal
 
 import discord
-from kesoku.agent.history import build_clean_history
+from kesoku.agent.history import build_history
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
@@ -55,7 +55,7 @@ class MessageHeaderView(discord.ui.View):
 
         try:
             # Fetch entire clean historical context in grouped user-facing order
-            history = await build_clean_history(
+            history = await build_history(
                 gateway=self.gateway,
                 session_id=self.session_id,
                 order="grouped",

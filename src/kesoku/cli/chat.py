@@ -10,7 +10,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from kesoku.agent.agent import Agent
-from kesoku.agent.history import build_clean_history
+from kesoku.agent.history import build_history
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.chatbot.cli_bot import CLIChatbot
@@ -117,7 +117,7 @@ async def _show_session_history(gateway: Gateway, console: Console, session_id: 
         logger.error(f"Session '{session_id}' not found.")
         sys.exit(1)
     order = "grouped" if grouped else "phased"
-    history = await build_clean_history(gateway=gateway, session_id=session_id, order=order, heal_orphans=False)
+    history = await build_history(gateway=gateway, session_id=session_id, order=order, heal_orphans=False)
     if not history:
         logger.warning(f"Session '{session_id}' has no recorded messages.")
         return
@@ -207,7 +207,7 @@ async def run_cli_chat_async(
     agent_task = asyncio.create_task(agent.start())
 
     order = "grouped" if grouped else "phased"
-    history = await build_clean_history(gateway=gateway, session_id=session_id, order=order, heal_orphans=False)
+    history = await build_history(gateway=gateway, session_id=session_id, order=order, heal_orphans=False)
     session = await gateway.db.get_session(session_id)
 
     if is_resumed:

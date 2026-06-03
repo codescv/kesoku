@@ -6,9 +6,10 @@ import time
 from typing import TYPE_CHECKING
 
 from kesoku.agent.history import (
-    build_clean_history,
+    build_history,
     messages_to_openlcm_dicts,
     openlcm_dicts_to_messages,
+    prepare_history_for_llm,
 )
 from kesoku.agent.llm import BaseLLM
 from kesoku.agent.tool_runner import ToolRunner
@@ -162,8 +163,8 @@ class TurnExecutor:
 
                 tools_list = self.tool_runner.tool_registry.get_tools_list()
 
-                # Retrieve and build the cleaned, prioritized, and aligned session history
-                history = await build_clean_history(
+                # Retrieve and build the raw session history
+                history = await build_history(
                     gateway=self.gateway,
                     session_id=self.session_id,
                 )
@@ -182,13 +183,13 @@ class TurnExecutor:
                     history, current_msg, llm
                 )
 
-
-
+                # Prepare history for the LLM by stripping thoughts and attachments dynamically
+                llm_history = prepare_history_for_llm(history)
 
                 # LLM inference
                 res = await llm.generate(
                     system_prompt=system_prompt,
-                    history=history,
+                    history=llm_history,
                     tools=tools_list,
                 )
 
@@ -197,7 +198,7 @@ class TurnExecutor:
                     try:
                         self.turn_logger.log_llm_turn(
                             llm_provider=llm.__class__.__name__,
-                            history=history,
+                            history=llm_history,
                             tools=tools_list,
                             response=res,
                             system_prompt=system_prompt,
@@ -532,9 +533,6 @@ class TurnExecutor:
             )
 
         return history
-
-
-
 
     async def _execute_tool_calls(
         self,

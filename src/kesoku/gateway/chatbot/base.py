@@ -16,7 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from kesoku.agent.history import build_clean_history, messages_to_openlcm_dicts
+from kesoku.agent.history import build_history, messages_to_openlcm_dicts
 from kesoku.agent.prompt import build_sys_prompt
 from kesoku.config import get_config
 from kesoku.constants import SYSTEM_START_TIME, MessageRole, MessageStatus, MessageType
@@ -409,7 +409,7 @@ class Chatbot(ABC):
             return "⚠️ No active session found for this chat."
 
         # Fetch active history
-        history = await build_clean_history(self.gateway, session.id)
+        history = await build_history(self.gateway, session.id)
         if not history:
             return "⚠️ Active session has no messages to compact."
 
@@ -495,7 +495,7 @@ class Chatbot(ABC):
         if not session:
             return "⚠️ No active session found for this chat."
 
-        history = await build_clean_history(self.gateway, session.id)
+        history = await build_history(self.gateway, session.id)
         if not history:
             return "⚠️ Active session has no messages."
 

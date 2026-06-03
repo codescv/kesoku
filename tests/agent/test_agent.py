@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from kesoku.agent.agent import Agent
-from kesoku.agent.history import build_clean_history
+from kesoku.agent.history import build_history, prepare_history_for_llm
 from kesoku.agent.llm import GeminiLLM, MockLLM, ToolCallRequest, get_llm
 from kesoku.agent.tools import ToolContext, ToolRegistry, run_shell_command
 from kesoku.config import KesokuConfig, WorkspaceConfig
@@ -293,7 +293,7 @@ async def test_orphaned_tool_call_healing(temp_db: str) -> None:
     await gw.post(tc_msg)
 
     # Call build clean history directly
-    history = await build_clean_history(gateway=gw, session_id="sess_heal")
+    history = await build_history(gateway=gw, session_id="sess_heal")
 
     # Verify a tool result was synthesized and exists in history
     tr_msgs = [m for m in history if m.type == "tool_result"]
@@ -340,7 +340,7 @@ async def test_orphaned_tool_call_healing_disabled(temp_db: str) -> None:
     await gw.post(tc_msg)
 
     # Call build clean history directly with heal_orphans=False
-    history = await build_clean_history(gateway=gw, session_id="sess_no_heal", heal_orphans=False)
+    history = await build_history(gateway=gw, session_id="sess_no_heal", heal_orphans=False)
 
     # Verify no tool result was synthesized/added to history
     tr_msgs = [m for m in history if m.type == "tool_result"]
@@ -383,7 +383,7 @@ async def test_system_prompt_and_pinned_turns_turn_based(temp_db: str) -> None:
         )
 
     # Call build clean history directly
-    history = await build_clean_history(gateway=gw, session_id="sess_pin")
+    history = await build_history(gateway=gw, session_id="sess_pin")
 
     # Verify all 6 turns are kept, meaning we have exactly 12 messages
     assert len(history) == 12
@@ -532,7 +532,7 @@ async def test_skill_pinning_and_parallel_safety_turn_based(temp_db: str) -> Non
     )
 
     # Retrieve clean history
-    history = await build_clean_history(gateway=gw, session_id="sess_skill")
+    history = await build_history(gateway=gw, session_id="sess_skill")
 
     # Let's assert all messages of Turn 2 are present!
     history_ids = {m.id for m in history}
@@ -681,8 +681,13 @@ async def test_priority_based_dropping_and_atomic_batches_turn_based(temp_db: st
     await gw.post(resp2)
 
     # Call history building directly
-    history = await build_clean_history(gateway=gw, session_id="sess_drop")
-    history_ids = {m.id for m in history}
+    history = await build_history(gateway=gw, session_id="sess_drop")
+    raw_ids = {m.id for m in history}
+    assert thought1.id in raw_ids
+    assert thought2.id in raw_ids
+
+    llm_history = prepare_history_for_llm(history)
+    history_ids = {m.id for m in llm_history}
 
     # Turn 1 checks:
     # - User 1 and Resp 1 must be kept
@@ -1038,8 +1043,13 @@ async def test_simplified_history_thought_stripping(temp_db: str) -> None:
     await gw.post(thought2)
 
     # Call build clean history directly
-    history = await build_clean_history(gateway=gw, session_id="sess_simp")
-    history_ids = {m.id for m in history}
+    history = await build_history(gateway=gw, session_id="sess_simp")
+    raw_ids = {m.id for m in history}
+    assert thought1.id in raw_ids
+    assert thought2.id in raw_ids
+
+    llm_history = prepare_history_for_llm(history)
+    history_ids = {m.id for m in llm_history}
 
     # Check Turn 1 (Completed)
     assert user1.id in history_ids
@@ -1273,16 +1283,19 @@ async def test_history_attachment_stripping(temp_db: str) -> None:
     await gw.post(msg2)
 
     # Call build clean history
-    history = await build_clean_history(gateway=gw, session_id="sess_attach_strip")
+    history = await build_history(gateway=gw, session_id="sess_attach_strip")
+    assert "attachments" in next(m for m in history if m.id == msg1.id).metadata
+
+    llm_history = prepare_history_for_llm(history)
 
     # Retrieve and inspect the historical message
-    hist_msg = next(m for m in history if m.id == msg1.id)
+    hist_msg = next(m for m in llm_history if m.id == msg1.id)
     # Attachments should be stripped and placeholder appended
     assert "attachments" not in hist_msg.metadata
     assert "[Attachments stripped from history: file1.png]" in hist_msg.content
 
     # Retrieve and inspect the latest message
-    latest_msg = next(m for m in history if m.id == msg2.id)
+    latest_msg = next(m for m in llm_history if m.id == msg2.id)
     # Attachments must be kept in full detail for the active turn
     assert "attachments" in latest_msg.metadata
     assert latest_msg.metadata["attachments"][0]["path"] == "/tmp/file2.png"

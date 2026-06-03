@@ -49,7 +49,7 @@ async def test_run_cli_chat_async_list(mock_list: AsyncMock, mock_gateway: Magic
 
 @pytest.mark.asyncio
 @patch("kesoku.cli.chat.Gateway")
-@patch("kesoku.cli.chat.build_clean_history", new_callable=AsyncMock)
+@patch("kesoku.cli.chat.build_history", new_callable=AsyncMock)
 async def test_run_cli_chat_async_show_history_phased(mock_build: AsyncMock, mock_gateway: MagicMock) -> None:
     """Test run_cli_chat_async show_history defaults to phased order."""
     gw_instance = mock_gateway.return_value
@@ -71,7 +71,7 @@ async def test_run_cli_chat_async_show_history_phased(mock_build: AsyncMock, moc
 
 @pytest.mark.asyncio
 @patch("kesoku.cli.chat.Gateway")
-@patch("kesoku.cli.chat.build_clean_history", new_callable=AsyncMock)
+@patch("kesoku.cli.chat.build_history", new_callable=AsyncMock)
 async def test_run_cli_chat_async_show_history_grouped(mock_build: AsyncMock, mock_gateway: MagicMock) -> None:
     """Test run_cli_chat_async show_history uses grouped order when grouped=True."""
     gw_instance = mock_gateway.return_value
