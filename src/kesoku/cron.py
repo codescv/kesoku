@@ -193,55 +193,62 @@ class CronManager:
                 prompt_path = job.get("prompt")
 
                 if not chatbot_id or not prompt_path:
-                    logger.warning(f"Job {idx} is missing chatbot_id or prompt.")
+                    logger.warning(f"Skipping Job {idx}: Missing chatbot_id or prompt.")
                     continue
 
-                # Retrieve count of messages sent today if channel_id is available
-                sent_today_count = 0
-                if channel_id and chatbot_id:
-                    bot = self.chatbots.get(chatbot_id)
-                    if bot:
-                        sent_today_count, _ = await bot.gateway.db.get_cronjob_sent_stats_today(chatbot_id, channel_id)
+                bot = self.chatbots.get(chatbot_id)
+                if not bot:
+                    logger.warning(f"Skipping Job {idx}: Chatbot '{chatbot_id}' is not available.")
+                    continue
 
-                # Check max_messages if channel_id is available
+                # Normalize channel_id for virtual chatbot
+                if chatbot_id == "cronjob" and not channel_id:
+                    channel_id = f"silent_{idx}"
+
+                if not channel_id:
+                    logger.warning(f"Skipping Job {idx}: Missing channel_id.")
+                    continue
+
+                # Retrieve count of messages sent today
+                sent_today_count, _ = await bot.gateway.db.get_cronjob_sent_stats_today(chatbot_id, channel_id)
+
+                # Check max_messages
                 max_messages = job.get("max_messages")
-                if max_messages is not None and channel_id and chatbot_id:
+                if max_messages is not None:
                     try:
                         target = int(max_messages)
                         if sent_today_count >= target:
                             logger.info(
-                                f"Job {idx} matched schedule but was skipped because the daily limit "
-                                f"of {target} messages has already been reached today ({sent_today_count} sent)."
+                                f"Skipping Job {idx}: Daily limit of {target} messages reached "
+                                f"({sent_today_count} sent)."
                             )
                             continue
                     except ValueError:
-                        logger.warning(f"Invalid max_messages format for job {idx}: {max_messages}")
+                        logger.warning(f"Skipping Job {idx}: Invalid max_messages format: {max_messages}")
 
-                # Check min_idle_time if channel_id is available
+                # Check min_idle_time
                 min_idle = job.get("min_idle_time") or job.get("min_idle_time_seconds")
-                if min_idle is not None and channel_id and chatbot_id:
-                    bot = self.chatbots.get(chatbot_id)
-                    if bot:
-                        try:
-                            min_idle_val = float(min_idle)
-                            last_msg_ts = await bot.gateway.db.get_last_message_timestamp(chatbot_id, channel_id)
-                            if last_msg_ts is not None:
-                                idle_time = now.timestamp() - last_msg_ts
-                                if idle_time < min_idle_val:
-                                    logger.info(
-                                        f"Job {idx} matched schedule but was skipped because channel {channel_id} "
-                                        f"has been idle for only {idle_time:.1f}s (required {min_idle_val}s)."
-                                    )
-                                    continue
-                        except ValueError:
-                            logger.warning(f"Invalid min_idle_time format for job {idx}: {min_idle}")
+                if min_idle is not None:
+                    try:
+                        min_idle_val = float(min_idle)
+                        last_msg_ts = await bot.gateway.db.get_last_message_timestamp(chatbot_id, channel_id)
+                        if last_msg_ts is not None:
+                            idle_time = now.timestamp() - last_msg_ts
+                            if idle_time < min_idle_val:
+                                logger.info(
+                                    f"Skipping Job {idx}: Channel {channel_id} idle for only {idle_time:.1f}s "
+                                    f"(required {min_idle_val}s)."
+                                )
+                                continue
+                    except ValueError:
+                        logger.warning(f"Skipping Job {idx}: Invalid min_idle_time format: {min_idle}")
 
                 # Probability Logic
                 base_prob = job.get("probability", 1.0)
                 try:
                     base_prob = float(base_prob)
                 except ValueError:
-                    logger.warning(f"Invalid probability format for job {idx}: {base_prob}")
+                    logger.warning(f"Skipping Job {idx}: Invalid probability format: {base_prob}")
                     base_prob = 1.0
 
                 job_key = (chatbot_id, channel_id, prompt_path)
@@ -266,8 +273,7 @@ class CronManager:
                     new_p = min(1.0, current_p * 1.1)
                     state["current_p"] = new_p
                     logger.info(
-                        f"Job {idx} matched schedule but was skipped by probability filter "
-                        f"(p={current_p:.4f}, r={r:.4f}). "
+                        f"Skipping Job {idx}: Probability filter (p={current_p:.4f}, r={r:.4f}). "
                         f"Probability increased to {new_p:.4f} for next tick."
                     )
                     continue
@@ -276,7 +282,7 @@ class CronManager:
                     state["current_p"] = base_prob
                     logger.info(
                         f"🚀 Triggering Job {idx} (chatbot: {chatbot_id}, "
-                        f"channel: {channel_id or 'auto-resolved'}). "
+                        f"channel: {channel_id}). "
                         f"Stats: p={current_p:.4f}, r={r:.4f}, sent_today={sent_today_count}. "
                         f"Resetting p to {base_prob}."
                     )
@@ -307,7 +313,7 @@ class CronManager:
             logger.warning(f"Cronjob {job_idx} is missing prompt field.")
             return
 
-        if not channel_id and chatbot_id != "wechat":
+        if not channel_id:
             logger.warning(f"Cronjob {job_idx} is missing channel_id field.")
             return
 

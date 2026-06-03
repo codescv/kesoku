@@ -153,7 +153,7 @@ async def test_cron_manager_path_traversal():
 
 
 @pytest.mark.asyncio
-async def test_cron_manager_wechat_optional_channel():
+async def test_cron_manager_wechat_missing_channel():
     mock_bot, _ = create_mock_bot(chatbot_id="wechat")
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -172,11 +172,7 @@ async def test_cron_manager_wechat_optional_channel():
         manager = CronManager(chatbots=[mock_bot], config_dir=tmpdir_real)
         await manager._check_and_trigger_jobs([job])
         await asyncio.sleep(0.1)
-        mock_bot.trigger_cronjob.assert_called_once_with(
-            channel_id=None,
-            prompt_content="Hello WeChat cron!",
-            mention_user_id=None,
-        )
+        mock_bot.trigger_cronjob.assert_not_called()
 
 
 @pytest.mark.asyncio

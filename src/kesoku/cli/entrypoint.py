@@ -4,6 +4,7 @@ Provides commands: init and chat (session-based one-shot CLI chat).
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -411,6 +412,50 @@ def wechat_pair(
     console.print("\n[bold green]WeChat chatbot paired and enabled successfully![/bold green]")
     console.print(f"  Account ID: [cyan]{credentials['account_id']}[/cyan]")
     console.print("  Token saved to configuration file.")
+
+
+@wechat_app.command("show-channels")
+def wechat_show_channels(
+    config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
+) -> None:
+    """Show all paired channels/chats for the active WeChat account."""
+    cfg = load_config(config)
+    if not cfg.wechat.enabled or not cfg.wechat.account_id:
+        logger.error("WeChat is not enabled or paired. Run 'kesoku wechat pair' first.")
+        sys.exit(1)
+
+    working_dir = cfg.agent_working_dir or os.getcwd()
+    tokens_path = os.path.join(working_dir, ".wechat_context_tokens.json")
+
+    console = Console()
+    if not os.path.exists(tokens_path):
+        console.print("[yellow]No channel tokens found. Send a message to the bot first to register channels.[/yellow]")
+        return
+
+    try:
+        with open(tokens_path, encoding="utf-8") as f:
+            tokens = json.load(f)
+    except Exception as e:
+        logger.error(f"Failed to load tokens file {tokens_path}: {e}")
+        sys.exit(1)
+
+    account_id = cfg.wechat.account_id
+    prefix = f"{account_id}:"
+
+    channels = []
+    for k in tokens.keys():
+        if k.startswith(prefix):
+            channels.append(k[len(prefix):])
+
+    if not channels:
+        console.print(f"[yellow]No channels found for account {account_id}.[/yellow]")
+        return
+
+    console.print(f"\n[bold green]=== Active WeChat Channels for {account_id} ===[/bold green]")
+    for chan in channels:
+        chan_type = "Group" if chan.endswith("@chatroom") else "DM/User"
+        console.print(f"  - ID: [cyan]{chan}[/cyan] | Type: [yellow]{chan_type}[/yellow]")
+
 
 
 @app.command("init")

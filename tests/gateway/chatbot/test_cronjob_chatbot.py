@@ -76,6 +76,13 @@ async def test_cron_manager_defaults_to_cronjob_silent():
     mock_bot.chatbot_id = "cronjob"
     mock_bot.trigger_cronjob = AsyncMock()
 
+    mock_gateway = MagicMock()
+    mock_db = AsyncMock()
+    mock_db.get_cronjob_sent_stats_today.return_value = (0, None)
+    mock_db.get_last_message_timestamp.return_value = None
+    mock_gateway.db = mock_db
+    mock_bot.gateway = mock_gateway
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_real = os.path.realpath(tmpdir)
         prompt_file_path = os.path.join(tmpdir_real, "silent_prompt.md")

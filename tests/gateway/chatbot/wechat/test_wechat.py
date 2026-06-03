@@ -447,54 +447,6 @@ async def test_wechat_chatbot_trigger_cronjob(
         assert "@12345" in posted.content
 
 
-@pytest.mark.asyncio
-@patch("aiohttp.ClientSession")
-async def test_wechat_chatbot_trigger_cronjob_auto_resolve(
-    mock_session_cls: MagicMock,
-    mock_config: KesokuConfig,
-    mock_gateway: MagicMock,
-) -> None:
-    """Test that trigger_cronjob resolves channel_id from context store when not provided."""
-    mock_session = MagicMock()
-    mock_session_cls.return_value = mock_session
-    mock_session.post = MagicMock()
-    mock_http_method(mock_session.post)
-    mock_session.get = MagicMock()
-    mock_http_method(mock_session.get)
-
-    with patch("kesoku.gateway.chatbot.wechat.adapter.get_config", return_value=mock_config):
-        bot = WechatChatbot(chatbot_id="wechat_test", gateway=mock_gateway)
-        bot._poll_session = mock_session
-        bot._send_session = mock_session
-
-        # Save some channels in the token store
-        bot._token_store.set("test_bot_id", "resolved_alice", "tok1")
-        bot._token_store.set("test_bot_id", "resolved_bob", "tok2")
-        bot._token_store.set("other_bot_id", "resolved_charlie", "tok3")
-
-        # Run trigger_cronjob with channel_id=None
-        await bot.trigger_cronjob(
-            channel_id=None,
-            prompt_content="Execute scheduled system check",
-            mention_user_id="12345",
-        )
-
-        # Verify session creation was called for each resolved channel under test_bot_id
-        # (resolved_alice and resolved_bob, but not resolved_charlie)
-        assert mock_gateway.create_session.call_count == 2
-        create_calls = mock_gateway.create_session.call_args_list
-        titles = [call[1]["title"] for call in create_calls]
-        assert "WeChat Scheduled Job resolved_alice" in titles
-        assert "WeChat Scheduled Job resolved_bob" in titles
-
-        # Verify gateway.post was called twice
-        assert mock_gateway.post.call_count == 2
-        posts = [call[0][0] for call in mock_gateway.post.call_args_list]
-        channels = [p.channel_id for p in posts]
-        assert "resolved_alice" in channels
-        assert "resolved_bob" in channels
-        assert "resolved_charlie" not in channels
-
 
 def test_context_token_store_get_all_channels() -> None:
     """Test that ContextTokenStore.get_all_channels returns only channels for the given account."""

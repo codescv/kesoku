@@ -788,56 +788,15 @@ You are interacting with the user via WeChat (Weixin).
         **kwargs: Any,
     ) -> None:
         """Trigger a scheduled cronjob in the specified WeChat chat/room."""
-        min_idle = kwargs.get("min_idle_time") or kwargs.get("min_idle_time_seconds")
-        max_messages = kwargs.get("max_messages")
-
-        async def should_trigger_for_channel(chan: str) -> bool:
-            # 1. Idle check
-            if min_idle is not None:
-                last_msg_ts = await self.gateway.db.get_last_message_timestamp(self.chatbot_id, chan)
-                if last_msg_ts is not None:
-                    idle_time = time.time() - last_msg_ts
-                    if idle_time < min_idle:
-                        logger.info(
-                            f"WeChat: Skip channel {chan} because it has been idle for only {idle_time:.1f}s "
-                            f"(required {min_idle}s)."
-                        )
-                        return False
-
-            # 2. Max Messages check
-            if max_messages is not None:
-                count, _ = await self.gateway.db.get_cronjob_sent_stats_today(self.chatbot_id, chan)
-                if count >= max_messages:
-                    logger.info(
-                        f"WeChat: Skip channel {chan} because daily max messages limit of {max_messages} "
-                        f"has already been reached today ({count} sent)."
-                    )
-                    return False
-            return True
-
         if not channel_id:
-            channels = self._token_store.get_all_channels(self._account_id)
-            if not channels:
-                logger.warning(
-                    "WeChat: Cannot trigger cronjob because no active channel/user is saved in the context file."
-                )
-                return
-            for chan in channels:
-                if not await should_trigger_for_channel(chan):
-                    continue
-                await self._trigger_cronjob_for_channel(
-                    channel_id=chan,
-                    prompt_content=prompt_content,
-                    mention_user_id=mention_user_id,
-                )
-        else:
-            if not await should_trigger_for_channel(channel_id):
-                return
-            await self._trigger_cronjob_for_channel(
-                channel_id=channel_id,
-                prompt_content=prompt_content,
-                mention_user_id=mention_user_id,
-            )
+            logger.error("WeChat: Cannot trigger cronjob without channel_id.")
+            return
+
+        await self._trigger_cronjob_for_channel(
+            channel_id=channel_id,
+            prompt_content=prompt_content,
+            mention_user_id=mention_user_id,
+        )
 
     async def _trigger_cronjob_for_channel(
         self,
