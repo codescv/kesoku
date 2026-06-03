@@ -81,8 +81,12 @@ async def test_agent_execution_loop(temp_db: str) -> None:
     # Start agent loop in background
     agent_task = asyncio.create_task(agent.start())
 
-    # Let it process for a moment
-    await asyncio.sleep(0.5)
+    # Wait for up to 5 seconds or until at least one message is marked as processed
+    for _ in range(50):
+        await asyncio.sleep(0.1)
+        history = await gw.db.get_session_history("sess1")
+        if any(m.status == "processed" for m in history):
+            break
     agent.stop()
     await asyncio.gather(agent_task, return_exceptions=True)
 
