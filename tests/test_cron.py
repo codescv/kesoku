@@ -214,7 +214,6 @@ async def test_cron_manager_min_idle_time():
             channel_id="999",
             prompt_content="Hello!",
             mention_user_id=None,
-            min_idle_time=60.0,
         )
 
 
@@ -257,7 +256,6 @@ async def test_cron_manager_max_messages():
             channel_id="999",
             prompt_content="Hello!",
             mention_user_id=None,
-            max_messages=3,
         )
 
 

@@ -350,26 +350,10 @@ class CronManager:
 
         try:
             if hasattr(bot, "trigger_cronjob"):
-                kwargs = {}
-                min_idle = job.get("min_idle_time") or job.get("min_idle_time_seconds")
-                if min_idle is not None:
-                    try:
-                        kwargs["min_idle_time"] = float(min_idle)
-                    except ValueError:
-                        pass
-
-                max_messages = job.get("max_messages")
-                if max_messages is not None:
-                    try:
-                        kwargs["max_messages"] = int(max_messages)
-                    except ValueError:
-                        pass
-
                 await bot.trigger_cronjob(
                     channel_id=str(channel_id) if channel_id else None,
                     prompt_content=prompt_content,
                     mention_user_id=str(mention_user_id) if mention_user_id else None,
-                    **kwargs,
                 )
             else:
                 logger.error(f"Chatbot '{chatbot_id}' does not support trigger_cronjob.")
