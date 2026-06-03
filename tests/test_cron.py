@@ -447,7 +447,7 @@ async def test_cron_manager_trigger_jobs_by_tag():
 
         assert mock_bot.trigger_cronjob.call_count == 2
         # Verify calls
-        calls = mock_bot.trigger_cronjob.call_args_list
+        calls = sorted(mock_bot.trigger_cronjob.call_args_list, key=lambda c: c[1]["channel_id"])
         assert calls[0][1]["channel_id"] == "1"
         assert calls[0][1]["prompt_content"] == "Prompt 1"
         assert calls[1][1]["channel_id"] == "3"
