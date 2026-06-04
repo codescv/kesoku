@@ -1515,3 +1515,67 @@ async def test_pre_ingest_interruption_hook_does_not_delete_if_not_active(
             # Verify cache still has it
             assert "msg_user_target" in bot._header_views
 
+
+@pytest.mark.asyncio
+async def test_handle_intermediate_message_skips_during_interruption(
+    mock_config: KesokuConfig, mock_gateway: MagicMock
+) -> None:
+    """Test that handle_intermediate_message skips rendering if worker queue is not empty (pending interruption)."""
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+
+            mock_message = MagicMock(spec=Message)
+            mock_message.id = "msg123"
+            mock_message.session_id = "session123"
+            mock_message.channel_id = "12345"
+            mock_message.role = MessageRole.ASSISTANT
+            mock_message.type = MessageType.THOUGHT
+            mock_message.content = "Thought content"
+
+            # Mock agent and worker with a non-empty queue
+            mock_agent = MagicMock()
+            mock_worker = MagicMock()
+            mock_worker.queue_empty.return_value = False  # NOT empty
+            mock_agent.workers = {"session123": mock_worker}
+            mock_gateway.agent = mock_agent
+
+            assert "session123" not in bot._turn_special_items
+            await bot.handle_intermediate_message(mock_message)
+            assert "session123" not in bot._turn_special_items
+
+
+@pytest.mark.asyncio
+async def test_handle_intermediate_message_does_not_skip_if_queue_empty(
+    mock_config: KesokuConfig, mock_gateway: MagicMock
+) -> None:
+    """Test that handle_intermediate_message does not skip rendering if worker queue is empty."""
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+
+            mock_message = MagicMock(spec=Message)
+            mock_message.id = "msg123"
+            mock_message.session_id = "session123"
+            mock_message.channel_id = "12345"
+            mock_message.role = MessageRole.ASSISTANT
+            mock_message.type = MessageType.THOUGHT
+            mock_message.content = "Thought content"
+
+            # Mock agent and worker with an empty queue
+            mock_agent = MagicMock()
+            mock_worker = MagicMock()
+            mock_worker.queue_empty.return_value = True  # Empty
+            mock_agent.workers = {"session123": mock_worker}
+            mock_gateway.agent = mock_agent
+
+            # Mock get_channel to return None to prevent further Discord API calls during test
+            bot.bot.get_channel = MagicMock(return_value=None)
+
+            assert "session123" not in bot._turn_special_items
+            await bot.handle_intermediate_message(mock_message)
+            # The method should proceed and initialize the session ID in _turn_special_items
+            assert "session123" in bot._turn_special_items
+

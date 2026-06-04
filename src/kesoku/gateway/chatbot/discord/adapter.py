@@ -538,6 +538,19 @@ class DiscordChatbot(Chatbot):
     async def handle_intermediate_message(self, message: Message) -> None:
         """Render an intermediate thought/tool/system message in the Discord UI."""
         session_id = message.session_id
+
+        # Guard: If there is a pending message in the queue, an interruption has been
+        # initiated. Skip rendering any further UI output for the current (aborted) turn.
+        agent = self.gateway.agent
+        if agent:
+            worker = agent.workers.get(session_id)
+            if worker and not worker.queue_empty():
+                logger.info(
+                    f"Skipping intermediate message rendering for session {session_id} "
+                    "due to pending interruption."
+                )
+                return
+
         if session_id not in self._turn_special_items:
             self._turn_special_items[session_id] = []
 
