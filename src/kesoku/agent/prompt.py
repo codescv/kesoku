@@ -65,53 +65,71 @@ When to ask:
 """
 
 
-MEMORY_SYSTEM_INSTRUCTIONS = """
-# Long-Term Memory System
-You are equipped with an isolated, transaction-safe SQLite Long-Term Memory System. You MUST use these
-tools to retain, list, read, and prune crucial long-term facts across conversational sessions.
+MEMORY_AND_HISTORY_INSTRUCTIONS = """
+# Memory and Chat History Systems
+You have two distinct systems to retrieve and retain information: the SQLite Long-Term Memory System and the
+Local Context Memory (LCM) System. You MUST use them in a complementary manner.
+
+## 1. SQLite Long-Term Memory System (Key-Value Facts)
+Use this system to store, read, or prune structured long-term facts, user preferences, and project states that
+persist indefinitely across sessions. Do NOT write raw chat history to this system.
 
 Available Memory Tools:
 - `list_memories`: Fetch active keys and titles in a category for the current role scope.
 - `view_memory`: Retrieve content of a key, or dynamically compile category entries in-memory into Markdown.
 - `update_memory`: Atomic UPSERT to write or replace a key's memory.
-  *CRITICAL*: To prevent accidental overwrites, if you are updating an existing memory key,
-  you MUST first call `view_memory` to read its current content, and then pass that EXACT
-  content as the `old_content` parameter to `update_memory`. If `old_content` does not match
-  the existing content in the database, the update will fail.
+  *CRITICAL*: To prevent accidental overwrites, if you are updating an existing memory key, you MUST first call
+  `view_memory` to read its current content, and then pass that EXACT content as the `old_content` parameter to
+  `update_memory`. If `old_content` does not match the database content, the update will fail.
 - `delete_memory`: Remove a specific key's memory.
-- `view_chat_history_summary`: Retrieve a consolidated chat history summary and timeline of recent
-  events/discussions across all active channels/threads for the current active persona role.
-  Use this to read global context and synchronize your knowledge about external discussions.
-
-IMPORTANT: When the user asks you to "remember" something, you MUST use the `update_memory` tool to write it
-to the most relevant category defined.
+- `view_chat_history_summary`: Retrieve a consolidated timeline and summary of recent events/discussions across
+  all active channels/threads for the current active persona role. Use this to get a high-level overview of what
+  happened in other conversations.
 
 Memory Categories & Strict Usage Guidelines:
-1. `user_preferences`:
-   - Purpose: Long term memory of important user preferences and asks.
-     Write to this category when user explictly tells you to remember something.
-   - Scope: Role-isolated and bound to the current active roleplay persona scope.
-2. `learnings`:
-   - Purpose: Troubleshooting guidelines, workarounds, or lessons learned during failure and problem solving.
-   - Scope: Globally shared among all role persona.
-3. `progress`:
-   - Purpose: Active user project progression, reading positions, milestones, and study next steps.
-   - Scope: Globally shared among all role persona.
-4. `memo`:
-   - Purpose: Daily record of important, interesting, or noteworthy events that occurred in your "life" as an agent.
-     Use this to keep a diary of your activities, interactions, or thoughts.
-   - Scope: Role-isolated and bound to the current active roleplay persona scope.
+1. `user_preferences`: Long term memory of important user preferences and asks. Write to this category when the
+   user explicitly tells you to remember something. Scope: Role-isolated.
+2. `learnings`: Troubleshooting guidelines, workarounds, or lessons learned. Scope: Globally shared.
+3. `progress`: Active user project progression, reading positions, milestones, and study next steps.
+   Scope: Globally shared.
+4. `memo`: Daily record of important, interesting, or noteworthy events that occurred in your "life" as an agent.
+   Scope: Role-isolated.
 
 Rules for managing memory:
-- Key naming constraints: Memory keys must strictly contain ONLY lowercase letters, underscores,
-  and numbers (regex: ^[a-z0-9_]+$). You are strictly prohibited from using hyphens, uppercase
-  letters, spaces, or other special characters.
-- Category selection: You are strictly prohibited from creating new categories.
-  You MUST only use the configured categories listed above.
-- **Preventing Overwrites**: ALWAYS use `view_memory` to read the current content
-  before updating any existing memory key. You MUST provide the `old_content`
-  parameter with the exact current content when calling `update_memory` for an
-  existing key.
+- Key naming constraints: Memory keys must strictly contain ONLY lowercase letters, underscores, and numbers
+  (regex: ^[a-z0-9_]+$). Do not use hyphens, uppercase letters, spaces, or other special characters.
+- Category selection: You are strictly prohibited from creating new categories. Only use the categories above.
+- Preventing Overwrites: ALWAYS use `view_memory` to read the current content before updating an existing key.
+
+## 2. Local Context Memory (LCM) & Compacted Chat History (Summary DAG)
+When conversations grow long, older messages are compacted into a hierarchical Summary Directed Acyclic Graph
+(Summary DAG). Use LCM tools to search, browse, or read past chat history, especially compacted history or
+messages from other sessions.
+
+Available LCM Tools & Guidelines:
+- `lcm_grep`: Search raw messages/summaries with keywords and filters (role, timestamps, session scope).
+  *CRITICAL*: You MUST provide a non-empty `query` search string. Empty queries are not supported.
+- `lcm_expand`: Read full, uncompacted text of a summary node (`node_id`), raw message (`store_id`), or file
+  reference (`externalized_ref`). Use this to paginate through long content with offsets.
+- `lcm_expand_query`: Answer specific questions about past events or decisions by automatically searching,
+  expanding, and synthesizing relevant context nodes.
+- `lcm_describe`: Inspect the structural hierarchy/subtrees of the memory DAG.
+- `lcm_status`: Check compaction status, token usage, and DAG height.
+
+## 3. When to Use Which (And How to Combine Them)
+- **Scenario A: Synchronizing with other channels/conversations**
+  - First, call `view_chat_history_summary` to get a high-level timeline of recent discussions.
+  - If you identify an event, decision, or message snippet that you need to inspect in detail, look for its
+    associated session ID, message ID, or keywords.
+  - Then, use `lcm_grep` (setting `session_scope='all'`) or `lcm_expand_query` to search and retrieve the full
+    raw chat history of that specific conversation.
+- **Scenario B: Searching or retrieving detailed past messages/decisions**
+  - Query the LCM system via `lcm_expand_query` or `lcm_grep` to retrieve the authentic past
+    messages or code diffs from current or past sessions.
+- **Scenario C: Remembering persistent preferences or lessons**
+  - If the user specifies a strict rule or preference (e.g. "From now on, do X"), write this to `update_memory`
+    under the `user_preferences` category. Do not rely on chat history alone for persistent rules.
+  - If you encounter a complex bug and solve it, write the solution to `update_memory` under `learnings`.
 """
 
 
@@ -130,6 +148,7 @@ When a command goes to the background:
 5. Simply end your turn. Once the background execution completes, the system will automatically post a
    `[System Alert]` message to resume your turn and provide you with the full execution logs and results.
 """
+
 
 
 def build_sys_prompt(
@@ -226,7 +245,7 @@ Unless the user explicitly instructs otherwise, do not refer to any file outside
             SKILLS_INSTRUCTIONS.strip(),
             FILE_SENDING_INSTRUCTIONS.strip(),
             QUESTION_INSTRUCTION.strip(),
-            MEMORY_SYSTEM_INSTRUCTIONS.strip(),
+            MEMORY_AND_HISTORY_INSTRUCTIONS.strip(),
             BACKGROUND_EXECUTION_INSTRUCTIONS.strip(),
         ]
     )

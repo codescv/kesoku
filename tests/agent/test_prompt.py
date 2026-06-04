@@ -21,6 +21,18 @@ def test_build_sys_prompt_default() -> None:
     assert "# Background Execution & Long-Running Tasks" in prompt
     assert "run_shell_command" in prompt
 
+    # Check Memory and Chat History instructions are included
+    assert "# Memory and Chat History Systems" in prompt
+    assert "list_memories" in prompt
+    assert "view_chat_history_summary" in prompt
+    assert "lcm_grep" in prompt
+    assert "lcm_expand" in prompt
+    assert "lcm_expand_query" in prompt
+    assert "lcm_describe" in prompt
+    assert "lcm_status" in prompt
+
+
+
 
 def test_build_sys_prompt_with_custom_context() -> None:
     """Verify build_sys_prompt appends custom context instructions correctly."""
