@@ -333,6 +333,10 @@ class GoogleChatChatbot(Chatbot):
         # Compile prompt
         custom_prompt = self._build_gchat_custom_prompt(space_data, sender_name)
 
+        # Resolve channel role
+        db_role = await self.gateway.db.get_channel_role(self.chatbot_id, channel_id)
+        role = db_role if isinstance(db_role, str) else "default"
+
         dto = InboundMessageDTO(
             sender_id=sender_name,
             channel_id=channel_id,
@@ -343,13 +347,11 @@ class GoogleChatChatbot(Chatbot):
                 "message_name": message_data.get("name"),
                 "google_chat_sender_email": sender_email,
                 "sender_name": f"{sender_name} (Email: {sender_email})" if sender_email else sender_name,
-
             },
-
             session_title=f"Google Chat Session: {text[:30]}",
             custom_prompt=custom_prompt,
+            role=role,
         )
-
 
         async def reply_func(reply_text: str) -> None:
             body = {"text": reply_text}
@@ -496,9 +498,7 @@ class GoogleChatChatbot(Chatbot):
                 )
             elif message.role == MessageRole.TOOL and message.type == MessageType.TOOL_CALL:
                 tool_name = message.metadata.get("tool_name") or message.sender or "unknown_tool"
-                arg_suffix = GoogleChatCardBuilder.get_tool_arguments_suffix(
-                    message.metadata.get("tool_arguments")
-                )
+                arg_suffix = GoogleChatCardBuilder.get_tool_arguments_suffix(message.metadata.get("tool_arguments"))
                 items.append(
                     {
                         "type": "tool_call",
@@ -546,13 +546,7 @@ class GoogleChatChatbot(Chatbot):
                 )
 
             # Build the card payload
-            body = {
-                "cardsV2": [
-                    GoogleChatCardBuilder.build_foldable_ui_card(
-                        session_id, items, status="running"
-                    )
-                ]
-            }
+            body = {"cardsV2": [GoogleChatCardBuilder.build_foldable_ui_card(session_id, items, status="running")]}
             if message.channel_id and "threads" in message.channel_id:
                 body["thread"] = {"name": message.channel_id}
 
@@ -658,11 +652,7 @@ class GoogleChatChatbot(Chatbot):
                 )
 
             if choices:
-                cards.append(
-                    GoogleChatCardBuilder.build_question_card(
-                        session_id, question_text, choices
-                    )
-                )
+                cards.append(GoogleChatCardBuilder.build_question_card(session_id, question_text, choices))
 
             if cards:
                 body["cardsV2"] = cards
@@ -682,8 +672,6 @@ class GoogleChatChatbot(Chatbot):
                 await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
             except Exception as e:
                 logger.error(f"Failed to send final message to Google Chat space: {e}", exc_info=True)
-
-
 
     def _build_gchat_custom_prompt(self, space_data: dict[str, Any], sender_name: str) -> str:
         """Build contextual system instructions injected into Google Chat sessions."""

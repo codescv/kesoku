@@ -85,9 +85,6 @@ def _safe_id(value: str | None, keep: int = 8) -> str:
     return raw[:keep]
 
 
-
-
-
 class ContextTokenStore:
     """Persistent or in-memory cache for WeChat ``context_token`` keyed by account + peer."""
 
@@ -178,9 +175,6 @@ class MessageDeduplicator:
         return False
 
 
-
-
-
 def _guess_chat_type(message: dict[str, Any], account_id: str) -> tuple[str, str]:
     room_id = str(message.get("room_id") or message.get("chat_room_id") or "").strip()
     to_user_id = str(message.get("to_user_id") or "").strip()
@@ -192,20 +186,8 @@ def _guess_chat_type(message: dict[str, Any], account_id: str) -> tuple[str, str
     return "dm", str(message.get("from_user_id") or "")
 
 
-
-
-
-
-
-
-
-
-
 def _media_reference(item: dict[str, Any], key: str) -> dict[str, Any]:
     return (item.get(key) or {}).get("media") or {}
-
-
-
 
 
 def _mime_from_filename(filename: str) -> str:
@@ -974,6 +956,10 @@ You are interacting with the user via WeChat (Weixin).
         # Compile prompt
         custom_prompt = await self._compile_custom_prompt(channel_id, chat_type)
 
+        # Resolve channel role
+        db_role = await self.gateway.db.get_channel_role(self.chatbot_id, channel_id)
+        role = db_role if isinstance(db_role, str) else "default"
+
         context_token = str(message.get("context_token") or "").strip()
 
         dto = InboundMessageDTO(
@@ -989,6 +975,7 @@ You are interacting with the user via WeChat (Weixin).
             },
             session_title=f"WeChat Session: {text[:30]}",
             custom_prompt=custom_prompt,
+            role=role,
         )
 
         async def reply_func(reply_text: str) -> None:
@@ -1228,13 +1215,15 @@ You are interacting with the user via WeChat (Weixin).
             }
 
         last_message_id = f"kesoku-wechat-{uuid.uuid4().hex}"
-        await self.send_client.send_raw_message({
-            "from_user_id": "",
-            "to_user_id": chat_id,
-            "client_id": last_message_id,
-            "message_type": MSG_TYPE_BOT,
-            "message_state": MSG_STATE_FINISH,
-            "item_list": [media_payload],
-            **({"context_token": context_token} if context_token else {}),
-        })
+        await self.send_client.send_raw_message(
+            {
+                "from_user_id": "",
+                "to_user_id": chat_id,
+                "client_id": last_message_id,
+                "message_type": MSG_TYPE_BOT,
+                "message_state": MSG_STATE_FINISH,
+                "item_list": [media_payload],
+                **({"context_token": context_token} if context_token else {}),
+            }
+        )
         return last_message_id

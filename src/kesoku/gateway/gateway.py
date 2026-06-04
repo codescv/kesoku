@@ -101,6 +101,8 @@ class Gateway:
 
         # Build system prompt if not provided
         if system_prompt is None:
+            if role is None and chatbot_id and channel_id:
+                role = await self.db.get_channel_role_with_inheritance(chatbot_id, channel_id, sess.id)
             system_prompt = build_sys_prompt(custom_prompt=custom_prompt, session=sess, role=role)
         sess.system_prompt = system_prompt
 

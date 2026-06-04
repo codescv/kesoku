@@ -95,6 +95,7 @@ class DeliveryAbortedError(Exception):
 
     pass
 
+
 def _format_uptime(td: datetime.timedelta) -> str:
     """Format a timedelta into a concise string representing uptime.
 
@@ -119,8 +120,10 @@ def _format_uptime(td: datetime.timedelta) -> str:
     parts.append(f"{seconds}s")
     return " ".join(parts)
 
+
 class InboundMessageAttachment(BaseModel):
     """Unified attachment metadata for inbound messages."""
+
     path: str
     mime_type: str
     filename: str
@@ -128,6 +131,7 @@ class InboundMessageAttachment(BaseModel):
 
 class InboundMessageDTO(BaseModel):
     """Unified Data Transfer Object for inbound messages across all platforms."""
+
     sender_id: str
     channel_id: str
     text: str = ""
@@ -137,7 +141,7 @@ class InboundMessageDTO(BaseModel):
     raw_metadata: dict[str, Any] = Field(default_factory=dict)
     session_title: str | None = None
     custom_prompt: str | None = None
-    role: str = "default"
+    role: str | None = None
 
 
 class CommandRegistry:
@@ -228,8 +232,7 @@ class Chatbot(ABC):
             res = await self.get_session_lcm_context_by_channel(channel_id)
             if await async_exists(res):
                 await reply_func(
-                    "📖 Here is your beautifully formatted LCM Active Context HTML download:",
-                    file_path=res
+                    "📖 Here is your beautifully formatted LCM Active Context HTML download:", file_path=res
                 )
             else:
                 await reply_func(res)
@@ -265,9 +268,7 @@ class Chatbot(ABC):
                 session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
                 if session:
                     staging_dir = self.get_session_staging_dir(session.workspace_name)
-                    await reply_func(
-                        f"🐞 Debug mode enabled.\nraw_llm_logs = True\nStaging dir: `{staging_dir}`"
-                    )
+                    await reply_func(f"🐞 Debug mode enabled.\nraw_llm_logs = True\nStaging dir: `{staging_dir}`")
                 else:
                     await reply_func(
                         "🐞 Debug mode enabled.\nraw_llm_logs = True\n⚠️ No active session found to resolve staging dir."
@@ -316,7 +317,7 @@ class Chatbot(ABC):
             for idx, job in enumerate(jobs):
                 tag_str = f" | tag: `{job.get('tag')}`" if job.get("tag") else ""
                 lines.append(
-                    f"  {idx+1}. **{job.get('chatbot_id')}** -> `{job.get('prompt')}`\n"
+                    f"  {idx + 1}. **{job.get('chatbot_id')}** -> `{job.get('prompt')}`\n"
                     f"     schedule: `{job.get('schedule')}`{tag_str} | channel: `{job.get('channel_id') or 'auto'}`"
                 )
             return "\n".join(lines)
@@ -538,10 +539,12 @@ class Chatbot(ABC):
             all_nodes = lcm_engine._dag.get_session_nodes(session.id)
 
             from openlcm.core.tokens import count_messages_tokens
+
             total_tokens = count_messages_tokens(assembled)
 
             summary_nodes_html = []
             from collections import defaultdict
+
             by_depth = defaultdict(list)
             for node in all_nodes:
                 by_depth[node.depth].append(node)
@@ -628,9 +631,9 @@ class Chatbot(ABC):
 
                         tool_call_html_parts.append(
                             f'<div class="tool-call-block">'
-                            f'🔧 <strong>Called Tool:</strong> <code>{name}</code><br>'
+                            f"🔧 <strong>Called Tool:</strong> <code>{name}</code><br>"
                             f'<pre class="tool-args-pre">{html.escape(arguments_pretty)}</pre>'
-                            f'</div>'
+                            f"</div>"
                         )
 
                     tool_calls_html = "\n".join(tool_call_html_parts)
@@ -926,7 +929,6 @@ class Chatbot(ABC):
         now_dt = datetime.datetime.now()
         msg_content = prompt_content
 
-
         msg_metadata = {"is_cronjob": True}
         if metadata:
             msg_metadata.update(metadata)
@@ -1117,6 +1119,7 @@ class Chatbot(ABC):
 
             # 3. Preprocess markdown tables: render to image files and replace with file tags
             from kesoku.utils.async_fs import async_write_binary_file
+
             tables = parse_markdown_tables(message.content)
             if tables:
                 session = await self.gateway.db.get_session(message.session_id)
@@ -1135,7 +1138,7 @@ class Chatbot(ABC):
                             await async_write_binary_file(img_path, png_bytes)
 
                             file_tag = f"\n[file: {img_path}]\n"
-                            content = content[:table.start_idx] + file_tag + content[table.end_idx:]
+                            content = content[: table.start_idx] + file_tag + content[table.end_idx :]
                         except Exception as re:
                             logger.error(f"Failed to render markdown table to image: {re}", exc_info=True)
                     message.content = content

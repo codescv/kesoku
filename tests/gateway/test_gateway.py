@@ -815,3 +815,53 @@ async def test_gateway_update_system_prompt(temp_db: str) -> None:
     fetched_session_after = await gw.db.get_session("sess_update_sys")
     assert fetched_session_after is not None
     assert fetched_session_after.system_prompt == "Updated prompt"  # Updated successfully!
+
+
+@pytest.mark.asyncio
+async def test_gateway_create_session_role_resolution(temp_db: str, tmp_path: Any) -> None:
+    """Verify that create_session resolves the role from database when role is None but chatbot/channel are provided."""
+    import kesoku.config
+
+    # Setup database
+    db_mgr = DatabaseManager(temp_db)
+    db_mgr.init_tables()
+
+    # Pre-populate role binding in channel_roles
+    with db_mgr.connection_provider.connection() as conn:
+        conn.execute(
+            "INSERT INTO channel_roles (chatbot_id, channel_id, role) VALUES (?, ?, ?)",
+            ("test_bot", "test_channel", "asuka"),
+        )
+        conn.commit()
+
+    # Setup roles directory in agent working dir
+    roles_dir = tmp_path / "roles" / "asuka"
+    roles_dir.mkdir(parents=True, exist_ok=True)
+    intro_file = roles_dir / "intro.md"
+    intro_file.write_text("Hello, I am Asuka.", encoding="utf-8")
+
+    # Mock the global config context
+    cfg_path = tmp_path / "config.toml"
+    kesoku.config.init_config(str(cfg_path))
+
+    original_config = kesoku.config._global_config
+    try:
+        cfg = kesoku.config.load_config(str(cfg_path))
+        cfg.workspace.db_path = temp_db
+        cfg.agent_working_dir = str(tmp_path)
+
+        gw = Gateway(context=KesokuContext(config=cfg))
+
+        # Create session with chatbot_id and channel_id but role=None
+        session = await gw.create_session(
+            title="Test Role Resolution",
+            chatbot_id="test_bot",
+            channel_id="test_channel",
+            role=None,
+        )
+
+        assert session.system_prompt is not None
+        assert "Hello, I am Asuka." in session.system_prompt
+        assert "# Active Persona (Role Name): (asuka)" in session.system_prompt
+    finally:
+        kesoku.config._global_config = original_config
