@@ -192,6 +192,9 @@ def messages_to_openlcm_dicts(history: list[Message]) -> list[dict[str, Any]]:
                     "arguments": tool_arguments_str,
                 },
             }
+            ts_hex = msg.metadata.get("thought_signature")
+            if ts_hex:
+                tc_dict["thought_signature"] = ts_hex
             current_tool_calls.append(tc_dict)
         elif msg.role == MessageRole.TOOL and msg.type == MessageType.TOOL_RESULT:
             flush_assistant()
@@ -316,6 +319,7 @@ def openlcm_dicts_to_messages(
 
                     call_args_json = json.dumps(fn_args, indent=2, ensure_ascii=False)
                     tc_id = tc.get("id") or ""
+                    ts_hex = tc.get("thought_signature")
                     msg_kwargs = {
                         "session_id": session_id,
                         "chatbot_id": chatbot_id,
@@ -331,6 +335,8 @@ def openlcm_dicts_to_messages(
                         },
                         "status": MessageStatus.RESPONDED,
                     }
+                    if ts_hex:
+                        msg_kwargs["metadata"]["thought_signature"] = ts_hex
                     if tc_id:
                         msg_kwargs["id"] = tc_id
                     msgs.append(Message(**msg_kwargs))

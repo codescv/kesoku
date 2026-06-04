@@ -221,3 +221,44 @@ def test_openlcm_dicts_to_messages_thought_text_unpacking() -> None:
     assert msgs[1].type == MessageType.TEXT
     assert msgs[1].content == "Hello, user!"
 
+
+def test_thought_signature_preservation() -> None:
+    """Verify that thought_signature is preserved through OpenLCM conversions."""
+    history = [
+        Message(
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="Kesoku",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_CALL,
+            content="Calling tool",
+            metadata={
+                "tool_name": "test_tool",
+                "tool_arguments": {"arg": 1},
+                "tool_call_id": "tc_1",
+                "thought_signature": "sig_123456",
+            },
+        )
+    ]
+
+    # 1. Convert to OpenLCM dicts
+    dicts = messages_to_openlcm_dicts(history)
+    assert len(dicts) == 1
+    assert dicts[0]["role"] == "assistant"
+    assert len(dicts[0]["tool_calls"]) == 1
+    assert dicts[0]["tool_calls"][0]["thought_signature"] == "sig_123456"
+
+    # 2. Convert back to Messages
+    msgs = openlcm_dicts_to_messages(
+        dicts,
+        session_id="sess1",
+        chatbot_id="cli",
+        channel_id="chan1",
+    )
+    assert len(msgs) == 1
+    assert msgs[0].role == MessageRole.TOOL
+    assert msgs[0].type == MessageType.TOOL_CALL
+    assert msgs[0].metadata.get("thought_signature") == "sig_123456"
+
+
