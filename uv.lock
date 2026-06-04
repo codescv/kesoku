@@ -1792,7 +1792,7 @@ requires-dist = [
     { name = "google-api-python-client", specifier = ">=2.196.0" },
     { name = "google-cloud-pubsub", specifier = ">=2.38.0" },
     { name = "google-genai", specifier = ">=0.3.0" },
-    { name = "openlcm", editable = "../openlcm" },
+    { name = "openlcm" },
     { name = "pillow", specifier = ">=12.2.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pyopenssl", specifier = ">=24.0.0" },
@@ -2515,7 +2515,7 @@ wheels = [
 [[package]]
 name = "openlcm"
 version = "0.1.2"
-source = { editable = "../openlcm" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
     { name = "autogen-agentchat" },
@@ -2533,29 +2533,10 @@ dependencies = [
     { name = "openai" },
     { name = "uvicorn", extra = ["standard"] },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "anthropic", specifier = ">=0.30" },
-    { name = "autogen-agentchat", specifier = ">=0.4" },
-    { name = "autogen-core", specifier = ">=0.4" },
-    { name = "crewai", specifier = ">=0.80" },
-    { name = "fastapi", specifier = ">=0.111" },
-    { name = "google-adk", specifier = ">=1.0" },
-    { name = "google-genai", specifier = ">=1.0" },
-    { name = "haystack-ai", specifier = ">=2.3" },
-    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
-    { name = "langchain-core", specifier = ">=0.2" },
-    { name = "langgraph", specifier = ">=0.2" },
-    { name = "langgraph-checkpoint", specifier = ">=2.0" },
-    { name = "litellm", specifier = ">=1.0" },
-    { name = "llama-index-core", specifier = ">=0.10" },
-    { name = "openai", specifier = ">=1.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
+sdist = { url = "https://files.pythonhosted.org/packages/af/19/4ca2f937bae0e525a8ff78d15e1a0b97e3845f12420080f517bead2b071d/openlcm-0.1.2.tar.gz", hash = "sha256:7d7b5b945ee70b13c4e62a428663a2a56d503641840ea4cb7d82ada53aa53164", size = 150988, upload-time = "2026-06-02T14:10:45.232Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3b/63/c72e6a3c70f20c938a3b113fb19ba8f3023cc68a2ebe10a555e6231831c7/openlcm-0.1.2-py3-none-any.whl", hash = "sha256:211c41fc5841a8afb4ae5852c3e09df89f20c0a88d86a85a51c3350befa3306b", size = 179232, upload-time = "2026-06-02T14:10:43.006Z" },
 ]
-provides-extras = ["dev"]
 
 [[package]]
 name = "openpyxl"
