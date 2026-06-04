@@ -537,6 +537,8 @@ class Chatbot(ABC):
                     fresh_msgs.append(msg)
 
             all_nodes = lcm_engine._dag.get_session_nodes(session.id)
+            active_nodes = lcm_engine._dag.get_active_nodes(session.id)
+            active_node_ids = {n.node_id for n in active_nodes}
 
             from openlcm.core.tokens import count_messages_tokens
 
@@ -554,15 +556,20 @@ class Chatbot(ABC):
                 nodes_at_depth = sorted(by_depth.get(depth, []), key=lambda nd: nd.created_at)
                 depth_label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(depth, f"Depth-{depth}")
                 for node in nodes_at_depth:
+                    is_active = node.node_id in active_node_ids
+                    card_cls = "node-card" if is_active else "node-card inactive"
+                    badge_cls = f"badge depth-{node.depth}" if is_active else "badge inactive"
+                    active_suffix = "" if is_active else " (Condensed)"
+
                     safe_summary = html.escape(node.summary).replace("\n", "<br>")
                     savings = round(node.source_token_count / node.token_count, 1) if node.token_count > 0 else 1
                     hint_text = node.expand_hint or f"lcm_expand(node_id={node.node_id}) to retrieve details"
                     safe_hint = html.escape(hint_text)
 
                     node_html = f"""
-                    <div class="node-card">
+                    <div class="{card_cls}">
                         <div class="node-header">
-                            <span class="badge depth-{node.depth}">{depth_label} Node {node.node_id}</span>
+                            <span class="{badge_cls}">{depth_label} Node {node.node_id}{active_suffix}</span>
                             <span style="font-size:0.85rem;color:#8899a6;">
                                 {node.source_token_count} tokens &rarr; {node.token_count} tokens ({savings}x savings)
                             </span>
@@ -574,6 +581,7 @@ class Chatbot(ABC):
                     </div>
                     """
                     summary_nodes_html.append(node_html)
+
 
             summary_nodes_html_str = (
                 "\n".join(summary_nodes_html) if summary_nodes_html else "<p>*(No active compacted summary nodes)*</p>"
@@ -757,6 +765,16 @@ class Chatbot(ABC):
         .badge.depth-0 {{ background-color: #10b981; }}
         .badge.depth-1 {{ background-color: #f59e0b; }}
         .badge.depth-2 {{ background-color: #ef4444; }}
+        .node-card.inactive {{
+            opacity: 0.55;
+            border-style: dashed;
+            background-color: #161c23;
+        }}
+        .badge.inactive {{
+            background-color: #536471 !important;
+            color: #f7f9f9;
+        }}
+
 
         .chat-bubble {{
             display: flex;
