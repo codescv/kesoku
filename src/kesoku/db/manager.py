@@ -972,6 +972,41 @@ class DatabaseManager:
             rows = cursor.fetchall()
             return [self._row_to_message(row) for row in rows]
 
+    def get_role_session_ids(self, role: str) -> list[str]:
+        """Retrieve all session IDs associated with a specific persona role.
+
+        Args:
+            role: The persona role to query.
+
+        Returns:
+            List of session ID strings.
+        """
+        with self.connection_provider.connection() as conn:
+            query = """
+                SELECT DISTINCT cs.session_id
+                FROM channel_sessions cs
+                LEFT JOIN channel_roles cr_direct
+                  ON cs.chatbot_id = cr_direct.chatbot_id
+                 AND cs.channel_id = cr_direct.channel_id
+                LEFT JOIN (
+                    SELECT session_id,
+                           json_extract(metadata, '$.parent_channel_id') as parent_channel_id
+                    FROM messages
+                    WHERE role = 'user' AND metadata LIKE '%parent_channel_id%'
+                    GROUP BY session_id
+                ) parent_info
+                  ON cs.session_id = parent_info.session_id
+                 AND cs.chatbot_id = 'discord'
+                LEFT JOIN channel_roles cr_parent
+                  ON cs.chatbot_id = cr_parent.chatbot_id
+                 AND parent_info.parent_channel_id = cr_parent.channel_id
+                WHERE COALESCE(cr_direct.role, cr_parent.role, 'default') = ?
+            """
+            cursor = conn.cursor()
+            cursor.execute(query, (role,))
+            rows = cursor.fetchall()
+            return [row[0] for row in rows if row[0]]
+
     # Cross Session Context CRUD
     def get_cross_session_context(self, role: str) -> CrossSessionContext | None:
         """Retrieve the cross-session context for a specific role.
@@ -1600,3 +1635,14 @@ class AsyncDatabaseManager:
             exclude_session_id=exclude_session_id,
         )
         return stored_ctx, new_messages
+
+    async def get_role_session_ids(self, role: str) -> list[str]:
+        """Retrieve all session IDs associated with a specific persona role (async).
+
+        Args:
+            role: The persona role to query.
+
+        Returns:
+            List of session ID strings.
+        """
+        return await asyncio.to_thread(self.sync_db.get_role_session_ids, role)

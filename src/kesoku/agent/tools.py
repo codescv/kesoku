@@ -1156,6 +1156,26 @@ async def lcm_grep(
     """
     if not context or not context.gateway:
         return "Error: ToolContext is missing."
+
+    import json
+
+    # Resolve active role to restrict session access to current persona memory
+    active_role = await _resolve_memory_role(category="user_preferences", role_param=None, context=context)
+    allowed_sessions = await context.gateway.db.get_role_session_ids(active_role)
+    allowed_sessions_set = set(allowed_sessions)
+
+    # Verify target session if explicitly requested
+    if session_scope == "session" and session_id:
+        if session_id not in allowed_sessions_set:
+            return json.dumps({
+                "query": query,
+                "session_scope": session_scope,
+                "session_id": session_id,
+                "total_results": 0,
+                "results": [],
+                "error": f"Session {session_id} does not belong to role {active_role}"
+            })
+
     lcm_engine = context.gateway.context.lcm_engine
     args = {
         "query": query,
@@ -1168,7 +1188,24 @@ async def lcm_grep(
         "time_to": time_to,
         "sort": sort,
     }
-    return await asyncio.to_thread(_lcm_grep, args, engine=lcm_engine)
+    raw_response = await asyncio.to_thread(_lcm_grep, args, engine=lcm_engine)
+
+    # If cross-session, post-filter results to preserve role isolation
+    if session_scope == "all":
+        try:
+            data = json.loads(raw_response)
+            if "results" in data:
+                filtered_results = [
+                    res for res in data["results"]
+                    if res.get("session_id") in allowed_sessions_set
+                ]
+                data["results"] = filtered_results[:limit]
+                data["total_results"] = len(data["results"])
+                return json.dumps(data)
+        except Exception as e:
+            logger.error(f"Failed to post-filter lcm_grep results: {e}")
+
+    return raw_response
 
 
 @default_registry.register

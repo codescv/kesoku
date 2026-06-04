@@ -321,5 +321,146 @@ async def test_manual_compact_command(tmp_path) -> None:
     assert "Context compaction is not needed right now" in reply_msg
 
 
+@pytest.mark.asyncio
+async def test_lcm_grep_role_isolation(tmp_path) -> None:
+    """Verify that lcm_grep limits results to the current active persona role during cross-session searches."""
+    import json
+
+    from kesoku.agent.tools import ToolContext, lcm_grep
+    from kesoku.config import KesokuConfig, WorkspaceConfig
+    from kesoku.constants import MessageRole, MessageType
+    from kesoku.context import KesokuContext
+    from kesoku.db import DatabaseManager, Message
+    from kesoku.gateway.gateway import Gateway
+
+    # 1. Setup DBs
+    temp_db_dir = tmp_path / "dbs"
+    temp_db_dir.mkdir()
+    kesoku_db_path = str(temp_db_dir / "kesoku.db")
+    db_mgr = DatabaseManager(kesoku_db_path)
+    db_mgr.init_tables()
+
+    # 2. Setup Context & Gateway
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=kesoku_db_path))
+    kesoku_ctx = KesokuContext(config=cfg, db=db_mgr)
+    gw = Gateway(context=kesoku_ctx)
+
+    # 3. Bind Roles to Channels in Kesoku DB
+    # Create sessions first to satisfy FOREIGN KEY constraints
+    import time
+
+    from kesoku.db import DatabaseManager, Session
+
+    sess_asuka_obj = Session(
+        id="sess_asuka",
+        title="Asuka Session",
+        created_at=time.time(),
+        updated_at=time.time(),
+        system_prompt="System Asuka",
+    )
+    db_mgr.create_session(sess_asuka_obj)
+
+    sess_tifa_obj = Session(
+        id="sess_tifa",
+        title="Tifa Session",
+        created_at=time.time(),
+        updated_at=time.time(),
+        system_prompt="System Tifa",
+    )
+    db_mgr.create_session(sess_tifa_obj)
+
+    # asuka
+    db_mgr.set_channel_role(chatbot_id="cli", channel_id="chan_asuka", role="asuka")
+    db_mgr.set_active_session_for_channel(chatbot_id="cli", channel_id="chan_asuka", session_id="sess_asuka")
+    # tifa
+    db_mgr.set_channel_role(chatbot_id="cli", channel_id="chan_tifa", role="tifa")
+    db_mgr.set_active_session_for_channel(chatbot_id="cli", channel_id="chan_tifa", session_id="sess_tifa")
+
+    # 4. Insert dummy messages in Kesoku DB to link original_msg_id
+    msg_asuka = Message(
+        id="msg_asuka_original",
+        session_id="sess_asuka",
+        chatbot_id="cli",
+        channel_id="chan_asuka",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Trigger",
+        status="processed"
+    )
+    db_mgr.save_message(msg_asuka)
+
+    msg_tifa = Message(
+        id="msg_tifa_original",
+        session_id="sess_tifa",
+        chatbot_id="cli",
+        channel_id="chan_tifa",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Trigger",
+        status="processed"
+    )
+    db_mgr.save_message(msg_tifa)
+
+    # 5. Ingest messages into OpenLCM (lcm.db)
+    # Asuka memory
+    kesoku_ctx.lcm_engine.bind_session("sess_asuka")
+    kesoku_ctx.lcm_engine._ingest_messages([
+        {"role": "user", "content": "This is Asuka's secret password."}
+    ])
+    # Tifa memory
+    kesoku_ctx.lcm_engine.bind_session("sess_tifa")
+    kesoku_ctx.lcm_engine._ingest_messages([
+        {"role": "user", "content": "This is Tifa's secret password."}
+    ])
+
+    # 6. Test search as Asuka
+    ctx_asuka = ToolContext(
+        session_id="sess_asuka",
+        session_workspace="ws_asuka",
+        gateway=gw,
+        original_msg_id="msg_asuka_original"
+    )
+
+    # We must search with session_scope="all"
+    res_asuka_str = await lcm_grep(query="secret", session_scope="all", context=ctx_asuka)
+    res_asuka = json.loads(res_asuka_str)
+
+    # Assertions for Asuka search
+    assert "results" in res_asuka
+    # Should only return Asuka's memory
+    assert len(res_asuka["results"]) == 1
+    assert res_asuka["results"][0]["session_id"] == "sess_asuka"
+    assert "Asuka" in res_asuka["results"][0]["snippet"]
+    assert "Tifa" not in res_asuka["results"][0]["snippet"]
+
+    # 7. Test search as Tifa
+    ctx_tifa = ToolContext(
+        session_id="sess_tifa",
+        session_workspace="ws_tifa",
+        gateway=gw,
+        original_msg_id="msg_tifa_original"
+    )
+
+    res_tifa_str = await lcm_grep(query="secret", session_scope="all", context=ctx_tifa)
+    res_tifa = json.loads(res_tifa_str)
+
+    # Assertions for Tifa search
+    assert "results" in res_tifa
+    # Should only return Tifa's memory
+    assert len(res_tifa["results"]) == 1
+    assert res_tifa["results"][0]["session_id"] == "sess_tifa"
+    assert "Tifa" in res_tifa["results"][0]["snippet"]
+    assert "Asuka" not in res_tifa["results"][0]["snippet"]
+
+    # 8. Test explicit session_id check (Asuka trying to access Tifa's session)
+    res_hack_str = await lcm_grep(query="secret", session_scope="session", session_id="sess_tifa", context=ctx_asuka)
+    res_hack = json.loads(res_hack_str)
+    assert res_hack["total_results"] == 0
+    assert "error" in res_hack
+    assert "does not belong to role" in res_hack["error"]
+
+
 
 
