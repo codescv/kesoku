@@ -885,7 +885,6 @@ async def update_memory(
     content: str,
     old_content: str | None = None,
     role: str | None = None,
-    create_category: bool = False,
     context: ToolContext | None = None,
 ) -> str:
     """Insert or atomically replace a memory record in the SQLite database.
@@ -904,7 +903,6 @@ async def update_memory(
         old_content: The exact expected current content of the memory if it already exists.
             Must match the existing content to succeed. Required for updating existing keys.
         role: Optional roleplay persona scope (defaults to None for implicit channel/default persona).
-        create_category: True if permission was granted to initialize a new category.
         context: Injected tool execution context.
 
     Returns:
@@ -917,12 +915,11 @@ async def update_memory(
     db = context.gateway.db
     try:
         allowed = await db.get_allowed_memory_categories()
-        if category not in allowed and not create_category:
+        if category not in allowed:
             return (
                 f"Write Denied: Category '{category}' is not recognized.\n"
-                f"Permitted categories: {sorted(list(allowed))}.\n"
-                "If you need to create a new category, you MUST ask the user for explicit permission "
-                "first, and then invoke this tool with `create_category=True`."
+                f"You can only use the following configured categories: {sorted(list(allowed))}.\n"
+                "Please choose one of the allowed categories."
             )
 
         if not validate_key(key):

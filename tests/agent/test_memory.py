@@ -94,24 +94,10 @@ async def test_memory_tools_execution(tmp_path) -> None:
         title="Invalid Title",
         content="Content",
         role="default",
-        create_category=False,
         context=ctx,
     )
     assert "Write Denied: Category 'forbidden_category' is not recognized" in res
-
-    # 2. Force override creating a new category with user permission set
-    res = await update_memory(
-        category="forbidden_category",
-        key="my_key",
-        title="Invalid Title",
-        content="Content",
-        role="default",
-        create_category=True,
-        context=ctx,
-    )
-    assert "Memory successfully saved!" in res
-    assert "Category: `forbidden_category`" in res
-    assert "Key: `my_key`" in res
+    assert "You can only use the following configured categories:" in res
 
     # 3. Verify that updating with an invalid key is rejected
     res_fail = await update_memory(
@@ -120,7 +106,6 @@ async def test_memory_tools_execution(tmp_path) -> None:
         title="《标日》学习进度",
         content="已学完第23课",
         role="asuka",
-        create_category=False,
         context=ctx,
     )
     assert "Error: Invalid Key" in res_fail
@@ -132,7 +117,6 @@ async def test_memory_tools_execution(tmp_path) -> None:
         title="Asuka Day 1",
         content="Asuka was tsundere today",
         role="asuka",
-        create_category=False,
         context=ctx,
     )
     assert "Memory successfully saved!" in res
@@ -146,7 +130,6 @@ async def test_memory_tools_execution(tmp_path) -> None:
         title="General Fun",
         content="Someone made a joke today",
         role="default",
-        create_category=False,
         context=ctx,
     )
 

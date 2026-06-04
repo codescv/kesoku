@@ -106,8 +106,8 @@ Rules for managing memory:
 - Key naming constraints: Memory keys must strictly contain ONLY lowercase letters, underscores,
   and numbers (regex: ^[a-z0-9_]+$). You are strictly prohibited from using hyphens, uppercase
   letters, spaces, or other special characters.
-- Category creation: You are NOT allowed to create new categories unless you ask the user for explicit
-  permission and set `create_category=True` in `update_memory`.
+- Category selection: You are strictly prohibited from creating new categories.
+  You MUST only use the configured categories listed above.
 - **Preventing Overwrites**: ALWAYS use `view_memory` to read the current content
   before updating any existing memory key. You MUST provide the `old_content`
   parameter with the exact current content when calling `update_memory` for an
