@@ -185,12 +185,150 @@ def test_cli_chat_workflow(mock_gemini: Any, tmp_path: Any) -> None:
     assert f"Chat History for Session '{session_id}'" in strip_ansi(res_history_short.stdout)
 
 
-def test_cli_service_non_linux() -> None:
-    """Verify service command fails on non-Linux systems."""
-    with patch("sys.platform", "darwin"):
+def test_cli_service_non_supported_platform() -> None:
+    """Verify service command fails on unsupported systems."""
+    with patch("sys.platform", "win32"):
         result = runner.invoke(app, ["service", "install"])
         assert result.exit_code == 1
-        assert "only supported on Linux" in result.stdout
+        assert "Background services are only supported on Linux and macOS" in strip_ansi(result.stdout)
+
+
+def test_cli_service_dry_run_macos() -> None:
+    """Verify service command dry-run generated launchd plist content on macOS."""
+    with (
+        patch("sys.platform", "darwin"),
+        patch("kesoku.cli.service.load_config", return_value=KesokuConfig()),
+        patch(
+            "os.path.abspath",
+            side_effect=lambda p: (
+                "/mock/workspace/config.toml" if "config.toml" in p else f"/mock/bin/{os.path.basename(p)}"
+            ),
+        ),
+        patch("os.path.exists", return_value=True),
+    ):
+        # Test basic user dry-run
+        result = runner.invoke(app, ["service", "install", "--dry-run"])
+        assert result.exit_code == 0
+        assert "Generated launchd plist path:" in result.stdout
+        assert "com.kesoku.agent.plist" in result.stdout
+        assert "<key>Label</key>" in result.stdout
+        assert "<string>com.kesoku.agent</string>" in result.stdout
+        assert "<string>/mock/bin/kesoku</string>" in result.stdout
+        assert "<string>start</string>" in result.stdout
+        assert "<string>-c</string>" in result.stdout
+        assert "<string>/mock/workspace/config.toml</string>" in result.stdout
+        assert "<key>WorkingDirectory</key>" in result.stdout
+        assert "<string>/mock/workspace</string>" in result.stdout
+        assert "<key>RunAtLoad</key>" in result.stdout
+        assert "<true/>" in result.stdout
+        assert "<key>KeepAlive</key>" in result.stdout
+
+
+def test_cli_service_install_user_macos() -> None:
+    """Verify successful user-level installation of the service on macOS."""
+    m_open = mock_open()
+    original_open = open
+
+    def selective_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if "com.kesoku.agent.plist" in str(file):
+            return m_open(file, *args, **kwargs)
+        return original_open(file, *args, **kwargs)
+
+    with (
+        patch("sys.platform", "darwin"),
+        patch("kesoku.cli.service.load_config", return_value=KesokuConfig()),
+        patch(
+            "os.path.abspath",
+            side_effect=lambda p: (
+                "/mock/workspace/config.toml" if "config.toml" in p else f"/mock/bin/{os.path.basename(p)}"
+            ),
+        ),
+        patch("os.path.exists", return_value=True),
+        patch("os.makedirs") as mock_makedirs,
+        patch("builtins.open", side_effect=selective_open),
+        patch("subprocess.run") as mock_run,
+    ):
+        result = runner.invoke(app, ["service", "install", "-c", "config.toml"])
+        assert result.exit_code == 0
+        assert "service installed successfully" in result.stdout.lower()
+        assert mock_makedirs.call_count == 2
+        m_open.assert_called_once()
+        assert mock_run.call_count == 1
+        mock_run.assert_any_call(
+            ["launchctl", "load", "-w", os.path.expanduser("~/Library/LaunchAgents/com.kesoku.agent.plist")],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
+def test_cli_service_uninstall_macos() -> None:
+    """Verify successful service uninstallation on macOS."""
+    with (
+        patch("sys.platform", "darwin"),
+        patch("kesoku.cli.entrypoint.load_config"),
+        patch("os.path.exists", return_value=True),
+        patch("os.remove") as mock_remove,
+        patch("subprocess.run") as mock_run,
+    ):
+        # Test user uninstall
+        result = runner.invoke(app, ["service", "uninstall"])
+        assert result.exit_code == 0
+        assert "uninstalled successfully" in result.stdout.lower()
+        mock_remove.assert_called_once()
+
+        unload_call = mock_run.mock_calls[0]
+        assert unload_call[1][0] == [
+            "launchctl",
+            "unload",
+            "-w",
+            os.path.expanduser("~/Library/LaunchAgents/com.kesoku.agent.plist"),
+        ]
+
+
+def test_cli_service_start_stop_restart_macos() -> None:
+    """Verify start, stop, and restart service wrapper command invocations on macOS."""
+    with (
+        patch("sys.platform", "darwin"),
+        patch("subprocess.run") as mock_run,
+    ):
+        # 1. Start User Service
+        res_start = runner.invoke(app, ["service", "start"])
+        assert res_start.exit_code == 0
+        assert "executed service start" in res_start.stdout.lower()
+        mock_run.assert_any_call(
+            ["launchctl", "start", "com.kesoku.agent"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        # 2. Stop System Service
+        res_stop = runner.invoke(app, ["service", "stop", "--system"])
+        assert res_stop.exit_code == 0
+        assert "executed service stop" in res_stop.stdout.lower()
+        mock_run.assert_any_call(
+            ["sudo", "launchctl", "stop", "com.kesoku.agent"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        # 3. Restart User Service (stop then start)
+        res_restart = runner.invoke(app, ["service", "restart"])
+        assert res_restart.exit_code == 0
+        assert "executed service restart" in res_restart.stdout.lower()
+        mock_run.assert_any_call(
+            ["launchctl", "stop", "com.kesoku.agent"],
+            capture_output=True,
+        )
+        mock_run.assert_any_call(
+            ["launchctl", "start", "com.kesoku.agent"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
 
 
 def test_cli_service_dry_run() -> None:

@@ -29,25 +29,27 @@ DEFAULT_INHERITED_ENVS = [
 ]
 
 # Setup Sub-Typer app for services
-service_app = typer.Typer(help="Manage Kesoku AI Agent as a systemd background service.")
+service_app = typer.Typer(help="Manage Kesoku AI Agent as a systemd (Linux) or launchd (macOS) background service.")
 
 
-def _verify_linux_platform(console: Console) -> None:
-    """Verify that the host platform is Linux.
+def _verify_supported_platform(console: Console) -> None:
+    """Verify that the host platform is Linux or macOS.
 
     Args:
         console: Console to output error message.
 
     Raises:
-        typer.Exit: If platform is not Linux.
+        typer.Exit: If platform is not supported.
     """
-    if sys.platform != "linux":
-        console.print("[bold red]Error: systemd services are only supported on Linux platforms.[/bold red]")
+    if sys.platform not in ("linux", "darwin"):
+        console.print(
+            "[bold red]Error: Background services are only supported on Linux and macOS platforms.[/bold red]"
+        )
         raise typer.Exit(code=1)
 
 
 def _get_service_params(user: bool, name: str | None = None) -> tuple[str, list[str], str, str]:
-    """Determine target path, systemctl reload command, user flags, and service name.
+    """Determine target path, reload command, user flags, and service name.
 
     Args:
         user: True for user-level installation, False for system-level.
@@ -56,16 +58,28 @@ def _get_service_params(user: bool, name: str | None = None) -> tuple[str, list[
     Returns:
         A tuple of (service_file_path, reload_cmd_list, user_flag_string, service_name)
     """
-    service_name = "kesoku" if not name else f"kesoku-{name}"
-    if user:
-        target_path = os.path.expanduser(f"~/.config/systemd/user/{service_name}.service")
-        systemctl_reload = ["systemctl", "--user", "daemon-reload"]
-        user_flag = "--user "
+    is_mac = sys.platform == "darwin"
+
+    if is_mac:
+        service_name = "com.kesoku.agent" if not name else f"com.kesoku.agent-{name}"
+        if user:
+            target_path = os.path.expanduser(f"~/Library/LaunchAgents/{service_name}.plist")
+            user_flag = "--user "
+        else:
+            target_path = f"/Library/LaunchDaemons/{service_name}.plist"
+            user_flag = ""
+        return target_path, [], user_flag, service_name
     else:
-        target_path = f"/etc/systemd/system/{service_name}.service"
-        systemctl_reload = ["sudo", "systemctl", "daemon-reload"]
-        user_flag = ""
-    return target_path, systemctl_reload, user_flag, service_name
+        service_name = "kesoku" if not name else f"kesoku-{name}"
+        if user:
+            target_path = os.path.expanduser(f"~/.config/systemd/user/{service_name}.service")
+            systemctl_reload = ["systemctl", "--user", "daemon-reload"]
+            user_flag = "--user "
+        else:
+            target_path = f"/etc/systemd/system/{service_name}.service"
+            systemctl_reload = ["sudo", "systemctl", "daemon-reload"]
+            user_flag = ""
+        return target_path, systemctl_reload, user_flag, service_name
 
 
 @service_app.command("install")
@@ -108,9 +122,9 @@ def install_cmd(
         ),
     ] = None,
 ) -> None:
-    """Install Kesoku as a systemd background service on Linux."""
+    """Install Kesoku as a background service (systemd on Linux, launchd on macOS)."""
     console = Console()
-    _verify_linux_platform(console)
+    _verify_supported_platform(console)
 
     # Resolve the absolute path of the configuration file and load it
     config_abs_path = os.path.abspath(config_path)
@@ -132,7 +146,7 @@ def install_cmd(
     else:
         kesoku_path = os.path.abspath(kesoku_path)
 
-    # Construct Environment lines for systemd unit file
+    # Construct Environment lines
     env_dict = {}
     for key in DEFAULT_INHERITED_ENVS:
         if key in os.environ:
@@ -162,18 +176,55 @@ def install_cmd(
     if name:
         env_dict["KESOKU_SERVICE_INSTANCE_NAME"] = name
 
-    env_lines = [f'Environment="{k}={v}"' for k, v in env_dict.items()]
-    environment_block = "\n".join(env_lines)
+    target_path, reload_cmd, user_flag, service_name = _get_service_params(user, name)
 
-    target_path, systemctl_reload, user_flag, service_name = _get_service_params(user, name)
-    wanted_by = "default.target" if user else "multi-user.target"
+    is_mac = sys.platform == "darwin"
 
-    description = "Kesoku AI Agent Service"
-    if name:
-        description += f" ({name})"
+    if is_mac:
+        env_dict_plist = "".join(f"        <key>{k}</key>\n        <string>{v}</string>\n" for k, v in env_dict.items())
+        log_path = (
+            os.path.expanduser(f"~/Library/Logs/Kesoku/{service_name}.log")
+            if user
+            else f"/var/log/{service_name}.log"
+        )
+        unit_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{service_name}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{kesoku_path}</string>
+        <string>start</string>
+        <string>-c</string>
+        <string>{config_abs_path}</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>{working_dir}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{log_path}</string>
+    <key>StandardErrorPath</key>
+    <string>{log_path}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+{env_dict_plist}    </dict>
+</dict>
+</plist>
+"""
+    else:
+        env_lines = [f'Environment="{k}={v}"' for k, v in env_dict.items()]
+        environment_block = "\n".join(env_lines)
+        wanted_by = "default.target" if user else "multi-user.target"
+        description = "Kesoku AI Agent Service"
+        if name:
+            description += f" ({name})"
 
-    # Generate Systemd unit file content with journal logging and improved recovery/lifecycle options
-    unit_content = f"""[Unit]
+        unit_content = f"""[Unit]
 Description={description}
 After=network.target
 
@@ -193,7 +244,8 @@ WantedBy={wanted_by}
 """
 
     if dry_run:
-        console.print(f"[bold green]# Generated systemd service unit path: {target_path}[/bold green]")
+        type_str = "launchd plist" if is_mac else "systemd service unit"
+        console.print(f"[bold green]# Generated {type_str} path: {target_path}[/bold green]")
         console.print(unit_content)
         return
 
@@ -201,10 +253,12 @@ WantedBy={wanted_by}
     try:
         if user:
             os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            if is_mac:
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
         with open(target_path, "w") as f:
             f.write(unit_content)
-        logger.info(f"Systemd service file written to: {target_path}")
+        logger.info(f"Service file written to: {target_path}")
 
     except PermissionError:
         console.print(f"[bold red]Error: Permission denied when writing to '{target_path}'.[/bold red]")
@@ -215,32 +269,50 @@ WantedBy={wanted_by}
             )
         raise typer.Exit(code=1)
     except Exception as e:
-        console.print(f"[bold red]Error writing systemd service file: {e}[/bold red]")
+        console.print(f"[bold red]Error writing service file: {e}[/bold red]")
         raise typer.Exit(code=1)
 
-    # Reload the systemd daemon configurations
-    logger.info(f"Reloading systemd daemon via: {' '.join(systemctl_reload)}...")
-    try:
-        subprocess.run(systemctl_reload, check=True, capture_output=True, text=True)
-        logger.info("Systemd daemon reloaded successfully.")
-    except subprocess.CalledProcessError as e:
-        logger.warning(f"Could not reload systemd daemon automatically: {e.stderr.strip() or e}")
-        console.print(
-            "[bold yellow]Warning: Please reload systemd manually by running 'systemctl daemon-reload'.[/bold yellow]"
-        )
+    if is_mac:
+        # Load plist
+        load_cmd = ["launchctl", "load", "-w", target_path]
+        if not user:
+            load_cmd = ["sudo"] + load_cmd
+        logger.info(f"Loading macOS launchd service via: {' '.join(load_cmd)}...")
+        try:
+            subprocess.run(load_cmd, check=True, capture_output=True, text=True)
+            logger.info("Service loaded successfully.")
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Could not load service automatically: {e.stderr.strip() or e}")
+            console.print(
+                f"[bold yellow]Warning: Please load the service manually: {' '.join(load_cmd)}[/bold yellow]"
+            )
+    else:
+        # Reload the systemd daemon configurations
+        logger.info(f"Reloading systemd daemon via: {' '.join(reload_cmd)}...")
+        try:
+            subprocess.run(reload_cmd, check=True, capture_output=True, text=True)
+            logger.info("Systemd daemon reloaded successfully.")
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Could not reload systemd daemon automatically: {e.stderr.strip() or e}")
+            console.print(
+                "[bold yellow]Warning: Please reload systemd manually by running "
+                "'systemctl daemon-reload'.[/bold yellow]"
+            )
 
-    # Always automatically enable the service to register boot-time auto-start
-    enable_cmd = ["systemctl"] + user_flag.split() + ["enable", service_name]
-    if not user:
-        enable_cmd = ["sudo"] + enable_cmd
+        # Always automatically enable the service to register boot-time auto-start
+        enable_cmd = ["systemctl"] + user_flag.split() + ["enable", service_name]
+        if not user:
+            enable_cmd = ["sudo"] + enable_cmd
 
-    logger.info(f"Enabling service via: {' '.join(enable_cmd)}...")
-    try:
-        subprocess.run(enable_cmd, check=True, capture_output=True, text=True)
-        logger.info("Service enabled successfully.")
-    except subprocess.CalledProcessError as e:
-        logger.warning(f"Could not enable service automatically: {e.stderr.strip() or e}")
-        console.print(f"[bold yellow]Warning: Please enable the service manually: {' '.join(enable_cmd)}[/bold yellow]")
+        logger.info(f"Enabling service via: {' '.join(enable_cmd)}...")
+        try:
+            subprocess.run(enable_cmd, check=True, capture_output=True, text=True)
+            logger.info("Service enabled successfully.")
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Could not enable service automatically: {e.stderr.strip() or e}")
+            console.print(
+                f"[bold yellow]Warning: Please enable the service manually: {' '.join(enable_cmd)}[/bold yellow]"
+            )
 
     console.print("\n[bold green]Kesoku service installed successfully![/bold green]")
     console.print("You can control the service using the following commands:")
@@ -248,7 +320,7 @@ WantedBy={wanted_by}
     console.print(f"  [bold cyan]kesoku service start {user_flag.strip()}{name_opt}[/bold cyan]   - Start the service")
     console.print(f"  [bold cyan]kesoku service stop {user_flag.strip()}{name_opt}[/bold cyan]    - Stop the service")
     status_label = f"kesoku service status {user_flag.strip()}{name_opt}"
-    console.print(f"  [bold cyan]{status_label}[/bold cyan]  - Check service status (via systemctl)")
+    console.print(f"  [bold cyan]{status_label}[/bold cyan]  - Check service status")
     console.print(f"  [bold cyan]kesoku service logs {user_flag.strip()}{name_opt}[/bold cyan]    - View service logs")
 
 
@@ -258,7 +330,7 @@ def uninstall_cmd(
         bool,
         typer.Option(
             "--user/--system",
-            help="Uninstall as a user-level systemd service (default) or system-level service",
+            help="Uninstall as a user-level service (default) or system-level service",
         ),
     ] = True,
     name: Annotated[
@@ -269,27 +341,35 @@ def uninstall_cmd(
         ),
     ] = None,
 ) -> None:
-    """Stop, disable, and uninstall Kesoku systemd service."""
+    """Stop, disable, and uninstall Kesoku background service."""
     console = Console()
-    _verify_linux_platform(console)
+    _verify_supported_platform(console)
 
-    target_path, systemctl_reload, user_flag, service_name = _get_service_params(user, name)
+    target_path, reload_cmd, user_flag, service_name = _get_service_params(user, name)
 
-    # 1. Stop the service
-    logger.info(f"Stopping the background service: {service_name}...")
-    stop_cmd_list = ["systemctl"] + user_flag.split() + ["stop", service_name]
-    if not user:
-        stop_cmd_list = ["sudo"] + stop_cmd_list
-    subprocess.run(stop_cmd_list, capture_output=True)
+    is_mac = sys.platform == "darwin"
 
-    # 2. Disable the service
-    logger.info(f"Disabling the background service: {service_name}...")
-    disable_cmd_list = ["systemctl"] + user_flag.split() + ["disable", service_name]
-    if not user:
-        disable_cmd_list = ["sudo"] + disable_cmd_list
-    subprocess.run(disable_cmd_list, capture_output=True)
+    # 1. Stop and disable the service
+    if is_mac:
+        logger.info(f"Unloading the background service: {service_name}...")
+        unload_cmd_list = ["launchctl", "unload", "-w", target_path]
+        if not user:
+            unload_cmd_list = ["sudo"] + unload_cmd_list
+        subprocess.run(unload_cmd_list, capture_output=True)
+    else:
+        logger.info(f"Stopping the background service: {service_name}...")
+        stop_cmd_list = ["systemctl"] + user_flag.split() + ["stop", service_name]
+        if not user:
+            stop_cmd_list = ["sudo"] + stop_cmd_list
+        subprocess.run(stop_cmd_list, capture_output=True)
 
-    # 3. Remove the service file from disk
+        logger.info(f"Disabling the background service: {service_name}...")
+        disable_cmd_list = ["systemctl"] + user_flag.split() + ["disable", service_name]
+        if not user:
+            disable_cmd_list = ["sudo"] + disable_cmd_list
+        subprocess.run(disable_cmd_list, capture_output=True)
+
+    # 2. Remove the service file from disk
     if os.path.exists(target_path):
         try:
             if not user:
@@ -309,41 +389,80 @@ def uninstall_cmd(
     else:
         logger.info(f"Service file '{target_path}' did not exist.")
 
-    # 4. Reload the systemd configurations
-    logger.info(f"Reloading systemd daemon via: {' '.join(systemctl_reload)}...")
-    try:
-        subprocess.run(systemctl_reload, check=True, capture_output=True, text=True)
-        logger.info("Systemd daemon reloaded successfully.")
-    except subprocess.CalledProcessError as e:
-        logger.warning(f"Could not reload systemd daemon automatically: {e.stderr.strip() or e}")
+    # 3. Reload daemon configurations (Linux only)
+    if not is_mac and reload_cmd:
+        logger.info(f"Reloading systemd daemon via: {' '.join(reload_cmd)}...")
+        try:
+            subprocess.run(reload_cmd, check=True, capture_output=True, text=True)
+            logger.info("Systemd daemon reloaded successfully.")
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Could not reload systemd daemon automatically: {e.stderr.strip() or e}")
 
     console.print("[bold green]Kesoku service has been uninstalled successfully![/bold green]")
 
 
-def _run_systemctl_action(action: str, user: bool, name: str | None, console: Console) -> None:
-    """Internal helper to run systemctl command for start/stop/restart.
+def _run_service_action(action: str, user: bool, name: str | None, console: Console) -> None:
+    """Internal helper to run command for start/stop/restart.
 
     Args:
-        action: The systemctl command verb (e.g., 'start', 'stop', 'restart').
+        action: The command verb (e.g., 'start', 'stop', 'restart').
         user: True for user service scope, False for system.
         name: Optional name suffix of the service instance.
         console: Rich Console instance.
     """
-    _verify_linux_platform(console)
-    _, _, user_flag, service_name = _get_service_params(user, name)
+    _verify_supported_platform(console)
+    target_path, _, user_flag, service_name = _get_service_params(user, name)
 
-    cmd_list = ["systemctl"] + user_flag.split() + [action, service_name]
-    if not user:
-        cmd_list = ["sudo"] + cmd_list
+    is_mac = sys.platform == "darwin"
 
-    logger.info(f"Running: {' '.join(cmd_list)}...")
-    try:
-        subprocess.run(cmd_list, check=True, capture_output=True, text=True)
-        console.print(f"[bold green]Successfully executed service {action} for {service_name}![/bold green]")
-    except subprocess.CalledProcessError as e:
-        err_msg = e.stderr.strip() or e
-        console.print(f"[bold red]Error executing service {action} for {service_name}: {err_msg}[/bold red]")
-        raise typer.Exit(code=1)
+    if is_mac:
+        if action == "restart":
+            # launchd has no restart verb, so we do stop + start
+            stop_cmd = ["launchctl", "stop", service_name]
+            if not user:
+                stop_cmd = ["sudo"] + stop_cmd
+            logger.info(f"Running: {' '.join(stop_cmd)}...")
+            subprocess.run(stop_cmd, capture_output=True)
+
+            start_cmd = ["launchctl", "start", service_name]
+            if not user:
+                start_cmd = ["sudo"] + start_cmd
+            logger.info(f"Running: {' '.join(start_cmd)}...")
+            try:
+                subprocess.run(start_cmd, check=True, capture_output=True, text=True)
+                console.print(f"[bold green]Successfully executed service restart for {service_name}![/bold green]")
+            except subprocess.CalledProcessError as e:
+                err_msg = e.stderr.strip() or e
+                console.print(
+                    f"[bold red]Error executing service restart for {service_name}: {err_msg}[/bold red]"
+                )
+                raise typer.Exit(code=1)
+        else:
+            cmd_list = ["launchctl", action, service_name]
+            if not user:
+                cmd_list = ["sudo"] + cmd_list
+
+            logger.info(f"Running: {' '.join(cmd_list)}...")
+            try:
+                subprocess.run(cmd_list, check=True, capture_output=True, text=True)
+                console.print(f"[bold green]Successfully executed service {action} for {service_name}![/bold green]")
+            except subprocess.CalledProcessError as e:
+                err_msg = e.stderr.strip() or e
+                console.print(f"[bold red]Error executing service {action} for {service_name}: {err_msg}[/bold red]")
+                raise typer.Exit(code=1)
+    else:
+        cmd_list = ["systemctl"] + user_flag.split() + [action, service_name]
+        if not user:
+            cmd_list = ["sudo"] + cmd_list
+
+        logger.info(f"Running: {' '.join(cmd_list)}...")
+        try:
+            subprocess.run(cmd_list, check=True, capture_output=True, text=True)
+            console.print(f"[bold green]Successfully executed service {action} for {service_name}![/bold green]")
+        except subprocess.CalledProcessError as e:
+            err_msg = e.stderr.strip() or e
+            console.print(f"[bold red]Error executing service {action} for {service_name}: {err_msg}[/bold red]")
+            raise typer.Exit(code=1)
 
 
 @service_app.command("start")
@@ -352,7 +471,7 @@ def start_cmd(
         bool,
         typer.Option(
             "--user/--system",
-            help="Start as a user-level systemd service (default) or system-level service",
+            help="Start as a user-level service (default) or system-level service",
         ),
     ] = True,
     name: Annotated[
@@ -365,7 +484,7 @@ def start_cmd(
 ) -> None:
     """Start the Kesoku background service."""
     console = Console()
-    _run_systemctl_action("start", user, name, console)
+    _run_service_action("start", user, name, console)
 
 
 @service_app.command("stop")
@@ -374,7 +493,7 @@ def stop_cmd(
         bool,
         typer.Option(
             "--user/--system",
-            help="Stop as a user-level systemd service (default) or system-level service",
+            help="Stop as a user-level service (default) or system-level service",
         ),
     ] = True,
     name: Annotated[
@@ -387,7 +506,7 @@ def stop_cmd(
 ) -> None:
     """Stop the Kesoku background service."""
     console = Console()
-    _run_systemctl_action("stop", user, name, console)
+    _run_service_action("stop", user, name, console)
 
 
 @service_app.command("restart")
@@ -396,7 +515,7 @@ def restart_cmd(
         bool,
         typer.Option(
             "--user/--system",
-            help="Restart as a user-level systemd service (default) or system-level service",
+            help="Restart as a user-level service (default) or system-level service",
         ),
     ] = True,
     name: Annotated[
@@ -409,7 +528,7 @@ def restart_cmd(
 ) -> None:
     """Restart the Kesoku background service."""
     console = Console()
-    _run_systemctl_action("restart", user, name, console)
+    _run_service_action("restart", user, name, console)
 
 
 @service_app.command("logs")
@@ -418,7 +537,7 @@ def logs_cmd(
         bool,
         typer.Option(
             "--user/--system",
-            help="Show logs for user-level systemd service (default) or system-level service",
+            help="Show logs for user-level service (default) or system-level service",
         ),
     ] = True,
     follow: Annotated[
@@ -434,7 +553,7 @@ def logs_cmd(
         typer.Option(
             "-n",
             "--lines",
-            help="Number of journal entries to show",
+            help="Number of log entries to show",
         ),
     ] = 50,
     name: Annotated[
@@ -445,29 +564,57 @@ def logs_cmd(
         ),
     ] = None,
 ) -> None:
-    """Show logs from journald for the Kesoku background service."""
+    """Show logs for the Kesoku background service."""
     console = Console()
-    _verify_linux_platform(console)
-    _, _, user_flag, service_name = _get_service_params(user, name)
+    _verify_supported_platform(console)
+    target_path, _, user_flag, service_name = _get_service_params(user, name)
 
-    cmd_list = ["journalctl"]
-    if user:
-        cmd_list += ["--user"]
-    cmd_list += ["-u", service_name]
+    if sys.platform == "darwin":
+        log_path = (
+            os.path.expanduser(f"~/Library/Logs/Kesoku/{service_name}.log")
+            if user
+            else f"/var/log/{service_name}.log"
+        )
+        if not os.path.exists(log_path):
+            console.print(
+                f"[bold yellow]No log file found at '{log_path}'. The service may not have started yet.[/bold yellow]"
+            )
+            return
 
-    if follow:
-        cmd_list += ["-f"]
-    if lines > 0:
-        cmd_list += ["-n", str(lines)]
+        cmd_list = ["tail"]
+        if follow:
+            cmd_list += ["-f"]
+        if lines > 0:
+            cmd_list += ["-n", str(lines)]
+        cmd_list += [log_path]
 
-    logger.info(f"Viewing logs via: {' '.join(cmd_list)}...")
-    try:
-        subprocess.run(cmd_list, check=True)
-    except KeyboardInterrupt:
-        pass
-    except subprocess.CalledProcessError as e:
-        console.print(f"[bold red]Error retrieving logs: {e}[/bold red]")
-        raise typer.Exit(code=1)
+        logger.info(f"Viewing logs via: {' '.join(cmd_list)}...")
+        try:
+            subprocess.run(cmd_list, check=True)
+        except KeyboardInterrupt:
+            pass
+        except subprocess.CalledProcessError as e:
+            console.print(f"[bold red]Error retrieving logs: {e}[/bold red]")
+            raise typer.Exit(code=1)
+    else:
+        cmd_list = ["journalctl"]
+        if user:
+            cmd_list += ["--user"]
+        cmd_list += ["-u", service_name]
+
+        if follow:
+            cmd_list += ["-f"]
+        if lines > 0:
+            cmd_list += ["-n", str(lines)]
+
+        logger.info(f"Viewing logs via: {' '.join(cmd_list)}...")
+        try:
+            subprocess.run(cmd_list, check=True)
+        except KeyboardInterrupt:
+            pass
+        except subprocess.CalledProcessError as e:
+            console.print(f"[bold red]Error retrieving logs: {e}[/bold red]")
+            raise typer.Exit(code=1)
 
 
 @service_app.command("status")
@@ -476,7 +623,7 @@ def status_cmd(
         bool,
         typer.Option(
             "--user/--system",
-            help="Check status of user-level systemd service (default) or system-level service",
+            help="Check status of user-level service (default) or system-level service",
         ),
     ] = True,
     name: Annotated[
@@ -489,12 +636,19 @@ def status_cmd(
 ) -> None:
     """Check the status of the Kesoku background service."""
     console = Console()
-    _verify_linux_platform(console)
-    _, _, user_flag, service_name = _get_service_params(user, name)
+    _verify_supported_platform(console)
+    target_path, _, user_flag, service_name = _get_service_params(user, name)
 
-    cmd_list = ["systemctl"] + user_flag.split() + ["status", service_name]
-    if not user:
-        cmd_list = ["sudo"] + cmd_list
+    if sys.platform == "darwin":
+        cmd_list = ["launchctl", "list", service_name]
+        if not user:
+            cmd_list = ["sudo"] + cmd_list
+        logger.info(f"Checking status via: {' '.join(cmd_list)}...")
+        subprocess.run(cmd_list)
+    else:
+        cmd_list = ["systemctl"] + user_flag.split() + ["status", service_name]
+        if not user:
+            cmd_list = ["sudo"] + cmd_list
 
-    logger.info(f"Checking status via: {' '.join(cmd_list)}...")
-    subprocess.run(cmd_list)
+        logger.info(f"Checking status via: {' '.join(cmd_list)}...")
+        subprocess.run(cmd_list)
