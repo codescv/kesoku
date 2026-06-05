@@ -85,6 +85,6 @@ skip-magic-trailing-comma = false
 line-ending = "auto"
 
 [tool.uv.sources]
-openlcm = { git = "ssh://git@github.com/codescv/OpenLCM.git" }
+openlcm = { git = "https://github.com/codescv/OpenLCM.git" }
 
 
