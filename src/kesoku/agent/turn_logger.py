@@ -152,6 +152,7 @@ class TurnLogger:
                 "metrics": {
                     "prompt_tokens": response.prompt_tokens,
                     "candidates_tokens": response.candidates_tokens,
+                    "cached_tokens": response.cached_tokens,
                     "total_tokens": response.total_tokens,
                 },
             },

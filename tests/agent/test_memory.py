@@ -177,7 +177,9 @@ async def test_category_role_routing_and_play_role(tmp_path) -> None:
     temp_db = str(tmp_path / "test_routing.db")
     DatabaseManager(temp_db).init_tables()
 
-    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    from kesoku.config import get_config
+    cfg = get_config()
+    cfg.workspace.db_path = temp_db
     gw = Gateway(context=KesokuContext(config=cfg))
 
     # Bind the channel to a specific role 'tifa'

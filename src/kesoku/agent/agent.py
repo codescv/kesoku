@@ -219,6 +219,7 @@ class Agent:
 
         try:
             async for msg in self.gateway.listen(status=MessageStatus.PENDING_AGENT):
+                logger.info(f"Dispatcher loop got message: {msg.id} with status {msg.status}")
                 if not self._running:
                     break
 

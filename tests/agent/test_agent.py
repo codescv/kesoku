@@ -798,6 +798,7 @@ async def test_agent_empty_response_nudge(temp_db: str) -> None:
             system_prompt: str | None = None,
             history: list[Message] | None = None,
             tools: list[Any] | None = None,
+            **kwargs: Any,
         ) -> LLMResponse:
             self.generate_calls += 1
             if self.generate_calls == 1:
@@ -1096,6 +1097,7 @@ async def test_agent_llm_error_handling(temp_db: str) -> None:
             system_prompt: str | None = None,
             history: list[Message] | None = None,
             tools: list[Any] | None = None,
+            **kwargs: Any,
         ) -> LLMResponse:
             raise RuntimeError("LLM API Connection Failed")
 
@@ -1154,6 +1156,7 @@ async def test_graceful_shutdown_and_orphaned_recovery(temp_db: str) -> None:
             system_prompt: str | None = None,
             history: list[Message] | None = None,
             tools: list[Any] | None = None,
+            **kwargs: Any,
         ) -> LLMResponse:
             await asyncio.sleep(0.3)
             return LLMResponse(content="Finished slowly.")

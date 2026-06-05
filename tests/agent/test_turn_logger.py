@@ -117,5 +117,6 @@ def test_log_llm_turn_serialization(temp_staging_dir: str) -> None:
     assert log_data["response"]["metrics"] == {
         "prompt_tokens": 10,
         "candidates_tokens": 5,
+        "cached_tokens": None,
         "total_tokens": 15,
     }

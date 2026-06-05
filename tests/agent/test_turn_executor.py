@@ -49,6 +49,7 @@ async def test_turn_executor_successful_turn(temp_db: str) -> None:
             system_prompt: str | None = None,
             history: list[Message] | None = None,
             tools: list[Any] | None = None,
+            **kwargs: Any,
         ) -> LLMResponse:
             return LLMResponse(content="Hello User! How can I help?", total_tokens=10)
 
@@ -122,6 +123,7 @@ async def test_turn_executor_nudging(temp_db: str) -> None:
             system_prompt: str | None = None,
             history: list[Message] | None = None,
             tools: list[Any] | None = None,
+            **kwargs: Any,
         ) -> LLMResponse:
             self.calls += 1
             if self.calls == 1:
@@ -194,6 +196,7 @@ async def test_turn_executor_tool_calls(temp_db: str) -> None:
             system_prompt: str | None = None,
             history: list[Message] | None = None,
             tools: list[Any] | None = None,
+            **kwargs: Any,
         ) -> LLMResponse:
             self.calls += 1
             if self.calls == 1:
@@ -316,6 +319,7 @@ async def test_turn_executor_pivot_resets_nudged(temp_db: str) -> None:
             system_prompt: str | None = None,
             history: list[Message] | None = None,
             tools: list[Any] | None = None,
+            **kwargs: Any,
         ) -> LLMResponse:
             self.calls += 1
             if self.calls == 1:
@@ -418,6 +422,7 @@ async def test_turn_executor_user_preferences_injection(temp_db: str) -> None:
             system_prompt: str | None = None,
             history: list[Message] | None = None,
             tools: list[Any] | None = None,
+            **kwargs: Any,
         ) -> LLMResponse:
             self.captured_history = list(history or [])
             return LLMResponse(content="Response", total_tokens=5)
@@ -492,6 +497,7 @@ async def test_turn_executor_user_preferences_truncation(temp_db: str) -> None:
             system_prompt: str | None = None,
             history: list[Message] | None = None,
             tools: list[Any] | None = None,
+            **kwargs: Any,
         ) -> LLMResponse:
             self.captured_history = list(history or [])
             return LLMResponse(content="Response", total_tokens=5)
@@ -616,6 +622,7 @@ async def test_turn_executor_cross_session_context_injection_and_consolidation(t
             system_prompt: str | None = None,
             history: list[Message] | None = None,
             tools: list[Any] | None = None,
+            **kwargs: Any,
         ) -> LLMResponse:
             if system_prompt == "You are an expert background memory consolidator.":
                 # Background consolidation task call
@@ -742,6 +749,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
             system_prompt: str | None = None,
             history: list[Message] | None = None,
             tools: list[Any] | None = None,
+            **kwargs: Any,
         ) -> LLMResponse:
             self.captured_history = list(history or [])
             return LLMResponse(content="Replied to user", total_tokens=5)
@@ -915,6 +923,7 @@ async def test_turn_executor_user_context_injection(temp_db: str) -> None:
             system_prompt: str | None = None,
             history: list[Message] | None = None,
             tools: list[Any] | None = None,
+            **kwargs: Any,
         ) -> LLMResponse:
             self.captured_history = list(history or [])
             return LLMResponse(content="Replied", total_tokens=5)
@@ -1064,6 +1073,7 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
             system_prompt: str | None = None,
             history: list[Message] | None = None,
             tools: list[Any] | None = None,
+            **kwargs: Any,
         ) -> LLMResponse:
             self.captured_history = list(history or [])
             return LLMResponse(content="Final Assistant Turn Response", total_tokens=10)
@@ -1132,6 +1142,256 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
     assert msg3.id in db_ids
     assert msg4.id in db_ids
     assert active_msg.id in db_ids
+
+
+@pytest.mark.asyncio
+async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> None:
+    """Verify context cache deletion and correct generate request when compaction occurs."""
+    from kesoku.constants import MessageRole
+    DatabaseManager(temp_db).init_tables()
+
+    # Configure Gemini and Context Caching
+    from kesoku.config import GeminiConfig
+    cfg = KesokuConfig(
+        workspace=WorkspaceConfig(db_path=temp_db),
+        gemini=GeminiConfig(
+            context_caching=True,
+            context_caching_threshold=100,  # small threshold to trigger caching
+        )
+    )
+
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.create_session("sess_cache_compact", title="Cache and Compact")
+
+    # Post some messages to exceed threshold
+    msg1 = Message(
+        session_id="sess_cache_compact",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="User message 1 that is quite long to accumulate tokens for caching " * 10,
+        status="pending",
+        timestamp=time.time() - 10,
+    )
+    await gw.post(msg1)
+
+    msg2 = Message(
+        session_id="sess_cache_compact",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="Assistant response 1 that is also quite long " * 10,
+        status="pending",
+        timestamp=time.time() - 5,
+    )
+    await gw.post(msg2)
+
+    active_msg = Message(
+        session_id="sess_cache_compact",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="Active user query",
+        status="pending_agent",
+        timestamp=time.time(),
+    )
+    await gw.post(active_msg)
+
+    token_count_to_return = 150
+
+    # Mock GeminiLLM to capture create_cache, delete_cache, and generate calls
+    class GeminiLLM(BaseLLM):
+        context_window_limit: int = 1000
+
+        def __init__(self) -> None:
+            self.created_caches = []
+            self.deleted_caches = []
+            self.captured_generates = []
+            self.token_calls = 0
+
+        def count_tokens(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+        ) -> int:
+            if len(self.captured_generates) == 0:
+                return 150
+            else:
+                return 50
+
+        async def create_cache(
+            self,
+            contents: list[Message],
+            system_prompt: str | None,
+            tools: list[Any] | None = None,
+            display_name: str | None = None,
+            ttl_seconds: int = 300,
+        ) -> str | None:
+            cache_name = f"mock_cache_{len(self.created_caches)}"
+            self.created_caches.append({
+                "name": cache_name,
+                "contents": contents,
+                "system_prompt": system_prompt,
+                "tools": tools,
+            })
+            return cache_name
+
+        async def delete_cache(self, cache_name: str) -> None:
+            self.deleted_caches.append(cache_name)
+
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+            cached_content: str | None = None,
+            **kwargs: Any,
+        ) -> LLMResponse:
+            self.captured_generates.append({
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "history": history,
+                "tools": tools,
+                "cached_content": cached_content,
+            })
+
+            # 1st call (during 1st iteration): return tool call
+            if len(self.captured_generates) == 1:
+                return LLMResponse(
+                    content="I need to call a tool",
+                    tool_calls=[
+                        ToolCallRequest(
+                            name="dummy_tool",
+                            arguments={"arg1": "val1"},
+                            tool_call_id="call_123",
+                        )
+                    ],
+                    total_tokens=10,
+                )
+            # 2nd call (during 2nd iteration): return final text
+            else:
+                return LLMResponse(content="Final response after tool execution", total_tokens=10)
+
+    llm = GeminiLLM()
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = ["dummy_tool"]
+
+    # Mock tool execution: returns a Message representing the tool output
+    async def mock_execute_tool(call, tc_msg, **kwargs):
+        return Message(
+            id=f"tool_res_{time.time()}",
+            session_id=tc_msg.session_id,
+            chatbot_id=tc_msg.chatbot_id,
+            channel_id=tc_msg.channel_id,
+            sender="System",
+            role=MessageRole.TOOL,
+            type=MessageType.TEXT,
+            content="Tool output content",
+            status="responded",
+            parent_id=tc_msg.id,
+        )
+    tool_runner.execute_tool.side_effect = mock_execute_tool
+    tool_runner.tool_context = MagicMock()
+    tool_runner.tool_context.transitioned_to_session = None
+
+    turn_logger = MagicMock(spec=TurnLogger)
+
+    # Mock the OpenLCM engine to simulate compaction
+    mock_lcm = MagicMock()
+    mock_lcm.should_compress_preflight.return_value = True
+
+    compaction_calls = 0
+
+    # Stateful compaction responses:
+    # 1st call: Compresses prefix to 2 messages
+    # 2nd call: Compresses including tool results to 3 messages
+    async def mock_compress(messages):
+        nonlocal compaction_calls
+        compaction_calls += 1
+        if compaction_calls == 1:
+            return [
+                {"role": "system", "content": "Compacted System Instruction"},
+                {"role": "user", "content": "Compacted user query"},
+            ]
+        else:
+            return [
+                {"role": "system", "content": "Newly Compacted System Instruction"},
+                {"role": "user", "content": "Compacted user query"},
+                {"role": "user", "content": "Compacted tool result"},
+            ]
+    mock_lcm.compress.side_effect = mock_compress
+
+    context = KesokuContext(config=cfg, llm=llm)
+    context.lcm_engine = mock_lcm
+
+    executor = TurnExecutor("sess_cache_compact", gw, tool_runner, turn_logger, context=context)
+
+    # Set up worker to run exactly two iterations of the loop (1st turn, 2nd turn)
+    worker = MagicMock()
+    type(worker).running = PropertyMock(side_effect=[True, True, False])
+
+    async def mock_pivot(m: Message) -> Message:
+        return m
+    worker.drain_queue_and_pivot.side_effect = mock_pivot
+    worker.queue_empty.return_value = True
+
+    from kesoku.constants import MessageType
+
+    # Run the turn! It will run 2 iterations because the first iteration returns a tool call
+    # which tells process_turn to "continue" the loop. The second iteration returns a final text,
+    # which breaks the loop, exiting process_turn.
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor.process_turn(
+            current_msg=active_msg,
+            worker=worker,
+            session_staging_dir="/tmp/sess_cache_compact",
+        )
+
+    # ASSERTIONS:
+    # 1. During the first iteration:
+    # - A context cache was successfully created for the prefix of compacted history.
+    # - active_cache_name was set to "mock_cache_0" with cached_messages_len=1.
+    assert len(llm.created_caches) == 1
+    assert llm.created_caches[0]["name"] == "mock_cache_0"
+
+    # 2. During the second iteration:
+    # - Compaction ran again (history length was reduced due to new tool results compacted).
+    # - Obsolete cache "mock_cache_0" was deleted.
+    # - No new cache was created (since token_count returned 50 < 100).
+    assert len(llm.deleted_caches) == 1
+    assert llm.deleted_caches[0] == "mock_cache_0"
+    assert len(llm.created_caches) == 1 # still only 1 cache from turn 1
+
+    # 3. Captured generates checks:
+    assert len(llm.captured_generates) == 2
+
+    # - 1st Generate:
+    gen_call_1 = llm.captured_generates[0]
+    assert gen_call_1["cached_content"] == "mock_cache_0"
+    assert gen_call_1["system_prompt"] is None
+    assert gen_call_1["tools"] is None
+    assert len(gen_call_1["history"]) == 1
+    assert gen_call_1["history"][0].role == MessageRole.USER
+    assert "Compacted user query" in gen_call_1["history"][0].content
+
+    # - 2nd Generate:
+    gen_call_2 = llm.captured_generates[1]
+    assert gen_call_2["cached_content"] is None
+    assert "Agent Working Directory" in gen_call_2["system_prompt"]
+    assert gen_call_2["tools"] == ["dummy_tool"]
+    assert len(gen_call_2["history"]) == 3
+    assert gen_call_2["history"][0].role == MessageRole.SYSTEM
+    assert gen_call_2["history"][1].role == MessageRole.USER
+    assert "Compacted user query" in gen_call_2["history"][1].content
+    assert gen_call_2["history"][2].role == MessageRole.USER
+    assert "Compacted tool result" in gen_call_2["history"][2].content
+
 
 
 

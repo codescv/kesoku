@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 from anthropic import AnthropicVertex
 from google import genai
-from google.genai import types
+from google.genai import _transformers, types
 from PIL import Image
 from pydantic import BaseModel, Field
 
@@ -404,6 +404,7 @@ class BaseLLM(ABC):
         system_prompt: str | None = None,
         history: list[Message] | None = None,
         tools: list[Callable] | None = None,
+        cached_content: str | None = None,
     ) -> LLMResponse:
         """Generate a response from the LLM given prompt and context.
 
@@ -412,12 +413,18 @@ class BaseLLM(ABC):
             system_prompt: Optional system instructions.
             history: Optional list of prior messages in the session.
             tools: Optional list of callable Python tool functions.
+            cached_content: Optional identifier for cached context content.
 
         Returns:
             An LLMResponse containing text and/or requested tool calls.
         """
         turns, resolved_system_prompt = history_to_turns(history, prompt, system_prompt)
-        native_input = self._build_native_input(turns, resolved_system_prompt, tools)
+        native_input = self._build_native_input(
+            turns=turns,
+            system_prompt=resolved_system_prompt,
+            tools=tools,
+            cached_content=cached_content,
+        )
         raw_res = await self._call_llm(native_input)
         return self._parse_native_response(raw_res)
 
@@ -426,6 +433,7 @@ class BaseLLM(ABC):
         turns: list[LLMTurn],
         system_prompt: str | None,
         tools: list[Callable] | None,
+        cached_content: str | None = None,
     ) -> Any:
         """Translate provider-neutral LLMTurns and tools into provider-native input structures."""
         raise NotImplementedError()
@@ -437,6 +445,37 @@ class BaseLLM(ABC):
     def _parse_native_response(self, raw_response: Any) -> LLMResponse:
         """Translate the provider-native response into a standardized LLMResponse."""
         raise NotImplementedError()
+
+    async def create_cache(
+        self,
+        contents: list[Message],
+        system_prompt: str | None = None,
+        tools: list[Callable] | None = None,
+        display_name: str | None = None,
+        ttl_seconds: int = 300,
+    ) -> str | None:
+        """Create an explicit context cache resource and return its identifier.
+
+        Args:
+            contents: Static message history prefix list to cache.
+            system_prompt: Optional system instruction prompt to cache.
+            tools: Optional list of callables to cache.
+            display_name: Optional human-readable display label.
+            ttl_seconds: Cache Time-to-Live in seconds.
+
+        Returns:
+            A string name identifier of the cache resource if supported/created, else None.
+        """
+        return None
+
+    async def delete_cache(self, cache_name: str) -> None:
+        """Delete a created context cache resource if supported.
+
+        Args:
+            cache_name: Resource identifier name of the cache to delete.
+        """
+        pass
+
 
     def count_tokens(
         self,
@@ -507,6 +546,7 @@ class GeminiLLM(BaseLLM):
         turns: list[LLMTurn],
         system_prompt: str | None,
         tools: list[Callable] | None,
+        cached_content: str | None = None,
     ) -> dict[str, Any]:
         contents: list[types.Content] = []
         for turn in turns:
@@ -542,6 +582,8 @@ class GeminiLLM(BaseLLM):
         config = types.GenerateContentConfig()
         if system_prompt:
             config.system_instruction = system_prompt
+        if cached_content:
+            config.cached_content = cached_content
         if tools:
             config.tools = tools  # type: ignore
             config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
@@ -565,6 +607,7 @@ class GeminiLLM(BaseLLM):
                 key = self.config.api_key or os.getenv("GEMINI_API_KEY")
                 client = genai.Client(api_key=key)
 
+            logger.info(f"GeminiLLM raw request config: {native_input['config']}")
             return client.models.generate_content(
                 model=self.model_name,
                 contents=native_input["contents"],
@@ -576,6 +619,88 @@ class GeminiLLM(BaseLLM):
         except Exception as e:
             logger.error(f"GeminiLLM generation failed: {e}")
             raise
+
+    async def create_cache(
+        self,
+        contents: list[Message],
+        system_prompt: str | None = None,
+        tools: list[Callable] | None = None,
+        display_name: str | None = None,
+        ttl_seconds: int = 300,
+    ) -> str | None:
+        """Create an explicit context cache for Gemini.
+
+        Args:
+            contents: List of prior history messages to cache.
+            system_prompt: Optional system instruction prompt to cache.
+            tools: Optional list of callables to cache.
+            display_name: Optional human-readable display name.
+            ttl_seconds: Time-to-Live duration in seconds.
+
+        Returns:
+            The resource name string of the created cache, or None if failed.
+        """
+        turns, resolved_system_prompt = history_to_turns(contents, None, system_prompt)
+        native_input = self._build_native_input(turns, resolved_system_prompt, None)
+        native_contents = native_input["contents"]
+
+        def _create() -> Any:
+            if self.config.auth_mode == "vertex":
+                client = genai.Client(
+                    vertexai=True,
+                    project=self.config.project_id,
+                    location=self.config.location,
+                )
+            else:
+                key = self.config.api_key or os.getenv("GEMINI_API_KEY")
+                client = genai.Client(api_key=key)
+
+            native_tools = _transformers.t_tools(client._api_client, tools) if tools else None
+
+            return client.caches.create(
+                model=self.model_name,
+                config=types.CreateCachedContentConfig(
+                    display_name=display_name or "kesoku_session_cache",
+                    contents=native_contents,
+                    system_instruction=resolved_system_prompt,
+                    tools=native_tools,
+                    ttl=f"{ttl_seconds}s",
+                )
+            )
+
+        try:
+            cache = await asyncio.to_thread(_create)
+            logger.info(f"Created Gemini context cache: {cache.name}")
+            return cache.name
+        except Exception as e:
+            logger.warning(f"Failed to create Gemini context cache: {e}")
+            return None
+
+    async def delete_cache(self, cache_name: str) -> None:
+        """Delete a created context cache resource.
+
+        Args:
+            cache_name: Resource identifier name of the cache to delete.
+        """
+        def _delete() -> None:
+            if self.config.auth_mode == "vertex":
+                client = genai.Client(
+                    vertexai=True,
+                    project=self.config.project_id,
+                    location=self.config.location,
+                )
+            else:
+                key = self.config.api_key or os.getenv("GEMINI_API_KEY")
+                client = genai.Client(api_key=key)
+
+            client.caches.delete(name=cache_name)
+
+        try:
+            await asyncio.to_thread(_delete)
+            logger.info(f"Deleted Gemini context cache: {cache_name}")
+        except Exception as e:
+            logger.warning(f"Failed to delete Gemini context cache {cache_name}: {e}")
+
 
     def _parse_native_response(self, raw_response: Any) -> LLMResponse:
         tool_calls = []
@@ -677,6 +802,7 @@ class ClaudeLLM(BaseLLM):
         turns: list[LLMTurn],
         system_prompt: str | None,
         tools: list[Callable] | None,
+        cached_content: str | None = None,
     ) -> dict[str, Any]:
         messages = []
         anthropic_tools = []
@@ -868,9 +994,13 @@ class MockLLM(BaseLLM):
         system_prompt: str | None = None,
         history: list[Message] | None = None,
         tools: list[Callable] | None = None,
+        cached_content: str | None = None,
     ) -> LLMResponse:
         """Return canned mock response."""
-        logger.debug(f"MockLLM received prompt: {prompt}, history count: {len(history or [])}")
+        logger.debug(
+            f"MockLLM received prompt: {prompt}, history count: {len(history or [])}, "
+            f"cached_content: {cached_content}"
+        )
         if self.responses is not None:
             if self._current_response_idx < len(self.responses):
                 res = self.responses[self._current_response_idx]

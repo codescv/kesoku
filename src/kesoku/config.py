@@ -104,6 +104,15 @@ class GeminiConfig(BaseModel):
             "Thinking level allocated for reasoning ('minimal', 'low', 'medium', 'high', or None to use model default)"
         ),
     )
+    context_caching: bool = Field(
+        default=True,
+        description="Whether to enable explicit context caching for long sessions",
+    )
+    context_caching_threshold: int = Field(
+        default=4096,
+        description="Minimum token threshold of static history prefix before context caching is triggered",
+    )
+
 
 
 class ClaudeConfig(BaseModel):
