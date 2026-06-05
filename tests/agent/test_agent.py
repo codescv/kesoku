@@ -116,7 +116,7 @@ def test_get_llm() -> None:
 async def test_run_shell_command(tmp_path: Any) -> None:
     """Test secure shell command execution tool."""
     ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
-    with patch("kesoku.agent.tools.get_config") as mock_get_config:
+    with patch("kesoku.agent.tools.shell.get_config") as mock_get_config:
         cfg = KesokuConfig()
         cfg.workspace.sessions_dir = str(tmp_path / "sessions")
         cfg.shell.enabled = False
@@ -146,7 +146,7 @@ async def test_run_shell_command_background_override(tmp_path: Any) -> None:
         session_workspace="test_ws_override",
         active_jobs=jobs,
     )
-    with patch("kesoku.agent.tools.get_config") as mock_get_config:
+    with patch("kesoku.agent.tools.shell.get_config") as mock_get_config:
         cfg = KesokuConfig()
         cfg.workspace.sessions_dir = str(tmp_path / "sessions")
         cfg.shell.enabled = True
@@ -241,13 +241,13 @@ def test_gemini_llm_thinking_level() -> None:
     from kesoku.config import GeminiConfig
 
     cfg = GeminiConfig(thinking_level="low", auth_mode="api_key", api_key="dummy")
-    llm = GeminiLLM(config=cfg)
 
     with patch("google.genai.Client") as mock_client_cls:
         mock_client_inst = MagicMock()
         mock_client_cls.return_value = mock_client_inst
         mock_client_inst.models.generate_content.return_value = MagicMock(parts=[])
 
+        llm = GeminiLLM(config=cfg)
         asyncio.run(llm.generate(prompt="Test"))
 
         mock_client_inst.models.generate_content.assert_called_once()

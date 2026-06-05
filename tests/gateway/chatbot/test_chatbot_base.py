@@ -172,3 +172,19 @@ async def test_resolve_outbound_path(tmp_path) -> None:
         low_confidence_path = staging_dir_abs.replace("staging", "stating") + "/completely_different.png"
         resolved = await chatbot.resolve_outbound_path(low_confidence_path, "session123")
         assert resolved == low_confidence_path
+
+        # 5. Exact match of a relative path under staging_dir
+        resolved = await chatbot.resolve_outbound_path("cat.png", "session123")
+        assert resolved == str(file_in_staging.resolve())
+
+        # 6. Fuzzy match of a relative path under staging_dir (catt.png -> cat.png)
+        resolved = await chatbot.resolve_outbound_path("catt.png", "session123")
+        assert resolved == str(file_in_staging.resolve())
+
+        # 7. Exact match of a nested relative path under staging_dir
+        resolved = await chatbot.resolve_outbound_path("output/result.png", "session123")
+        assert resolved == str(nested_file.resolve())
+
+        # 8. Fuzzy match of a nested relative path under staging_dir (outtput/results.png -> output/result.png)
+        resolved = await chatbot.resolve_outbound_path("outtput/results.png", "session123")
+        assert resolved == str(nested_file.resolve())

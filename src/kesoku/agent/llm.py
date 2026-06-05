@@ -597,18 +597,8 @@ class GeminiLLM(BaseLLM):
 
     async def _call_llm(self, native_input: dict[str, Any]) -> Any:
         def _call() -> Any:
-            if self.config.auth_mode == "vertex":
-                client = genai.Client(
-                    vertexai=True,
-                    project=self.config.project_id,
-                    location=self.config.location,
-                )
-            else:
-                key = self.config.api_key or os.getenv("GEMINI_API_KEY")
-                client = genai.Client(api_key=key)
-
             logger.info(f"GeminiLLM raw request config: {native_input['config']}")
-            return client.models.generate_content(
+            return self.client.models.generate_content(
                 model=self.model_name,
                 contents=native_input["contents"],
                 config=native_input["config"],
@@ -645,19 +635,9 @@ class GeminiLLM(BaseLLM):
         native_contents = native_input["contents"]
 
         def _create() -> Any:
-            if self.config.auth_mode == "vertex":
-                client = genai.Client(
-                    vertexai=True,
-                    project=self.config.project_id,
-                    location=self.config.location,
-                )
-            else:
-                key = self.config.api_key or os.getenv("GEMINI_API_KEY")
-                client = genai.Client(api_key=key)
+            native_tools = _transformers.t_tools(self.client._api_client, tools) if tools else None
 
-            native_tools = _transformers.t_tools(client._api_client, tools) if tools else None
-
-            return client.caches.create(
+            return self.client.caches.create(
                 model=self.model_name,
                 config=types.CreateCachedContentConfig(
                     display_name=display_name or "kesoku_session_cache",
@@ -683,17 +663,7 @@ class GeminiLLM(BaseLLM):
             cache_name: Resource identifier name of the cache to delete.
         """
         def _delete() -> None:
-            if self.config.auth_mode == "vertex":
-                client = genai.Client(
-                    vertexai=True,
-                    project=self.config.project_id,
-                    location=self.config.location,
-                )
-            else:
-                key = self.config.api_key or os.getenv("GEMINI_API_KEY")
-                client = genai.Client(api_key=key)
-
-            client.caches.delete(name=cache_name)
+            self.client.caches.delete(name=cache_name)
 
         try:
             await asyncio.to_thread(_delete)

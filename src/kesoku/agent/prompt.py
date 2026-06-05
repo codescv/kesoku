@@ -42,7 +42,11 @@ Rules for file sending:
    and general files, use the `[file: /abs/path/to/file]` block.
 4. The file must physically exist on the local disk before you output either syntax.
 5. Do not guess or output fictional/placeholder file paths.
-6. Always ensure that the path inside `[file: <path>]` or `[voice: <path>]` is a fully resolved absolute path."""
+6. If the file is located within your session staging directory (the STAGING_DIR
+   environment variable), you can use either a relative path (relative to the session's
+   staging directory) or an absolute path. Otherwise, you must use a fully resolved absolute path.
+   Avoid guessing path spellings. If you use a relative path, make sure it matches the
+   file name in STAGING_DIR exactly."""
 
 
 QUESTION_INSTRUCTION = """
