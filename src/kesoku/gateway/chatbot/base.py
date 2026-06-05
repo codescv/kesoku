@@ -413,11 +413,9 @@ class Chatbot(ABC):
         if not history:
             return "⚠️ Active session has no messages to compact."
 
-        lcm_engine = self.gateway.context.lcm_engine
-        original_session_id = lcm_engine.current_session_id
+        lcm_engine = self.gateway.context.get_lcm_engine(session.id)
 
         try:
-            lcm_engine.bind_session(session.id)
             lcm_input = messages_to_openlcm_dicts(history)
 
             # Prepend system prompt
@@ -438,9 +436,6 @@ class Chatbot(ABC):
         except Exception as e:
             logger.error(f"Failed manual compaction for session {session.id}: {e}")
             return f"⚠️ Failed to compact history: {e}"
-        finally:
-            if original_session_id and original_session_id != session.id:
-                lcm_engine.bind_session(original_session_id)
 
     async def get_session_status_by_channel(self, channel_id: str) -> str:
         """Get session statistics for the channel."""
@@ -499,13 +494,9 @@ class Chatbot(ABC):
         if not history:
             return "⚠️ Active session has no messages."
 
-        lcm_engine = self.gateway.context.lcm_engine
-        original_session_id = lcm_engine.current_session_id
+        lcm_engine = self.gateway.context.get_lcm_engine(session.id)
 
         try:
-            # Ensure session is bound to read summaries correctly from openlcm.db
-            lcm_engine.bind_session(session.id)
-
             lcm_input = messages_to_openlcm_dicts(history)
 
             system_message = None
@@ -550,9 +541,6 @@ class Chatbot(ABC):
         except Exception as e:
             logger.error(f"Failed to get LCM context by channel: {e}")
             return f"⚠️ Failed to retrieve LCM context: {e}"
-        finally:
-            if original_session_id and original_session_id != session.id:
-                lcm_engine.bind_session(original_session_id)
 
     async def trigger_cronjob_message(
         self,

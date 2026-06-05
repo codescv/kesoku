@@ -405,13 +405,13 @@ async def test_lcm_grep_role_isolation(tmp_path) -> None:
 
     # 5. Ingest messages into OpenLCM (lcm.db)
     # Asuka memory
-    kesoku_ctx.lcm_engine.bind_session("sess_asuka")
-    kesoku_ctx.lcm_engine._ingest_messages([
+    lcm_asuka = kesoku_ctx.get_lcm_engine("sess_asuka")
+    lcm_asuka._ingest_messages([
         {"role": "user", "content": "This is Asuka's secret password."}
     ])
     # Tifa memory
-    kesoku_ctx.lcm_engine.bind_session("sess_tifa")
-    kesoku_ctx.lcm_engine._ingest_messages([
+    lcm_tifa = kesoku_ctx.get_lcm_engine("sess_tifa")
+    lcm_tifa._ingest_messages([
         {"role": "user", "content": "This is Tifa's secret password."}
     ])
 

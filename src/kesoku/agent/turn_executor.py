@@ -298,7 +298,7 @@ class TurnExecutor:
 
                 # Update OpenLCM engine metrics
                 try:
-                    self.context.lcm_engine.update_from_response({
+                    self.context.get_lcm_engine(self.session_id).update_from_response({
                         "prompt_tokens": res.prompt_tokens,
                         "completion_tokens": res.candidates_tokens,
                         "total_tokens": res.total_tokens,
@@ -606,8 +606,7 @@ class TurnExecutor:
             return history
 
         # Initialize/Bind the active session to OpenLCM engine
-        lcm_engine = self.context.lcm_engine
-        lcm_engine.bind_session(
+        lcm_engine = self.context.get_lcm_engine(
             session_id=self.session_id,
             context_length=llm.context_window_limit,
         )

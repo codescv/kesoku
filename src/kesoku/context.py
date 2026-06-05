@@ -38,19 +38,30 @@ class KesokuContext:
         self._llm = llm
         self.active_jobs = ActiveJobsRegistry()
 
-        # Define dynamic LLM summarization bridge for OpenLCM
-        async def lcm_summarize_fn(prompt: str, max_tokens: int) -> str:
-            # Dynamically fetch configured LLM provider
-            model_client = self.get_llm()
-            res = await model_client.generate(prompt=prompt)
-            return res.content
-
         # Resolve OpenLCM SQLite DB path relative to kesoku.db directory
-        lcm_db_path = os.path.join(os.path.dirname(self.config.workspace.db_path), "lcm.db")
-        self.lcm_engine = LCMEngine(
-            summarize_fn=lcm_summarize_fn,
-            db_path=lcm_db_path,
-        )
+        self.lcm_db_path = os.path.join(os.path.dirname(self.config.workspace.db_path), "lcm.db")
+        self._lcm_engines: dict[str, LCMEngine] = {}
+
+    def get_lcm_engine(self, session_id: str, context_length: int = 1048576) -> LCMEngine:
+        """Create and bind a session-specific LCMEngine instance to prevent concurrent clobbering."""
+        if session_id not in self._lcm_engines:
+            async def lcm_summarize_fn(prompt: str, max_tokens: int) -> str:
+                model_client = self.get_llm()
+                res = await model_client.generate(prompt=prompt)
+                return res.content
+
+            engine = LCMEngine(
+                summarize_fn=lcm_summarize_fn,
+                db_path=self.lcm_db_path,
+            )
+            engine.bind_session(session_id=session_id, context_length=context_length)
+            self._lcm_engines[session_id] = engine
+        else:
+            engine = self._lcm_engines[session_id]
+            if context_length > 0 and context_length != engine.context_length:
+                engine.set_context_length(context_length)
+
+        return engine
 
     @property
     def config(self) -> KesokuConfig:

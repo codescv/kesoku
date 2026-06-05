@@ -74,7 +74,7 @@ async def lcm_grep(
                 "error": f"Session {session_id} does not belong to role {active_role}"
             })
 
-    lcm_engine = context.gateway.context.lcm_engine
+    lcm_engine = context.lcm_engine
     args = {
         "query": query,
         "limit": limit,
@@ -129,7 +129,7 @@ async def lcm_expand(
     """
     if not context or not context.gateway:
         return "Error: ToolContext is missing."
-    lcm_engine = context.gateway.context.lcm_engine
+    lcm_engine = context.lcm_engine
     args = {
         "node_id": node_id,
         "store_id": store_id,
@@ -164,7 +164,7 @@ async def lcm_expand_query(
     """
     if not context or not context.gateway:
         return "Error: ToolContext is missing."
-    lcm_engine = context.gateway.context.lcm_engine
+    lcm_engine = context.lcm_engine
     args = {
         "prompt": prompt,
         "query": query,
@@ -191,7 +191,7 @@ async def lcm_describe(
     """
     if not context or not context.gateway:
         return "Error: ToolContext is missing."
-    lcm_engine = context.gateway.context.lcm_engine
+    lcm_engine = context.lcm_engine
     args = {
         "node_id": node_id,
         "externalized_ref": externalized_ref,
@@ -208,5 +208,5 @@ async def lcm_status(context: ToolContext | None = None) -> str:
     """
     if not context or not context.gateway:
         return "Error: ToolContext is missing."
-    lcm_engine = context.gateway.context.lcm_engine
+    lcm_engine = context.lcm_engine
     return await asyncio.to_thread(_lcm_status, {}, engine=lcm_engine)

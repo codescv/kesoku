@@ -1096,7 +1096,7 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
     mock_lcm.compress.side_effect = mock_compress
 
     context = KesokuContext(config=cfg, llm=llm)
-    context.lcm_engine = mock_lcm
+    context.get_lcm_engine = MagicMock(return_value=mock_lcm)
 
     executor = TurnExecutor("sess_auto_compact", gw, tool_runner, turn_logger, context=context)
 
@@ -1118,7 +1118,7 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
         )
 
     # Assertions: Verify that the OpenLCM engine was correctly bound, checked, and executed
-    mock_lcm.bind_session.assert_called_once_with(
+    context.get_lcm_engine.assert_any_call(
         session_id="sess_auto_compact",
         context_length=1000
     )
@@ -1328,7 +1328,7 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
     mock_lcm.compress.side_effect = mock_compress
 
     context = KesokuContext(config=cfg, llm=llm)
-    context.lcm_engine = mock_lcm
+    context.get_lcm_engine = MagicMock(return_value=mock_lcm)
 
     executor = TurnExecutor("sess_cache_compact", gw, tool_runner, turn_logger, context=context)
 

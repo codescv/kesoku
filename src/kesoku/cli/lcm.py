@@ -48,12 +48,9 @@ def lcm_status(
     console.print(f"\n[bold green]=== LCM Status for Session '{session_id}' ({session.title}) ===[/bold green]")
 
     try:
-        # Setup KesokuContext & Gateway
         context = KesokuContext(config=cfg, db=db)
         gateway = Gateway(context=context)
-        lcm_engine = context.lcm_engine
-
-        lcm_engine.bind_session(session_id)
+        lcm_engine = context.get_lcm_engine(session_id)
         all_nodes = lcm_engine._dag.get_session_nodes(session_id)
 
         # Count total compacted nodes & savings
@@ -151,10 +148,9 @@ def lcm_view(
 
     context = KesokuContext(config=cfg, db=db)
     gateway = Gateway(context=context)
-    lcm_engine = context.lcm_engine
+    lcm_engine = context.get_lcm_engine(session_id)
 
     try:
-        lcm_engine.bind_session(session_id)
         all_nodes = lcm_engine._dag.get_session_nodes(session_id)
 
         # 1. Print System Prompt
@@ -332,10 +328,9 @@ def lcm_compact(
 
     context = KesokuContext(config=cfg, db=db)
     gateway = Gateway(context=context)
-    lcm_engine = context.lcm_engine
+    lcm_engine = context.get_lcm_engine(session_id)
 
     try:
-        lcm_engine.bind_session(session_id)
         history = asyncio.run(build_history(gateway=gateway, session_id=session_id))
         if not history:
             console.print("[bold red]Error: Active session has no messages to compact.[/bold red]")
