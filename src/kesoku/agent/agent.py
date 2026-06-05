@@ -213,7 +213,7 @@ class Agent:
         logger.info("Kesoku Agent master dispatcher loop started.")
 
         # Recover orphaned processing messages at startup
-        recovered_count = await self.gateway.db.recover_orphaned_processing_messages()
+        recovered_count = await self.gateway.db.recover_orphaned_processing_messages(threshold_seconds=0.0)
         if recovered_count > 0:
             logger.info(f"Recovered {recovered_count} orphaned processing messages back to pending_agent status.")
 
