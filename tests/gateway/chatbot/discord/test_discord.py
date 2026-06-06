@@ -78,6 +78,60 @@ async def test_init_with_env_token() -> None:
         bot = DiscordChatbot(chatbot_id="discord", gateway=gw)
         assert bot.bot_token == "env_token_value"
 
+@pytest.mark.asyncio
+async def test_init_with_proxy() -> None:
+    """Test initialization detects and sets HTTP/HTTPS proxies from environment."""
+    cfg = KesokuConfig()
+    cfg.discord = DiscordConfig(enabled=True, bot_token="test_token", chatbot_id="discord")
+    gw = MagicMock(spec=Gateway)
+
+    # 1. Test HTTPS_PROXY
+    with (
+        patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=cfg),
+        patch.dict("os.environ", {"HTTPS_PROXY": "http://proxy-https-upper.local:8080"}),
+    ):
+        bot = DiscordChatbot(chatbot_id="discord", gateway=gw)
+        assert bot.bot.http.proxy == "http://proxy-https-upper.local:8080"
+
+    # 2. Test https_proxy (lowercase)
+    with (
+        patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=cfg),
+        patch.dict("os.environ", {"https_proxy": "http://proxy-https-lower.local:8080"}),
+    ):
+        bot = DiscordChatbot(chatbot_id="discord", gateway=gw)
+        assert bot.bot.http.proxy == "http://proxy-https-lower.local:8080"
+
+    # 3. Test HTTP_PROXY
+    with (
+        patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=cfg),
+        patch.dict("os.environ", {"HTTP_PROXY": "http://proxy-http-upper.local:8080"}),
+    ):
+        bot = DiscordChatbot(chatbot_id="discord", gateway=gw)
+        assert bot.bot.http.proxy == "http://proxy-http-upper.local:8080"
+
+    # 4. Test http_proxy (lowercase)
+    with (
+        patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=cfg),
+        patch.dict("os.environ", {"http_proxy": "http://proxy-http-lower.local:8080"}),
+    ):
+        bot = DiscordChatbot(chatbot_id="discord", gateway=gw)
+        assert bot.bot.http.proxy == "http://proxy-http-lower.local:8080"
+
+    # 5. Prioritization of https_proxy over http_proxy
+    with (
+        patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=cfg),
+        patch.dict(
+            "os.environ",
+            {
+                "https_proxy": "http://proxy-https.local:8080",
+                "http_proxy": "http://proxy-http.local:8080",
+            },
+        ),
+    ):
+        bot = DiscordChatbot(chatbot_id="discord", gateway=gw)
+        assert bot.bot.http.proxy == "http://proxy-https.local:8080"
+
+
 
 @pytest.mark.asyncio
 async def test_on_message_ignore_self(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:

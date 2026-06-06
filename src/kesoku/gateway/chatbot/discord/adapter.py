@@ -148,7 +148,16 @@ class DiscordChatbot(Chatbot):
         intents.message_content = True
         intents.members = True
         intents.guilds = True
-        self.bot = discord.Client(intents=intents)
+
+        proxy = (
+            os.environ.get("https_proxy")
+            or os.environ.get("HTTPS_PROXY")
+            or os.environ.get("http_proxy")
+            or os.environ.get("HTTP_PROXY")
+        )
+        if proxy:
+            logger.info("Using proxy settings from environment variable: %s", proxy)
+        self.bot = discord.Client(intents=intents, proxy=proxy)
         self.bot.event(self.on_ready)
         self.bot.event(self.on_message)
         setup_discord_commands(self)
