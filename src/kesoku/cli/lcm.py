@@ -60,7 +60,7 @@ def lcm_status(
         savings = round(total_source_tokens / total_compacted_tokens, 1) if total_compacted_tokens > 0 else 1
 
         # Get active history length from raw kesoku.db
-        history = asyncio.run(build_history(gateway=gateway, session_id=session_id))
+        history = asyncio.run(build_history(gateway=gateway, session_id=session_id, heal_orphans=False))
         total_raw_turns = len(history) if history else 0
 
         # Find fresh tail count
@@ -191,7 +191,7 @@ def lcm_view(
                     )
 
         # 3. Render Uncompacted Fresh Tail Messages
-        history = asyncio.run(build_history(gateway=gateway, session_id=session_id))
+        history = asyncio.run(build_history(gateway=gateway, session_id=session_id, heal_orphans=False))
         if history:
             lcm_input = messages_to_openlcm_dicts(history)
             system_message = None
@@ -331,7 +331,7 @@ def lcm_compact(
     lcm_engine = context.get_lcm_engine(session_id)
 
     try:
-        history = asyncio.run(build_history(gateway=gateway, session_id=session_id))
+        history = asyncio.run(build_history(gateway=gateway, session_id=session_id, heal_orphans=False))
         if not history:
             console.print("[bold red]Error: Active session has no messages to compact.[/bold red]")
             sys.exit(1)

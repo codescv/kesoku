@@ -409,7 +409,7 @@ class Chatbot(ABC):
             return "⚠️ No active session found for this chat."
 
         # Fetch active history
-        history = await build_history(self.gateway, session.id)
+        history = await build_history(self.gateway, session.id, heal_orphans=False)
         if not history:
             return "⚠️ Active session has no messages to compact."
 
@@ -490,7 +490,7 @@ class Chatbot(ABC):
         if not session:
             return "⚠️ No active session found for this chat."
 
-        history = await build_history(self.gateway, session.id)
+        history = await build_history(self.gateway, session.id, heal_orphans=False)
         if not history:
             return "⚠️ Active session has no messages."
 

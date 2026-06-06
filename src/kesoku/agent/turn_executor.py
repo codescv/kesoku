@@ -179,6 +179,7 @@ class TurnExecutor:
                 history = await build_history(
                     gateway=self.gateway,
                     session_id=self.session_id,
+                    heal_orphans=True,
                 )
                 history_len_before = len(history)
                 # Check and automatically compact history in-place if it exceeds threshold

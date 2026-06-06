@@ -296,8 +296,8 @@ async def test_orphaned_tool_call_healing(temp_db: str) -> None:
     )
     await gw.post(tc_msg)
 
-    # Call build clean history directly
-    history = await build_history(gateway=gw, session_id="sess_heal")
+    # Call build clean history directly with heal_orphans=True
+    history = await build_history(gateway=gw, session_id="sess_heal", heal_orphans=True)
 
     # Verify a tool result was synthesized and exists in history
     tr_msgs = [m for m in history if m.type == "tool_result"]

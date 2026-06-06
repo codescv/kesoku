@@ -18,7 +18,7 @@ async def build_history(
     gateway: Gateway,
     session_id: str,
     order: Literal["phased", "grouped"] = "phased",
-    heal_orphans: bool = True,
+    heal_orphans: bool = False,
 ) -> list[Message]:
     """Retrieve the raw conversational history from storage.
 
