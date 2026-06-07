@@ -31,6 +31,7 @@ logger = setup_logger(__name__)
 
 MAX_TOTAL_USER_PREFERENCES_LENGTH = 500
 MAX_TOTAL_CROSS_SESSION_CONTEXT_LENGTH = 3000
+MAX_CHATBOT_ERROR_MESSAGE_LENGTH = 500
 
 
 class TurnExecutor:
@@ -368,7 +369,7 @@ class TurnExecutor:
 
             full_error_msg = f"⚠️ An error occurred while processing your request: {e}"
             hint = f"\n\nFull error log saved to staging directory: {error_filename}"
-            max_err_len = 500 - len(hint)
+            max_err_len = MAX_CHATBOT_ERROR_MESSAGE_LENGTH - len(hint)
             truncated_error = truncate_middle(
                 full_error_msg,
                 max_err_len,

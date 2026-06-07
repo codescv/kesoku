@@ -1460,8 +1460,9 @@ async def test_turn_executor_error_handling_truncation(temp_db: str, tmp_path: A
     assert len(assistant_msgs) == 1
     err_content = assistant_msgs[0].content
 
-    # 2. Check length of error message is <= 500
-    assert len(err_content) <= 500
+    # 2. Check length of error message is <= MAX_CHATBOT_ERROR_MESSAGE_LENGTH
+    from kesoku.agent.turn_executor import MAX_CHATBOT_ERROR_MESSAGE_LENGTH
+    assert len(err_content) <= MAX_CHATBOT_ERROR_MESSAGE_LENGTH
     # 3. Check error message ends with the hint
     assert "Full error log saved to staging directory: error_user_msg_123.txt" in err_content
 
