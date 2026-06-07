@@ -98,3 +98,11 @@ nav:
           - Google Chat Adapter: dev/platforms/gchat.md
           - WeChat Adapter: dev/platforms/wechat.md
       - Testing & Debugging: dev/debugging.md
+
+markdown_extensions:
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
