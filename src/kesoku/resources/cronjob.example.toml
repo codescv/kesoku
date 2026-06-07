@@ -1,50 +1,59 @@
-# Kesoku Cronjob Configuration
+# Kesoku Cronjob Configuration Template (cronjob.example.toml)
 
-# [[job]]
-# # The standard 5-field cron schedule: minute hour day-of-month month day-of-week.
-# # This example matches every 13 minutes between 10:00 and 22:00.
-# schedule = "*/13 10-22 * * *"
-#
-# # Path to the prompt file, relative to the directory containing this config file.
-# prompt = "cronjobs/cron_prompt.md"
-#
-# # Optional: Discord User ID to mention / notify when the job triggers.
-# mention_user_id = "123"
-#
-# # Discord Channel ID where the message should be sent.
-# channel_id = "456"
-#
-# # The chatbot adapter ID configured in config.toml.
-# chatbot_id = "discord"
-#
-# # Optional: Initial trigger probability (between 0.0 and 1.0).
-# # If set to 0.02, the job will run with a 2% chance on scheduled ticks.
-# # If skipped, probability increases by 10% (* 1.1) on next tick, and resets on trigger or new day.
-# # Omit this option to always run the job on schedule (defaults to 1.0).
-# probability = 0.02
-#
-# # Optional: Minimum idle time in seconds.
-# # If the channel has active human/agent messages within this period, the job is skipped.
-# # min_idle_time = 1800
-#
-# # Optional: Maximum number of cron messages allowed per day in this channel.
-# # max_messages = 3
+# Each scheduled job is defined under a `[[job]]` block.
+# You can define multiple independent jobs.
+
+[[job]]
+# 1. The standard 5-field cron schedule: minute hour day-of-month month day-of-week.
+# Example: Matches every 15 minutes between 10:00 and 22:00.
+schedule = "*/15 10-22 * * *"
+
+# 2. Path to the prompt file, relative to the directory containing this config file.
+# The content of this markdown file will be sent to the agent as the trigger prompt.
+prompt = "cronjobs/morning_update.md"
+
+# 3. Target chatbot adapter ID configured in config.toml (e.g. "discord", "google_chat", "wechat").
+chatbot_id = "discord"
+
+# 4. Target channel or thread ID where the message should be sent.
+channel_id = "123456789012345678"
+
+# 5. [Optional] Discord User ID to mention / notify when the job triggers.
+mention_user_id = "987654321098765432"
+
+# 6. [Optional] Trigger probability (float between 0.0 and 1.0, default: 1.0).
+# If set to 0.05, the job has a 5% chance of executing on any matching scheduled tick.
+# If skipped, the probability increases by 10% (* 1.1) on each subsequent tick, resetting on trigger or new day.
+probability = 0.05
+
+# 7. [Optional] Minimum idle time in seconds.
+# If the target channel has seen active messages within this period, the job is skipped to avoid interrupting active conversations.
+min_idle_time = 1800
+
+# 8. [Optional] Maximum number of cron messages allowed per day in this channel (prevents runaway logs).
+max_messages = 3
 
 
-# [[job]]
-# # Example: Run every Monday morning at 9:00 AM on Google Chat
-# schedule = "0 9 * * 1"
-#
-# # Path to the prompt file
-# prompt = "cronjobs/weekly_report.md"
-#
-# # Fully qualified Google Chat space or thread resource name
-# # - Space Level: "spaces/AAAAxxxx"
-# # - Thread Level: "spaces/AAAAxxxx/threads/YYYYyyyy" (Recommended to stay in thread context)
-# channel_id = "spaces/AAAAxxxx/threads/YYYYyyyy"
-#
-# # The chatbot adapter ID configured in config.toml
-# chatbot_id = "google_chat"
-#
-# # Optional: Google Chat User ID to mention (format: user ID only)
-# mention_user_id = "123456789"
+[[job]]
+# Example: Run every Monday morning at 9:00 AM on Google Chat
+schedule = "0 9 * * 1"
+prompt = "cronjobs/weekly_report.md"
+chatbot_id = "google_chat"
+
+# Fully qualified Google Chat space or thread resource name
+# - Space Level: "spaces/AAAAxxxx"
+# - Thread Level: "spaces/AAAAxxxx/threads/YYYYyyyy" (Recommended to stay in thread context)
+channel_id = "spaces/AAAAxxxx/threads/YYYYyyyy"
+
+# [Optional] Google Chat User ID to mention (format: user ID only, e.g. "123456789")
+mention_user_id = "123456789"
+
+
+[[job]]
+# Example: Run daily at midnight on WeChat
+schedule = "0 0 * * *"
+prompt = "cronjobs/daily_cleanup.md"
+chatbot_id = "wechat"
+
+# WeChat Room ID or User ID (retrieved from WeChat chatbot console log)
+channel_id = "wxid_xxxxxx"

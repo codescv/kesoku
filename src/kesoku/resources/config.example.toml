@@ -1,91 +1,177 @@
+# Kesoku Main Configuration Template (config.example.toml)
+
 [workspace]
+# Path to SQLite database file where messages, sessions, and memory categories are stored.
 db_path = "kesoku.db"
+
+# Directory where custom skills (e.g. `SKILL.md`) are placed.
 skills_dir = "skills"
+
+# Directory where persona templates (e.g. `roles/{character}/intro.md`) are placed.
+roles_dir = "roles"
+
+# Directory where raw session logs, LLM trajectories, and uploaded/downloaded attachments are staged.
 sessions_dir = "sessions"
 
+
 [agent]
+# Active LLM provider: "gemini" or "claude".
 llm = "gemini"
-# Optional: List of custom system prompt file paths relative to agent working directory
-# user_prompts = ["memory/USER.md"]
-raw_llm_logs = true
+
+# List of custom user prompt markdown files relative to agent working directory.
+# Injected into system prompt compilation chain on boot.
+user_prompts = []
+
+# Whether to write raw LLM inputs and outputs to turn log files in the session directory.
+raw_llm_logs = false
+
 # Threshold percentage of context window limit before warning is shown (default: 80.0)
 compact_history_warning_threshold = 50.0
+
 # Threshold for automatic in-place history compaction (if >1 raw tokens, if <1 window ratio, default: 0.8)
 compact_history_threshold = 0.8
 
 
-
 [gemini]
-# https://ai.google.dev/gemini-api/docs/models
-model_name = "gemini-3-flash-preview"
+# Standard stable model identifier.
+model_name = "gemini-2.5-flash"
+
+# Authentication mode: "vertex" (Google Cloud Vertex AI) or "api_key" (Raw Gemini API Key).
 auth_mode = "vertex"
+
+# API Key (Required only if auth_mode = "api_key"). Can also be set via GEMINI_API_KEY environment variable.
+api_key = ""
+
+# GCP Project ID (Required only if auth_mode = "vertex").
 project_id = "your-gcp-project"
-location = "global"
-thinking_level = "medium" # 'minimal', 'low', 'medium', 'high', or comment out for model default
+
+# GCP Location/Region (Required only if auth_mode = "vertex").
+location = "us-central1"
+
+# Thinking allocation level: "minimal", "low", "medium", "high", or comment out for model default.
+thinking_level = "high"
+
+# Whether to enable explicit context caching for long sessions to reduce latency/cost.
+context_caching = true
+
+# Minimum token threshold of static history prefix before context caching is triggered.
+context_caching_threshold = 4096
+
 
 [claude]
-# Available models on Vertex AI:
-# - Claude Opus 4.7: "claude-opus-4-7"
-# - Claude Sonnet 4.6: "claude-sonnet-4-6"
-model_name = "claude-opus-4-7"
+# Claude model identifier hosted on Vertex AI.
+model_name = "claude-3-5-sonnet@20241022"
+
+# GCP Project ID.
 project_id = "your-gcp-project"
+
+# GCP Region/Location.
 location = "us-east5"
 
+
 [discord]
+# Set to true to launch the Discord chatbot adapter daemon.
 enabled = false
+
+# Discord Bot secret token. Can also be set via DISCORD_TOKEN environment variable.
 bot_token = "your-discord-bot-token"
+
+# Unique identifier for this chatbot instance.
 chatbot_id = "discord"
-# List of allowed Discord user IDs or usernames (if empty, all users can mention the bot)
-# user_allowlist = ["1234567890"]
+
+# List of allowed Discord user IDs or usernames (if empty, all users can mention the bot).
+# user_allowlist = ["1234567890", "another_username"]
 
 # Optional: Channel-specific configuration overrides
 # [[discord.channels]]
-# channels = ["channel_id", "channel_name"]
-# llm = "claude"
-# auto_thread = false
+# channels = ["1234567890"]    # Target channel IDs
+# llm = "claude"               # Override LLM provider
+# auto_thread = false          # Disable automatic thread creation
+
 
 [google_chat]
+# Set to true to launch the Google Chat chatbot adapter daemon.
 enabled = false
+
+# Unique identifier for this chatbot instance.
 chatbot_id = "google_chat"
+
+# GCP Project ID hosting the Pub/Sub subscription.
 project_id = "your-gcp-project"
+
+# GCP Pub/Sub Topic ID.
 topic_id = "your-gchat-topic"
+
+# GCP Pub/Sub Pull Subscription ID (allows the chatbot to pull events without inbound webhook endpoints).
 subscription_id = "your-gchat-subscription"
-credentials_json = "" # Optional: path to service account JSON file
-impersonate_service_account = "" # Optional: target service account email to impersonate
-# List of allowed Google Chat user resource names or emails
-# user_allowlist = ["users/1234567890"]
-# reaction_emoji = "👀" # Optional: Emoji to react with when receiving a user message
+
+# Optional: Path to service account JSON key file for authentication.
+# credentials_json = "keys/service_account.json"
+
+# Optional: Target service account email to impersonate.
+# impersonate_service_account = "bot-service-account@project.iam.gserviceaccount.com"
+
+# List of allowed Google Chat user resource names or emails.
+# user_allowlist = ["users/1234567890", "user@company.com"]
+
+# Optional: Emoji to react with when receiving a user message (requires user credentials).
+# reaction_emoji = "👀"
+
 
 [wechat]
+# Set to true to launch the WeChat chatbot adapter daemon.
 enabled = false
+
+# Unique identifier for this chatbot instance.
 chatbot_id = "wechat"
-account_id = "" # Filled automatically by 'kesoku wechat pair'
-token = "" # Filled automatically by 'kesoku wechat pair'
+
+# WeChat/iLink bot account ID.
+account_id = ""
+
+# WeChat/iLink bot auth token.
+token = ""
+
+# WeChat/iLink API base URL.
 base_url = "https://ilinkai.weixin.qq.com"
-# Optional path to custom system prompt markdown file relative to agent working directory
+
+# Optional path to custom system prompt file relative to agent working directory.
 # sys_prompt_file = "memory/wechat_prompt.md"
 
+
 [shell]
+# Whether to enable the shell command execution tool.
 enabled = true
+
+# Whether to run commands inside a shell wrapper (supporting pipe and redirect characters).
 use_shell = true
+
+# Safety filter mode: "blocklist" (prohibits forbidden commands) or "allowlist" (strictly allows permitted ones).
 mode = "blocklist"
+
+# Allowed commands regex list (used in allowlist mode).
 allowlist_patterns = [
     "^(echo|ls|pwd|cat|git|uv|grep|find|python|sed|awk)(\\s|$)",
 ]
+
+# Prohibited commands regex list (used in blocklist mode).
 blocklist_patterns = [
     "(\\b|^)(rm|sudo|shutdown|reboot|mkfs|dd|chmod|chown)(\\b|\\s|$)",
 ]
+
+# Max seconds a shell command can run before it is transitioned to background execution.
 background_threshold_seconds = 300.0
 
+
 [shell.env]
-# CUSTOM_VAR = "value"
+# Custom environment variables injected into subprocess execution environments.
+# PATH = "/usr/bin:/bin"
+
 
 [env]
-# OpenLCM custom configurations injected as environment variables on startup
-# See openlcm documentation for all tunables
+# OpenLCM tunables injected as environment variables on startup.
+# Configures the Lossless Context Management condensation thresholds.
 LCM_CONTEXT_THRESHOLD = 0.75
 LCM_FRESH_TAIL_COUNT = 64
 LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED = true
 LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED = true
 LCM_RESERVE_TOKENS_FLOOR = 50000
-
