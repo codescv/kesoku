@@ -842,10 +842,15 @@ class Chatbot(ABC):
             filters["session_id"] = self.session_id
         else:
             filters["chatbot_id"] = self.chatbot_id
-
         try:
             async for msg in self.gateway.listen(
-                exclude_statuses=[MessageStatus.DELIVERED], exclude_roles=[MessageRole.USER], **filters
+                exclude_statuses=[
+                    MessageStatus.DELIVERED,
+                    MessageStatus.PENDING_AGENT,
+                    MessageStatus.PROCESSING,
+                ],
+                exclude_roles=[MessageRole.USER],
+                **filters,
             ):
                 await self.handle_message(msg)
         except asyncio.CancelledError:
