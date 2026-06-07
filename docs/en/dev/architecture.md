@@ -47,8 +47,9 @@ Kesoku is a lightweight, highly readable, and robust autonomous AI agent framewo
 +------------------------------------------------------------------------+
 ```
 
-## Concurrency, Anti-Stall Mechanism & Thread Sorting (V4)
+### Concurrency, Anti-Stall Mechanism & Thread Sorting (V4)
 To handle multiple users and user interruptions gracefully, Kesoku implements an advanced concurrency model:
+
 1. **Stateless Pub/Sub Hub**: The Gateway provides `post(message)` to save messages and broadcast them to active in-memory `listen(**filters)` async generators.
 2. **Agent Dispatcher**: The master Agent runs `listen(role="user")`. Upon receiving a message, it checks if a `SessionWorker` task exists for that `session_id`. If not, it spawns one; otherwise, it pushes the message into the worker's queue.
 3. **Session Worker & Interruption Policy**:
@@ -59,6 +60,7 @@ To handle multiple users and user interruptions gracefully, Kesoku implements an
 
 ## LLM Turn Logging
 To facilitate auditing, debugging, and trajectory evaluation, Kesoku logs every raw LLM inference turn:
+
 - **Session Staging Directory**: Logs are saved in the session's dedicated workspace/staging directory on disk.
 - **YAML Format**: To be both human-readable and programmatically parseable, the logs are serialized as `.log.yaml` files.
 - **Sequential Naming**: Each inference turn is saved as `llm-turn-{idx}.log.yaml`, where `{idx}` is a sequential integer starting from 1. The turn index is dynamically calculated at runtime by scanning the staging directory, making it robust across service restarts.
@@ -70,6 +72,7 @@ To facilitate auditing, debugging, and trajectory evaluation, Kesoku logs every 
 
 ## Message Data Model & Native Tool Calling
 All message ingestion and routing is unified through `Gateway.post()`. Every message in Kesoku follows strict role, type, status, and sender conventions as detailed in [Message and Lifecycle Specification](message.md):
+
 - **Roles**: `user`, `assistant`, `tool`, `system`
 - **Types**: `text`, `thought`, `tool_call`, `tool_result`
 - **Sender Rules**:
@@ -83,16 +86,19 @@ All message ingestion and routing is unified through `Gateway.post()`. Every mes
 
 ## Discord Chatbot Adapter Architecture
 Kesoku includes a fully functional Discord chatbot adapter (`DiscordChatbot`) connecting external Discord servers with the internal Gateway broker:
+
 - **Allowlist Filtering & Token Fallback**: Configured via `user_allowlist`. If populated, unlisted users only receive replies if explicitly mentioning the bot. Messages explicitly mentioning third parties are ignored. The chatbot supports fallback token lookup via the `DISCORD_TOKEN` environment variable when `bot_token` is not specified in the configuration file.
 - **Thread-Based Context Separation & Direct Channel Interaction**: To prevent multi-user context collisions, conversations are normally isolated inside Discord threads, where the thread ID maps to Kesoku's external `channel_id`. To support direct channel interaction without thread creation, a configuration option `auto_thread` is provided inside `[[discord.channels]]` channel overrides (setting it to `false` prevents automatic thread creation in matching channels). By default, regular channels auto-thread. If a user manually starts a thread within a direct channel, the adapter detects the thread context and interacts within the thread naturally. Session creation timestamps are synchronized with initial Discord message timestamps to ensure correct chronological ordering. If multiple bots run in the same channel, thread creation race conditions (`discord.HTTPException`) are gracefully handled by discovering and joining the thread created by peer bots.
 - **Special Context Prompts**: Server and channel metadata, along with active member lists and Discord user IDs, are dynamically injected into the session's system prompt.
 - **Newline Chunking, File-Sending Syntax & Message Splitting**: The bot renders all assistant responses, thoughts (`💭`), tool calls (`🛠️`), and tool results (`📥`) to Discord. Output exceeding Discord's 2000-character limit is cleanly chunked at newline boundaries. In addition, Kesoku supports a standardized file-sending syntax `[file: /abs/path/to/file]`. When the Discord chatbot encounters this syntax in any outgoing message content, it automatically splits the content around the file blocks, uploads existing files as attachments via `discord.File`, and filters out empty or whitespace-only message segments to strictly conform to Discord API constraints. If a specified file does not exist on disk, a user-friendly warning notification is gracefully dispatched to the thread.
 - **Asynchronous Typing Status Indicator**: While the agent is thinking, running tools, or generating responses, `DiscordChatbot` continuously displays a typing status in the corresponding thread or channel. The typing indicator starts when an incoming user message is received, and is gracefully cancelled upon successful delivery of the final assistant text response. To prevent infinite typing during an unexpected error or network drop, each typing task is guarded by a robust 10-minute safety timeout.
 - **Interactive Header View Buttons**: The Discord message header includes a persistent view component (`MessageHeaderView`) containing interactive emoji-only buttons:
+
   - **View Trajectory (`📜`)**: Streams a custom-generated interactive dark-mode HTML trace file of the conversation turn.
   - **Stop Turn (`🛑`)**: Stops/aborts the active `SessionWorker` turn task, marks the pending user prompt as `interrupted` in the database, and deletes any intermediate special messages (such as thoughts and tool calls) from the Discord UI.
   - **Clear Session (`♻️`)**: Deletes the session and all its messages from the SQLite database, recursively deletes the session workspace folder on disk, and deletes active UI components. This button is only visible inside regular channels and is hidden inside threads.
 - **Session and Turn Metrics**: Upon completion or interruption of each logical conversational turn, the persistent header message is dynamically edited in-place with detailed session and turn execution statistics:
+
   - **Total Session Turns**: The total number of user turns processed in the current session.
   - **Context Window Size**: The number of tokens currently in the session context window (prompt/input tokens) measured in integer K.
   - **Turn Tool Calls**: The total count of tools executed in the current turn.
@@ -102,6 +108,7 @@ Kesoku includes a fully functional Discord chatbot adapter (`DiscordChatbot`) co
 - **Dynamic Question-Choice Syntax & Button View**: Outgoing messages containing the syntax `[question: <question> | choice1 | choice2 | ...]` are automatically parsed and split. The question text is sent to Discord alongside a dynamic `QuestionView` containing choice buttons. When a button is selected, all buttons are permanently disabled to prevent duplicate submission, the message is edited to show the disabled buttons, a confirmation `<@user> selected: **choice**` is posted, and the exact choice is posted directly to the Kesoku Gateway as a new `ROLE_USER` message (which automatically triggers the chatbot typing spinner).
 
 - **Incoming Attachment Processing**: When the Discord bot receives a message containing file attachments:
+
   1. It resolves or creates the corresponding chat session and staging directory path (`sessions/<session_id>`).
   2. It asynchronously downloads each attachment and saves it into the session staging directory, ensuring filename safety and avoiding collision.
   3. It populates the message `metadata` with attachment information under the key `"attachments"` as a list of file descriptors: `[{"path": "/absolute/path/to/saved/file", "mime_type": "image/png", "filename": "photo.png"}]`.
@@ -109,11 +116,13 @@ Kesoku includes a fully functional Discord chatbot adapter (`DiscordChatbot`) co
   5. During LLM inference, both the `GeminiLLM` and `ClaudeLLM` backends load these attachments from the staging directory and transmit them natively as multi-part content blocks (`types.Part.from_bytes` for Gemini, and base64-encoded source blocks for Claude) to leverage the models' native multi-modal capabilities.
 
 - **Slash Commands System (`discord_command.py`)**: The Discord chatbot integrates native slash commands using `discord.app_commands.CommandTree`.
+
   - `/restart`: Restarts the Kesoku background service. It sends an ephemeral confirmation message, stops active chatbot listeners cleanly, and executes a non-blocking `kesoku service restart` (supporting both `--user` and `--system` installations) to cleanly recycle the OS process. If those commands are not available or fail, it falls back to an in-place replacement via `os.execv`.
 
 
 ## Google Chat Chatbot Adapter Architecture
 Kesoku includes a highly modular Google Chat chatbot adapter (`GoogleChatChatbot`) utilizing a stateless Google Cloud Pub/Sub Pull Subscription and standard GCP public APIs:
+
 - **Pub/Sub Pull Subscription (Firewall-Friendly)**: To operate without requiring inbound HTTP webhooks, public DNS, or SSL/TLS configurations, the adapter continuously pulls interaction events in an asynchronous, thread-safe queue listener loop.
 - **Service Account Impersonation**: Supports standard service account auth via key files, or secure key-less service account impersonation (via Google Application Default Credentials) to generate short-lived tokens automatically without managing static JSON files on disk.
 - **Thread-Based Conversation Context & Threaded Replies**: Conversations are kept contextual by extracting `message.thread.name` (or `space.name` if threadless) and mapping it directly to the Kesoku `channel_id` and `session_id`. Outgoing replies automatically append thread identifiers and pass `messageReplyOption="REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"` to route replies seamlessly back into the same thread context rather than starting a new thread.
