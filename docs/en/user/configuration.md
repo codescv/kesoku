@@ -9,7 +9,7 @@ Kesoku is centrally configured via a structured TOML file (usually `config.toml`
 To generate a default configuration file, navigate to your workspace and run:
 
 ```bash
-uv run kesoku init -c config.toml
+kesoku init -c config.toml
 ```
 
 This creates a default configuration file named `config.toml` in your current directory.

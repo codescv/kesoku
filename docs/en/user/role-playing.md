@@ -53,12 +53,12 @@ You are a helpful programming assistant. You speak concisely and always write cl
 If you are initializing your workspace for the first time, make sure roles are generated:
 
 ```bash
-uv run kesoku init -c config.toml
+kesoku init -c config.toml
 ```
 To force-overwrite or restore default roles, use:
 
 ```bash
-uv run kesoku init -c config.toml --overwrite-roles
+kesoku init -c config.toml --overwrite-roles
 ```
 
 ---

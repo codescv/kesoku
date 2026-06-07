@@ -12,21 +12,28 @@ Kesoku (name inspired by `結束/Kessoku`) is a minimal, readable, and modular a
 
 ## Installation 📦
 
-Kesoku uses `uv` for lightning-fast dependency management and packaging.
+Install Kesoku globally as a CLI tool using `uv`:
 
 ```bash
-git clone <repository_url> kesoku
-# Navigate to project
+uv tool install git+https://github.com/codescv/kesoku.git
+```
+
+For local development (to edit code, run tests, or build docs):
+
+```bash
+git clone https://github.com/codescv/kesoku.git
 cd kesoku
-# Synchronize dependencies
-uv sync
+# Install as an editable tool
+uv tool install -e .
+# Sync all groups (ruff, pytest, mkdocs)
+uv sync --all-groups
 ```
 
 ## Configuration ⚙️
 
 Initialize a workspace and `config.toml` in any directory (e.g. `private/`):
 ```bash
-uv run kesoku init -c private/config.toml
+kesoku init -c private/config.toml
 ```
 This creates `private/config.toml`, `private/kesoku.db`, and `private/skills/`.
 
@@ -80,34 +87,34 @@ impersonate_service_account = "" # Optional target service account email to impe
 
 Start a new chat session:
 ```bash
-uv run kesoku chat -c private/config.toml "What is 25 + 15?"
+kesoku chat -c private/config.toml "What is 25 + 15?"
 ```
 
 List all current chat sessions:
 ```bash
-uv run kesoku chat -c private/config.toml -l
+kesoku chat -c private/config.toml -l
 ```
 
 Resume a specific chat session by its ID:
 ```bash
-uv run kesoku chat -c private/config.toml -r abc12345 "And multiply that by 2."
+kesoku chat -c private/config.toml -r abc12345 "And multiply that by 2."
 ```
 
 Resume the latest active chat session:
 ```bash
-uv run kesoku chat -c private/config.toml -z "And subtract 10."
+kesoku chat -c private/config.toml -z "And subtract 10."
 ```
 
 Show full formatted chat history of a session:
 ```bash
-uv run kesoku chat -c private/config.toml --show-history abc12345
+kesoku chat -c private/config.toml --show-history abc12345
 ```
 
 ### Daemon Mode (`start`)
 
 Run background daemons (Discord bot):
 ```bash
-uv run kesoku start -c private/config.toml
+kesoku start -c private/config.toml
 ```
 
 ### Running as a Background Service (Linux/macOS)
@@ -119,15 +126,15 @@ Generates and installs the service file (`.service` unit on Linux, `.plist` conf
 
 - **User-Level Service (Default, recommended - no root required)**:
   ```bash
-  uv run kesoku service install -c private/config.toml -e GEMINI_API_KEY=your-api-key
+  kesoku service install -c private/config.toml -e GEMINI_API_KEY=your-api-key
   ```
 - **System-Level Service (Global, requires root)**:
   ```bash
-  sudo uv run kesoku service install --system -c private/config.toml -e GEMINI_API_KEY=your-api-key
+  sudo kesoku service install --system -c private/config.toml -e GEMINI_API_KEY=your-api-key
   ```
 - **Dry-Run (prints service file configuration to stdout)**:
   ```bash
-  uv run kesoku service install --dry-run -c private/config.toml -e GEMINI_API_KEY=your-api-key
+  kesoku service install --dry-run -c private/config.toml -e GEMINI_API_KEY=your-api-key
   ```
 
 #### 2. Manage the Service
@@ -135,30 +142,29 @@ You can start, stop, restart, and uninstall the service using `kesoku service` s
 
 - **Start the service**:
   ```bash
-  uv run kesoku service start
+  kesoku service start
   ```
 - **Stop the service**:
   ```bash
-  uv run kesoku service stop
+  kesoku service stop
   ```
 - **Restart the service**:
   ```bash
-  uv run kesoku service restart
+  kesoku service restart
   ```
 - **Uninstall the service** (stops, disables, and deletes the configuration file):
   ```bash
-  uv run kesoku service uninstall
+  kesoku service uninstall
   ```
 
-*Note: Add the `--system` flag to any of the management subcommands if you installed the service in system-level mode (e.g. `uv run kesoku service start --system`).*
+*Note: Add the `--system` flag to any of the management subcommands if you installed the service in system-level mode (e.g. `kesoku service start --system`).*
 
 #### 3. Check Status and Logs
 - **Check service status**:
   ```bash
-  uv run kesoku service status
+  kesoku service status
   ```
 - **Follow real-time background logs**:
   ```bash
-  uv run kesoku service logs -f
+  kesoku service logs -f
   ```
-

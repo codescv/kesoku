@@ -12,14 +12,14 @@
 运行在当前普通用户权限范围内，**不需要** root / sudo 管理员权限：
 
 ```bash
-uv run kesoku service install -c private/config.toml
+kesoku service install -c private/config.toml
 ```
 
 ### 2. 系统级服务 (System-Level)
 运行在全局系统范围内，需要 `sudo` 权限来安装：
 
 ```bash
-sudo uv run kesoku service install --system -c private/config.toml
+sudo kesoku service install --system -c private/config.toml
 ```
 
 ### 🔧 注入与继承环境变量
@@ -29,14 +29,14 @@ sudo uv run kesoku service install --system -c private/config.toml
 如果您需要显式覆盖或为服务注入其他的环境变量，可以使用 `-e` / `--env` 选项（可以多次声明）：
 
 ```bash
-uv run kesoku service install -c config.toml -e GEMINI_API_KEY=your_api_key -e CUSTOM_PORT=8080
+kesoku service install -c config.toml -e GEMINI_API_KEY=your_api_key -e CUSTOM_PORT=8080
 ```
 
 ### 🔍 预览配置 (Dry-Run)
 在不真正写入系统目录的情况下，在终端打印出生成的 systemd unit 文件或 plist 文件配置内容：
 
 ```bash
-uv run kesoku service install --dry-run -c config.toml
+kesoku service install --dry-run -c config.toml
 ```
 
 ---
@@ -47,27 +47,27 @@ uv run kesoku service install --dry-run -c config.toml
 
 ### 启动服务
 ```bash
-uv run kesoku service start
+kesoku service start
 ```
 
 ### 停止服务
 ```bash
-uv run kesoku service stop
+kesoku service stop
 ```
 
 ### 重启服务
 ```bash
-uv run kesoku service restart
+kesoku service restart
 ```
 
 ### 查询运行状态
 显示当前服务是否处于 active 运行中，或是已经退出，并展示其 PID 信息：
 
 ```bash
-uv run kesoku service status
+kesoku service status
 ```
 
-*注意：如果您的服务是通过 `--system` 安装的，控制命令也必须带上 `--system` 标识（如 `uv run kesoku service start --system`）。*
+*注意：如果您的服务是通过 `--system` 安装的，控制命令也必须带上 `--system` 标识（如 `kesoku service start --system`）。*
 
 ---
 
@@ -81,21 +81,21 @@ uv run kesoku service status
 默认打印最后 50 行日志：
 
 ```bash
-uv run kesoku service logs
+kesoku service logs
 ```
 
 ### 实时流式跟踪日志
 持续输出最新的日志信息（效果等同于 `tail -f`）：
 
 ```bash
-uv run kesoku service logs -f
+kesoku service logs -f
 ```
 
 ### 限制日志输出行数
 查看指定行数的历史日志：
 
 ```bash
-uv run kesoku service logs -n 100
+kesoku service logs -n 100
 ```
 
 ---
@@ -104,5 +104,5 @@ uv run kesoku service logs -n 100
 停止运行服务，取消开机自启，并干净地清除系统中残留的所有 Kesoku 服务配置文件：
 
 ```bash
-uv run kesoku service uninstall
+kesoku service uninstall
 ```

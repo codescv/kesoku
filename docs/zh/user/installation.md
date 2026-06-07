@@ -9,50 +9,57 @@
 在开始安装之前，请确保您的系统环境满足以下要求：
 
 *   **Python**：版本需在 3.12 或更新。
-*   **uv**：极速 Python 包管理与虚拟环境工具。
-    *   如果您尚未安装 `uv`，可参考 [uv 安装说明](https://github.com/astral-sh/uv#installation)。通常，您可以通过以下命令快速安装：
+*   **uv**：极速 Python 包与虚拟环境管理工具。
+    *   如果您尚未安装 `uv`，运行以下命令快速安装：
         ```bash
         curl -LsSf https://astral-sh.uv.run/install.sh | sh
         ```
-*   **Git**：用于克隆项目仓库。
+*   **Git**：从仓库直接安装时需要使用。
 
 ---
 
-## 📦 开始安装
+## 📦 安装 Kesoku (推荐方式)
 
-按照以下步骤克隆并运行 Kesoku：
+最推荐的安装方式是使用 `uv tool install` 将 Kesoku 作为全局命令行工具安装。`uv` 会自动为您维护虚拟环境隔离，并将 `kesoku` 可执行文件添加到系统的环境变量中。
 
-### 步骤 1：克隆仓库
-将代码仓库克隆到您的本地目录：
+### 选项 A：直接从 GitHub 安装
+运行以下命令从主分支安装最新版本的 Kesoku：
+
+```bash
+uv tool install git+https://github.com/codescv/kesoku.git
+```
+
+### 选项 B：从本地克隆代码安装
+如果您已经将项目代码克隆到了本地：
 
 ```bash
 git clone https://github.com/codescv/kesoku.git
 cd kesoku
+uv tool install .
 ```
 
-### 步骤 2：同步依赖包
-Kesoku 使用 `uv` 管理虚拟环境与锁定的依赖项。要自动创建本地虚拟环境并安装所有运行所需的依赖，只需执行：
+### 验证安装
+在终端输入以下命令验证 `kesoku` 可执行程序是否正常工作：
 
 ```bash
-uv sync
+kesoku --help
 ```
-此命令将在项目根目录创建 `.venv/` 虚拟环境，并同步 `uv.lock` 中指定的所有包。
-
-### 步骤 3：验证命令行工具
-通过 `uv run` 执行以下命令，以确认命令行入口是否正常工作：
-
-```bash
-uv run kesoku --help
-```
-如果安装成功，终端将输出 `kesoku` 命令行工具的帮助信息（展示 `chat`、`start`、`service`、`init`、`wechat` 等子命令）。
+如果安装成功，终端将输出命令行帮助信息，列出可用的子命令（如 `chat`、`start`、`service`、`init`、`wechat`、`memory` 等）。
 
 ---
 
-## 🛠️ 开发者安装（可选）
+## 🛠️ 开发者安装
 
-如果您计划对 Kesoku 贡献代码、运行单元测试或本地预览此文档网站，请同步开发组依赖项：
+如果您计划参与 Kesoku 的开发、运行单元测试或修改代码：
 
-```bash
-# 同步包含 ruff, pytest, 和 mkdocs 在内的所有开发依赖
-uv sync --all-groups
-```
+1. 克隆代码库，并将其安装为**可编辑的全局工具**（Editable Tool），以便您对本地代码的任何修改能实时反映到 `kesoku` 指令中：
+   ```bash
+   git clone https://github.com/codescv/kesoku.git
+   cd kesoku
+   uv tool install -e .
+   ```
+2. 在项目根目录下创建本地虚拟环境并安装所有开发组相关的依赖（用于运行单元测试、格式化代码或本地预览文档）：
+   ```bash
+   uv sync --all-groups
+   ```
+3. 运行测试请使用 `uv run pytest`，编译/构建文档请使用 `uv run mkdocs build`。

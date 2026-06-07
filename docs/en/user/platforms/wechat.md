@@ -10,7 +10,7 @@ Unlike Discord or Google Chat which use static developer tokens, the WeChat bot 
 
 1.  Run the pairing command in your terminal:
     ```bash
-    uv run kesoku wechat pair -c config.toml
+    kesoku wechat pair -c config.toml
     ```
 2.  A large ASCII barcode (QR Code) will be generated and printed inside your terminal.
     *   *If the QR code blocks look warped, zoom out your terminal (`Cmd -` or `Ctrl -`) or enlarge the window.*
@@ -26,7 +26,7 @@ Unlike Discord or Google Chat which use static developer tokens, the WeChat bot 
 To see which WeChat groups or contacts are currently paired and mapped as active conversation channels in Kesoku:
 
 ```bash
-uv run kesoku wechat show-channels -c config.toml
+kesoku wechat show-channels -c config.toml
 ```
 
 This queries the active WeChat adapter and lists all chats, group names, and their associated channel identifiers.

@@ -9,7 +9,7 @@ Kesoku 所有的运行参数均在项目根目录的 TOML 文件（通常为 `co
 在任意工作目录下运行以下命令，即可生成一份包含默认值的配置文件：
 
 ```bash
-uv run kesoku init -c config.toml
+kesoku init -c config.toml
 ```
 
 这将在当前目录生成一个名为 `config.toml` 的配置文件。

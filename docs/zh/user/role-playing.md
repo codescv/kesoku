@@ -53,12 +53,12 @@ touch roles/helper/intro.md
 如果您是第一次初始化工作区，请确保角色目录已生成：
 
 ```bash
-uv run kesoku init -c config.toml
+kesoku init -c config.toml
 ```
 若需要强制覆盖或恢复默认角色设定，可以运行：
 
 ```bash
-uv run kesoku init -c config.toml --overwrite-roles
+kesoku init -c config.toml --overwrite-roles
 ```
 
 ---

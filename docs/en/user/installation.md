@@ -9,50 +9,57 @@ This guide will walk you through setting up Kesoku on your local machine or serv
 Before installing Kesoku, ensure your environment meets the following requirements:
 
 *   **Python**: Version 3.12 or newer.
-*   **uv**: A fast Python package installer and resolver.
-    *   If you don't have `uv` installed, follow the [uv installation guide](https://github.com/astral-sh/uv#installation). Typically, you can install it via curl:
+*   **uv**: A fast Python package manager and resolver.
+    *   If you don't have `uv` installed, run:
         ```bash
         curl -LsSf https://astral-sh.uv.run/install.sh | sh
         ```
-*   **Git**: Required for cloning the repository.
+*   **Git**: Required if installing from the repository.
 
 ---
 
-## 📦 Setting Up Kesoku
+## 📦 Setting Up Kesoku (Recommended)
 
-Follow these steps to download and set up Kesoku:
+The easiest way to install and run Kesoku as a global command-line tool is using `uv tool install`. This automatically manages the virtual environment for you and places the `kesoku` executable in your system path.
 
-### Step 1: Clone the Repository
-Clone the repository to your target workspace:
+### Option A: Install directly from GitHub
+Run the following command to install the latest version from the main branch:
+
+```bash
+uv tool install git+https://github.com/codescv/kesoku.git
+```
+
+### Option B: Install from a local clone
+If you have cloned the repository locally:
 
 ```bash
 git clone https://github.com/codescv/kesoku.git
 cd kesoku
+uv tool install .
 ```
 
-### Step 2: Synchronize Dependencies
-Kesoku uses `uv` to lock and manage virtual environment packages. To create the virtual environment and install all necessary dependencies (including the standard runtime ones), run:
+### Verify the Installation
+Verify that the `kesoku` executable is available:
 
 ```bash
-uv sync
+kesoku --help
 ```
-This command creates a local virtual environment under `.venv/` and synchronizes all packages defined in `uv.lock`.
-
-### Step 3: Verify the CLI Installation
-Verify that the `kesoku` command-line executable works inside the `uv` environment:
-
-```bash
-uv run kesoku --help
-```
-You should see output displaying the CLI subcommands (`chat`, `start`, `service`, `init`, `wechat`, etc.).
+You should see output displaying the CLI subcommands (`chat`, `start`, `service`, `init`, `wechat`, `memory`, etc.).
 
 ---
 
-## 🛠️ Developer Installation (Optional)
+## 🛠️ Developer Installation
 
-If you plan to contribute to Kesoku, run tests, or build this documentation site, make sure to install development-group dependencies:
+If you plan to contribute to Kesoku, run tests, or modify its codebase:
 
-```bash
-# Sync all dependencies including ruff, pytest, and mkdocs
-uv sync --all-groups
-```
+1. Clone the repository and install it as an **editable tool**, allowing any local code changes to reflect immediately:
+   ```bash
+   git clone https://github.com/codescv/kesoku.git
+   cd kesoku
+   uv tool install -e .
+   ```
+2. To install all development-group dependencies (for testing and docs compilation) inside a local project virtual environment:
+   ```bash
+   uv sync --all-groups
+   ```
+3. Run tests using `uv run pytest` or compile documentation with `uv run mkdocs build`.
