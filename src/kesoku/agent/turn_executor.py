@@ -259,7 +259,7 @@ class TurnExecutor:
                 )
                 if active_cache_name and len(llm_history) >= cached_messages_len:
                     generate_history = llm_history[cached_messages_len:]
-                    generate_system_prompt = None
+                    generate_system_prompt = system_prompt
                     generate_tools = None
                     generate_cached_content = active_cache_name
                 else:

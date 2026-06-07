@@ -532,3 +532,51 @@ def test_gemini_llm_count_tokens_exception_fallback() -> None:
         mock_warn.assert_called_once()
         assert "Failed to count tokens via Gemini API" in mock_warn.call_args[0][0]
 
+
+@pytest.mark.asyncio
+async def test_gemini_llm_with_cached_content() -> None:
+    """Verify GeminiLLM does not set system_instruction or tools in raw config when using cached_content."""
+    mock_client = MagicMock()
+    mock_res = MagicMock()
+    mock_res.parts = [MagicMock(text="Response text", thought=False, function_call=None)]
+    mock_res.usage_metadata = MagicMock(prompt_token_count=10, candidates_token_count=5, total_token_count=15)
+    mock_client.models.generate_content.return_value = mock_res
+
+    # A mock tool function
+    def my_dummy_tool() -> str:
+        return "dummy"
+
+    # Case 1: Without cached_content
+    with patch("google.genai.Client", return_value=mock_client):
+        gemini = GeminiLLM()
+        await gemini.generate(
+            prompt="Hello",
+            system_prompt="My system prompt",
+            tools=[my_dummy_tool],
+            cached_content=None,
+        )
+        called_kwargs = mock_client.models.generate_content.call_args[1]
+        config = called_kwargs["config"]
+        assert config.system_instruction == "My system prompt"
+        assert len(config.tools) == 1
+        assert config.cached_content is None
+
+    mock_client.reset_mock()
+
+    # Case 2: With cached_content
+    with patch("google.genai.Client", return_value=mock_client):
+        gemini = GeminiLLM()
+        await gemini.generate(
+            prompt="Hello",
+            system_prompt="My system prompt",
+            tools=[my_dummy_tool],
+            cached_content="projects/123/locations/global/cachedContents/456",
+        )
+        called_kwargs = mock_client.models.generate_content.call_args[1]
+        config = called_kwargs["config"]
+        # When using cached content, they must be omitted in the raw config!
+        assert config.system_instruction is None
+        assert config.tools is None
+        assert config.cached_content == "projects/123/locations/global/cachedContents/456"
+
+

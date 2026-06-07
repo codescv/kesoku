@@ -1374,7 +1374,7 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
     # - 1st Generate:
     gen_call_1 = llm.captured_generates[0]
     assert gen_call_1["cached_content"] == "mock_cache_0"
-    assert gen_call_1["system_prompt"] is None
+    assert "Agent Working Directory" in gen_call_1["system_prompt"]
     assert gen_call_1["tools"] is None
     assert len(gen_call_1["history"]) == 1
     assert gen_call_1["history"][0].role == MessageRole.USER

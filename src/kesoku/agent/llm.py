@@ -231,7 +231,7 @@ def history_to_turns(
     if history:
         for msg in history:
             if msg.role == MessageRole.SYSTEM:
-                if not resolved_system_prompt:
+                if resolved_system_prompt is None:
                     resolved_system_prompt = msg.content
                 elif msg != history[0]:
                     notification = f"[System Notification]\n{msg.content}"
@@ -580,13 +580,14 @@ class GeminiLLM(BaseLLM):
                     contents.append(types.Content(role=role, parts=parts))
 
         config = types.GenerateContentConfig()
-        if system_prompt:
-            config.system_instruction = system_prompt
         if cached_content:
             config.cached_content = cached_content
-        if tools:
-            config.tools = tools  # type: ignore
-            config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
+        else:
+            if system_prompt:
+                config.system_instruction = system_prompt
+            if tools:
+                config.tools = tools  # type: ignore
+                config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
         if self.config.thinking_level is not None:
             config.thinking_config = types.ThinkingConfig(
                 thinking_level=self.config.thinking_level,
