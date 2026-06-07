@@ -778,6 +778,7 @@ You are interacting with the user via WeChat (Weixin).
             channel_id=channel_id,
             prompt_content=prompt_content,
             mention_user_id=mention_user_id,
+            **kwargs,
         )
 
     async def _trigger_cronjob_for_channel(
@@ -785,6 +786,7 @@ You are interacting with the user via WeChat (Weixin).
         channel_id: str,
         prompt_content: str,
         mention_user_id: str | None = None,
+        **kwargs: Any,
     ) -> None:
         """Helper to trigger cronjob in a single specific channel."""
         chat_type = "group" if channel_id.endswith("@chatroom") else "dm"
@@ -794,6 +796,7 @@ You are interacting with the user via WeChat (Weixin).
         if mention_user_id:
             msg_content = f"@{mention_user_id} {msg_content}"
 
+        tag = kwargs.get("tag")
         await self.trigger_cronjob_message(
             channel_id=channel_id,
             prompt_content=msg_content,
@@ -801,6 +804,7 @@ You are interacting with the user via WeChat (Weixin).
             custom_prompt=custom_prompt,
             metadata={"wechat_cronjob": True},
             title=f"WeChat Scheduled Job {channel_id}",
+            tag=tag,
         )
 
         # Start typing indicator

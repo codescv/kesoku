@@ -104,6 +104,7 @@ async def test_cron_manager_defaults_to_cronjob_silent():
             channel_id="silent_0",
             prompt_content="Silent cron job content",
             mention_user_id=None,
+            tag=None,
         )
 
 

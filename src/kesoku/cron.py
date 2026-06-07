@@ -354,6 +354,7 @@ class CronManager:
                     channel_id=str(channel_id) if channel_id else None,
                     prompt_content=prompt_content,
                     mention_user_id=str(mention_user_id) if mention_user_id else None,
+                    tag=job.get("tag"),
                 )
             else:
                 logger.error(f"Chatbot '{chatbot_id}' does not support trigger_cronjob.")

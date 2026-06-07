@@ -550,6 +550,7 @@ class Chatbot(ABC):
         custom_prompt: str | None = None,
         metadata: dict[str, Any] | None = None,
         title: str | None = None,
+        tag: str | None = None,
     ) -> Message:
         """Unified helper to create a session (if not exists) and post a scheduled cronjob message to the gateway.
 
@@ -558,7 +559,10 @@ class Chatbot(ABC):
         """
         session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
         if not session:
-            session_title = title or f"{self.chatbot_id.capitalize()} Scheduled Job {channel_id}"
+            if tag:
+                session_title = f"Cronjob {tag}"
+            else:
+                session_title = title or f"{self.chatbot_id.capitalize()} Scheduled Job {channel_id}"
             session = await self.gateway.create_session(
                 session_id=None,
                 title=session_title,
@@ -573,6 +577,8 @@ class Chatbot(ABC):
         msg_content = prompt_content
 
         msg_metadata = {"is_cronjob": True}
+        if tag:
+            msg_metadata["tag"] = tag
         if metadata:
             msg_metadata.update(metadata)
 

@@ -364,13 +364,7 @@ class DiscordChatbot(Chatbot):
         # Trigger typing status for the thread/channel while agent is thinking
         channel_id = dto.channel_id
         if channel_id not in self._typing_tasks:
-            target_channel = self.bot.get_channel(int(channel_id))
-            if not target_channel:
-                try:
-                    target_channel = await self.bot.fetch_channel(int(channel_id))
-                except Exception as e:
-                    logger.error(f"Failed to fetch channel {channel_id} in post_ingest_hook: {e}")
-
+            target_channel = await self._get_discord_channel(channel_id, dto.raw_metadata)
             if target_channel:
                 self._typing_tasks[channel_id] = asyncio.create_task(self._keep_typing(target_channel))
 
@@ -405,6 +399,8 @@ class DiscordChatbot(Chatbot):
         # Thread-based context separation
         target_channel: discord.Thread | discord.DMChannel | discord.GroupChannel | discord.TextChannel | None = None
         if isinstance(message.channel, discord.Thread):
+            target_channel = message.channel
+        elif message.guild is None:
             target_channel = message.channel
         else:
             channel_id_str = str(message.channel.id)
@@ -516,29 +512,56 @@ class DiscordChatbot(Chatbot):
         """Process outgoing message from Gateway and send to target Discord thread."""
         await self.render_outgoing_message(message)
 
-    async def _get_discord_channel_with_abort(self, message: Message) -> Any | None:
+    async def _get_discord_channel(self, channel_id_str: str, metadata: dict[str, Any] | None = None) -> Any | None:
         try:
-            target_id = int(message.channel_id)
+            target_id = int(channel_id_str)
         except ValueError:
-            logger.error(f"Invalid Discord channel_id: {message.channel_id}")
             return None
 
         channel = self.bot.get_channel(target_id)
         if not channel:
             try:
-                channel = await self.bot.fetch_channel(target_id)  # type: ignore
+                channel = await self.bot.fetch_channel(target_id)
             except (discord.NotFound, discord.Forbidden) as fe:
-                logger.warning(
-                    f"Message {message.id} Failed to fetch Discord channel {target_id} (deleted or forbidden): {fe}. "
-                    "Aborting session and marking message as delivered to stop retrying."
-                )
-                await self.gateway.abort_session(message.session_id)
-                await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
-                raise DeliveryAbortedError("Discord channel fetch failed (deleted or forbidden)")
-            except Exception as fe:
-                logger.error(f"Failed to fetch Discord channel {target_id}: {fe}")
-                return None
+                raise DeliveryAbortedError(f"Discord channel fetch failed: {fe}") from fe
+            except Exception as e:
+                logger.debug(f"Failed to fetch channel {target_id} by ID: {e}")
+
+        if not channel and metadata:
+            recipient_id_str = (
+                metadata.get("discord_author_id")
+                or metadata.get("dm_recipient_id")
+            )
+            if recipient_id_str:
+                try:
+                    user_id = int(recipient_id_str)
+                    user = self.bot.get_user(user_id)
+                    if not user:
+                        user = await self.bot.fetch_user(user_id)
+                    if user:
+                        channel = user.dm_channel
+                        if not channel:
+                            channel = await user.create_dm()
+                except (discord.NotFound, discord.Forbidden) as fe:
+                    raise DeliveryAbortedError(f"Discord DM user fetch failed: {fe}") from fe
+                except Exception as de:
+                    logger.warning(f"Failed to resolve DM channel for recipient {recipient_id_str}: {de}")
+
         return channel
+
+    async def _get_discord_channel_with_abort(self, message: Message) -> Any | None:
+        try:
+            channel = await self._get_discord_channel(message.channel_id, getattr(message, "metadata", None))
+            return channel
+        except DeliveryAbortedError as de:
+            logger.warning(
+                f"Message {message.id} Failed to fetch Discord channel "
+                f"{message.channel_id} (deleted or forbidden): {de}. "
+                "Aborting session and marking message as delivered to stop retrying."
+            )
+            await self.gateway.abort_session(message.session_id)
+            await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
+            raise
 
     def supports_intermediate_messages(self) -> bool:
         """Determine if the platform supports intermediate rendering of thoughts and tools."""
@@ -885,27 +908,51 @@ class DiscordChatbot(Chatbot):
                 logger.error(f"Failed waiting for Discord bot to be ready: {e}")
                 return
 
-        try:
-            target_id = int(channel_id)
-        except ValueError:
-            logger.error(f"Invalid Discord channel_id for cronjob: {channel_id}")
-            return
-
-        channel = self.bot.get_channel(target_id)
-        if not channel:
-            try:
-                channel = await self.bot.fetch_channel(target_id)  # type: ignore
-            except Exception as fe:
-                logger.error(f"Failed to fetch Discord channel {target_id} for cronjob: {fe}")
+        channel = None
+        if isinstance(channel_id, str) and channel_id.lower() == "dm":
+            if not mention_user_id:
+                logger.error("Cannot trigger DM cronjob without mention_user_id.")
                 return
+            try:
+                user_id = int(mention_user_id)
+                user = self.bot.get_user(user_id)
+                if not user:
+                    user = await self.bot.fetch_user(user_id)
+                if user:
+                    channel = user.dm_channel
+                    if not channel:
+                        channel = await user.create_dm()
+                if not channel:
+                    logger.error(f"Failed to resolve DM channel for user {mention_user_id}")
+                    return
+            except Exception as e:
+                logger.error(f"Error resolving DM channel for user {mention_user_id}: {e}", exc_info=True)
+                return
+        else:
+            try:
+                target_id = int(channel_id)
+            except ValueError:
+                logger.error(f"Invalid Discord channel_id for cronjob: {channel_id}")
+                return
+
+            channel = self.bot.get_channel(target_id)
+            if not channel:
+                try:
+                    channel = await self.bot.fetch_channel(target_id)  # type: ignore
+                except Exception as fe:
+                    logger.error(f"Failed to fetch Discord channel {target_id} for cronjob: {fe}")
+                    return
 
         # Determine if this is an auto-thread channel
         is_thread = isinstance(channel, discord.Thread)
+        is_dm = getattr(channel, "guild", None) is None
         channel_id_str = str(channel.id)
         channel_name = getattr(channel, "name", "") or ""
 
         auto_thread = True
-        if not is_thread:
+        if is_dm:
+            auto_thread = False
+        elif not is_thread:
             override = self._resolve_channel_override(channel_id_str, channel_name)
             if override is not None and override.auto_thread is not None:
                 auto_thread = override.auto_thread
@@ -948,17 +995,21 @@ class DiscordChatbot(Chatbot):
         msg_metadata = {
             "channel_name": channel_name,
         }
+        if is_dm:
+            msg_metadata["dm_recipient_id"] = str(mention_user_id)
         if parent_channel_id:
             msg_metadata["parent_channel_id"] = parent_channel_id
         if parent_channel_name:
             msg_metadata["parent_channel_name"] = parent_channel_name
 
+        tag = kwargs.get("tag")
         await self.trigger_cronjob_message(
             channel_id=target_channel_id_str,
             prompt_content=prompt_content,
             sender_name="Cronjob",
             custom_prompt=custom_prompt,
             metadata=msg_metadata,
+            tag=tag,
         )
 
         # Trigger typing status for the thread/channel while agent is thinking

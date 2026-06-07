@@ -51,10 +51,12 @@ class CronjobChatbot(Chatbot):
             mention_user_id: Unused parameter for virtual chatbot.
             **kwargs: Additional optional arguments.
         """
+        tag = kwargs.get("tag")
         await self.trigger_cronjob_message(
             channel_id=channel_id,
             prompt_content=prompt_content,
             sender_name="Cronjob",
             custom_prompt=None,
             metadata={"is_cronjob": True, "is_silent": True},
+            tag=tag,
         )

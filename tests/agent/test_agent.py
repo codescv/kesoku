@@ -164,23 +164,14 @@ async def test_run_shell_command_background_override(tmp_path: Any) -> None:
 
 
 def test_workspace_name() -> None:
-    """Test Session.workspace_name escaping, truncation, and prefix."""
-    import time
-
+    """Test Session.workspace_name returns only the session ID."""
     from kesoku.db import Session
 
     sess1 = Session(id="12345", title="Math Session", created_at=1779264000.0)
-    ts_str = time.strftime("%y%m%d-%H-%M", time.localtime(sess1.created_at))
-    assert sess1.workspace_name == f"{ts_str}_Math_Session_12345"
+    assert sess1.workspace_name == "12345"
 
     sess2 = Session(id="54321", title="Hello/World*?!", created_at=1779264000.0)
-    assert sess2.workspace_name == f"{ts_str}_Hello_World_54321"
-
-    sess3 = Session(id="67890", title="a" * 30, created_at=1779264000.0)
-    assert sess3.workspace_name == f"{ts_str}_{'a' * 20}_67890"
-
-    sess4 = Session(id="99999", title="___", created_at=1779264000.0)
-    assert sess4.workspace_name == f"{ts_str}_session_99999"
+    assert sess2.workspace_name == "54321"
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,5 @@
 """Database Pydantic models for Kesoku AI Agent."""
 
-import re
 import time
 import uuid
 from typing import Any
@@ -49,14 +48,7 @@ class Session(BaseModel):
         Returns:
             An escaped folder name string.
         """
-        escaped = re.sub(r"[^\w\-]", "_", self.title)
-        escaped = re.sub(r"_+", "_", escaped)
-        escaped = escaped.strip("_")
-        if not escaped:
-            escaped = "session"
-        title_escaped = escaped[:20].strip("_")
-        ts_str = time.strftime("%y%m%d-%H-%M", time.localtime(self.created_at))
-        return f"{ts_str}_{title_escaped}_{self.id}"
+        return self.id
 
 
 class AgentMemory(BaseModel):
