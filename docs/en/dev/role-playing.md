@@ -89,3 +89,38 @@ When the agent executes the `play_role(role="coder")` tool call mid-session:
     await db.update_session_system_prompt(session_id, new_sys_prompt)
     ```
 4.  The LLM backend loads the updated system prompt from the session database on its next inference cycle.
+
+---
+
+## 🎨 Persona Creation & Scaffolding Mechanism (`role-creator` Skill)
+
+To facilitate creating custom character personas, Kesoku bundles the `role-creator` skill. It relies on a pure agent-based scaffolding workflow instead of a dedicated script, meaning the agent interactively designs and generates files based on templates.
+
+### 1. Standard Persona Directory Structure
+
+A complete character persona lives under `${AWD}/roles/{name}/` and adheres to the following layout and design specification:
+
+*   **`intro.md`**: Main profile file. Contains the name, traits, speech patterns, and catchphrases, alongside TTS and Image script instructions that guide the LLM to run custom scripts when vocal or visual output is requested.
+*   **`images/`**: Reference avatar or portrait image (if provided), loaded as `--image` when calling the `ai-image` skill to achieve visual consistency (Image-to-Image).
+*   **`audio/`**: Reference WAV recording of the target voice (if provided), used as the base reference audio for TTS voice cloning.
+*   **`scripts/`**: Houses generated wrapper shell scripts:
+    *   `{name}-tts.sh`: Executable script for vocal cloning text-to-speech.
+    *   `{name}-image.sh`: Executable script for rendering character illustrations.
+
+### 2. Scaffolding Workflow by the Agent
+
+When the `role-creator` skill is triggered, the agent executes the following steps within the AWD (Agent Working Directory):
+
+1.  **Interact & Gather**: Ask the user for character parameters (name, core traits, references).
+2.  **Scaffolding Folders**: Create the `roles/{name}/` directory and its subfolders `images/`, `audio/`, and `scripts/`.
+3.  **Process References**:
+    *   Copy and rename the avatar image to `roles/{name}/images/`.
+    *   Copy and rename the WAV reference voice recording to `roles/{name}/audio/`.
+4.  **Write Character Profile (`intro.md`)**:
+    *   Compile the interactive choices into an instruction block and write it to `roles/{name}/intro.md`, highlighting speech and rendering rules.
+5.  **Render Shell Scripts**:
+    *   **TTS Script**: Reference the template `${SKILL_DIR}/template/scripts/asuka-tts.sh`. The agent replaces `asuka` (both lowercase and capitalized) with `{name}`, points `REF_AUDIO` to the copied WAV file, writes the matching `REF_TEXT` transcript, and saves the output to `roles/{name}/scripts/{name}-tts.sh`.
+    *   **Image Script**: Reference the template `${SKILL_DIR}/template/scripts/asuka-image.sh`. The agent replaces name placeholders, points `REF_IMAGE` to the copied avatar file, and saves the output to `roles/{name}/scripts/{name}-image.sh`.
+6.  **Executable Permissions**:
+    *   After writing the shell scripts, the agent must run a system command (e.g. `chmod +x`) to set execute permissions (`0o755`) so they can be executed by the LLM during chat sessions.
+

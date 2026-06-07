@@ -87,57 +87,42 @@ Behind the scenes, the agent detects the intent, calls `play_role(role="coder")`
 
 ## 🎨 Tutorial: Creating a Vivid Character Persona (Voice Clone & Visual Avatar)
 
-You can build a highly customized character with a custom avatar, consistent image generation reference, and custom voice cloning (TTS) output.
+In Kesoku, you don't need to manually create complex role directories or write shell scripts. Kesoku has a built-in **`role-creator` skill** that allows the agent to interactively design, create, and automatically bootstrap new character personas for you!
 
-### Folder Structure
-Create a subdirectory under your `roles/` folder (e.g. `roles/alice/`):
+### 🚀 Creating a Persona Interactively
+
+Simply ask the agent in your chat:
+> *"Help me design a new character named Alice"*
+> or
+> *"Start the role creator tool"*
+
+The agent will activate the `role-creator` skill and guide you through the process step-by-step:
+1. **Core Concept**: Ask for the name, character traits, linguistic style, and catchphrases.
+2. **Avatar Sample (Optional)**: Help you select or upload a reference portrait image for consistent visual generations.
+3. **Voice Sample (Optional)**: Help you provide a 5-15 seconds WAV clip of the target voice along with its transcript to clone a matching TTS voice output.
+
+Once gathered, the agent automatically generates the folder structures, configs, and custom rendering scripts.
+
+---
+
+### 📂 Generated Folder Structure
+
+Once `role-creator` runs, it scaffolds the following structure under your `roles/` directory (using `roles/alice/` as an example):
 
 ```directory
 roles/alice/
-├── intro.md              # Profile, personality traits, and scripting guides
+├── intro.md              # Profile, personality traits, and scripting guides (auto-generated)
 ├── images/
-│   └── character.jpg     # Portrait image of Alice (reference for consistent avatar generation)
+│   └── character.jpg     # Reference portrait image of Alice (if provided, for consistent visual avatar generation)
 ├── audio/
-│   └── character.wav     # Clean WAV recording of Alice's voice (5-15 seconds for voice cloning)
+│   └── character.wav     # Reference WAV audio clip of Alice (if provided, for voice cloning)
 └── scripts/
-    ├── character-tts.sh  # Script to run text-to-speech voice cloning
-    └── character-image.sh # Script to generate character images
+    ├── alice-tts.sh      # Executable script to generate voice cloned TTS (Hiragana/Katakana for Japanese)
+    └── alice-image.sh    # Executable script to generate consistent illustrations of Alice
 ```
 
-### Step 1: Write `intro.md` (Instruction Profile)
-Define Alice's character settings and guide the model on how to speak and output audio/visual files:
+---
 
-```markdown
-# Name
-Alice 🌸
+### 🔄 Persona-Isolated Memories
 
-# Core Profile
-- You are Alice, a energetic junior game designer.
-- Speak informally, using emojis frequently.
-
-# Voice and Visual Guides
-- **Voice Generation (TTS)**: Whenever the user asks you to speak or send a voice message, you MUST run `${AWD}/roles/alice/scripts/character-tts.sh` to generate the output WAV audio file.
-- **Image Generation**: Whenever the user asks for a picture of you, run `${AWD}/roles/alice/scripts/character-image.sh` using `${AWD}/roles/alice/images/character.jpg` as the reference image.
-```
-
-### Step 2: Set up Voice Assets & TTS Script
-1. Record a clean, high-quality audio clip of the target voice (e.g., `roles/alice/audio/character.wav`).
-2. Write a script `roles/alice/scripts/character-tts.sh` that wraps a voice-cloning engine (like Qwen-TTS):
-
-```bash
-#!/bin/bash
-# Usage: character-tts.sh "text to speak" "/path/to/output.wav"
-TEXT=$1
-OUTPUT_PATH=$2
-REF_VOICE="${AWD}/roles/alice/audio/character.wav"
-
-# Execute TTS voice clone
-uv run python -m qwen_tts --text "$TEXT" --ref-audio "$REF_VOICE" --output "$OUTPUT_PATH"
-```
-
-### Step 3: Set up Visual Portrait & Image Script
-1. Place a reference portrait `roles/alice/images/character.jpg`.
-2. Write `roles/alice/scripts/character-image.sh` to run image-to-image stable diffusion or Vertex AI Image Generation, referencing the portrait to maintain look-and-feel consistency.
-
-### Step 4: Persona-Isolated Memories
 Whenever the persona is active, any memories stored under the `"memo"` category are stored privately under that role scope (e.g., `role='alice'`). This prevents different characters from confusing their personal facts and daily diaries.

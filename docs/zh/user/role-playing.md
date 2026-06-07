@@ -87,57 +87,42 @@ uv run kesoku init -c config.toml --overwrite-roles
 
 ## 🎨 教程：如何创建生动的角色人设（集成声音克隆与图像生成）
 
-您可以为 Kesoku 智能体量身定制一个高度个性化的角色，包括专属的头像、图像一致性参考样本，以及原汁原味的声音克隆（TTS）输出。
+在 Kesoku 中，您不需要手动去创建复杂的角色文件夹、编写底层的语音/图像生成脚本。Kesoku 已经内置了 **`role-creator` 技能**，您可以直接让智能体为您交互式地设计、创建并自动初始化一个全新的角色人设！
 
-### 角色文件夹结构
-在您的 `roles/` 目录下创建一个与角色名字相同的子文件夹（例如 `roles/alice/`）：
+### 🚀 使用技能交互式创建角色
+
+您只需在聊天中直接对智能体说：
+> *“帮我设计一个名为 Alice 的新角色”*
+> 或
+> *“启动角色创建工具”*
+
+智能体便会启用 `role-creator` 技能，化身为您的角色设定顾问，交互式地引导您一步步完成创建：
+1. **核心人设设计**：收集角色名称、性格特征、语言口吻及口头禅。
+2. **头像样本（可选）**：引导您提供或上传一张参考头像，用于保持图像生成的一致性。
+3. **声音样本（可选）**：引导您提供一段 5-15 秒的 WAV 语音音频作为基准，并录入转录文本，以便克隆出极其相似的专属 TTS 声音输出。
+
+收集完毕后，智能体将自动在工作区下生成专属的角色文件夹、配置文件以及底层克隆脚本。
+
+---
+
+### 📂 生成的角色文件夹结构
+
+当 `role-creator` 执行完毕后，它会自动在 `roles/` 目录下生成如下结构（以 `roles/alice/` 为例）：
 
 ```directory
 roles/alice/
-├── intro.md              # 角色生平设定、性格规则与生成调用指南
+├── intro.md              # 角色生平设定、性格规则与生成调用指南（自动生成）
 ├── images/
-│   └── character.jpg     #  Alice 的半身照/头像（用作图像生成一致性参考图）
+│   └── character.jpg     # Alice 的头像（若提供，用于图像一致性参考）
 ├── audio/
-│   └── character.wav     # Alice 的清晰语音音频片段（5-15 秒，用作声音克隆基准）
+│   └── character.wav     # Alice 的参考声音频片段（若提供，用于声音克隆基准）
 └── scripts/
-    ├── character-tts.sh  # 执行文本转语音声音克隆的脚本
-    └── character-image.sh # 执行 Alice 图像渲染的脚本
+    ├── alice-tts.sh      # 自动生成的文本转语音声音克隆执行脚本
+    └── alice-image.sh    # 自动生成的 Alice 图像一致性渲染脚本
 ```
 
-### 步骤 1：撰写人设介绍文件 `intro.md`
-在 `intro.md` 中定义 Alice 的性格，并指导大模型在生成语音和图像时，必须通过调用特定的脚本来完成：
+---
 
-```markdown
-# 姓名
-Alice 🌸
+### 🔄 专属的备忘记忆隔离
 
-# 角色人设背景
-- 你是 Alice，一名充满活力的初级游戏策划。
-- 讲话风格偏口语化，喜欢频繁使用各种可爱的表情符号。
-
-# 语音与视觉输出规范
-- **语音生成 (TTS)**：只要用户要求你说话、发语音或者用语音回复，你必须通过运行 `${AWD}/roles/alice/scripts/character-tts.sh` 来生成对应的 WAV 音频文件。
-- **图像生成**：只要用户要求发送你的照片或自拍，你必须通过运行 `${AWD}/roles/alice/scripts/character-image.sh` 进行生成，并参考`${AWD}/roles/alice/images/character.jpg`。
-```
-
-### 步骤 2：添加声音样本与 TTS 脚本
-1. 准备一段 10 秒左右清晰、无背景噪音的 Alice 目标声音音频，保存为 `roles/alice/audio/character.wav`。
-2. 编写包装 Qwen-TTS（或其它声音克隆模型）的 Shell 脚本 `roles/alice/scripts/character-tts.sh`：
-
-```bash
-#!/bin/bash
-# 用法: character-tts.sh "要说的文本内容" "/输出音频绝对路径.wav"
-TEXT=$1
-OUTPUT_PATH=$2
-REF_VOICE="${AWD}/roles/alice/audio/character.wav"
-
-# 执行 TTS 声音克隆
-uv run python -m qwen_tts --text "$TEXT" --ref-audio "$REF_VOICE" --output "$OUTPUT_PATH"
-```
-
-### 步骤 3：添加头像样本与绘图脚本
-1. 将 Alice 的基准半身照图片放入 `roles/alice/images/character.jpg`。
-2. 编写 `roles/alice/scripts/character-image.sh` 脚本，在调用 `ai-image` 绘画技能时传入此半身照，确保生成的画作中 Alice 的面容与发型具有高度一致性。
-
-### 步骤 4：专属的备忘记忆隔离
-当 Alice 角色处于活跃状态时，智能体通过 `update_memory` 写入类别为 `"memo"`（自定义备忘）的记忆时，会自动打上 `role='alice'` 的专属标签，从而与其它角色的记忆完全隔离，防止不同人设之间的互动记忆发生混乱。
+当新角色 Alice 创建成功并处于活跃状态后，智能体通过 `update_memory` 写入类别为 `"memo"`（自定义备忘）的记忆时，会自动打上 `role='alice'` 的专属标签，从而与其它角色的记忆完全隔离，防止不同人设之间的互动记忆发生混乱。

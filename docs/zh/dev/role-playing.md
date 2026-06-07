@@ -89,3 +89,38 @@ CREATE TABLE IF NOT EXISTS channel_roles (
     await db.update_session_system_prompt(session_id, new_sys_prompt)
     ```
 4.  在下一个推理步骤中，LLM 客户端会从会话记录中重新读取更新后的 `system_prompt` 字段，并代入到推理上下文中。
+
+---
+
+## 🎨 角色创建与初始化机制 (`role-creator` 技能)
+
+为了让用户能够便捷地创建自定义人设，Kesoku 捆绑内置了基于纯 Agent 交互生成流程的 `role-creator` 技能。它不需要特定的后台脚本，而是由 Agent 通过交互收集信息后，利用文件操作工具和技能自带的模板进行动态渲染和生成。
+
+### 1. 角色目录规范结构
+
+一个完整的角色人设目录被严格存放在 `${AWD}/roles/{name}/` 下，其标准布局和设计规范如下：
+
+*   **`intro.md`**：角色 profile 主文件。包含名字、性格设定、口头禅，以及最重要的语音（TTS）和绘图（Image）脚本调用规则（指导 LLM 在需要语音/图片输出时必须调用对应的专有 shell 脚本）。
+*   **`images/`**：角色的基准头像或半身照（若提供）。在调用 `ai-image` 绘画技能时作为 `--image` 基础参考图传入，实现图像生成一致性（Image-to-Image）。
+*   **`audio/`**：角色的参考声音音频剪辑（通常为 WAV 格式，若提供）。用于在 `qwen-tts` 声音克隆中作为基准参考音频（Reference Audio）。
+*   **`scripts/`**：存放自动生成的执行脚本：
+    *   `{name}-tts.sh`：文本转语音的专属 Shell 脚本。
+    *   `{name}-image.sh`：角色插图渲染的专属 Shell 脚本。
+
+### 2. 纯 Agent 自动构建流程
+
+当启用 `role-creator` 技能后，智能体将遵循以下构建流在 AWD (Agent Working Directory) 中渲染和拼装角色资产：
+
+1.  **收集和规划**：交互式收集用户需求（名称、性格特点、参考音频/图片）。
+2.  **创建目录结构**：使用文件工具在 AWD 下初始化 `roles/{name}/`，并创建 `images/`、`audio/` 和 `scripts/` 子文件夹。
+3.  **处理参考资产**：
+    *   将用户提供的基准头像图片复制并命名到 `roles/{name}/images/` 下。
+    *   将用户提供的参考音频复制到 `roles/{name}/audio/` 下。
+4.  **生成配置文件 (`intro.md`)**：
+    *   根据交互整理出的人设特质动态组装配置内容并写入 `roles/{name}/intro.md`，重点描述语音与视觉输出规范。
+5.  **渲染 Shell 脚本**：
+    *   **TTS 脚本**：参考模版 `${SKILL_DIR}/template/scripts/asuka-tts.sh` 进行生成。Agent 需要在脚本内容中将名字替换为对应角色的名字，将 `REF_AUDIO` 指向复制后的 WAV 文件，将 `REF_TEXT` 设置为对应的转写文字，保存为 `roles/{name}/scripts/{name}-tts.sh`。
+    *   **Image 脚本**：参考模版 `${SKILL_DIR}/template/scripts/asuka-image.sh` 进行生成。替换名字后，将 `REF_IMAGE` 指向复制后的图片，保存为 `roles/{name}/scripts/{name}-image.sh`。
+6.  **赋予执行权限**：
+    *   所有生成的 `.sh` 脚本在写入后，Agent 必须通过运行命令（例如 `chmod +x`）赋予它们可执行权限（`0o755`），以便在后续推理中，模型可以直接调用该脚本。
+
