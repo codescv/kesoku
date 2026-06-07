@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS channel_roles (
 ```
 
 当用户要求切换角色，或者 Agent 在回合中执行了 `play_role` 工具调用时：
+
 1. 系统会通过 upsert 写入关系映射：
     ```sql
     INSERT OR REPLACE INTO channel_roles (chatbot_id, channel_id, role)
@@ -59,6 +60,7 @@ CREATE TABLE IF NOT EXISTS channel_roles (
 
 ### 2. 线程继承模型 (Discord)
 在 Discord 适配器交互场景下：
+
 *   每次新建会话时，机器人通常会在此文本频道下创建一个新的子线程（Thread）。
 *   该子线程在 Discord 体系中拥有独立的 ID（反映在数据库中为新 `channel_id`）。
 *   为了防止用户每次在线程内都需要重新设置角色，系统会在数据库中查找该会话最近一条用户消息中的 `metadata` 字段，解析出 `parent_channel_id`（即该子线程所属的父级文本频道 ID，如 `#general` 频道的 ID）。
@@ -72,6 +74,7 @@ CREATE TABLE IF NOT EXISTS channel_roles (
 ## 🔄 系统提示词动态重构时序
 
 当 Agent 在会话运行期间执行了 `play_role(role="tifa")` 工具：
+
 1.  工具模块更新数据库的通道角色映射关系：
     ```python
     await db.set_channel_role(chatbot_id, channel_id, "tifa")

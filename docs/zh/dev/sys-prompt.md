@@ -53,6 +53,7 @@
 
 ### 4. 内置功能交互规范
 这些是硬编码在 `prompt.py` 中的提示语，用于训练智能体理解和操作 Kesoku 的独特机制：
+
 *   **`SKILLS_INSTRUCTIONS`**：指导模型如何使用 `list_skills()` 检索可用技能，以及使用 `use_skill(name)` 加载特定技能说明。
 *   **`FILE_SENDING_INSTRUCTIONS`**：指导模型发送文件的特殊语法：`[file: /绝对/文件/路径]`。如果回复文本中包含此格式，聊天平台适配器会自动将其捕获并作为文件附件上传给最终用户。
 *   **`QUESTION_INSTRUCTION`**：指导模型发送多项选择按钮的特殊语法：`[question: <标题> | 选项1 | 选项2]`。

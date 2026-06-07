@@ -29,6 +29,7 @@ kesoku/
 `SKILL.md` 必须以包裹在 `---` 之间的 YAML 元数据块开头，定义技能名称、描述及平台限制。
 
 示例 `skills/my-git-helper/SKILL.md`：
+
 ```yaml
 ---
 name: git-helper
@@ -49,6 +50,7 @@ metadata:
 
 ### 操作系统平台兼容性
 如果某个技能依赖于特定操作系统的二进制工具，可以在 `metadata.platforms` 中进行声明：
+
 *   `platforms: [linux, darwin]`：该技能仅在 Linux 和 macOS 宿主机上加载，在 Windows 上自动隐藏。
 *   省略 `platforms` 属性：默认该技能为跨平台，在所有操作系统上都会被加载。
 *   `platforms: []`：全局禁用此技能。
@@ -61,8 +63,10 @@ Kesoku 为 Agent 提供了两个内置的自治工具来管理技能：
 
 1.  **`list_skills()`**：
     Agent 可以随时调用此工具扫描 `skills/` 目录。系统会识别当前的宿主机操作系统，自动过滤掉不兼容的技能，并向 Agent 返回可用技能的名称与简要介绍列表。
+
 2.  **`use_skill(skill_name)`**：
     当 Agent 判定需要执行与某个技能相关的复杂任务时：
+
     *   它会调用 `use_skill(skill_name="git-helper")`。
     *   该工具读取 `skills/git-helper/SKILL.md` 的全部说明内容。
     *   **绝对路径重定向**：系统会自动在返回的说明头部注入该技能目录的绝对路径，并指示 Agent 在执行 CLI 脚本时使用该绝对路径（例如 `python /absolute/path/to/skills/git-helper/scripts/git_commit.py`），确保脚本执行稳定。

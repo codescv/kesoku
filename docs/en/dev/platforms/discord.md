@@ -19,6 +19,7 @@ The Discord chatbot adapter is implemented inside `src/kesoku/gateway/chatbot/di
 
 ### 1. Thread-Based Session Separation
 To avoid conversation collisions in multi-user environments:
+
 *   When a user posts a message in an override channel (if `auto_thread = true`), the bot creates a Discord thread for the conversation.
 *   The **Thread ID** is mapped directly to the database `channel_id` and `session_id`.
 *   All subsequent messages within that thread share the same session ID.
@@ -30,6 +31,7 @@ To avoid conversation collisions in multi-user environments:
 
 ### 3. Incoming Attachments Processing
 When a user uploads files (photos, code documents, PDFs) in Discord:
+
 1.  The adapter catches the attachments list.
 2.  It resolves the session staging workspace directory (`sessions/<session_workspace_name>`).
 3.  It downloads the attachment bytes and saves them locally with sanitized filenames.
@@ -48,12 +50,14 @@ Kesoku uses Discord's `discord.ui.View` to inject interactive widgets:
 
 ### 1. `MessageHeaderView`
 This persistent view is attached to the very first message header of each session thread. It contains three emoji-only buttons:
+
 *   **View Trajectory (`📜`)**: Triggers an async generation of an HTML trace trajectory file using `LcmHtmlReporter` and posts it to the thread as a temporary file.
 *   **Stop Turn (`🛑`)**: Cancels the worker's active `asyncio.Task` loop, flags the database prompt as `interrupted`, and deletes any intermediate thoughts or tool logs from the Discord UI.
 *   **Clear Session (`♻️`)**: Stops the worker task, deletes the session SQLite history, recursively removes the session directory from the disk, and deletes the thread from the channel.
 
 ### 2. `QuestionView` (Dynamic Choices Buttons)
 When the adapter encounters the syntax `[question: What is 1+1? || 2 | 3]`, it splits the content:
+
 *   Renders the text block.
 *   Appends a `QuestionView` containing buttons representing `"2"` and `"3"`.
 *   Once a button is clicked, it disables all options to prevent duplicate responses, posts a confirmation message, and submits the choice directly to the Gateway Broker as a new `ROLE_USER` prompt.

@@ -46,6 +46,7 @@ class SkillManifest(BaseModel):
 
 ### 1. 路径越界防御 (Path Safety)
 为了防止恶意输入导致的敏感路径越界攻击（例如模型企图读取 `use_skill(skill_name="../../../../etc")`），`_resolve_skill_dir` 进行了严格的安全检测：
+
 *   **名称过滤**：技能标识符强制使用正则过滤：`^[a-zA-Z0-9_\-]+$`。
 *   **前缀匹配**：系统解析真实规范的绝对路径，并确认基础 `skills/` 目录是该绝对路径的唯一公共前缀：
     ```python
@@ -55,22 +56,26 @@ class SkillManifest(BaseModel):
 
 ### 2. 元数据解析 (Manifest Parsing)
 解析器 `parse_skill_markdown()` 用于抓取 Markdown 文件顶部的 YAML 配置块：
+
 *   利用正则检索文件头部包裹在三个短横线（`---`）之间的块。
 *   使用 `yaml.safe_load()` 安全解析该块，并映射为 `SkillManifest` 实例。
 *   若解析失败，系统会记录日志并跳过该技能文件夹。
 
 ### 3. 操作系统平台匹配
 在运行期间，系统会将宿主机内核类型标准化为 `"linux"`、`"darwin"` 或 `"windows"`。执行 `list_skills()` 时：
+
 *   若元数据中声明了 `platforms` 列表且当前系统不在其中，该技能将被过滤隐藏。
 *   若 `platforms` 为 `None`，代表兼容所有平台。
 *   若 `platforms` 为 `[]` 空列表，该技能在所有系统上均被隐藏。
 
 ### 4. 权限与功能审计
 在加载具体技能前，管理器会核对系统配置，判定宿主机是否具备运行该技能所需的权限：
+
 *   例如，若技能清单中要求了 `"run_shell_command"`，但 `config.toml` 中设置了 `cfg.shell.enabled = false`，系统将直接抛出 `PermissionError` 拒绝加载。
 
 ### 5. 绝对路径重定向
 当调用 `get_skill(skill_name)` 返回技能内容时：
+
 *   管理器获取该技能子文件夹的绝对路径。
 *   在 Markdown 文本最前部追加一段绝对路径环境变量提示语：
     ```markdown

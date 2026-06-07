@@ -24,6 +24,7 @@ async def calculate_sum(a: int, b: int) -> int:
 
 ### Docstring Parsing & Schema Extraction
 When initializing LLM backends (like `GeminiLLM` or `ClaudeLLM`), the client reads the registered tools and parses their signatures:
+
 *   **Descriptions**: Extracted from the function's docstring (using Google-style conventions).
 *   **Argument Types**: Extracted from Python type annotations (e.g. `a: int`).
 *   **JSON Schema**: Automatically generated and transmitted to the LLM (as `FunctionDeclaration` blocks for Gemini, or `Tool` schemas for Claude).
@@ -50,6 +51,7 @@ Tool execution is managed by the `ToolRunner` class (`src/kesoku/agent/tool_runn
 
 ### 1. Interruption Check
 Before executing the tool, `ToolRunner` evaluates the `is_interrupted` callback:
+
 ```python
 if is_interrupted and is_interrupted():
     # Abort execution immediately and return aborted status message
@@ -58,16 +60,19 @@ This ensures that if a new user prompt arrived in the queue while the agent was 
 
 ### 2. Parameter Validation
 Using `inspect.signature(tool_func)`, the runner checks that all required arguments (parameters without default values) were emitted by the LLM:
+
 *   If a parameter named `context` exists in the signature, the runner automatically injects the current `ToolContext` object (which holds the active `gateway`, `session_id`, and `original_msg_id`).
 *   If any arguments are missing due to LLM parsing errors or truncation, it throws a descriptive validation error rather than attempting execution.
 
 ### 3. Thread Safe Subprocesses
 The runner supports both synchronous and asynchronous functions:
+
 *   **Async Functions**: Executed directly via `await tool_func(**kwargs)`.
 *   **Sync Functions**: Wrapped and run in a separate threadpool using `asyncio.to_thread(tool_func, **kwargs)` to prevent blocking the event loop.
 
 ### 4. Message Packaging
 All output values and exceptions are caught, serialized to strings, and packaged into a standard database `Message` object:
+
 *   **Role**: `MessageRole.TOOL` (`"tool"`)
 *   **Type**: `MessageType.TOOL_RESULT` (`"tool_result"`)
 *   **Status**: `MessageStatus.RESPONDED`

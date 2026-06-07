@@ -22,13 +22,16 @@ background_threshold_seconds = 300.0
 
 1.  **`enabled`** (boolean, default: `true`):
     Enables or disables the command execution tool entirely. If set to `false`, the agent will not be able to execute any command line inputs.
+
 2.  **`use_shell`** (boolean, default: `true`):
     If `true`, command execution uses `subprocess.Popen(..., shell=True)`. This allows operators like pipes (`|`), redirection (`>`), and environment expansions.
+
 3.  **`mode`** (string, default: `"blocklist"`):
     *   `"blocklist"`: Commands are allowed by default, unless they match one of the regex patterns in `blocklist_patterns`.
     *   `"allowlist"`: Commands are blocked by default, unless they match one of the regex patterns in `allowlist_patterns`.
 4.  **`allowlist_patterns`** / **`blocklist_patterns`** (list of strings):
     List of regular expressions used to inspect the full command string.
+
 5.  **`background_threshold_seconds`** (float, default: `300.0`):
     The maximum execution duration allowed for a command in the foreground. If a command runs longer than this threshold, it is automatically safely detached into a background execution job.
 
@@ -37,6 +40,7 @@ background_threshold_seconds = 300.0
 ## ⚙️ How Command Inspection Works
 
 When the agent attempts to run a terminal command:
+
 1.  The command string is stripped of leading/trailing whitespaces.
 2.  In **Blocklist Mode**:
     *   The command is evaluated against each pattern in `blocklist_patterns`.

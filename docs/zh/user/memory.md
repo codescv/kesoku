@@ -12,22 +12,26 @@ Kesoku 将所有的聊天记录、绑定设定和 Agent 的记忆内容都存储
 
 ### 1. 列出所有活跃会话
 查询数据库中记录的所有会话，并展示它们的创建时间、绑定角色以及已同步的消息条数：
+
 ```bash
 uv run kesoku chat -c config.toml -l
 ```
 
 ### 2. 打印会话聊天历史
 在终端中以美观、带色彩的 Rich 格式打印出指定会话的完整历史对话轨迹：
+
 ```bash
 uv run kesoku chat -c config.toml --show-history <session_id>
 ```
 
 ### 3. 恢复会话进行聊天
 在已有的特定会话中继续对话：
+
 ```bash
 uv run kesoku chat -c config.toml -r <session_id> "我们刚才提到的数字是几？"
 ```
 或者，无需复制 ID，快速恢复**最近一次活跃**的会话：
+
 ```bash
 uv run kesoku chat -c config.toml -z "继续之前的任务。"
 ```
@@ -42,6 +46,7 @@ Kesoku 内置了一个长期记忆模块，允许 Agent 跨会话沉淀和读取
 
 ### 1. 列出记忆条目
 列出指定分类下的所有记忆（可选择过滤特定角色）：
+
 ```bash
 # 列出默认角色 (default) 在 'user_preference' 分类下的所有记忆
 uv run kesoku memory list --category user_preference --role default
@@ -49,18 +54,21 @@ uv run kesoku memory list --category user_preference --role default
 
 ### 2. 查看具体记忆内容
 查看单个记忆 Key 的详细内容与描述：
+
 ```bash
 uv run kesoku memory view --category user_preference --key user_timezone --role default
 ```
 
 ### 3. 添加或更新记忆
 手动录入或修改一条记忆记录：
+
 ```bash
 uv run kesoku memory update --category user_preference --key user_timezone --title "用户时区" --content "Asia/Tokyo" --role default
 ```
 
 ### 4. 删除记忆
 删除指定的记忆条目：
+
 ```bash
 uv run kesoku memory delete --category user_preference --key user_timezone --role default
 ```

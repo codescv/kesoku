@@ -10,12 +10,14 @@ To register Kesoku as a startup background service:
 
 ### 1. User-Level Service (Recommended)
 This runs under your user account scope and does not require administrative root/sudo permissions:
+
 ```bash
 uv run kesoku service install -c private/config.toml
 ```
 
 ### 2. System-Level Service (Global)
 This runs globally on the OS and requires administrative `sudo` permissions to install:
+
 ```bash
 sudo uv run kesoku service install --system -c private/config.toml
 ```
@@ -25,12 +27,14 @@ By default, the service installer automatically inherits these environment varia
 `PATH`, `HTTP_PROXY`, `HTTPS_PROXY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `DISCORD_TOKEN`.
 
 To manually append or override environment variables for the service daemon, use the `-e` / `--env` options (which can be declared multiple times):
+
 ```bash
 uv run kesoku service install -c config.toml -e GEMINI_API_KEY=your_api_key -e CUSTOM_PORT=8080
 ```
 
 ### 🔍 Dry-Run Preview
 To preview the generated config file contents (e.g. the systemd `.service` file or plist structure) without writing to the disk:
+
 ```bash
 uv run kesoku service install --dry-run -c config.toml
 ```
@@ -58,6 +62,7 @@ uv run kesoku service restart
 
 ### Query Active Status
 Shows whether the daemon is active, running, or failed, along with its process ID:
+
 ```bash
 uv run kesoku service status
 ```
@@ -74,18 +79,21 @@ You can follow or inspect logs directly through the CLI:
 
 ### Show Recent Logs
 Display the last 50 log lines:
+
 ```bash
 uv run kesoku service logs
 ```
 
 ### Stream Live Logs
 Follow logs in real-time (similar to `tail -f`):
+
 ```bash
 uv run kesoku service logs -f
 ```
 
 ### Limit Log Lines
 Specify how many lines of history to display:
+
 ```bash
 uv run kesoku service logs -n 100
 ```
@@ -94,6 +102,7 @@ uv run kesoku service logs -n 100
 
 ## 🗑️ Uninstalling the Service
 To stop the service, disable boot-time autostart, and remove all service configuration files cleanly from your system:
+
 ```bash
 uv run kesoku service uninstall
 ```

@@ -53,6 +53,7 @@ The prompt is constructed dynamically by `build_sys_prompt()` inside `src/kesoku
 
 ### 4. Built-in Instructions
 These are static, hardcoded instructions inside `prompt.py` that train the agent on how to use Kesoku's features:
+
 *   **`SKILLS_INSTRUCTIONS`**: Guides the agent on how to discover custom instruction files by calling `list_skills()` and `use_skill(name)`.
 *   **`FILE_SENDING_INSTRUCTIONS`**: Teaches the agent the file-sending markup syntax: `[file: /absolute/path/to/file]`. If this string is matched in outgoing text, chatbot adapters will upload the file as a native attachment.
 *   **`QUESTION_INSTRUCTION`**: Teaches the agent the multiple-choice button markup syntax: `[question: <title> | choice1 | choice2]`.

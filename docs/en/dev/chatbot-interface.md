@@ -10,6 +10,7 @@ The base class is defined as `Chatbot(ABC)` in `src/kesoku/gateway/chatbot/base.
 
 ### 1. Command Registry
 Every chatbot adapter inherits a standard `CommandRegistry` populated with platform-agnostic commands:
+
 *   `/clear` / `/reset`: Terminate the active session, stop tasks, and delete directories.
 *   `/status`: Display CPU uptime, turns processed, context window size, and execution speed metrics.
 *   `/compact`: Manually force lossless context pruning.
@@ -20,6 +21,7 @@ The adapter checks for incoming commands inside `handle_command(text, reply_func
 
 ### 2. Subscriber Event Loop
 When `start()` is called, the adapter runs a continuous listener loop subscribing to outbound events:
+
 ```python
 async for msg in self.gateway.listen(
     exclude_statuses=[MessageStatus.DELIVERED, MessageStatus.PENDING_AGENT, MessageStatus.PROCESSING],
@@ -57,6 +59,7 @@ If the message contains markdown tables, the template method intercepts them, re
 
 ### 2. Content Block Parsing
 Using `parse_message_content()`, the template splits the content into segment blocks:
+
 *   `{"type": "text", "content": "..."}`
 *   `{"type": "file", "path": "..."}`
 *   `{"type": "voice", "path": "..."}`
@@ -101,6 +104,7 @@ class SlackChatbot(Chatbot):
 
 ### Step 2: Override Hook Controls (Optional)
 If your platform supports typing indicators or card updates, override these hooks:
+
 *   `supports_intermediate_messages()`: Return `true` if the platform supports collapsible cards or inline updates for thoughts/tool logs.
 *   `pre_ingest_hook()`: Run setup actions (like starting the Slack typing spinner) when an inbound prompt is received.
 *   `on_message_delivered()`: Run cleanup actions (like stopping the typing spinner) when delivery finishes.

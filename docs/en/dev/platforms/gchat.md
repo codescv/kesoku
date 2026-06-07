@@ -17,6 +17,7 @@ The Google Chat chatbot adapter is implemented inside `src/kesoku/gateway/chatbo
 
 ### 1. Asynchronous Pub/Sub Pull Listener
 Unlike typical HTTP webhook-based bots which require incoming web traffic, public DNS records, and SSL certs, Kesoku uses a firewall-friendly **Pub/Sub Pull Subscription**:
+
 *   The adapter starts a background listener thread using `google.cloud.pubsub_v1.SubscriberClient`.
 *   It subscribes to the subscription ID configured in `config.toml` (`[google_chat].subscription_id`).
 *   When a user interacts with the chatbot (sends a DM, mentions it in a space, or clicks a card button), Google Workspace posts an event to the Pub/Sub topic, which is pulled asynchronously by the adapter.
@@ -42,6 +43,7 @@ Since Google Chat does not support editing previously sent raw text messages in-
 
 ### 1. Foldable Thoughts Card
 While the agent is thinking and running tools:
+
 *   The adapter posts an intermediate Card V2 message.
 *   Thoughts, tool calls, and system notifications are grouped inside a single collapsible section titled **"Thoughts & Tools"** (built inside `cards.py`):
     *   **Thoughts**: Displayed under a collapsible panel widget.

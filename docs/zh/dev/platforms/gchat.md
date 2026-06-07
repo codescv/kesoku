@@ -17,6 +17,7 @@ Google Chat 适配器核心代码存放于 `src/kesoku/gateway/chatbot/google_ch
 
 ### 1. 基于 GCP Pub/Sub 的异步消息拉取循环
 不同于传统的 HTTP Webhook 机器人必须接收外部 HTTP 请求并暴露公网 IP/域名，Kesoku 采用了免防火墙配置的 **Pub/Sub 异步拉取机制**：
+
 *   适配器在启动时利用 `google.cloud.pubsub_v1.SubscriberClient` 开启一个后台消息接收协程。
 *   持续拉取在 `config.toml` 中配置的 Pull 订阅号 (`[google_chat].subscription_id`)。
 *   当用户与机器人对话或在群组空间中提及机器人时，Google Chat API 会将事件推送至 GCP 主题，进而由适配器异步拉取并解析为统一的 `InboundMessageDTO`，推送至网关处理。
@@ -41,6 +42,7 @@ Google Chat 适配器核心代码存放于 `src/kesoku/gateway/chatbot/google_ch
 
 ### 1. 思考步骤折叠卡片 (Foldable Thoughts Card)
 在 Agent 进行推理和调用工具期间：
+
 *   适配器会向聊天空间投递一张可折叠的卡片。
 *   所有的中间思考逻辑（Thoughts）、工具调用声明（Tool Calls）及系统通知会被打包到一个名为 **"Thoughts & Tools"** 的折叠面板中：
     *   **思维链**：放置于折叠卡片组件中。

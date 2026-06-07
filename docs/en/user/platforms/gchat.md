@@ -30,6 +30,7 @@ Google Chat publishes interaction events to a Pub/Sub topic. Kesoku pulls events
 
 ### Step B: Grant Publisher Permission to Google Chat
 Google Chat needs permission to publish events to your newly created topic.
+
 1. On your `kesoku-chat-events` topic page, click **Show Info Panel** (top right).
 2. Under the **Permissions** tab, click **Add Principal**.
 3. In **New principals**, enter the official Google Chat API system service account:
@@ -68,10 +69,12 @@ To do this, configure your local user identity (which runs Kesoku) to impersonat
 
 #### 1. Enable IAM Credentials API
 Ensure the **IAM Service Account Credentials API** is enabled in your GCP project:
+
 - Navigate to **APIs & Services > Library** and enable `iamcredentials.googleapis.com`.
 
 #### 2. Grant Impersonation Permission to your Corporate User
 Grant your personal corporate email address the **Service Account Token Creator** role (`roles/iam.serviceAccountTokenCreator`) on the service account:
+
 1. In **IAM & Admin > Service Accounts**, click on `kesoku-chat-agent`.
 2. Click the **Permissions** tab.
 3. Click **Grant Access**.
@@ -81,6 +84,7 @@ Grant your personal corporate email address the **Service Account Token Creator*
 
 #### 3. Authenticate Local Environment via CLI (Option A - Zero Code Changes)
 Run the following command on your local development machine to log in and automatically configure all local GCP SDK libraries to impersonate the bot service account:
+
 ```bash
 gcloud auth application-default login --impersonate-service-account=kesoku-chat-agent@YOUR_PROJECT_ID.iam.gserviceaccount.com
 ```
@@ -126,11 +130,13 @@ When a user clicks a button on a Card, Google Chat sends a `CARD_CLICKED` event 
   https://www.googleapis.com/auth/chat.bot
   ```
   This scope authorizes the bot to act as itself inside any space it has been added to.
+
 - **Zero User Login Screen**: Unlike other Google Workspace integrations (like Sheets or Drive) that require user OAuth consent screens and individual authorization tokens, Google Chat apps using App Authentication (`chat.bot` scope) authorize instantly as soon as the bot is invited/added to the space by a user. No user authorization flow is needed!
 
 ### Q: Do I need to grant the Service Account or the local user special IAM permissions to send messages?
 
 **No.** 
+
 1. **For the Service Account**: In the Google Chat ecosystem, a chatbot app automatically inherits permissions to read/write messages inside any Google Chat Space or Thread it has been invited or added to. No custom or extra GCP IAM roles (such as a "Google Chat Writer" role) need to be assigned to the Service Account within the GCP console for message delivery.
 2. **For the local user (Impersonation context)**: Your personal corporate user account does not need any Google Chat API permissions. When you run `gcloud auth application-default login --impersonate-service-account=...`, the Google Cloud IAM token service verifies your `Service Account Token Creator` permission, logs you in, and generates temporary security tokens representing the Service Account itself. To the Chat API, the caller is the Service Account (the App/Bot), which has permissions to interact naturally inside its spaces.
 

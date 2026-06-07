@@ -20,6 +20,7 @@ kesoku/
 ```
 
 When a session resolves to a specific role:
+
 1. Kesoku reads the corresponding `roles/<role_name>/intro.md` file.
 2. It injects the file content into the **Active Persona** section of the compilation system prompt.
 3. The model adopts this persona for all subsequent turns in that channel.
@@ -43,16 +44,19 @@ touch roles/helper/intro.md
 ```
 
 Add the instructions for the role. E.g.:
+
 ```markdown
 You are a helpful programming assistant. You speak concisely and always write clean, well-commented Python code.
 ```
 
 ### Step 3: Initialize/Overwrite Roles
 If you are initializing your workspace for the first time, make sure roles are generated:
+
 ```bash
 uv run kesoku init -c config.toml
 ```
 To force-overwrite or restore default roles, use:
+
 ```bash
 uv run kesoku init -c config.toml --overwrite-roles
 ```
@@ -72,6 +76,7 @@ To change the persona of the current channel, simply instruct the agent to do so
 
 ### Behind the Scenes
 Upon receiving the command:
+
 1. The agent detects the intent and calls the tool: `play_role(role="tifa")`.
 2. The tool verifies that `roles/tifa/intro.md` exists.
 3. The tool binds the role `"tifa"` to the current `(chatbot_id, channel_id)` inside the SQLite database.

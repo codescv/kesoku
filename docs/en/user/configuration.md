@@ -22,16 +22,19 @@ Here is a comprehensive breakdown of all settings blocks in `config.toml`:
 
 ### 1. `[workspace]`
 Manages paths for the SQLite database, logs, and custom capability folders.
+
 *   **`db_path`** (string, default: `"kesoku.db"`): Relative or absolute path to the SQLite persistence file.
 *   **`skills_dir`** (string, default: `"skills"`): Folder where custom skills (`SKILL.md`) are placed.
 *   **`sessions_dir`** (string, default: `"sessions"`): Workspace directory where per-session raw logs, trajectories, and attachments are staged.
 
 ### 2. `[agent]`
 Defines active agent features.
+
 *   **`llm`** (string, default: `"gemini"`): The active LLM engine provider. Supported values are `"gemini"` and `"claude"`.
 
 ### 3. `[gemini]`
 Configures Google GenAI/Gemini integrations.
+
 *   **`model_name`** (string, default: `"gemini-2.5-flash"`): The model ID.
 *   **`auth_mode`** (string, default: `"api_key"`): Authentication method. Use `"api_key"` for raw API Keys, or `"vertex"` to run via Google Cloud Vertex AI (which uses Application Default Credentials).
 *   **`api_key`** (string): The API key (if `auth_mode = "api_key"`). If empty, falls back to the `GEMINI_API_KEY` environment variable.
@@ -41,12 +44,14 @@ Configures Google GenAI/Gemini integrations.
 
 ### 4. `[claude]`
 Configures Anthropic's Claude models hosted on Google Cloud Vertex AI.
+
 *   **`model_name`** (string, default: `"claude-3-5-sonnet@20241022"`): Vertex model ID.
 *   **`project_id`** (string): Google Cloud Project ID.
 *   **`location`** (string, default: `"us-east5"`): Vertex AI region.
 
 ### 5. `[shell]`
 Defines safety configurations for the shell command tool runner execution.
+
 *   **`enabled`** (boolean, default: `true`): Whether the agent is allowed to execute shell commands on the host machine.
 *   **`mode`** (string, default: `"blocklist"`): Safe patterns evaluation strategy. Set to `"blocklist"` or `"allowlist"`.
 *   **`allowlist_patterns`** (list of regex, default: echo/pwd/git/uv/etc.): Regexes matching commands that are allowed to run.

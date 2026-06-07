@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS channel_roles (
 ```
 
 Whenever a user requests a role switch or the agent executes the `play_role` tool:
+
 1.  The mapping is upserted into `channel_roles`:
     ```sql
     INSERT OR REPLACE INTO channel_roles (chatbot_id, channel_id, role)
@@ -59,6 +60,7 @@ Queries the `channel_roles` table directly for matching `(chatbot_id, channel_id
 
 ### 2. Thread Inheritance (Discord)
 For Discord bot sessions:
+
 *   A new conversational thread is created automatically by the chatbot adapter.
 *   This thread has its own unique Discord ID (`channel_id` in database).
 *   Instead of requiring the user to set the role for every single thread, the database checks the last user message metadata in the active session for `parent_channel_id`.
@@ -72,6 +74,7 @@ If no channel or parent channel is bound, the executor falls back to `"default"`
 ## 🔄 System Prompt Rebuilding Sequence
 
 When the agent executes the `play_role(role="tifa")` tool call mid-session:
+
 1.  The database helper updates the channel role binding:
     ```python
     await db.set_channel_role(chatbot_id, channel_id, "tifa")

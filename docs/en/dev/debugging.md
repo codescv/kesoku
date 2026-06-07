@@ -7,6 +7,7 @@ This guide details the debugging resources, logging structure, direct database i
 ## 📜 LLM Turn Trajectory Logging (`TurnLogger`)
 
 To audit LLM prompts, tool execution arguments, and reasoning trajectories, Kesoku registers a `TurnLogger` (`src/kesoku/agent/turn_logger.py`):
+
 *   **Log Location**: Saved sequentially under the session's workspace staging directory: `sessions/<session_workspace_name>/llm-turn-{idx}.log.yaml`.
 *   **Format**: Logged as a structured YAML document for both human-readability and script parsing.
 
@@ -66,6 +67,7 @@ sqlite3 kesoku.db
 ## 📜 HTML Trace Trajectory Viewer (`LcmHtmlReporter`)
 
 When debugging complex multi-turn trajectories, developers can review an interactive browser trace:
+
 *   **Source File**: `src/kesoku/gateway/chatbot/lcm_reporter.py`
 *   **Mechanism**: The reporter reads the session messages database, formats them into a dark-mode styled HTML page, and saves it inside the session's workspace.
 *   **Trigger**:

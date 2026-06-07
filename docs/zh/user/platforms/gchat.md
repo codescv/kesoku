@@ -30,6 +30,7 @@ Google Chat 将用户交互事件发布到 Pub/Sub 主题（Topic）中，Kesoku
 
 ### 步骤 B：向 Google Chat 授权发布权限
 Google Chat 服务需要获取向您刚刚创建的 Pub/Sub 主题发布消息的权限。
+
 1. 在 `kesoku-chat-events` 主题详情页面中，点击右上角的 **显示信息面板** (Show Info Panel)。
 2. 在 **权限** 选项卡下，点击 **添加成员** (Add Principal)。
 3. 在 **新的成员** 输入框中，填入 Google Chat API 的官方系统服务账号：
@@ -67,10 +68,12 @@ Kesoku 使用服务账号进行 GCP 接口的权限验证（包括拉取 Pub/Sub
 
 #### 1. 启用凭证 API
 确保您的 GCP 项目启用了 **IAM Service Account Credentials API**：
+
 - 在 **API 和服务 > 库** 中搜索并启用 `iamcredentials.googleapis.com`。
 
 #### 2. 向您的企业账号授权模拟权限
 向您的个人企业邮箱授予该服务账号的 **Service Account Token Creator** 角色权限：
+
 1. 在 **IAM & 管理 > 服务账号** 页面中，点击刚刚创建的 `kesoku-chat-agent` 服务账号。
 2. 切换到 **权限** (Permissions) 选项卡。
 3. 点击 **授予访问权限** (Grant Access)。
@@ -80,6 +83,7 @@ Kesoku 使用服务账号进行 GCP 接口的权限验证（包括拉取 Pub/Sub
 
 #### 3. 本地终端完成认证
 在本地开发环境或服务器上运行以下命令登录，它将自动配置本地 GCP SDK，临时代表服务账号执行身份验证：
+
 ```bash
 gcloud auth application-default login --impersonate-service-account=kesoku-chat-agent@YOUR_PROJECT_ID.iam.gserviceaccount.com
 ```
@@ -125,10 +129,12 @@ gcloud auth application-default login --impersonate-service-account=kesoku-chat-
   https://www.googleapis.com/auth/chat.bot
   ```
   该权限范围授权机器人在已被邀请加入的群组或空间中以自己（App）的名义发送消息。
+
 - **免登录授权**：与 Sheets 或 Drive 等需要用户弹出 OAuth 授权同意书并生成用户级 Token 的应用不同，Google Chat App 在被用户邀请/加入到空间的那一刻起，就已经获取了合法的 `chat.bot` 权限。整个过程中不需要任何终端用户的二次登录确认。
 
 ### 问：是否需要赋予服务账号特殊的 IAM 读写角色权限来发送消息？
 
 **不需要。**
+
 1. **服务账号侧**：在 Google Chat 生态中，聊天应用只要被管理员/用户邀请进了对应的空间 (Space) 或线程，就已经自动继承了读写消息的完整权限。您无需在 GCP IAM 中为其再分配类似于“Google Chat 写入者”等任何额外的特殊云端写角色。
 2. **本地模拟用户侧**：您的个人企业账号本身不需要任何 Google Chat API 权限。当您执行服务账号模拟登录时，GCP 会验证您的 `Service Account Token Creator` 权限并颁发临时 Token。对于 Chat 接口而言，调用者身份依旧是服务账号（即机器人应用本身），它完全有权在其所在的会话空间中收发消息。

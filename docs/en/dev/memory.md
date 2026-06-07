@@ -93,6 +93,7 @@ Different categories of memory require distinct access privileges and lifecycles
 
 ### 6.1 Lifecycle Boot Sequence
 When a new conversational session starts or resumes:
+
 1. **Fetch Dynamic Context**: The Kesoku framework queries the SQLite database:
    ```sql
    SELECT category, key, title, content FROM agent_memories WHERE category IN ('preference', 'rule');
@@ -112,6 +113,7 @@ When a new conversational session starts or resumes:
 
 ### 6.2 Preventing Key Duplication (Fuzzy Guardrail)
 To prevent the LLM from creating redundant keys (e.g., `standard_japanese` and `standard_japan`), the `update_memory` tool implements **Fuzzy Key Matching**:
+
 1. Clean the input key: `lowercase`, strip whitespace, and replace spaces with underscores.
 2. Check existing keys under the category using `difflib.get_close_matches` with a threshold of `0.8`.
 3. If an existing key matches, redirect the update to the existing key and output an informative warning log to the agent.
@@ -121,6 +123,7 @@ To prevent the LLM from creating redundant keys (e.g., `standard_japanese` and `
 ## 7. Migration Plan (Legacy Markdown to DB)
 
 To transition from the legacy `memory/*.md` system:
+
 1. Run a setup script to execute the SQLite migration (DDL creation).
 2. Read legacy files:
    - Extract sections from `memory/User.md` and seed them as `preference` records.
@@ -217,6 +220,7 @@ CREATE TABLE IF NOT EXISTS agent_memories (
 
 ### 3.2 Narrative Timelines (`cross_session_contexts`)
 Contains the consolidated chronological milestone narrative per persona, updated asynchronously.
+
 ```sql
 CREATE TABLE IF NOT EXISTS cross_session_contexts (
     role TEXT PRIMARY KEY,          -- Active roleplay persona key
@@ -244,6 +248,7 @@ Instead, Kesoku employs a hybrid injection strategy: **Sync Guidelines** are inj
 
 #### Case A: Bootstrap Turn (With User Preferences)
 Both Guidelines and Preferences are injected:
+
 ```markdown
 [Background Context: Sync Guidelines]
 ======
@@ -264,6 +269,7 @@ Both Guidelines and Preferences are injected:
 
 #### Case B: Non-Bootstrap Turn (With User Preferences)
 Only Preferences are injected:
+
 ```markdown
 [User Preferences]
 - Preferred Programming Language: Python
@@ -456,9 +462,11 @@ The context injection will run immediately before system prompts are constructed
 4. **Evaluate Timeout & Threshold**:
    - **Case A (Not Timed Out or Under Threshold)**:
      If `now - updated_at <= 30 minutes` OR `tokens(new_messages) <= 4000`:
+
      - Inject `[Stored Context]` + `[All messages since updated_at belonging to other sessions]`.
    - **Case B (Timed Out & Lock Idle - Triggers Summarization)**:
      If `now - updated_at > 30 minutes` AND `tokens(new_messages) > 4000`:
+
      - Inject `[Stored Context]` + `[All non-current-session messages in the last 30 minutes (or last N turns)]`.
      - Attempt to claim the lock via `claim_cross_session_context_for_update(active_role)`.
      - If lock is claimed successfully, spawn the background task (note: the background task **must** include the current session's history to ensure its progress is compiled into the persistent memory):

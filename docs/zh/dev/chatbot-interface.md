@@ -10,6 +10,7 @@
 
 ### 1. 指令注册中心 (Command Registry)
 每个适配器在实例化时，都会自动注册一组通用的斜杠（`/`）系统控制指令：
+
 *   `/clear` / `/reset`：终止当前的活动任务，清除 SQLite 消息数据，并删除本地会话暂存文件夹。
 *   `/status`：查询系统开机运行时间、处理的回合数、当前上下文 Token 窗口占比以及平均耗时指标。
 *   `/compact`：手动强制触发一次上下文压缩裁剪。
@@ -20,6 +21,7 @@
 
 ### 2. 订阅者事件循环 (Subscriber Loop)
 当适配器启动 `start()` 时，它会开启一个长轮询协程任务，订阅网关分发的外部事件：
+
 ```python
 async for msg in self.gateway.listen(
     exclude_statuses=[MessageStatus.DELIVERED, MessageStatus.PENDING_AGENT, MessageStatus.PROCESSING],
@@ -57,6 +59,7 @@ async for msg in self.gateway.listen(
 
 ### 2. 内容段落解析
 模板方法利用 `parse_message_content()` 将消息剥离为以下段落单元，进行分别处理：
+
 *   `{"type": "text", "content": "..."}`
 *   `{"type": "file", "path": "..."}`
 *   `{"type": "voice", "path": "..."}`
@@ -101,6 +104,7 @@ class SlackChatbot(Chatbot):
 
 ### 步骤 2：覆盖控制 Hook (可选)
 如果需要处理复杂的输入中状态 (Typing spinner) 或卡片更新动作，可以覆盖重写以下内置回调方法：
+
 *   `supports_intermediate_messages()`：如果平台支持在同一张卡片内更新中间步骤或日志，返回 `true`。
 *   `pre_ingest_hook()`：在用户发起会话、消息入队前运行（例如立即开启输入状态动画）。
 *   `on_message_delivered()`：在消息发送成功、转换为 DELIVERED 状态后运行（例如关闭输入状态动画，或发送会话计时统计）。

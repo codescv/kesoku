@@ -7,6 +7,7 @@
 ## 📜 LLM 推理回合轨迹日志 (`TurnLogger`)
 
 为了便于开发者审计发送给大模型的 Prompt 提示词上下文、分析工具调用的执行参数及模型推理逻辑，系统内置了回合日志记录器 `TurnLogger`（位于 `src/kesoku/agent/turn_logger.py`）：
+
 *   **日志位置**：顺序保存在当前会话的 Staging 工作目录中：`sessions/<workspace_name>/llm-turn-{idx}.log.yaml`。
 *   **文件格式**：序列化为结构化 YAML 文件，保证了高可读性，同时方便自动化脚本提取分析。
 
@@ -66,6 +67,7 @@ sqlite3 kesoku.db
 ## 📜 交互式 HTML 推理轨迹查看器 (`LcmHtmlReporter`)
 
 为了更直观地回溯复杂的长对话执行细节，Kesoku 提供了可视化交互网页报告：
+
 *   **核心模块**：`src/kesoku/gateway/chatbot/lcm_reporter.py`。
 *   **实现原理**：该模块读取 SQLite 中的消息历史，经过渲染编译，在会话暂存目录下输出一个带暗黑模式、包含工具调用与思维折叠展示的单页面 `.html` 可视化执行轨迹报告。
 *   **查看方式**：

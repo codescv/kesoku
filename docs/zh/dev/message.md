@@ -48,6 +48,7 @@ graph TD
 
 ### 2.1 角色 (`role`)
 定义了消息是由哪一类功能实体生成或主导的：
+
 *   `user`：外部真实用户、后台定时任务触发器（Cronjob）或模拟调度事件。
 *   `assistant`：Kesoku 智能体本身生成的回复（包括中间思维链、文本响应、通知消息等）。
 *   `tool`：外设工具，包含工具调用请求或工具执行的返回值输出。
@@ -55,6 +56,7 @@ graph TD
 
 ### 2.2 类型 (`type`)
 定义了消息正文的结构化格式与运行语义：
+
 *   `text`：常规文本，用于大模型消费或最终呈递给用户。
 *   `thought`：大模型在发出工具调用指令**之前**输出的推理思维链（Chain-of-thought）。
 *   `tool_call`：大模型发出的结构化工具调用请求，包含工具名称和执行参数。
@@ -62,6 +64,7 @@ graph TD
 
 ### 2.3 状态 (`status`)
 在流水线中实时追踪消息的流转阶段：
+
 *   `pending_agent`：新接收的用户提问已写入数据库，等待 Agent 分发 Worker 接管。
 *   `processing`：Worker 协程正在调度大模型对该用户消息进行推理处理。
 *   `processed`：用户提问的回合推理已全部结束，并成功产生助手回复。
@@ -152,6 +155,7 @@ graph TD
 
 ### 5.2 大模型实际 Prompt 历史 (`build_clean_history`)
 在将历史输入给大模型时，会运行优化裁剪链：
+
 *   **系统排除**：剔除所有轻量的系统级临时通知（如 `sender="Notification"` 的提示语）。
 *   **剥离思维链 (Thought Stripping)**：**所有历史回合中的 assistant thoughts (`type=thought`) 都会被彻底清除**，只保留当前最活跃一轮的思维以指导当下行动。这极大地节约了 Token 空间，并避免模型受到历史垃圾思维的干扰。
 *   **剥离附件 (Attachment Stripping)**：从历史 user 消息的元数据中剥离庞大的文件字节或图片，并在正文末尾加上占位符（例如 `[Attachments stripped from history: data.csv]`），让模型知道文件存在，但不重复载入数据。
@@ -170,6 +174,7 @@ graph TD
 
 ### 5.4 高级角色映射规则 (Transpilation)
 为了规避主流聊天大模型接口（如 Gemini API、OpenAI API）所强制要求的 alternating roles 角色交替验证规则，适配器在生成 IR 结构时（`history_to_turns` 方法）会执行逻辑转译：
+
 *   **自愈消息 (Nudge)**：原本在数据库中为 `role=system`，转译器会将其转译为 `role=user` 并前置提示语 `[System Notification]\n`，使得模型可以正常接收自愈警报，且不触犯厂商交替校验规则。
 *   **定时任务 / 后台警报**：一律在转译层包装为标准的 `user` 或 `tool_result` 回合提交，在用户侧完全不可见，但大模型可流畅解读。
 

@@ -19,6 +19,7 @@ The WeChat chatbot adapter is implemented inside `src/kesoku/gateway/chatbot/wec
 
 ### 1. Terminal QR Code Pairing Flow
 The pairing flow is handled inside `entrypoint.py` and calls `qr_login()` from `adapter.py`:
+
 *   Initiates an authorization request to the iLink platform to obtain a temporary pairing ticket.
 *   Converts the ticket URL into an ASCII QR Code and prints it directly to the terminal.
 *   Polls the pairing status endpoint until the WeChat user scans the QR code and clicks authorize on their mobile phone.
@@ -26,6 +27,7 @@ The pairing flow is handled inside `entrypoint.py` and calls `qr_login()` from `
 
 ### 2. Event Polling Daemon (`listener.py`)
 Since WeChat does not offer push subscriptions or inbound HTTP webhooks for normal personal accounts, the adapter runs a continuous polling daemon:
+
 *   `WechatListener` runs a non-blocking `asyncio` loop pulling events from Tencent iLink APIs using the active authentication token.
 *   It routes incoming text messages and uploads to the Kesoku Gateway Broker.
 
@@ -37,8 +39,10 @@ Because WeChat chatrooms do not support message status updates (e.g. typing stat
 
 1.  **Disabled Intermediate Messages**:
     The adapter overrides `supports_intermediate_messages()` to return `False`.
+
 2.  **Stateless Bypass**:
     When the gateway posts intermediate thoughts (`MessageType.THOUGHT`), tool calls (`MessageType.TOOL_CALL`), or system notifications (`MessageRole.SYSTEM`):
+
     *   The base `render_outgoing_message` template detects that intermediate messages are unsupported.
     *   It immediately transitions their database status to `MessageStatus.DELIVERED` without attempting to deliver them to the WeChat room.
 3.  **Final Message Delivery**:

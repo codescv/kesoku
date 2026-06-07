@@ -7,6 +7,7 @@
 ## 1. 记忆架构设计基础 (Memory v1)
 
 早期基于纯 Markdown 扁平文件（如 `Progress.md`、`Agent.md`）的记忆更新方案存在致命的安全漏洞：
+
 *   **全量覆盖风险 (Full-Overwrite Hazard)**：模型在修改文件内某一项进度时，极易由于幻觉导致整个文件的大片内容被丢失或截断。
 *   **键值重复与漂移**：缺少数据库主键约束，模型经常会为同一个概念生成重复或相似的 Key（例如 `japan` 和 `japanese`）。
 *   **弱约束规则**：放置在扁平文件中的运行规则（如“必须使用 `uv run` 运行测试”），只能等待模型主动阅读，极易被忽略。
@@ -15,6 +16,7 @@
 
 ### 1.1 数据存储模型 (`agent_memories` 表)
 所有的 KV 结构化记忆均存储在 SQLite 数据库中：
+
 ```sql
 CREATE TABLE IF NOT EXISTS agent_memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -29,6 +31,7 @@ CREATE TABLE IF NOT EXISTS agent_memories (
 
 ### 1.2 记忆类别与生命周期分配
 不同功能类别的记忆享有不同的读写级别，防止由于大模型误写导致数据混乱：
+
 1.  **用户偏好 (`preference`)**：【只读保护】。记录用户的性格背景、时区等个人偏好信息。智能体对其仅有 Read-Only 权限，更新必须由用户手动通过指令发起，防止大模型编造幻觉覆盖真实偏好。
 2.  **执行规范规则 (`rule`)**：【只读保护】。存储最高优先级的系统硬约束规则（如“限制出站文件路径”、“使用 `uv` 管理包”）。在会话初始化时，被强行注入到系统提示词顶部。
 3.  **学习与项目进度 (`progress`)**：【读写协同】。记录各种具体项目进度、学习节点。Agent 可以通过工具进行原子性的 `INSERT OR REPLACE` 写入，确保安全不影响其他项目进度。
@@ -66,6 +69,7 @@ CREATE TABLE IF NOT EXISTS agent_memories (
 
 ### 2.1 会话回合自适应注入规则 (Bootstrap Injection)
 系统并不在每个 Turn 中都注入繁琐的记忆同步说明，而是采用了细分策略：
+
 *   **同步引导指南 (Sync Guidelines)**：仅在**引导回合（Bootstrap Turn）**注入。引导回合被定义为：
     1.  全新启动的会话（回合数小于等于 1）。
     2.  长空闲重新唤醒（当前消息的时间戳与上一回合消息的间隔时间，超过了设置的 `1800` 秒超时阈值）。
@@ -74,6 +78,7 @@ CREATE TABLE IF NOT EXISTS agent_memories (
 
 ### 2.2 按需主动拉取工具 (`view_chat_history_summary`)
 大模型遇到外部上下文依赖时，会调用此工具拉取跨会话进展：
+
 *   **执行逻辑**：
     1.  确定当前的活动角色名称。
     2.  读取跨会话同步数据库表 `cross_session_contexts` 中，属于该角色的已固化总结时间轴。

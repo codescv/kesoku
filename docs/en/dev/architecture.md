@@ -212,6 +212,7 @@ blocklist_patterns = ["(\\b|^)(rm|sudo|shutdown|reboot|mkfs|dd|chmod|chown)(\\b|
 
 ### Claude LLM Support (Vertex AI)
 Kesoku supports Anthropic's Claude models hosted on Google Cloud Vertex AI. 
+
 - **Alternating Message Alignment**: Converts and groups database historical turns to strictly comply with Anthropic's alternating user/assistant pattern.
 - **Dynamic Tool Conversion**: Automatically generates JSON tool schema definitions matching the Anthropic Tool Use specification from Python callables with docstrings and type annotations.
 - **Parallel Multi-Tool Calls**: Correlates and tracks concurrent tool calls and execution results using database message parent links as the `tool_use_id`.
@@ -236,5 +237,6 @@ metadata:
 
 ### Native Tool Integration & Script Robustness
 The skill manager exposes two native tools to the LLM:
+
 1. `list_skills()`: Scans `skills_dir`, parses YAML frontmatter, filters by OS platform, and returns a summary of available skills.
 2. `use_skill(skill_name: str)`: Returns the complete markdown instructions from the skill's `SKILL.md`. To ensure robust execution when a skill includes scripts or tools (e.g., `uv run scripts/script.py`), `use_skill` automatically prepends a prominent header with the exact absolute path to the skill directory, instructing the LLM to use absolute paths for all CLI command invocations.
