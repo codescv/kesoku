@@ -69,7 +69,7 @@ To facilitate auditing, debugging, and trajectory evaluation, Kesoku logs every 
   - **Response**: The LLM's raw text output, thoughts, tool calls, and token metrics.
 
 ## Message Data Model & Native Tool Calling
-All message ingestion and routing is unified through `Gateway.post()`. Every message in Kesoku follows strict role, type, status, and sender conventions as detailed in [Message and Lifecycle Specification](MESSAGE_AND_LIFECYCLE.md):
+All message ingestion and routing is unified through `Gateway.post()`. Every message in Kesoku follows strict role, type, status, and sender conventions as detailed in [Message and Lifecycle Specification](message.md):
 - **Roles**: `user`, `assistant`, `tool`, `system`
 - **Types**: `text`, `thought`, `tool_call`, `tool_result`
 - **Sender Rules**:

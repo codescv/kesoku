@@ -1,0 +1,100 @@
+site_name: Kesoku Docs
+site_url: https://codescv.github.io/kesoku/
+repo_url: https://github.com/codescv/kesoku
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: teal
+      accent: purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: teal
+      accent: purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+
+plugins:
+  - search
+  - i18n:
+      docs_structure: folder
+      languages:
+        - locale: en
+          name: English
+          default: true
+        - locale: zh
+          name: 简体中文
+          nav_translations:
+            Home: 首页
+            User Guide: 用户手册
+            Developer Guide: 开发者指南
+            Installation: 安装指南
+            Configuration: 配置指南
+            Role Playing: 角色扮演
+            Memory & Sessions: 记忆与会话
+            Skills & Custom Tools: 技能与自定义工具
+            Safety Settings (Shell): 安全策略
+            Platforms: 平台配置
+            Discord: Discord
+            Google Chat: Google Chat
+            WeChat: 微信 (WeChat)
+            Service Management: 系统服务管理
+            Troubleshooting: 故障排除
+            Architecture & Concurrency: 架构与并发设计
+            Agent Cycle: 智能体生命周期
+            Message Model: 消息数据模型
+            System Prompt: 提示词生成
+            Tools & Execution: 工具与执行
+            Memory & Database: 记忆与数据库
+            Role Playing Principles: 角色扮演原理
+            Skills System: 自治技能原理
+            LLM Backends: 大模型提供商扩展
+            Chatbot Interface: 聊天机器人基类
+            Discord Adapter: Discord 适配器
+            Google Chat Adapter: Google Chat 适配器
+            WeChat Adapter: 微信适配器
+            Testing & Debugging: 测试与调试
+
+# Navigation Structure
+nav:
+  - Home: index.md
+  - User Guide:
+      - Installation: user/installation.md
+      - Configuration: user/configuration.md
+      - Role Playing: user/role-playing.md
+      - Memory & Sessions: user/memory.md
+      - Skills & Custom Tools: user/skills.md
+      - Safety Settings (Shell): user/safety.md
+      - Platforms:
+          - Discord: user/platforms/discord.md
+          - Google Chat: user/platforms/gchat.md
+          - WeChat: user/platforms/wechat.md
+      - Service Management: user/service.md
+      - Troubleshooting: user/troubleshooting.md
+  - Developer Guide:
+      - Architecture & Concurrency: dev/architecture.md
+      - Agent Cycle: dev/agent-cycle.md
+      - Message Model: dev/message.md
+      - System Prompt: dev/sys-prompt.md
+      - Tools & Execution: dev/tools.md
+      - Memory & Database: dev/memory.md
+      - Role Playing Principles: dev/role-playing.md
+      - Skills System: dev/skills.md
+      - LLM Backends: dev/llm.md
+      - Chatbot Interface: dev/chatbot-interface.md
+      - Platforms:
+          - Discord Adapter: dev/platforms/discord.md
+          - Google Chat Adapter: dev/platforms/gchat.md
+          - WeChat Adapter: dev/platforms/wechat.md
+      - Testing & Debugging: dev/debugging.md

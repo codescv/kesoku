@@ -25,3 +25,6 @@ wheels/
 
 # store private data (reserved for testing etc)
 private/
+
+# MkDocs build directory
+site/

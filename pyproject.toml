@@ -48,6 +48,8 @@ addopts = ""
 
 [dependency-groups]
 dev = [
+    "mkdocs-material>=9.7.6",
+    "mkdocs-static-i18n>=1.3.1",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
     "ruff>=0.9.0",
