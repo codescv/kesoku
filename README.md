@@ -2,15 +2,16 @@
 
 Kesoku (name inspired by `結束/Kessoku`) is a minimal, readable, and modular autonomous AI agent designed for seamless integration with chat platforms (like Discord and one-shot CLI chat) powered by SQLite message persistence, session management, and extensible tool calling.
 
-## Features 🌟
+---
 
-- **Structured TOML Config**: Manage workspaces, LLMs (API key or Vertex AI), and chatbot tokens centrally in `config.toml`.
-- **Gateway Architecture**: Decouples Chatbots from the Agent loop. Messages are buffered and routed reliably.
-- **Session Management**: Maintain multiple persistent chat sessions in SQLite. List, resume, and view formatted chat histories instantly with `rich`.
-- **Separate Execution Modes**: Run `kesoku chat` for one-shot session-based CLI interactions or `kesoku start` to run background daemons (supporting both Discord and Google Chat).
-- **Extensible Tooling & Skills**: Simple decorator-based or function registry system allowing the agent to execute tools.
+## 📖 Documentation
 
-## Installation 📦
+For detailed guides on advanced configuration, platform bots (Discord, WeChat, Google Chat), cron jobs, and internal architecture, visit the official documentation:
+👉 **[https://codescv.github.io/kesoku/](https://codescv.github.io/kesoku/)**
+
+---
+
+## 📦 Quick Start Installation
 
 Install Kesoku globally as a CLI tool using `uv`:
 
@@ -18,153 +19,24 @@ Install Kesoku globally as a CLI tool using `uv`:
 uv tool install git+https://github.com/codescv/kesoku.git
 ```
 
-For local development (to edit code, run tests, or build docs):
-
-```bash
-git clone https://github.com/codescv/kesoku.git
-cd kesoku
-# Install as an editable tool
-uv tool install -e .
-# Sync all groups (ruff, pytest, mkdocs)
-uv sync --all-groups
-```
-
-## Configuration ⚙️
-
-Initialize a workspace and `config.toml` in any directory (e.g. `private/`):
+To initialize a workspace and configuration template:
 ```bash
 kesoku init -c private/config.toml
 ```
-This creates `private/config.toml`, `private/kesoku.db`, and `private/skills/`.
 
-Sample `config.toml`:
-```toml
-[workspace]
-db_path = "kesoku.db"
-skills_dir = "skills"
+---
 
-[agent]
-llm = "gemini"
+## 💬 CLI Chat Usage
 
-[gemini]
-model_name = "gemini-2.5-flash"
-auth_mode = "api_key" # Use "vertex" for Google Cloud Vertex AI
-api_key = "your_api_key"
-thinking_level = "high"
+Start an interactive CLI session with your agent using the `chat` subcommand:
 
-[claude]
-model_name = "claude-3-5-sonnet@20241022"
-project_id = "your-gcp-project"
-location = "us-east5"
-
-[discord]
-enabled = false
-bot_token = "your_discord_bot_token" # Optional if DISCORD_TOKEN environment variable is set
-
-# Channel-specific overrides
-[[discord.channels]]
-channels = ["1234567890", "announcements"]
-llm = "claude"
-auto_thread = false
-
-[google_chat]
-enabled = false
-chatbot_id = "google_chat"
-project_id = "your-gcp-project"
-topic_id = "kesoku-chat-events"
-subscription_id = "kesoku-chat-sub"
-credentials_json = "" # Optional path to JSON key file. If empty, uses ADC.
-impersonate_service_account = "" # Optional target service account email to impersonate (key-less)
-# reaction_emoji = "👀" # Optional: Emoji to react with when receiving a user message
-
-# For step-by-step instructions on setting up Google Cloud Platform (GCP) components,
-# see: docs/GOOGLE_CHAT_SETUP.md
-```
-
-## Usage 🚀
-
-### Session-Based CLI Chat (`chat`)
-
-Start a new chat session:
 ```bash
+# Start a new chat session
 kesoku chat -c private/config.toml "What is 25 + 15?"
-```
 
-List all current chat sessions:
-```bash
+# Resume the latest active chat session
+kesoku chat -c private/config.toml -z "And multiply that by 2."
+
+# List all persistent chat sessions
 kesoku chat -c private/config.toml -l
 ```
-
-Resume a specific chat session by its ID:
-```bash
-kesoku chat -c private/config.toml -r abc12345 "And multiply that by 2."
-```
-
-Resume the latest active chat session:
-```bash
-kesoku chat -c private/config.toml -z "And subtract 10."
-```
-
-Show full formatted chat history of a session:
-```bash
-kesoku chat -c private/config.toml --show-history abc12345
-```
-
-### Daemon Mode (`start`)
-
-Run background daemons (Discord bot):
-```bash
-kesoku start -c private/config.toml
-```
-
-### Running as a Background Service (Linux/macOS)
-
-To run Kesoku as a persistent background service (using `systemd` on Linux or `launchd` on macOS), use the `service` command group:
-
-#### 1. Install the Service
-Generates and installs the service file (`.service` unit on Linux, `.plist` configuration on macOS). By default, the installation automatically inherits environment variables matching `PATH`, `HTTP_PROXY`, `HTTPS_PROXY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, and `DISCORD_TOKEN` from the current shell. You can override or add custom environment variables using the `-e` / `--env` options.
-
-- **User-Level Service (Default, recommended - no root required)**:
-  ```bash
-  kesoku service install -c private/config.toml -e GEMINI_API_KEY=your-api-key
-  ```
-- **System-Level Service (Global, requires root)**:
-  ```bash
-  sudo kesoku service install --system -c private/config.toml -e GEMINI_API_KEY=your-api-key
-  ```
-- **Dry-Run (prints service file configuration to stdout)**:
-  ```bash
-  kesoku service install --dry-run -c private/config.toml -e GEMINI_API_KEY=your-api-key
-  ```
-
-#### 2. Manage the Service
-You can start, stop, restart, and uninstall the service using `kesoku service` subcommand wrappers:
-
-- **Start the service**:
-  ```bash
-  kesoku service start
-  ```
-- **Stop the service**:
-  ```bash
-  kesoku service stop
-  ```
-- **Restart the service**:
-  ```bash
-  kesoku service restart
-  ```
-- **Uninstall the service** (stops, disables, and deletes the configuration file):
-  ```bash
-  kesoku service uninstall
-  ```
-
-*Note: Add the `--system` flag to any of the management subcommands if you installed the service in system-level mode (e.g. `kesoku service start --system`).*
-
-#### 3. Check Status and Logs
-- **Check service status**:
-  ```bash
-  kesoku service status
-  ```
-- **Follow real-time background logs**:
-  ```bash
-  kesoku service logs -f
-  ```
