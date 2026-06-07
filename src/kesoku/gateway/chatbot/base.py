@@ -560,7 +560,7 @@ class Chatbot(ABC):
         session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
         if not session:
             if tag:
-                session_title = f"Cronjob {tag}"
+                session_title = f"Cronjob {self.chatbot_id} {tag}"
             else:
                 session_title = title or f"{self.chatbot_id.capitalize()} Scheduled Job {channel_id}"
             session = await self.gateway.create_session(

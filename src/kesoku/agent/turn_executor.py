@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import os
 import time
+import traceback
 from typing import TYPE_CHECKING
 
 from kesoku.agent.history import (
@@ -354,6 +356,24 @@ class TurnExecutor:
             raise
         except Exception as e:
             logger.error(f"Error in session turn {self.session_id}: {e}", exc_info=True)
+            tb_str = traceback.format_exc()
+            error_filename = f"error_{current_msg.id}.txt"
+            error_file_path = os.path.join(session_staging_dir, error_filename)
+            try:
+                with open(error_file_path, "w", encoding="utf-8") as f:
+                    f.write(tb_str)
+            except Exception as fe:
+                logger.error(f"Failed to write error traceback file to {error_file_path}: {fe}")
+
+            full_error_msg = f"⚠️ An error occurred while processing your request: {e}"
+            hint = f"\n\nFull error log saved to staging directory: {error_filename}"
+
+            if len(full_error_msg) + len(hint) > 500:
+                max_err_len = 500 - len(hint) - 3
+                truncated_content = full_error_msg[:max_err_len] + "..." + hint
+            else:
+                truncated_content = full_error_msg + hint
+
             error_msg = Message(
                 session_id=self.session_id,
                 chatbot_id=chatbot_id,
@@ -361,7 +381,7 @@ class TurnExecutor:
                 sender="Kesoku",
                 role=MessageRole.ASSISTANT,
                 type=MessageType.TEXT,
-                content=f"⚠️ An error occurred while processing your request: {e}",
+                content=truncated_content,
                 status=MessageStatus.PENDING,
                 parent_id=current_msg.id,
             )
