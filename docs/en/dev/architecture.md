@@ -5,46 +5,27 @@ Kesoku is a lightweight, highly readable, and robust autonomous AI agent framewo
 
 ## Architectural Overview
 
-```
-+------------------------------------------------------------------------+
-|                        Configuration Layer                             |
-|                `config.toml` loaded via `src/kesoku/config.py`         |
-+------------------------------------------------------------------------+
-                                   |
-              +--------------------+--------------------+
-              | (`kesoku start`)                        | (`kesoku chat`)
-              v                                         v
-+------------------------------------+    +------------------------------------+
-|  Foreground Service Mode (Start)   |    |    Session CLI Mode (Chat)         |
-| - Launches all background bots     |    | - Launches local CLIChatbot        |
-|   (Discord, etc.) from config      |    | - Buffers one-shot session events  |
-+------------------------------------+    +------------------------------------+
-              |                                         |
-              +--------------------+--------------------+
-                                   v
-+------------------------------------------------------------------------+
-|                           Kesoku Gateway                               |
-| - Stateless Pub/Sub Broker (`post(msg)` & `listen(**filters)`)         |
-| - Unified message ingestion, routing, and persistence via `post`       |
-| - Manages persistent conversational sessions in SQLite                 |
-+------------------------------------------------------------------------+
-                                   |
-                       SQLite Persistence Layer
-     (Database tables: `messages` & `sessions` at configured `db_path`)
-                                   ^
-                                   |
-+------------------------------------------------------------------------+
-|                     Kesoku Agent Dispatcher Loop                       |
-| - Asynchronously listens for `role="user"` messages                    |
-| - Dispatches per-session background tasks (`SessionWorker`)            |
-|                                                                        |
-|       +--------------------------------------------------------+       |
-|       |                    SessionWorker                       |       |
-|       | - Pulls user messages from session queue               |       |
-|       | - Checks for thought interruptions before/after steps  |       |
-|       | - Invokes LLM (Gemini API) & executes atomic tools     |       |
-|       +--------------------------------------------------------+       |
-+------------------------------------------------------------------------+
+```mermaid
+graph TD
+    Config["Configuration Layer (src/kesoku/config.py loads config.toml)"]
+    Config --> Daemon["Foreground Service Mode (kesoku start) - starts listeners"]
+    Config --> CLIMode["Session CLI Mode (kesoku chat) - CLIChatbot adapter"]
+    
+    Daemon --> Gateway["Kesoku Gateway (gateway.py) - Broker Hub"]
+    CLIMode --> Gateway
+    
+    Gateway <--> SQLite[("SQLite Persistence Layer (messages & sessions)")]
+    
+    Agent["Kesoku Agent Dispatcher Loop"]
+    Gateway -->|Pulls role='user' messages| Agent
+    
+    subgraph SessionWorker [SessionWorker Concurrency]
+        Worker["SessionWorker (agent.py)"]
+        Worker -->|Executes turns| LLM["LLM Backend (llm.py)"]
+        Worker -->|Executes tools| Shell["Shell command tool"]
+    end
+    
+    Agent -->|Dispatches worker per session| Worker
 ```
 
 ### Concurrency, Anti-Stall Mechanism & Thread Sorting (V4)

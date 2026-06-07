@@ -27,25 +27,17 @@ This document outlines the architecture for Kesoku's Unified Memory System. It a
 
 The Kesoku Memory System separates memory into three core logical categories stored in a unified SQLite table, but routed differently during the session lifecycle.
 
-```
-                  +-----------------------------------+
-                  |          SQLite Storage           |
-                  |         `agent_memories`          |
-                  +-----------------------------------+
-                                    |
-          +-------------------------+-------------------------+
-          | (Category: 'preference')| (Category: 'rule')      | (Category: 'progress')
-          v                         v                         v
-+-------------------+     +-------------------+     +-------------------------+
-|   User Profile    |     |  Execution Rules  |     |   Activity Progress     |
-| (Static Facts)    |     | (Hard Constraints)|     |  (Project Tracking)     |
-+-------------------+     +-------------------+     +-------------------------+
-          |                         |                         |
-          v                         v                         | (On-demand tool call)
-+---------------------------------------------+               v
-|        Framework-level Injection            |     +-------------------------+
-|  (Assembled into LLM System Prompt on Boot) |     |  Tool: `view_progress`  |
-+---------------------------------------------+     +-------------------------+
+```mermaid
+graph TD
+    DB[("SQLite Storage (agent_memories)")]
+    DB -->|Category: preference| Pref["User Profile (Static Facts)"]
+    DB -->|Category: rule| Rule["Execution Rules (Hard Constraints)"]
+    DB -->|Category: progress| Prog["Activity Progress (Project Tracking)"]
+    
+    Pref --> Boot["Framework-level Injection (LLM System Prompt on Boot)"]
+    Rule --> Boot
+    
+    Prog -->|On-demand tool call| Tool["Tool: view_progress"]
 ```
 
 ---
@@ -150,32 +142,17 @@ By combining **Unconditional Preferences Injection** (always injecting active us
 
 The memory system decouples static metadata, rule-based user profiles, and volatile conversational timelines into distinct layers. The underlying storage continues to utilize **SQLite** (`kesoku.db`) for atomic transactional safety.
 
-```
-+-----------------------------------------------------------------------------+
-|                               SQLite Database                               |
-+-----------------------------------------------------------------------------+
-       |                                                               |
-       v                                                               v
-+-----------------------+                               +---------------------+
-|   `agent_memories`    |                               |`cross_session_ctx`  |
-|    (Structured KV)    |                               |  (Event Timeline)   |
-+-----------------------+                               +---------------------+
-       |                                                               |
-       | (Passive Push)                                                | (Active Pull)
-       v                                                               v
-+-----------------------+                               +---------------------+
-|   Bootstrap Injection |                               |   Tool API Call     |
-| (Only on New/Resume)  |                               |`view_cross_session_`|
-|                       |                               |`memory`             |
-+-----------------------+                               +---------------------+
-       |                                                               |
-       +-------------------------------+-------------------------------+
-                                       |
-                                       v
-                    +-------------------------------------+
-                    |           LLM Context               |
-                    |    (Clean & Focused Execution)      |
-                    +-------------------------------------+
+```mermaid
+graph TD
+    DB[("SQLite Database")]
+    DB -->|Structured KV| KV["agent_memories"]
+    DB -->|Event Timeline| Sync["cross_session_ctx"]
+    
+    KV -->|Passive Push| Boot["Bootstrap Injection (Only on New/Resume)"]
+    Sync -->|Active Pull| Tool["Tool API Call: view_chat_history_summary"]
+    
+    Boot --> LLM["LLM Context (Clean & Focused Execution)"]
+    Tool --> LLM
 ```
 
 ### 2.1 Session Turn Execution Flow

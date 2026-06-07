@@ -44,27 +44,17 @@ CREATE TABLE IF NOT EXISTS agent_memories (
 
 因此，Memory V2 推出了**自适应拼装与主动拉取**的设计方案：
 
-```text
-+-----------------------+                               +---------------------+
-|   `agent_memories`    |                               |`cross_session_ctx`  |
-| (用户静态偏好与硬规则) |                               | (全局事件轨迹时间轴) |
-+-----------------------+                               +---------------------+
-        │                                                               │
-        │ (Bootstrap 阶段 Push 注入)                                    │ (大模型按需主动 Pull 拉取)
-        v                                                               v
-+-----------------------+                               +---------------------+
-|   第一回合 / 长空闲激活  |                               |  Tool:              |
-|  (Sync Guidelines)    |                               |`view_chat_history_` |
-|                       |                               |`summary`            |
-+-----------------------+                               +---------------------+
-        │                                                               |
-        +-------------------------------+-------------------------------+
-                                        │
-                                        v
-                     +-------------------------------------+
-                     |           LLM 运行上下文            |
-                     |       (高度聚焦当前的研发任务)      |
-                     +-------------------------------------+
+```mermaid
+graph TD
+    DB[("SQLite 数据库")]
+    DB -->|结构化 KV| KV["agent_memories (用户静态偏好与硬规则)"]
+    DB -->|事件时间轴| Sync["cross_session_ctx (全局事件轨迹时间轴)"]
+    
+    KV -->|Bootstrap 阶段 Push 注入| Boot["第一回合 / 长空闲激活 (Sync Guidelines)"]
+    Sync -->|大模型按需主动 Pull 拉取| Tool["Tool: view_chat_history_summary"]
+    
+    Boot --> LLM["LLM 运行上下文 (高度聚焦当前的研发任务)"]
+    Tool --> LLM
 ```
 
 ### 2.1 会话回合自适应注入规则 (Bootstrap Injection)
