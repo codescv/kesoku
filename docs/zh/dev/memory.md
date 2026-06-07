@@ -1,54 +1,90 @@
-# 记忆系统设计与多会话上下文同步
+# 记忆系统、数据库设计与无损上下文管理 (LCM)
 
-本技术文档详述了 Kesoku AI Agent 的记忆系统架构设计，涵盖了 Memory V1 数据库结构设计、Memory V2 动态拉取优化（Bootstrap & On-Demand Pull）以及跨会话总结异步锁机制。
+本技术文档详述了 Kesoku AI Agent 的记忆与上下文管理系统架构设计，涵盖了结构化 SQLite 存储层、动态提示词注入生命周期以及无损上下文管理（LCM）系统如何优化长对话历史。
 
 ---
 
-## 1. 记忆架构设计基础 (Memory v1)
+## 1. 早期设计的缺陷与痛点
 
-早期基于纯 Markdown 扁平文件（如 `Progress.md`、`Agent.md`）的记忆更新方案存在致命的安全漏洞：
+### 1.1 纯文本 Markdown 文件（如 `Progress.md`、`Agent.md`）
+1. **全量覆盖风险 (Full-Overwrite Hazard)**：大模型修改进度文件时，极易因“幻觉”导致整个文件的其他不相干段落被意外截断或丢失。
+2. **键值重复与漂移**：缺少数据库的唯一性主键约束，模型经常为同一个概念生成重复或相近的 Key（例如 `standard_japanese`、`standard_japan` 和 `标日学习`）。
+3. **弱约束规则**：放置在扁平文件中的运行规则（如“必须使用 `uv run` 运行测试”），只能被动等待模型主动读取，大模型极易忽略。
 
-*   **全量覆盖风险 (Full-Overwrite Hazard)**：模型在修改文件内某一项进度时，极易由于幻觉导致整个文件的大片内容被丢失或截断。
-*   **键值重复与漂移**：缺少数据库主键约束，模型经常会为同一个概念生成重复或相似的 Key（例如 `japan` 和 `japanese`）。
-*   **弱约束规则**：放置在扁平文件中的运行规则（如“必须使用 `uv run` 运行测试”），只能等待模型主动阅读，极易被忽略。
+### 1.2 Memory V1 全量提示词注入
+在每个 Turn（会话回合）中，将所有偏好、进度、规则全都塞入系统提示词（System Prompt）中，会迅速占满上下文窗口，并导致**注意力分散（Attention Distraction）**——模型因为被大量无关的进度摘要包围，进而忽略了真正的硬约束规则。
 
-为了解决这些问题，Kesoku 建立了**结构化 SQLite 存储层**，并将核心偏好和规则强行注入到模型系统提示词（System Prompt）中最显眼的位置。
+---
 
-### 1.1 数据存储模型 (`agent_memories` 表)
-所有的 KV 结构化记忆均存储在 SQLite 数据库中：
+## 2. 结构化长期记忆（SQLite `agent_memories`）
+
+为了实现事务级别的安全隔离，Kesoku 引入了结构化的 SQLite 关系存储层（`agent_memories` 表）：
 
 ```sql
 CREATE TABLE IF NOT EXISTS agent_memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    category TEXT NOT NULL,         -- 'progress', 'preference', 'rule'
+    category TEXT NOT NULL,         -- 'progress', 'learnings', 'user_preferences', 'memo'
     key TEXT NOT NULL,              -- 唯一的 snake_case 键名 (例如 'standard_japanese')
     title TEXT NOT NULL,            -- 人类可读标签
-    content TEXT NOT NULL,          -- 结构化 JSON 或 Markdown 文本内容
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(category, key)           -- 强约束 Upsert 限制
+    content TEXT NOT NULL,          -- Markdown 或 JSON 内容 (最大 500 字符)
+    updated_at REAL NOT NULL,       -- UNIX 时间戳浮点数
+    role TEXT NOT NULL DEFAULT 'default', -- 绑定的角色人设范围
+    UNIQUE(category, key, role)     -- 安全更新和排重约束
 );
 ```
 
-### 1.2 记忆类别与生命周期分配
-不同功能类别的记忆享有不同的读写级别，防止由于大模型误写导致数据混乱：
+### 2.1 类别描述与作用域
+*   **`progress` / `learnings`**：用于跟踪项目开发进度和个人学习节点。这些数据是**全局共享**的，统一绑定在默认角色 `"default"` 作用域下。
+*   **`user_preferences`**：存储用户个人基本信息、语音/TTS 发音习惯以及回复风格偏好。这些是**角色隔离**的，绑定在当前频道活跃的角色人设下。
+*   **`memo`**：自定义用户备忘笔记或零散记忆。这些是**角色隔离**的。
 
-1.  **用户偏好 (`preference`)**：【只读保护】。记录用户的性格背景、时区等个人偏好信息。智能体对其仅有 Read-Only 权限，更新必须由用户手动通过指令发起，防止大模型编造幻觉覆盖真实偏好。
-2.  **执行规范规则 (`rule`)**：【只读保护】。存储最高优先级的系统硬约束规则（如“限制出站文件路径”、“使用 `uv` 管理包”）。在会话初始化时，被强行注入到系统提示词顶部。
-3.  **学习与项目进度 (`progress`)**：【读写协同】。记录各种具体项目进度、学习节点。Agent 可以通过工具进行原子性的 `INSERT OR REPLACE` 写入，确保安全不影响其他项目进度。
+### 2.2 读写权限生命周期
+*   **用户偏好与规则**：**只读保护（Read-Only for Agent）**。为了防止大模型幻觉编造并覆写偏好数据，此类记录只能由用户手动发起指令进行修改。
+*   **进度与学习记录**：**读写协同（Read-Write for Agent）**。大模型可以通过调用工具对单条记录进行原子的 `INSERT OR REPLACE` 写入，从而完全消除覆盖损坏其他进度的风险。
 
 ---
 
-## 2. 局部按需注入与动态拉取 (Memory v2)
+## 3. 动态提示词注入生命周期
 
-在长对话和多通道运行期间，如果将所有历史和进度直接塞入 system prompt 中，会快速占满 context window，并且会极大地**分散大模型的注意力 (Attention Distraction)**。
+为了保证大模型高度聚焦当前任务，Kesoku 将动态记忆和偏好前置注入到**最新的一条用户消息**中，而不是塞入全局 system prompt 中。
 
-因此，Memory V2 推出了**自适应拼装与主动拉取**的设计方案：
+### 3.1 注入规则
+*   **引导回合 (Bootstrap Turn)**（会话的第 1 回合，或者空闲超过 30 分钟重新唤醒）：
+    *   向前置注入**同步引导指南 (Sync Guidelines)** 与**用户偏好配置 (User Preferences)**。
+    *   *引导指南会告知模型其当前扮演的角色 `role="{active_role}"`，并提示其拥有 `view_chat_history_summary` 工具。如果用户提到了当前通道历史之外的事物，模型必须首先调用该工具拉取全局时间轴。*
+*   **普通回合**：
+    *   仅注入**用户偏好配置 (User Preferences)**。避免在对话激活后重复塞入冗长的同步引导。
+
+### 3.2 注入模板示例
+```markdown
+[Background Context: Sync Guidelines]
+======
+# Passive Synchronization Guidelines:
+- 💡 You are playing the active persona role: {active_role}.
+- 💡 You have access to the `view_chat_history_summary` tool, which retrieves a consolidated chat history summary and chronological timeline of recent events across active threads/channels.
+- 💡 If the user's current request below refers to external threads, other chats, or events you cannot locate in this session's history, you MUST call `view_chat_history_summary` to read the global context and synchronize before providing a response.
+======
+
+[User Preferences]
+- Preferred Programming Language: Python
+- Code Style: PEP 8 compliant, explicit type hints
+- Preferred Test Framework: pytest with uv run
+
+[Current Request]
+{original_user_message}
+```
+
+---
+
+## 4. 无损上下文管理 (LCM) 系统
+
+长对话历史如果以原始文本一直堆积，会极快耗尽上下文窗口。Kesoku 深度集成了 `OpenLCM` 引擎，实现历史压缩与无损找回的完美平衡。
 
 ```mermaid
 graph TD
     DB[("SQLite 数据库")]
-    DB -->|结构化 KV| KV["agent_memories (用户静态偏好与硬规则)"]
-    DB -->|事件时间轴| Sync["cross_session_ctx (全局事件轨迹时间轴)"]
+    DB -->|结构化 KV| KV["agent_memories"]
+    DB -->|事件时间轴| Sync["cross_session_ctx"]
     
     KV -->|Bootstrap 阶段 Push 注入| Boot["第一回合 / 长空闲激活 (Sync Guidelines)"]
     Sync -->|大模型按需主动 Pull 拉取| Tool["Tool: view_chat_history_summary"]
@@ -57,46 +93,20 @@ graph TD
     Tool --> LLM
 ```
 
-### 2.1 会话回合自适应注入规则 (Bootstrap Injection)
-系统并不在每个 Turn 中都注入繁琐的记忆同步说明，而是采用了细分策略：
+### 4.1 回合前置自动历史压缩 (Preflight Compaction)
+1. 在每次发起 LLM 推理前，智能体运行环境会自动评估当前的历史消息总 Token 长度。
+2. 当长度超出预警阈值时，自动触发 `lcm_engine.compress()` 压缩流。
+3. `OpenLCM` 会自动合并最老的回合，利用大模型生成树状的**分层摘要节点（Summary Nodes）**，并建立无损总结的有向无环图 (DAG)。
+4. 智能体将长历史切断，替换为指向这些摘要节点的轻量骨架指针列表，极大地释放了 Token 空间。
 
-*   **同步引导指南 (Sync Guidelines)**：仅在**引导回合（Bootstrap Turn）**注入。引导回合被定义为：
-    1.  全新启动的会话（回合数小于等于 1）。
-    2.  长空闲重新唤醒（当前消息的时间戳与上一回合消息的间隔时间，超过了设置的 `1800` 秒超时阈值）。
-    *   *引导指南告知模型其拥有读取全局总结的 tool API，如果发现用户提及了当前线程之外的历史（如“刚才在 Discord 里说的那个 bug”），模型必须首先调用拉取工具，主动获取上下文。*
-*   **用户偏好配置 (User Preferences)**：如果数据库存在用户偏好设定，则在**每一个回合**中都无条件前置注入给大模型，确保其始终遵循代码规范和个人习惯。
+### 4.2 无损检索与还原工具
+如果大模型在推理过程中需要查阅已被压缩的细节，它可以主动调用以下 LCM 工具：
+*   **`lcm_grep`**：通过关键词、角色、时间范围检索历史消息和摘要（返回结果会自动进行角色隔离过滤）。
+*   **`lcm_expand`**：输入指定的 `node_id` 或 `store_id`，还原并读取被压缩的完整原始对话。
+*   **`lcm_expand_query`**：对压缩历史进行自然语言问答（例如“先前讨论过的方案 A 有哪些缺陷？”），LCM 会自动搜索、关联并返回整合答案。
+*   **`lcm_describe`**：查看当前摘要 DAG 的拓扑层次结构。
+*   **`lcm_status`**：查询当前的压缩状态与 DAG 树高度。
 
-### 2.2 按需主动拉取工具 (`view_chat_history_summary`)
-大模型遇到外部上下文依赖时，会调用此工具拉取跨会话进展：
-
-*   **执行逻辑**：
-    1.  确定当前的活动角色名称。
-    2.  读取跨会话同步数据库表 `cross_session_contexts` 中，属于该角色的已固化总结时间轴。
-    3.  查询在最近一次更新时间点之后，在其他所有活跃通道中产生的高价值新消息（过滤掉垃圾 thoughts 和 tool log），并将它们实时拼接输出。
-*   这保证了 Agent 在需要时能够像“翻阅书本”一样获取跨越 Discord、微信和命令行终端的全局上下文，而不需要在每次提问时都带上这些繁重的历史包袱。
-
----
-
-## 3. 跨会话同步与自愈锁机制 (Cross-Session Context Design)
-
-为了使多通道的全局进展能定时在后台更新并存回数据库，Kesoku 引入了基于 CAS（Compare-And-Swap）的异步总结锁控制。
-
-### 3.1 跨会话数据库结构 (`cross_session_contexts`)
-```sql
-CREATE TABLE IF NOT EXISTS cross_session_contexts (
-    role TEXT PRIMARY KEY,          -- 角色名人设 (如 default)
-    content TEXT NOT NULL,          -- 固化的 Markdown 时间轴总结
-    updated_at REAL NOT NULL,       -- 最后更新时间戳
-    status TEXT NOT NULL DEFAULT 'idle' -- 锁状态：'idle' (空闲) 或 'updating' (更新中)
-);
-```
-
-### 3.2 异步自愈锁管理 (CAS & Self-Healing)
-为了在不阻塞用户实时会话（保证低延迟）的前提下，实现后台平滑总结：
-
-1.  **触发阶段**：每一次会话 Turn 执行结束后，执行器统计自上一次 checkpoint 以来产生的新消息 token 数量。若超过 `4000` tokens，或者时间间隔超过 30 分钟，即触发同步流程。
-2.  **原子抢占锁 (CAS)**：调用 `claim_cross_session_context_for_update(role)`：
-    *   为防由于意外强杀或断电导致锁死在 `updating` 状态（产生死锁），CAS 逻辑会在抢占前**自动检查并重置**所有创建时间超过 300 秒的僵死锁为 `idle`。
-    *   执行 UPDATE 事务将状态原子性修改为 `updating`，确保只有一个 SessionWorker 在后台进行大模型总结。
-3.  **后台总结**：主会话立即将最终文本发给用户（不影响交互响应），同时在独立的 background `asyncio.Task` 协程中加载当前上下文以及新产生的对话序列，调用大模型生成一段限制在 300 字以内的紧凑时间轴摘要。
-4.  **释放与固化**：计算完毕后，调用 `release_cross_session_context_lock(role, new_summary)`，更新摘要正文，写入时间戳并将状态恢复为 `idle`，完成一个记忆生命周期的闭环。
+### 4.3 互补 coexistence
+*   `agent_memories` 负责保存长期的、高度固化的结构化事实与规则。
+*   `OpenLCM` 负责以极低 Token 损耗且无损的方式，维持单条长对话线程的全部历史轨迹。

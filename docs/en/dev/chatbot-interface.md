@@ -8,16 +8,44 @@ This guide outlines how chatbot adapters integrate with Kesoku's Broker gateway,
 
 The base class is defined as `Chatbot(ABC)` in `src/kesoku/gateway/chatbot/base.py`. It provides shared state, built-in slash command parser registries, and text processing utilities.
 
-### 1. Command Registry
-Every chatbot adapter inherits a standard `CommandRegistry` populated with platform-agnostic commands:
+### 1. Command Registry & Slash Command Mapping
 
-*   `/clear` / `/reset`: Terminate the active session, stop tasks, and delete directories.
-*   `/status`: Display CPU uptime, turns processed, context window size, and execution speed metrics.
-*   `/compact`: Manually force lossless context pruning.
-*   `/role <name>`: Switch or view channel roleplay personas.
-*   `/debug`: Toggle raw LLM logs and staging directories visibility.
+Every chatbot adapter inherits a standard `CommandRegistry` (defined in `src/kesoku/gateway/chatbot/base.py`) populated with platform-agnostic commands.
 
-The adapter checks for incoming commands inside `handle_command(text, reply_func, channel_id)`.
+#### Core Registered Commands:
+*   **`clear`** (Alias: `reset`): Shuts down active session worker tasks, purges SQLite history, and clears the session's workspace staging folder.
+*   **`status`**: Collects and returns runtime metrics: turns processed, token usage, context window K-tokens, and response speeds.
+*   **`compact`**: Manually triggers pre-flight compaction via `OpenLCM` without waiting for natural token exhaustion.
+*   **`role`**: Updates the SQLite channel-role mappings, binding a new persona (e.g. `coder`) to the channel, and rebuilds the active system prompt.
+*   **`lcm`** (Alias: `context`): Spawns trajectory HTML logging via `LcmHtmlReporter` and returns the file path.
+*   **`debug`**: Toggles verbose logging and displays raw prompt logs in the AWD staging paths.
+*   **`restart`**: Triggers a non-blocking process reload.
+
+#### Architectural Flow & Platform Registrations
+Depending on the target chat platform, these commands are parsed and registered differently:
+
+```text
+               ┌──────────────────────────────────────────┐
+               │    `Chatbot._register_default_commands()`│
+               └────────────────────┬─────────────────────┘
+                                    │
+                  ┌─────────────────┴─────────────────┐
+                  ▼                                   ▼
+      [Discord Slash Commands]              [Text-Prefix Platforms]
+    - setup_discord_commands(chatbot)     - WeChat or Console adapters
+    - Reads CommandRegistry definitions   - Intercept messages starting with "/"
+    - Creates discord.app_commands.Command- Extract command name & params
+    - Registers callbacks to CommandTree   - Execute: `commands.execute()`
+```
+
+*   **Discord Slash Integration**:
+    *   The Discord adapter uses a dynamic command builder (`src/kesoku/gateway/chatbot/discord/command.py`).
+    *   It loops over the `CommandRegistry` entries and maps them to standard `discord.app_commands.Command` instances.
+    *   Argument-carrying commands (like `/role {role_name}` or `/cronjob {tag}`) utilize a closure factory to construct callbacks with the appropriate parameter type annotations, allowing Discord's UI to render native argument input fields.
+    *   The tree is then synced with the Discord gateway via `chatbot.tree.sync()`.
+*   **Text-Prefix Integration**:
+    *   Chatbot adapters without native slash-command APIs (like WeChat or the command-line console) evaluate incoming text.
+    *   If the message starts with `/`, the adapter skips normal LLM agent routing, extracts the command name and trailing arguments, and dispatches them directly via `self.commands.execute(cmd_name, reply_func, **kwargs)`.
 
 ### 2. Subscriber Event Loop
 When `start()` is called, the adapter runs a continuous listener loop subscribing to outbound events:

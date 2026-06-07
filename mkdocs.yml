@@ -45,6 +45,7 @@ plugins:
             Memory & Sessions: 记忆与会话
             Skills & Custom Tools: 技能与自定义工具
             Safety Settings (Shell): 安全策略
+            Slash Commands: 系统命令与斜杠指令
             Platforms: 平台配置
             Discord: Discord
             Google Chat: Google Chat
@@ -76,6 +77,7 @@ nav:
       - Memory & Sessions: user/memory.md
       - Skills & Custom Tools: user/skills.md
       - Safety Settings (Shell): user/safety.md
+      - Slash Commands: user/commands.md
       - Platforms:
           - Discord: user/platforms/discord.md
           - Google Chat: user/platforms/gchat.md
