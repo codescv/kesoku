@@ -93,9 +93,9 @@ When a new conversational session starts or resumes:
 2. **Translate to Compact Markdown**: The engine renders raw JSON into a highly compact, non-redundant list format:
    ```markdown
    # 1. User Profile & Preferences
-   - Name: 小张 (Japanese TTS Pronunciation: "シャオジャン")
-   - Current Role: Customer Solutions Engineer at Google Ads
-   - Interests: Guitar, Switch Games, Finance
+   - Name: Bob (Japanese TTS Pronunciation: "ボブ")
+   - Current Role: Platform Software Engineer at TechCorp
+   - Interests: Guitar, Chess, Finance
 
    # 2. Hard Execution Constraints (CRITICAL)
    - ⚠️ You must use 'uv run' to run Python programs. Never use native 'python', 'pip' or 'pytest'.

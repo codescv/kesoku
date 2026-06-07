@@ -64,7 +64,7 @@ For Discord bot sessions:
 *   A new conversational thread is created automatically by the chatbot adapter.
 *   This thread has its own unique Discord ID (`channel_id` in database).
 *   Instead of requiring the user to set the role for every single thread, the database checks the last user message metadata in the active session for `parent_channel_id`.
-*   If the parent text channel (e.g. `#general`) has a bound role (e.g. `"tifa"`), the thread automatically adopts the `"tifa"` role persona.
+*   If the parent text channel (e.g. `#general`) has a bound role (e.g. `"coder"`), the thread automatically adopts the `"coder"` role persona.
 
 ### 3. Root Fallback
 If no channel or parent channel is bound, the executor falls back to `"default"`.
@@ -73,11 +73,11 @@ If no channel or parent channel is bound, the executor falls back to `"default"`
 
 ## 🔄 System Prompt Rebuilding Sequence
 
-When the agent executes the `play_role(role="tifa")` tool call mid-session:
+When the agent executes the `play_role(role="coder")` tool call mid-session:
 
 1.  The database helper updates the channel role binding:
     ```python
-    await db.set_channel_role(chatbot_id, channel_id, "tifa")
+    await db.set_channel_role(chatbot_id, channel_id, "coder")
     ```
 2.  The tool triggers a prompt rebuild for the active session:
     ```python

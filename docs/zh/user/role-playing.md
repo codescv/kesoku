@@ -13,10 +13,10 @@ kesoku/
 └── roles/
     ├── default/
     │   └── intro.md         # 默认的智能体系统提示词
-    ├── tifa/
-    │   └── intro.md         # Tifa 人设提示词
-    └── asuka/
-        └── intro.md         # Asuka 人设提示词
+    ├── coder/
+    │   └── intro.md         # Coder 人设提示词
+    └── helper/
+        └── intro.md         # Helper 人设提示词
 ```
 
 当某个会话绑定了特定角色时：
@@ -70,15 +70,15 @@ uv run kesoku init -c config.toml --overwrite-roles
 ### 通过对话触发
 要切换当前频道/线程的角色设定，只需在对话中以日常语言对 Agent 下达指令：
 
-*   *“请切换到 Tifa 人设”*
-*   *“扮演 Asuka”*
+*   *“请切换到 coder 人设”*
+*   *“扮演 helper”*
 *   *“换回默认角色”*
 
 ### 幕后原理
 收到指令后：
 
-1. Agent 识别出您的切换意图，并调用工具 `play_role(role="tifa")`。
-2. 该工具验证 `roles/tifa/intro.md` 文件是否存在。
-3. 在 SQLite 数据库中将当前 `(chatbot_id, channel_id)` 与角色 `"tifa"` 进行映射绑定。
+1. Agent 识别出您的切换意图，并调用工具 `play_role(role="coder")`。
+2. 该工具验证 `roles/coder/intro.md` 文件是否存在。
+3. 在 SQLite 数据库中将当前 `(chatbot_id, channel_id)` 与角色 `"coder"` 进行映射绑定。
 4. 重新编译当前活动会话的系统提示词，并持久化更新到数据库中。
 5. Agent 回复您确认切换，并在后续的推理和发言中立即生效该人设。

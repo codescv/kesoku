@@ -13,10 +13,10 @@ kesoku/
 └── roles/
     ├── default/
     │   └── intro.md         # Default system prompt instructions
-    ├── tifa/
-    │   └── intro.md         # Tifa character persona
-    └── asuka/
-        └── intro.md         # Asuka character persona
+    ├── coder/
+    │   └── intro.md         # Coder character persona
+    └── helper/
+        └── intro.md         # Helper character persona
 ```
 
 When a session resolves to a specific role:
@@ -70,15 +70,15 @@ In Kesoku, role switching is fully dynamic and managed by the agent itself using
 ### Triggering via Chat
 To change the persona of the current channel, simply instruct the agent to do so in plain text:
 
-*   *"Please switch to the Tifa persona"*
-*   *"Play Asuka"*
+*   *"Please switch to the coder persona"*
+*   *"Play helper"*
 *   *"Go back to your default role"*
 
 ### Behind the Scenes
 Upon receiving the command:
 
-1. The agent detects the intent and calls the tool: `play_role(role="tifa")`.
-2. The tool verifies that `roles/tifa/intro.md` exists.
-3. The tool binds the role `"tifa"` to the current `(chatbot_id, channel_id)` inside the SQLite database.
+1. The agent detects the intent and calls the tool: `play_role(role="coder")`.
+2. The tool verifies that `roles/coder/intro.md` exists.
+3. The tool binds the role `"coder"` to the current `(chatbot_id, channel_id)` inside the SQLite database.
 4. The tool compiles and updates the active session's system prompt in the database.
 5. The agent responds, confirming the switch, and adopts the new personality immediately.
