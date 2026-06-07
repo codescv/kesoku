@@ -1,6 +1,6 @@
 """Unit tests for the text and markdown processing utility functions."""
 
-from kesoku.utils.text import format_text, split_text_into_chunks
+from kesoku.utils.text import format_text, split_text_into_chunks, truncate_middle
 
 
 def test_format_text_headers_shifting() -> None:
@@ -95,6 +95,17 @@ def test_clean_latex() -> None:
     code_input = "Math $x^2$ and code:\n```python\nx = y ** 2\n```\nMore math $y^3$."
     expected_code = "Math x² and code:\n```python\nx = y ** 2\n```\nMore math y³."
     assert clean_latex(code_input) == expected_code
+
+
+def test_truncate_middle() -> None:
+    """Test truncate_middle text helper."""
+    # Under limit
+    assert truncate_middle("Hello World", max_len=20) == "Hello World"
+    # Over limit, requires middle truncation
+    text = "Hello\nWorld\nLonger\nContent"
+    res = truncate_middle(text, max_len=15, placeholder="...")
+    assert "Hello" in res
+    assert "Content" in res
 
 
 

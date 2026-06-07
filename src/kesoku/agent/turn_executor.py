@@ -17,6 +17,8 @@ from kesoku.agent.llm import BaseLLM
 from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.turn_logger import TurnLogger
 from kesoku.context import KesokuContext
+from kesoku.utils.async_fs import async_write_text_file
+from kesoku.utils.text import truncate_middle
 
 if TYPE_CHECKING:
     from kesoku.agent.agent import SessionWorker
@@ -360,19 +362,19 @@ class TurnExecutor:
             error_filename = f"error_{current_msg.id}.txt"
             error_file_path = os.path.join(session_staging_dir, error_filename)
             try:
-                with open(error_file_path, "w", encoding="utf-8") as f:
-                    f.write(tb_str)
+                await async_write_text_file(error_file_path, tb_str)
             except Exception as fe:
                 logger.error(f"Failed to write error traceback file to {error_file_path}: {fe}")
 
             full_error_msg = f"⚠️ An error occurred while processing your request: {e}"
             hint = f"\n\nFull error log saved to staging directory: {error_filename}"
-
-            if len(full_error_msg) + len(hint) > 500:
-                max_err_len = 500 - len(hint) - 3
-                truncated_content = full_error_msg[:max_err_len] + "..." + hint
-            else:
-                truncated_content = full_error_msg + hint
+            max_err_len = 500 - len(hint)
+            truncated_error = truncate_middle(
+                full_error_msg,
+                max_err_len,
+                "\n\n... [Error Truncated for Brevity] ...\n\n",
+            )
+            truncated_content = truncated_error + hint
 
             error_msg = Message(
                 session_id=self.session_id,

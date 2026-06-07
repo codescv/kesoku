@@ -225,6 +225,44 @@ def split_text_into_chunks(text: str, max_length: int) -> list[str]:
     return chunks
 
 
+def truncate_middle(text: str, max_len: int, placeholder: str = "\n\n... [Truncated for Brevity] ...\n\n") -> str:
+    """Truncates text in the middle if it exceeds max_len, preserving beginning and end.
+
+    It attempts to split cleanly on newline boundaries to preserve markdown formatting.
+
+    Args:
+        text: The input string.
+        max_len: Maximum allowed character length.
+        placeholder: Deletion indicator placed in the middle.
+
+    Returns:
+        The truncated string.
+    """
+    if len(text) <= max_len:
+        return text
+
+    budget = max_len - len(placeholder)
+    if budget <= 0:
+        return text[:max_len]
+
+    keep_start = int(budget * 0.45)
+    keep_end = budget - keep_start
+
+    # Try to find clean newline boundaries near the split indices, clamping to budget
+    start_idx = text.find("\n", max(0, keep_start - 100), keep_start)
+    if start_idx == -1:
+        start_idx = keep_start
+
+    end_idx = text.rfind("\n", len(text) - keep_end, min(len(text), len(text) - keep_end + 100))
+    if end_idx == -1:
+        end_idx = len(text) - keep_end
+
+    if start_idx < end_idx:
+        return text[:start_idx] + placeholder + text[end_idx:]
+
+    return text[:keep_start] + placeholder + text[-keep_end:]
+
+
 def truncate_context_middle(text: str, max_len: int = 3000) -> str:
     """Truncates text in the middle if it exceeds max_len, preserving beginning and end.
 
@@ -237,30 +275,7 @@ def truncate_context_middle(text: str, max_len: int = 3000) -> str:
     Returns:
         The truncated string with a deletion indicator in the middle.
     """
-    if len(text) <= max_len:
-        return text
-
-    # Split into 40% start, 55% end, keeping 5% buffer for the indicator
-    keep_start = int(max_len * 0.4)
-    keep_end = int(max_len * 0.55)
-
-    # Try to find clean newline boundaries near the split indices (+-100 chars)
-    # to prevent breaking markdown list items/lines in half
-    start_idx = text.find("\n", max(0, keep_start - 100), min(len(text), keep_start + 100))
-    if start_idx == -1:
-        start_idx = keep_start
-
-    end_idx = text.rfind("\n", max(0, len(text) - keep_end - 100), min(len(text), len(text) - keep_end + 100))
-    if end_idx == -1:
-        end_idx = len(text) - keep_end
-
-    if start_idx < end_idx:
-        return text[:start_idx] + "\n\n... [Timeline Truncated for Brevity] ...\n\n" + text[end_idx:]
-
-    # Fallback to simple raw slice if boundary matching fails or is overlapping
-    char_start = int(max_len * 0.45)
-    char_end = int(max_len * 0.45)
-    return text[:char_start] + "\n\n... [Timeline Truncated for Brevity] ...\n\n" + text[-char_end:]
+    return truncate_middle(text, max_len, "\n\n... [Timeline Truncated for Brevity] ...\n\n")
 
 
 # LaTeX to Unicode symbol mapping for Discord readability

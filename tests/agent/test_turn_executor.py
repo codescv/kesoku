@@ -1463,12 +1463,12 @@ async def test_turn_executor_error_handling_truncation(temp_db: str, tmp_path: A
     # 2. Check length of error message is <= 500
     assert len(err_content) <= 500
     # 3. Check error message ends with the hint
-    assert f"Full error log saved to staging directory: error_user_msg_123.txt" in err_content
+    assert "Full error log saved to staging directory: error_user_msg_123.txt" in err_content
 
     # 4. Check the traceback file exists and contains traceback of RuntimeError
     error_file_path = os.path.join(staging_dir, "error_user_msg_123.txt")
     assert os.path.exists(error_file_path)
-    with open(error_file_path, "r", encoding="utf-8") as f:
+    with open(error_file_path, encoding="utf-8") as f:
         file_content = f.read()
     assert "RuntimeError" in file_content
     assert "X" * 600 in file_content
