@@ -639,6 +639,43 @@ async def test_add_reaction_toggle_deletion(
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
 @patch("kesoku.gateway.chatbot.google_chat.adapter.build")
+async def test_add_reaction_custom_emoji(
+    mock_build: MagicMock,
+    mock_subscriber: MagicMock,
+    mock_auth_default: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+) -> None:
+    """Test that attempting to react with a custom emoji passes the correct payload."""
+    mock_auth_default.return_value = (MagicMock(), "test-project")
+    mock_config.google_chat.reaction_emoji = ":temu:"
+
+    mock_chat_client = MagicMock()
+    mock_build.side_effect = [MagicMock(), mock_chat_client]
+
+    mock_reactions = MagicMock()
+    mock_chat_client.spaces.return_value.messages.return_value.reactions.return_value = mock_reactions
+
+    mock_create = MagicMock()
+    mock_reactions.create = mock_create
+    mock_create.return_value.execute = MagicMock(return_value={"name": "spaces/AAA/messages/msg123/reactions/XYZ123"})
+
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
+        bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
+        message_name = "spaces/AAA/messages/msg123"
+
+        await bot._add_reaction(message_name, ":temu:")
+        mock_create.assert_called_once_with(
+            parent=message_name,
+            body={"emoji": {"customEmoji": {"name": "customEmojis/:temu:"}}}
+        )
+
+
+@pytest.mark.asyncio
+
+@patch("google.auth.default")
+@patch("google.cloud.pubsub_v1.SubscriberClient")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
 async def test_add_reaction_409_conflict_triggers_list_and_delete(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,

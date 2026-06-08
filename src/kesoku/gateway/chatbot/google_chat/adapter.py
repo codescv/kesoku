@@ -421,7 +421,7 @@ class GoogleChatChatbot(Chatbot):
 
         emoji_payload: dict[str, Any] = {}
         if emoji.startswith(":") and emoji.endswith(":"):
-            emoji_payload = {"customEmoji": {"emojiName": emoji}}
+            emoji_payload = {"customEmoji": {"name": f"customEmojis/{emoji}"}}
         else:
             emoji_payload = {"unicode": emoji}
 
