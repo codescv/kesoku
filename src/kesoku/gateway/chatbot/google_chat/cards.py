@@ -38,6 +38,25 @@ class GoogleChatCardBuilder:
         return f": <code>{html.escape(arg_str)}</code>" if arg_str else ""
 
     @staticmethod
+    def _truncate_text(text: str, max_chars: int = 500) -> str:
+        """Truncate long text from the middle, leaving the beginning and end.
+
+        Args:
+            text: The text to truncate.
+            max_chars: Maximum characters to preserve.
+
+        Returns:
+            Truncated string.
+        """
+        if not text:
+            return ""
+        if len(text) <= max_chars:
+            return text
+        half = max_chars // 2 - 20
+        truncated_count = len(text) - (half * 2)
+        return text[:half] + f"\n... [truncated {truncated_count} chars] ...\n" + text[-half:]
+
+    @staticmethod
     def build_foldable_ui_card(
         session_id: str,
         items: list[dict[str, Any]],
@@ -55,16 +74,31 @@ class GoogleChatCardBuilder:
         Returns:
             A cardsV2 dictionary structure.
         """
+        # Limit total items to prevent card size limit issues and clutter.
+        max_items = 12
+        if len(items) > max_items:
+            start_items = items[:3]
+            end_items = items[-8:]
+            middle_placeholder = {
+                "type": "system",
+                "content": f"... [{len(items) - 11} intermediate tools and thoughts hidden for size limit] ...",
+            }
+            display_items = start_items + [middle_placeholder] + end_items
+        else:
+            display_items = items
+
         widgets = []
-        for item in items:
+        for item in display_items:
             if item["type"] == "thought":
-                content_html = html.escape(item["content"]).replace("\n", "<br>")
+                truncated = GoogleChatCardBuilder._truncate_text(item["content"], max_chars=500)
+                content_html = html.escape(truncated).replace("\n", "<br>")
                 widgets.append({"textParagraph": {"text": f"💭 <b>Thought:</b> {content_html}"}})
             elif item["type"] == "tool_call":
                 emoji = item["status"]
                 widgets.append({"textParagraph": {"text": f"🛠️ <b>{item['tool_name']}</b>{item['arg_suffix']} {emoji}"}})
             elif item["type"] == "system":
-                content_html = html.escape(item["content"]).replace("\n", "<br>")
+                truncated = GoogleChatCardBuilder._truncate_text(item["content"], max_chars=500)
+                content_html = html.escape(truncated).replace("\n", "<br>")
                 widgets.append({"textParagraph": {"text": f"⚙️ <b>System:</b> {content_html}"}})
 
         if not widgets:

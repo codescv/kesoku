@@ -1032,3 +1032,25 @@ async def test_google_chat_slash_command_with_mention(
         mock_gateway.create_session.assert_not_called()
         mock_gateway.post.assert_not_called()
 
+
+def test_google_chat_card_builder_truncation() -> None:
+    """Test that GoogleChatCardBuilder truncates long thoughts and limits items."""
+    from kesoku.gateway.chatbot.google_chat.cards import GoogleChatCardBuilder
+
+    # 1. Test truncation of a single long thought
+    long_thought = "A" * 1000
+    items = [{"type": "thought", "content": long_thought}]
+    card = GoogleChatCardBuilder.build_foldable_ui_card("test_session", items)
+    text = card["card"]["sections"][0]["widgets"][0]["textParagraph"]["text"]
+    assert "truncated" in text
+    assert len(text) < 600
+
+    # 2. Test filtration of many items
+    many_items = [{"type": "tool_call", "tool_name": f"tool_{i}", "arg_suffix": "", "status": "✅"} for i in range(20)]
+    card = GoogleChatCardBuilder.build_foldable_ui_card("test_session", many_items)
+    widgets = card["card"]["sections"][0]["widgets"]
+    # We keep first 3 + 1 placeholder + last 8 = 12 widgets
+    assert len(widgets) == 12
+    assert "intermediate tools and thoughts hidden" in widgets[3]["textParagraph"]["text"]
+
+
