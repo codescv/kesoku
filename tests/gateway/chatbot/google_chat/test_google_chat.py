@@ -443,7 +443,6 @@ async def test_load_user_credentials_adc(
             scopes=[
                 "https://www.googleapis.com/auth/chat.messages.reactions.create",
                 "https://www.googleapis.com/auth/chat.messages",
-                "https://www.googleapis.com/auth/chat.customemojis.readonly",
             ]
         )
 
@@ -593,14 +592,14 @@ async def test_incoming_message_no_reaction_if_disabled(
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
 @patch("kesoku.gateway.chatbot.google_chat.adapter.build")
-async def test_add_reaction_toggle_deletion(
+async def test_add_reaction_no_toggle_deletion(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
     mock_auth_default: MagicMock,
     mock_config: KesokuConfig,
     mock_gateway: MagicMock,
 ) -> None:
-    """Test that attempting to react with an already reacted emoji deletes/toggles the reaction."""
+    """Test that attempting to react with an already reacted emoji skips/ignores it without deleting."""
     mock_auth_default.return_value = (MagicMock(), "test-project")
     mock_config.google_chat.reaction_emoji = "👀"
 
@@ -617,7 +616,6 @@ async def test_add_reaction_toggle_deletion(
 
     mock_delete = MagicMock()
     mock_reactions.delete = mock_delete
-    mock_delete.return_value.execute = MagicMock()
 
     with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
@@ -629,11 +627,13 @@ async def test_add_reaction_toggle_deletion(
         mock_create.assert_called_once()
         assert bot._used_reactions[message_name]["👀"] == "spaces/AAA/messages/msg123/reactions/XYZ123"
 
-        # 2. Add reaction second time -> triggers delete (toggle)
+        # 2. Add reaction second time -> skips without create/delete
         await bot._add_reaction(message_name, "👀")
-        mock_delete.assert_called_once_with(name="spaces/AAA/messages/msg123/reactions/XYZ123")
-        # Confirm it was removed from the used reactions map
-        assert "👀" not in bot._used_reactions[message_name]
+        mock_create.assert_called_once()  # Still only once
+        mock_delete.assert_not_called()
+        # Confirm it remains in the used reactions map
+        assert bot._used_reactions[message_name]["👀"] == "spaces/AAA/messages/msg123/reactions/XYZ123"
+
 
 
 @pytest.mark.asyncio
@@ -677,14 +677,14 @@ async def test_add_reaction_custom_emoji(
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
 @patch("kesoku.gateway.chatbot.google_chat.adapter.build")
-async def test_add_reaction_409_conflict_triggers_list_and_delete(
+async def test_add_reaction_409_conflict_ignored(
     mock_build: MagicMock,
     mock_subscriber: MagicMock,
     mock_auth_default: MagicMock,
     mock_config: KesokuConfig,
     mock_gateway: MagicMock,
 ) -> None:
-    """Test that if create raises a duplicate 409 error, the handler lists reactions and deletes the duplicate."""
+    """Test that if create raises a duplicate 409 error, it is caught and ignored gracefully."""
     mock_auth_default.return_value = (MagicMock(), "test-project")
     mock_config.google_chat.reaction_emoji = "👀"
 
@@ -701,30 +701,23 @@ async def test_add_reaction_409_conflict_triggers_list_and_delete(
     http_error = HttpError(resp, error_payload)
     mock_reactions.create.return_value.execute = MagicMock(side_effect=http_error)
 
-    # Configure list and delete mocks
+    # Configure list and delete mocks to ensure they are NOT called
     mock_list = MagicMock()
     mock_reactions.list = mock_list
-    mock_list.return_value.execute = MagicMock(
-        return_value={
-            "reactions": [{"name": "spaces/AAA/messages/msg123/reactions/XYZ999", "emoji": {"unicode": "👀"}}]
-        }
-    )
-
     mock_delete = MagicMock()
     mock_reactions.delete = mock_delete
-    mock_delete.return_value.execute = MagicMock()
 
     with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
         bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
 
         message_name = "spaces/AAA/messages/msg123"
 
-        # Add reaction -> raises 409 -> lists and deletes
+        # Add reaction -> raises 409 -> ignored
         await bot._add_reaction(message_name, "👀")
 
         mock_reactions.create.assert_called_once()
-        mock_list.assert_called_once_with(parent=message_name)
-        mock_delete.assert_called_once_with(name="spaces/AAA/messages/msg123/reactions/XYZ999")
+        mock_list.assert_not_called()
+        mock_delete.assert_not_called()
 
 
 def test_parse_emoji_sequence() -> None:

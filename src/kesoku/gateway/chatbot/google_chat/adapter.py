@@ -158,32 +158,41 @@ class GoogleChatChatbot(Chatbot):
         logger.info("Loading Google Chat credentials using Application Default Credentials (ADC).")
         return source_creds, project_id or self.config.project_id
 
-    def _load_user_credentials(self) -> tuple[Any, str]:
+    def _load_user_credentials(self, scopes: list[str] | None = None) -> tuple[Any, str]:
         """Load GCP user credentials strictly using ADC (no service account or impersonation).
+
+        Args:
+            scopes: Optional list of scopes to request. Defaults to standard reaction scopes.
 
         Returns:
             A tuple of (credentials, project_id).
         """
-        scopes = [
-            "https://www.googleapis.com/auth/chat.messages.reactions.create",
-            "https://www.googleapis.com/auth/chat.messages",
-            "https://www.googleapis.com/auth/chat.customemojis.readonly",
-        ]
-        logger.info("Loading Google Chat user credentials strictly using ADC.")
+        if scopes is None:
+            scopes = [
+                "https://www.googleapis.com/auth/chat.messages.reactions.create",
+                "https://www.googleapis.com/auth/chat.messages",
+            ]
+        logger.info(f"Loading Google Chat user credentials strictly using ADC with scopes: {scopes}")
         source_creds, project_id = google.auth.default(scopes=scopes)
         return source_creds, project_id or (self.config.project_id if self.config.project_id else "")
 
     async def _load_custom_emojis(self) -> None:
         """Fetch and cache all custom emojis to resolve aliases automatically."""
-        if not self._user_chat_service:
-            return
         try:
+            scopes = [
+                "https://www.googleapis.com/auth/chat.messages.reactions.create",
+                "https://www.googleapis.com/auth/chat.messages",
+                "https://www.googleapis.com/auth/chat.customemojis.readonly",
+            ]
+            user_creds, _ = self._load_user_credentials(scopes=scopes)
+            temp_chat_service = build("chat", "v1", credentials=user_creds)
+
             def fetch_all() -> dict[str, str]:
                 emojis_map = {}
                 next_page_token = None
                 while True:
                     res = (
-                        self._user_chat_service.customEmojis()
+                        temp_chat_service.customEmojis()
                         .list(pageSize=1000, pageToken=next_page_token)
                         .execute()
                     )
@@ -444,17 +453,9 @@ class GoogleChatChatbot(Chatbot):
 
         used_map = self._used_reactions[message_name]
 
-        # Toggle Deletion: If this emoji is already in the used map, delete it!
+        # If this emoji is already in the used map, do not delete it, just return!
         if emoji in used_map:
-            reaction_name = used_map[emoji]
-            try:
-                await asyncio.to_thread(
-                    self._user_chat_service.spaces().messages().reactions().delete(name=reaction_name).execute
-                )
-                used_map.pop(emoji)
-                logger.debug(f"Successfully removed reaction '{emoji}' from message: {message_name}")
-            except Exception as e:
-                logger.error(f"Failed to delete reaction '{emoji}' from message {message_name}: {e}")
+            logger.debug(f"Reaction '{emoji}' already exists in used_map. Skipping.")
             return
 
         emoji_payload: dict[str, Any] = {}
@@ -481,52 +482,7 @@ class GoogleChatChatbot(Chatbot):
             logger.debug(f"Successfully reacted with '{emoji}' to message: {message_name}")
         except HttpError as e:
             if e.resp.status == 409:
-                # Duplicate reaction reported by the API. We don't have the name in memory,
-                # but since it already exists, let's query reactions to find it and delete it.
-                logger.warning(
-                    f"Reaction '{emoji}' already exists on {message_name} (Http 409). Resolving and deleting."
-                )
-                try:
-                    reactions_list_res = await asyncio.to_thread(
-                        self._user_chat_service.spaces().messages().reactions().list(parent=message_name).execute
-                    )
-                    reactions_list = reactions_list_res.get("reactions", [])
-                    # Find our reaction
-                    found = False
-                    for r in reactions_list:
-                        r_emoji = r.get("emoji", {})
-                        r_unicode = r_emoji.get("unicode")
-                        r_custom_uid = r_emoji.get("customEmoji", {}).get("uid")
-                        r_custom_name = r_emoji.get("customEmoji", {}).get("emojiName")
-
-                        is_match = False
-                        if r_unicode == emoji:
-                            is_match = True
-                        elif r_custom_name == emoji:
-                            is_match = True
-                        elif r_custom_uid == emoji:
-                            is_match = True
-                        elif r_custom_name and self._custom_emoji_map.get(r_custom_name) == emoji:
-                            is_match = True
-                        elif r_custom_uid and f"customEmojis/{r_custom_uid}" == emoji:
-                            is_match = True
-
-                        if is_match:
-                            # Found it! Let's delete it
-                            await asyncio.to_thread(
-                                self._user_chat_service.spaces().messages().reactions().delete(name=r["name"]).execute
-                            )
-                            logger.debug(
-                                f"Successfully removed duplicate reaction '{emoji}' from message: {message_name}"
-                            )
-                            found = True
-                            break
-                    if not found:
-                        logger.warning(f"Could not resolve duplicate reaction '{emoji}' to delete on {message_name}.")
-                except Exception as delete_error:
-                    logger.error(
-                        f"Failed to resolve/delete duplicate reaction '{emoji}' on {message_name}: {delete_error}"
-                    )
+                logger.info(f"Reaction '{emoji}' already exists on {message_name} (Http 409). Skipping duplicate.")
             else:
                 logger.error(f"Google Chat API error when adding reaction '{emoji}': {e}")
         except Exception as e:
