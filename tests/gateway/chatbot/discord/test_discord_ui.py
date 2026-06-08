@@ -8,7 +8,7 @@ import pytest
 
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
-from kesoku.gateway.chatbot.discord.ui import MessageHeaderView, QuestionView
+from kesoku.gateway.chatbot.discord.ui import MAX_BUTTON_LABEL_LEN, MessageHeaderView, QuestionView
 from kesoku.gateway.gateway import Gateway
 
 
@@ -524,3 +524,22 @@ async def test_question_view_duplicate_prefixes(mock_gateway: MagicMock) -> None
     assert view.children[0].custom_id == "btn_q_s123_0_This is a very long "
     assert view.children[1].custom_id == "btn_q_s123_1_This is a very long "
     assert view.children[0].custom_id != view.children[1].custom_id
+
+
+@pytest.mark.asyncio
+async def test_question_view_long_label_truncation(mock_gateway: MagicMock) -> None:
+    """Test that QuestionView truncates button labels longer than MAX_BUTTON_LABEL_LEN characters."""
+    mock_chatbot = MagicMock()
+    long_choice = "A" * (MAX_BUTTON_LABEL_LEN + 20)
+    choices = [long_choice]
+    view = QuestionView(
+        gateway=mock_gateway,
+        session_id="s123",
+        chatbot=mock_chatbot,
+        question="Select one",
+        choices=choices,
+    )
+    assert len(view.children) == 1
+    assert len(view.children[0].label) == MAX_BUTTON_LABEL_LEN
+    assert view.children[0].label == "A" * (MAX_BUTTON_LABEL_LEN - 3) + "..."
+    assert view.children[0].custom_id == f"btn_q_s123_0_{long_choice[:20]}"

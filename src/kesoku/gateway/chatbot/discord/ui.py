@@ -21,6 +21,9 @@ from kesoku.utils.async_fs import async_exists
 
 logger = setup_logger(__name__)
 
+MAX_BUTTON_LABEL_LEN = 80
+"""Maximum allowed length for a Discord button label."""
+
 
 class MessageHeaderView(discord.ui.View):
     """Persistent Discord view representing the conversation header with interactive trajectory viewer."""
@@ -619,9 +622,13 @@ class QuestionView(discord.ui.View):
         self.choices = choices
 
         for idx, choice in enumerate(choices):
+            # Discord button label must be MAX_BUTTON_LABEL_LEN or fewer characters
+            label = choice
+            if len(label) > MAX_BUTTON_LABEL_LEN:
+                label = label[: MAX_BUTTON_LABEL_LEN - 3] + "..."
             button = discord.ui.Button(
                 style=discord.ButtonStyle.primary,
-                label=choice,
+                label=label,
                 custom_id=f"btn_q_{session_id}_{idx}_{choice[:20]}",
             )
             button.callback = self.make_callback(choice)
