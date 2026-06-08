@@ -443,7 +443,8 @@ async def test_load_user_credentials_adc(
             scopes=[
                 "https://www.googleapis.com/auth/chat.messages.reactions.create",
                 "https://www.googleapis.com/auth/chat.messages",
-            ]
+            ],
+            quota_project_id="test-project"
         )
 
 

@@ -172,8 +172,12 @@ class GoogleChatChatbot(Chatbot):
                 "https://www.googleapis.com/auth/chat.messages.reactions.create",
                 "https://www.googleapis.com/auth/chat.messages",
             ]
-        logger.info(f"Loading Google Chat user credentials strictly using ADC with scopes: {scopes}")
-        source_creds, project_id = google.auth.default(scopes=scopes)
+        quota_project = self.config.project_id if self.config.project_id else None
+        logger.info(
+            f"Loading Google Chat user credentials strictly using ADC with scopes: {scopes} "
+            f"and quota_project_id: {quota_project}"
+        )
+        source_creds, project_id = google.auth.default(scopes=scopes, quota_project_id=quota_project)
         return source_creds, project_id or (self.config.project_id if self.config.project_id else "")
 
     async def _load_custom_emojis(self) -> None:
