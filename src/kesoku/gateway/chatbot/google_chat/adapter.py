@@ -100,6 +100,7 @@ class GoogleChatChatbot(Chatbot):
         self._foldable_ui_messages: dict[str, dict[str, Any]] = {}
         self._active_user_message_names: dict[str, str] = {}
         self._used_reactions: dict[str, dict[str, str]] = {}
+        self._custom_emoji_map: dict[str, str] = {}
 
         # Load credentials and initialize Google APIs
         self._credentials, self._project_id = self._load_credentials()
@@ -166,14 +167,51 @@ class GoogleChatChatbot(Chatbot):
         scopes = [
             "https://www.googleapis.com/auth/chat.messages.reactions.create",
             "https://www.googleapis.com/auth/chat.messages",
+            "https://www.googleapis.com/auth/chat.customemojis.readonly",
         ]
         logger.info("Loading Google Chat user credentials strictly using ADC.")
         source_creds, project_id = google.auth.default(scopes=scopes)
         return source_creds, project_id or (self.config.project_id if self.config.project_id else "")
 
+    async def _load_custom_emojis(self) -> None:
+        """Fetch and cache all custom emojis to resolve aliases automatically."""
+        if not self._user_chat_service:
+            return
+        try:
+            def fetch_all() -> dict[str, str]:
+                emojis_map = {}
+                next_page_token = None
+                while True:
+                    res = (
+                        self._user_chat_service.customEmojis()
+                        .list(pageSize=1000, pageToken=next_page_token)
+                        .execute()
+                    )
+                    emojis = res.get("customEmojis", [])
+                    for item in emojis:
+                        if "emojiName" in item and "name" in item:
+                            emojis_map[item["emojiName"]] = item["name"]
+                    next_page_token = res.get("nextPageToken")
+                    if not next_page_token:
+                        break
+                return emojis_map
+
+            # Execute list fetch in thread
+            self._custom_emoji_map = await asyncio.to_thread(fetch_all)
+            logger.info(f"Successfully cached {len(self._custom_emoji_map)} custom emojis for reactions.")
+        except Exception as e:
+            logger.warning(
+                f"Could not load custom emojis list: {e}. "
+                "Custom emoji aliases (e.g. ':temu:') will only work if the API credentials have the "
+                "customemojis scope, or if you configure the exact 'customEmojis/uid' format."
+            )
+
     async def start(self) -> None:
         """Start listening to outgoing agent responses and run the Pub/Sub Pull task."""
         self._running = True
+        # Load custom emojis cache if reactions are enabled
+        if self.config.reaction_emoji and self._user_chat_service:
+            await self._load_custom_emojis()
         # Start base subscriber listener for outgoing agent responses
         self._listener_task = asyncio.create_task(super().start())
         # Start background subscriber loop for incoming Google Chat events
@@ -420,8 +458,16 @@ class GoogleChatChatbot(Chatbot):
             return
 
         emoji_payload: dict[str, Any] = {}
-        if emoji.startswith(":") and emoji.endswith(":"):
-            emoji_payload = {"customEmoji": {"name": f"customEmojis/{emoji}"}}
+        if emoji.startswith("customEmojis/"):
+            emoji_payload = {"customEmoji": {"name": emoji}}
+        elif emoji.startswith(":") and emoji.endswith(":"):
+            # Resolve custom emoji alias
+            resolved_name = self._custom_emoji_map.get(emoji)
+            if resolved_name:
+                emoji_payload = {"customEmoji": {"name": resolved_name}}
+            else:
+                # Fallback to f"customEmojis/{emoji}" if resolution map is empty/unavailable
+                emoji_payload = {"customEmoji": {"name": f"customEmojis/{emoji}"}}
         else:
             emoji_payload = {"unicode": emoji}
 
@@ -452,7 +498,20 @@ class GoogleChatChatbot(Chatbot):
                         r_unicode = r_emoji.get("unicode")
                         r_custom_uid = r_emoji.get("customEmoji", {}).get("uid")
                         r_custom_name = r_emoji.get("customEmoji", {}).get("emojiName")
-                        if r_unicode == emoji or r_custom_uid == emoji or r_custom_name == emoji:
+
+                        is_match = False
+                        if r_unicode == emoji:
+                            is_match = True
+                        elif r_custom_name == emoji:
+                            is_match = True
+                        elif r_custom_uid == emoji:
+                            is_match = True
+                        elif r_custom_name and self._custom_emoji_map.get(r_custom_name) == emoji:
+                            is_match = True
+                        elif r_custom_uid and f"customEmojis/{r_custom_uid}" == emoji:
+                            is_match = True
+
+                        if is_match:
                             # Found it! Let's delete it
                             await asyncio.to_thread(
                                 self._user_chat_service.spaces().messages().reactions().delete(name=r["name"]).execute
