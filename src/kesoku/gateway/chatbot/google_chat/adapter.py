@@ -421,7 +421,7 @@ class GoogleChatChatbot(Chatbot):
 
         emoji_payload: dict[str, Any] = {}
         if emoji.startswith(":") and emoji.endswith(":"):
-            emoji_payload = {"customEmoji": {"uid": emoji}}
+            emoji_payload = {"customEmoji": {"emojiName": emoji}}
         else:
             emoji_payload = {"unicode": emoji}
 
@@ -450,8 +450,9 @@ class GoogleChatChatbot(Chatbot):
                     for r in reactions_list:
                         r_emoji = r.get("emoji", {})
                         r_unicode = r_emoji.get("unicode")
-                        r_custom = r_emoji.get("customEmoji", {}).get("uid")
-                        if r_unicode == emoji or r_custom == emoji:
+                        r_custom_uid = r_emoji.get("customEmoji", {}).get("uid")
+                        r_custom_name = r_emoji.get("customEmoji", {}).get("emojiName")
+                        if r_unicode == emoji or r_custom_uid == emoji or r_custom_name == emoji:
                             # Found it! Let's delete it
                             await asyncio.to_thread(
                                 self._user_chat_service.spaces().messages().reactions().delete(name=r["name"]).execute
