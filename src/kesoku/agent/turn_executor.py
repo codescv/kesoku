@@ -92,14 +92,15 @@ class TurnExecutor:
         Returns:
             A BaseLLM instance to use for this turn.
         """
-        if current_msg.chatbot_id == "discord":
+        cfg = self.context.config
+        discord_cfg = cfg.get_discord_config(current_msg.chatbot_id)
+        if discord_cfg:
             channel_id = current_msg.channel_id
             channel_name = current_msg.metadata.get("channel_name", "")
             parent_id = current_msg.metadata.get("parent_channel_id")
             parent_name = current_msg.metadata.get("parent_channel_name")
 
-            cfg = self.context.config
-            for override in cfg.discord.channels:
+            for override in discord_cfg.channels:
                 identifiers = {channel_id, channel_name}
                 if parent_id:
                     identifiers.add(parent_id)

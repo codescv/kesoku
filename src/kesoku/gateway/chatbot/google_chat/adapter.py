@@ -17,7 +17,7 @@ from google.cloud import pubsub_v1
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 
-from kesoku.config import get_config
+from kesoku.config import GoogleChatConfig, get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot, InboundMessageDTO, parse_message_content
@@ -75,19 +75,33 @@ def parse_emoji_sequence(emoji_str: str) -> list[str]:
 class GoogleChatChatbot(Chatbot):
     """Chatbot adapter connecting Google Chat spaces with Kesoku Gateway via Pub/Sub."""
 
-    def __init__(self, chatbot_id: str, gateway: Gateway) -> None:
+    def __init__(
+        self,
+        chatbot_id: str,
+        gateway: Gateway,
+        google_chat_config: GoogleChatConfig | None = None,
+    ) -> None:
         """Initialize the Google Chat chatbot adapter.
 
         Args:
             chatbot_id: Unique identifier for this chatbot instance.
             gateway: The Kesoku Gateway instance managing routing and persistence.
+            google_chat_config: Optional specific GoogleChatConfig. Defaults to config setting.
 
         Raises:
             ValueError: If critical configuration settings are missing.
         """
         super().__init__(chatbot_id, gateway)
         cfg = get_config()
-        self.config = cfg.google_chat
+        if google_chat_config is not None:
+            self.config = google_chat_config
+        else:
+            if isinstance(cfg.google_chat, list):
+                self.config = next((c for c in cfg.google_chat if c.chatbot_id == chatbot_id), None)
+                if not self.config:
+                    self.config = GoogleChatConfig(chatbot_id=chatbot_id)
+            else:
+                self.config = cfg.google_chat
 
         if not self.config.enabled:
             raise ValueError("Google Chat chatbot is disabled in configuration.")

@@ -384,11 +384,25 @@ def cli_memory_import(
 
 @wechat_app.command("pair")
 def wechat_pair(
+    chatbot_id: Annotated[
+        str | None, typer.Option("-b", "--chatbot-id", help="Chatbot ID of the WeChat bot to pair")
+    ] = None,
     config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
     timeout: Annotated[int, typer.Option("-t", "--timeout", help="Timeout in seconds for QR scan confirmation")] = 480,
 ) -> None:
     """Pair WeChat account with Kesoku via terminal barcode QR code."""
     cfg = load_config(config)
+
+    if chatbot_id:
+        w_cfg = cfg.get_wechat_config(chatbot_id)
+        if not w_cfg:
+            logger.error(f"WeChat chatbot ID '{chatbot_id}' not found in configuration.")
+            sys.exit(1)
+    else:
+        if cfg.chatbots.wechat:
+            w_cfg = cfg.chatbots.wechat[0]
+        else:
+            w_cfg = cfg.wechat
 
     from kesoku.gateway.chatbot.wechat import qr_login
 
@@ -399,10 +413,10 @@ def wechat_pair(
         sys.exit(1)
 
     # Update config
-    cfg.wechat.enabled = True
-    cfg.wechat.account_id = credentials["account_id"]
-    cfg.wechat.token = credentials["token"]
-    cfg.wechat.base_url = credentials["base_url"]
+    w_cfg.enabled = True
+    w_cfg.account_id = credentials["account_id"]
+    w_cfg.token = credentials["token"]
+    w_cfg.base_url = credentials["base_url"]
 
     from kesoku.config import save_config
 
@@ -416,12 +430,32 @@ def wechat_pair(
 
 @wechat_app.command("show-channels")
 def wechat_show_channels(
+    chatbot_id: Annotated[
+        str | None, typer.Option("-b", "--chatbot-id", help="Chatbot ID of the WeChat bot to query")
+    ] = None,
     config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
 ) -> None:
     """Show all paired channels/chats for the active WeChat account."""
     cfg = load_config(config)
-    if not cfg.wechat.enabled or not cfg.wechat.account_id:
-        logger.error("WeChat is not enabled or paired. Run 'kesoku wechat pair' first.")
+
+    # Resolve list of configs to query
+    target_configs = []
+    if chatbot_id:
+        w_cfg = cfg.get_wechat_config(chatbot_id)
+        if not w_cfg:
+            logger.error(f"WeChat chatbot ID '{chatbot_id}' not found in configuration.")
+            sys.exit(1)
+        target_configs.append(w_cfg)
+    else:
+        active_wechats = cfg.active_wechats
+        if active_wechats:
+            target_configs.extend(active_wechats)
+        else:
+            target_configs.append(cfg.wechat)
+
+    valid_configs = [c for c in target_configs if c.enabled and c.account_id]
+    if not valid_configs:
+        logger.error("No enabled or paired WeChat chatbot configuration found.")
         sys.exit(1)
 
     working_dir = cfg.agent_working_dir or os.getcwd()
@@ -439,22 +473,26 @@ def wechat_show_channels(
         logger.error(f"Failed to load tokens file {tokens_path}: {e}")
         sys.exit(1)
 
-    account_id = cfg.wechat.account_id
-    prefix = f"{account_id}:"
+    for w_cfg in valid_configs:
+        account_id = w_cfg.account_id
+        prefix = f"{account_id}:"
 
-    channels = []
-    for k in tokens.keys():
-        if k.startswith(prefix):
-            channels.append(k[len(prefix):])
+        channels = []
+        for k in tokens.keys():
+            if k.startswith(prefix):
+                channels.append(k[len(prefix):])
 
-    if not channels:
-        console.print(f"[yellow]No channels found for account {account_id}.[/yellow]")
-        return
+        console.print(
+            f"\n[bold green]=== Active WeChat Channels for {w_cfg.chatbot_id} "
+            f"({account_id}) ===[/bold green]"
+        )
+        if not channels:
+            console.print("  [yellow]No active channels found for this account.[/yellow]")
+            continue
 
-    console.print(f"\n[bold green]=== Active WeChat Channels for {account_id} ===[/bold green]")
-    for chan in channels:
-        chan_type = "Group" if chan.endswith("@chatroom") else "DM/User"
-        console.print(f"  - ID: [cyan]{chan}[/cyan] | Type: [yellow]{chan_type}[/yellow]")
+        for chan in channels:
+            chan_type = "Group" if chan.endswith("@chatroom") else "DM/User"
+            console.print(f"  - ID: [cyan]{chan}[/cyan] | Type: [yellow]{chan_type}[/yellow]")
 
 
 
@@ -554,7 +592,11 @@ def start_cmd(
     load_config(config)
     cfg = get_config()
 
-    if not cfg.discord.enabled and not cfg.google_chat.enabled and not cfg.wechat.enabled:
+    active_discords = cfg.active_discords
+    active_gchats = cfg.active_google_chats
+    active_wechats = cfg.active_wechats
+
+    if not active_discords and not active_gchats and not active_wechats:
         console = Console()
         console.print("[bold red]Error: No chatbots are enabled in the configuration.[/bold red]")
         sys.exit(1)
@@ -564,29 +606,46 @@ def start_cmd(
     bot_tasks = []
     bots = []
 
-    discord_token = cfg.discord.bot_token or os.environ.get("DISCORD_TOKEN")
-    if cfg.discord.enabled and discord_token:
-        from kesoku.gateway.chatbot.discord import DiscordChatbot
+    for d_cfg in active_discords:
+        discord_token = d_cfg.bot_token or os.environ.get("DISCORD_TOKEN")
+        if discord_token:
+            from kesoku.gateway.chatbot.discord import DiscordChatbot
 
-        discord_bot = DiscordChatbot(chatbot_id=cfg.discord.chatbot_id, gateway=gateway)
-        bot_tasks.append(discord_bot.start())
-        bots.append(discord_bot)
-    elif cfg.discord.enabled and not discord_token:
-        console = Console()
-        console.print("[bold red]Error: Discord is enabled but bot_token is not configured.[/bold red]")
-        sys.exit(1)
+            discord_bot = DiscordChatbot(
+                chatbot_id=d_cfg.chatbot_id,
+                gateway=gateway,
+                bot_token=discord_token,
+                discord_config=d_cfg,
+            )
+            bot_tasks.append(discord_bot.start())
+            bots.append(discord_bot)
+        else:
+            console = Console()
+            console.print(
+                f"[bold red]Error: Discord bot '{d_cfg.chatbot_id}' is enabled "
+                "but bot_token is not configured.[/bold red]"
+            )
+            sys.exit(1)
 
-    if cfg.google_chat.enabled:
+    for g_cfg in active_gchats:
         from kesoku.gateway.chatbot.google_chat import GoogleChatChatbot
 
-        gchat_bot = GoogleChatChatbot(chatbot_id=cfg.google_chat.chatbot_id, gateway=gateway)
+        gchat_bot = GoogleChatChatbot(
+            chatbot_id=g_cfg.chatbot_id,
+            gateway=gateway,
+            google_chat_config=g_cfg,
+        )
         bot_tasks.append(gchat_bot.start())
         bots.append(gchat_bot)
 
-    if cfg.wechat.enabled:
+    for w_cfg in active_wechats:
         from kesoku.gateway.chatbot.wechat import WechatChatbot
 
-        wechat_bot = WechatChatbot(chatbot_id=cfg.wechat.chatbot_id, gateway=gateway)
+        wechat_bot = WechatChatbot(
+            chatbot_id=w_cfg.chatbot_id,
+            gateway=gateway,
+            wechat_config=w_cfg,
+        )
         bot_tasks.append(wechat_bot.start())
         bots.append(wechat_bot)
 

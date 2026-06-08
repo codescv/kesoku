@@ -841,7 +841,7 @@ class DatabaseManager:
             return role
 
         # 2. Discord parent channel inheritance
-        if chatbot_id == "discord" and session_id:
+        if chatbot_id.startswith("discord") and session_id:
             with self.connection_provider.connection() as conn:
                 try:
                     cursor = conn.cursor()

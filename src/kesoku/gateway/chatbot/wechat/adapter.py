@@ -23,7 +23,7 @@ import aiohttp
 import certifi
 import qrcode
 
-from kesoku.config import get_config
+from kesoku.config import WechatConfig, get_config
 from kesoku.constants import MessageRole, MessageType
 from kesoku.db import Message
 from kesoku.gateway.attachment_manager import AttachmentManager
@@ -619,12 +619,20 @@ async def qr_login(
 class WechatChatbot(Chatbot):
     """WeChat chatbot adapter for Kesoku AI Agent framework."""
 
-    def __init__(self, chatbot_id: str, gateway: Gateway) -> None:
+    def __init__(self, chatbot_id: str, gateway: Gateway, wechat_config: WechatConfig | None = None) -> None:
         """Initialize WechatChatbot adapter."""
         super().__init__(chatbot_id, gateway)
         self.attachment_manager = AttachmentManager()
         cfg = get_config()
-        self.config = cfg.wechat
+        if wechat_config is not None:
+            self.config = wechat_config
+        else:
+            if isinstance(cfg.wechat, list):
+                self.config = next((c for c in cfg.wechat if c.chatbot_id == chatbot_id), None)
+                if not self.config:
+                    self.config = WechatConfig(chatbot_id=chatbot_id)
+            else:
+                self.config = cfg.wechat
 
         if not self.config.enabled:
             raise ValueError("WeChat chatbot is disabled in configuration.")

@@ -161,12 +161,13 @@ def install_cmd(
             env_dict[key] = val
 
     # Early validation of Discord chatbot token configuration
-    if cfg.discord.enabled:
-        discord_token = cfg.discord.bot_token or env_dict.get("DISCORD_TOKEN")
+    for d_cfg in cfg.active_discords:
+        discord_token = d_cfg.bot_token or env_dict.get("DISCORD_TOKEN")
         if not discord_token:
             console.print(
-                "[bold red]Error: Discord chatbot is enabled in the configuration, but no bot token "
-                "was configured in either config.toml or inherited/passed environment variables. "
+                f"[bold red]Error: Discord chatbot is enabled in the configuration "
+                f"(instance: '{d_cfg.chatbot_id}'), but no bot token was configured "
+                "in either config.toml or inherited/passed environment variables. "
                 "Please configure the bot token or specify it via '-e DISCORD_TOKEN=value'.[/bold red]"
             )
             raise typer.Exit(code=1)

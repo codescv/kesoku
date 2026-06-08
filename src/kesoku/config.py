@@ -208,6 +208,14 @@ class WechatConfig(BaseModel):
     )
 
 
+class ChatbotsConfig(BaseModel):
+    """Container for multiple chatbot adapter lists."""
+
+    discord: list[DiscordConfig] = Field(default_factory=list)
+    google_chat: list[GoogleChatConfig] = Field(default_factory=list)
+    wechat: list[WechatConfig] = Field(default_factory=list)
+
+
 class KesokuConfig(BaseModel):
     """Root Kesoku configuration structure."""
 
@@ -218,6 +226,7 @@ class KesokuConfig(BaseModel):
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
     google_chat: GoogleChatConfig = Field(default_factory=GoogleChatConfig)
     wechat: WechatConfig = Field(default_factory=WechatConfig)
+    chatbots: ChatbotsConfig = Field(default_factory=ChatbotsConfig)
     shell: ShellConfig = Field(default_factory=ShellConfig)
     env: dict[str, str | int | float | bool] = Field(
         default_factory=dict,
@@ -226,6 +235,66 @@ class KesokuConfig(BaseModel):
     agent_working_dir: str | None = Field(
         default=None, exclude=True, description="Absolute path of the directory containing the config file"
     )
+
+    @property
+    def active_discords(self) -> list[DiscordConfig]:
+        """Get all enabled Discord configs."""
+        configs = []
+        if self.discord.enabled:
+            configs.append(self.discord)
+        for d in self.chatbots.discord:
+            if d.enabled:
+                configs.append(d)
+        return configs
+
+    @property
+    def active_google_chats(self) -> list[GoogleChatConfig]:
+        """Get all enabled Google Chat configs."""
+        configs = []
+        if self.google_chat.enabled:
+            configs.append(self.google_chat)
+        for g in self.chatbots.google_chat:
+            if g.enabled:
+                configs.append(g)
+        return configs
+
+    @property
+    def active_wechats(self) -> list[WechatConfig]:
+        """Get all enabled WeChat configs."""
+        configs = []
+        if self.wechat.enabled:
+            configs.append(self.wechat)
+        for w in self.chatbots.wechat:
+            if w.enabled:
+                configs.append(w)
+        return configs
+
+    def get_discord_config(self, chatbot_id: str) -> DiscordConfig | None:
+        """Find DiscordConfig with matching chatbot_id."""
+        if self.discord.chatbot_id == chatbot_id:
+            return self.discord
+        for d_cfg in self.chatbots.discord:
+            if d_cfg.chatbot_id == chatbot_id:
+                return d_cfg
+        return None
+
+    def get_google_chat_config(self, chatbot_id: str) -> GoogleChatConfig | None:
+        """Find GoogleChatConfig with matching chatbot_id."""
+        if self.google_chat.chatbot_id == chatbot_id:
+            return self.google_chat
+        for g_cfg in self.chatbots.google_chat:
+            if g_cfg.chatbot_id == chatbot_id:
+                return g_cfg
+        return None
+
+    def get_wechat_config(self, chatbot_id: str) -> WechatConfig | None:
+        """Find WechatConfig with matching chatbot_id."""
+        if self.wechat.chatbot_id == chatbot_id:
+            return self.wechat
+        for w_cfg in self.chatbots.wechat:
+            if w_cfg.chatbot_id == chatbot_id:
+                return w_cfg
+        return None
 
     def resolve_paths(self, config_file_path: str) -> None:
         """Resolve workspace relative paths against the directory containing the config file.

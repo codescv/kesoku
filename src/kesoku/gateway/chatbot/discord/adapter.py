@@ -10,7 +10,7 @@ from collections import defaultdict
 from typing import Any
 
 import discord
-from kesoku.config import DiscordChannelOverride, get_config
+from kesoku.config import DiscordChannelOverride, DiscordConfig, get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.attachment_manager import AttachmentManager
@@ -129,18 +129,35 @@ The time is very important to prevent your hallucination about the world status.
 class DiscordChatbot(Chatbot):
     """Discord chatbot adapter connecting to Kesoku Gateway broker."""
 
-    def __init__(self, chatbot_id: str, gateway: Gateway, bot_token: str | None = None) -> None:
+    def __init__(
+        self,
+        chatbot_id: str,
+        gateway: Gateway,
+        bot_token: str | None = None,
+        discord_config: DiscordConfig | None = None,
+    ) -> None:
         """Initialize the Discord chatbot adapter.
 
         Args:
             chatbot_id: Unique identifier for this chatbot instance.
             gateway: Kesoku Gateway instance.
             bot_token: Optional Discord bot token. Defaults to config setting.
+            discord_config: Optional specific DiscordConfig. Defaults to config setting.
         """
         super().__init__(chatbot_id, gateway)
-        self.config = get_config()
+        cfg = get_config()
+        if discord_config is not None:
+            self.config = discord_config
+        else:
+            if isinstance(cfg.discord, list):
+                self.config = next((c for c in cfg.discord if c.chatbot_id == chatbot_id), None)
+                if not self.config:
+                    self.config = DiscordConfig(chatbot_id=chatbot_id)
+            else:
+                self.config = cfg.discord
+
         self.attachment_manager = AttachmentManager()
-        self.bot_token = bot_token or self.config.discord.bot_token or os.environ.get("DISCORD_TOKEN")
+        self.bot_token = bot_token or self.config.bot_token or os.environ.get("DISCORD_TOKEN")
         if not self.bot_token:
             raise ValueError("Discord bot token is required but not configured.")
 
@@ -187,7 +204,7 @@ class DiscordChatbot(Chatbot):
         Returns:
             The matching DiscordChannelOverride instance if found, None otherwise.
         """
-        for override in self.config.discord.channels:
+        for override in self.config.channels:
             identifiers = {channel_id, channel_name}
             if parent_id:
                 identifiers.add(parent_id)
@@ -379,7 +396,7 @@ class DiscordChatbot(Chatbot):
             return
 
         # Check user_allowlist filtering
-        allowlist = self.config.discord.user_allowlist
+        allowlist = self.config.user_allowlist
         if allowlist:
             is_allowed = (
                 str(message.author.id) in allowlist
