@@ -7,6 +7,7 @@ a Google Cloud Pub/Sub Pull Subscription and GCP public APIs.
 import asyncio
 import json
 import random
+import re
 import time
 from typing import Any
 
@@ -46,17 +47,26 @@ def parse_emoji_sequence(emoji_str: str) -> list[str]:
     if "," in emoji_str:
         return [e.strip() for e in emoji_str.split(",") if e.strip()]
 
-    # Otherwise, extract individual emojis (handling variation selectors and ZWJs safely)
+    # Match custom emojis (like :temu:) or any single unicode code point
+    tokens = re.findall(r":[a-zA-Z0-9_\-+]+:|.", emoji_str)
+
     emojis = []
     current: list[str] = []
-    for char in emoji_str:
-        # Variation Selector (0xfe0f) or ZWJ (0x200d) or Fitzpatrick skin tones
-        if ord(char) in (0xFE0F, 0x200D) or (current and ord(char) in range(0x1F3FB, 0x1F3FF + 1)):
-            current.append(char)
-        else:
+    for token in tokens:
+        if token.startswith(":") and token.endswith(":"):
             if current:
                 emojis.append("".join(current))
-            current = [char]
+                current = []
+            emojis.append(token)
+        else:
+            char = token
+            # Variation Selector (0xfe0f) or ZWJ (0x200d) or Fitzpatrick skin tones
+            if ord(char) in (0xFE0F, 0x200D) or (current and ord(char) in range(0x1F3FB, 0x1F3FF + 1)):
+                current.append(char)
+            else:
+                if current:
+                    emojis.append("".join(current))
+                current = [char]
     if current:
         emojis.append("".join(current))
     return emojis

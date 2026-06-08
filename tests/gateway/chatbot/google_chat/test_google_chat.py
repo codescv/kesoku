@@ -703,6 +703,12 @@ def test_parse_emoji_sequence() -> None:
     assert parse_emoji_sequence("👍") == ["👍"]
     # Case 5: Empty string
     assert parse_emoji_sequence("") == []
+    # Case 6: Custom emoji
+    assert parse_emoji_sequence(":temu:") == [":temu:"]
+    # Case 7: Mix of standard and custom emoji
+    assert parse_emoji_sequence("👀 :temu: 🚀") == ["👀", ":temu:", "🚀"]
+    assert parse_emoji_sequence("👀,:temu:,🚀") == ["👀", ":temu:", "🚀"]
+
 
 
 @pytest.mark.asyncio
