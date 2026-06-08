@@ -243,6 +243,7 @@ class TurnExecutor:
                                 system_prompt=system_prompt,
                                 tools=tools_list,
                                 display_name=f"kesoku_{self.session_id}",
+                                ttl_seconds=cfg.gemini.context_caching_ttl,
                             )
                             if active_cache_name:
                                 cached_messages_len = len(prefix_messages)
@@ -274,12 +275,33 @@ class TurnExecutor:
                     generate_cached_content = None
 
                 # LLM inference
-                res = await llm.generate(
-                    system_prompt=generate_system_prompt,
-                    history=generate_history,
-                    tools=generate_tools,
-                    cached_content=generate_cached_content,
-                )
+                try:
+                    res = await llm.generate(
+                        system_prompt=generate_system_prompt,
+                        history=generate_history,
+                        tools=generate_tools,
+                        cached_content=generate_cached_content,
+                    )
+                except Exception as e:
+                    if active_cache_name and ("expired" in str(e) or "cache" in str(e).lower()):
+                        logger.warning(
+                            f"LLM generation failed, possibly due to cache expiration: {e}. "
+                            "Retrying without context cache."
+                        )
+                        active_cache_name = None
+                        cached_messages_len = 0
+                        generate_history = llm_history
+                        generate_system_prompt = system_prompt
+                        generate_tools = tools_list
+                        generate_cached_content = None
+                        res = await llm.generate(
+                            system_prompt=generate_system_prompt,
+                            history=generate_history,
+                            tools=generate_tools,
+                            cached_content=generate_cached_content,
+                        )
+                    else:
+                        raise
 
                 # Log the raw LLM turn using TurnLogger if enabled
                 if cfg.agent.raw_llm_logs and self.turn_logger:

@@ -1475,5 +1475,140 @@ async def test_turn_executor_error_handling_truncation(temp_db: str, tmp_path: A
     assert "X" * 600 in file_content
 
 
+@pytest.mark.asyncio
+async def test_turn_executor_cache_expiration_retry(temp_db: str) -> None:
+    """Verify that TurnExecutor retries generation without context cache if it expires."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    cfg.gemini.context_caching = True
+    cfg.gemini.context_caching_threshold = 10
+    cfg.gemini.context_caching_ttl = 1800
+
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.create_session("sess_cache_expire", title="Cache Expire Session")
+
+    msg1 = Message(
+        session_id="sess_cache_expire",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        content="Long prompt prefix that is cached.",
+        status="responded",
+    )
+    await gw.post(msg1)
+
+    msg2 = Message(
+        session_id="sess_cache_expire",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        content="The current pending message.",
+        status="pending_agent",
+    )
+    await gw.post(msg2)
+
+    class GeminiLLM(BaseLLM):
+        def __init__(self) -> None:
+            self.created_caches: list[dict[str, Any]] = []
+            self.deleted_caches: list[str] = []
+            self.captured_generates: list[dict[str, Any]] = []
+            self.cache_ttl_passed: int | None = None
+
+        def count_tokens(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+        ) -> int:
+            return 100
+
+        async def create_cache(
+            self,
+            contents: list[Message],
+            system_prompt: str | None,
+            tools: list[Any] | None = None,
+            display_name: str | None = None,
+            ttl_seconds: int = 300,
+        ) -> str | None:
+            self.cache_ttl_passed = ttl_seconds
+            cache_name = f"mock_cache_{len(self.created_caches)}"
+            self.created_caches.append({
+                "name": cache_name,
+                "contents": contents,
+                "system_prompt": system_prompt,
+                "tools": tools,
+            })
+            return cache_name
+
+        async def delete_cache(self, cache_name: str) -> None:
+            self.deleted_caches.append(cache_name)
+
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+            cached_content: str | None = None,
+            **kwargs: Any,
+        ) -> LLMResponse:
+            self.captured_generates.append({
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "history": history,
+                "tools": tools,
+                "cached_content": cached_content,
+            })
+
+            if len(self.captured_generates) == 1:
+                assert cached_content == "mock_cache_0"
+                raise RuntimeError("400 INVALID_ARGUMENT. Cache content mock_cache_0 is expired.")
+            else:
+                assert cached_content is None
+                return LLMResponse(content="Recovered from expired cache!", total_tokens=10)
+
+    llm = GeminiLLM()
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    turn_logger = MagicMock(spec=TurnLogger)
+
+    context = KesokuContext(config=cfg, llm=llm)
+    executor = TurnExecutor("sess_cache_expire", gw, tool_runner, turn_logger, context=context)
+
+    worker = MagicMock()
+    type(worker).running = PropertyMock(side_effect=[True, False])
+
+    async def mock_pivot(m: Message) -> Message:
+        return m
+
+    worker.drain_queue_and_pivot.side_effect = mock_pivot
+    worker.queue_empty.return_value = True
+
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor.process_turn(
+            current_msg=msg2,
+            worker=worker,
+            session_staging_dir="/tmp/sess_cache_expire",
+        )
+
+    assert llm.cache_ttl_passed == 1800
+    assert len(llm.created_caches) == 1
+    assert llm.created_caches[0]["name"] == "mock_cache_0"
+
+    assert len(llm.captured_generates) == 2
+    assert llm.captured_generates[0]["cached_content"] == "mock_cache_0"
+    assert llm.captured_generates[1]["cached_content"] is None
+
+    history = await gw.db.get_session_history("sess_cache_expire")
+    assistant_msgs = [m for m in history if m.role == "assistant"]
+    assert len(assistant_msgs) == 1
+    assert assistant_msgs[0].content == "Recovered from expired cache!"
+    assert assistant_msgs[0].status == "pending"
+
+
+
 
 

@@ -112,6 +112,10 @@ class GeminiConfig(BaseModel):
         default=4096,
         description="Minimum token threshold of static history prefix before context caching is triggered",
     )
+    context_caching_ttl: int = Field(
+        default=3600,
+        description="Time-to-Live (TTL) in seconds for the explicit context cache",
+    )
 
 
 

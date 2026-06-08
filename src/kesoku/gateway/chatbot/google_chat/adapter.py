@@ -312,7 +312,10 @@ class GoogleChatChatbot(Chatbot):
 
         sender_name = sender_data.get("displayName", "User")
         sender_id = sender_data.get("name", "users/unknown")
-        text = message_data.get("text", "").strip()
+        text = message_data.get("argumentText", "")
+        if not text.strip():
+            text = message_data.get("text", "")
+        text = text.strip()
         space_name = space_data.get("name")  # e.g., "spaces/AAAAxxxx"
         thread_name = thread_data.get("name")  # e.g., "spaces/AAAAxxxx/threads/YYYY"
 

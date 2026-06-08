@@ -974,3 +974,61 @@ async def test_google_chat_slash_command_execution_reply(
         assert call_kwargs["body"]["thread"]["name"] == "spaces/AAA/threads/BBB"
         assert "Active Persona:" in call_kwargs["body"]["text"]
         assert "xiaozhang" in call_kwargs["body"]["text"]
+
+
+@pytest.mark.asyncio
+@patch("google.auth.default")
+@patch("google.cloud.pubsub_v1.SubscriberClient")
+@patch("kesoku.gateway.chatbot.google_chat.adapter.build")
+async def test_google_chat_slash_command_with_mention(
+    mock_build: MagicMock,
+    mock_subscriber: MagicMock,
+    mock_auth_default: MagicMock,
+    mock_config: KesokuConfig,
+    mock_gateway: MagicMock,
+) -> None:
+    """Test that incoming text with mention and argumentText starts with '/' is intercepted as command."""
+    mock_auth_default.return_value = (MagicMock(), "test-project")
+
+    mock_chat_client = MagicMock()
+    mock_build.return_value = mock_chat_client
+    mock_messages = MagicMock()
+    mock_chat_client.spaces.return_value.messages.return_value = mock_messages
+    mock_create = MagicMock()
+    mock_messages.create = mock_create
+    mock_create.return_value.execute = MagicMock(return_value={"name": "spaces/AAA/messages/reply123"})
+
+    event_payload = {
+        "type": "MESSAGE",
+        "space": {"name": "spaces/AAA"},
+        "message": {
+            "name": "spaces/AAA/messages/msg123",
+            "text": "@AI小张 Pro /status",
+            "argumentText": " /status",
+            "sender": {
+                "displayName": "Test User",
+                "name": "users/allowed_user",
+                "email": "allowed@example.com",
+            },
+            "thread": {"name": "spaces/AAA/threads/BBB"},
+        },
+    }
+
+    with patch("kesoku.gateway.chatbot.google_chat.adapter.get_config", return_value=mock_config):
+        bot = GoogleChatChatbot(chatbot_id="gchat_test", gateway=mock_gateway)
+
+        bot.commands.execute = AsyncMock()
+
+        pubsub_msg = MagicMock(spec=pubsub_v1.subscriber.message.Message)
+        pubsub_msg.data = json.dumps(event_payload).encode("utf-8")
+
+        await bot._on_pubsub_message(pubsub_msg)
+
+        bot.commands.execute.assert_called_once()
+        args, kwargs = bot.commands.execute.call_args
+        assert args[0] == "status"
+        assert kwargs["channel_id"] == "spaces/AAA/threads/BBB"
+
+        mock_gateway.create_session.assert_not_called()
+        mock_gateway.post.assert_not_called()
+
