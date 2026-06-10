@@ -4,32 +4,23 @@ from kesoku.agent.prompt import build_sys_prompt
 
 
 def test_build_sys_prompt_default() -> None:
-    """Verify build_sys_prompt includes default system prompt and file-sending instructions."""
+    """Verify build_sys_prompt includes default system prompt and output formatting rules."""
     prompt = build_sys_prompt()
 
-    # Check file/voice instructions header and syntax are included
-    assert "# Sending Files and Voice Messages to the User" in prompt
+    # Check output formatting rules are included
+    assert "# Output Formatting Rules" in prompt
     assert "[file: /abs/path/to/file]" in prompt
     assert "[voice: /abs/path/to/audio]" in prompt
-    assert "Rules for file sending:" in prompt
-
-    # Check question instructions are included
-    assert "# Asking the User Questions with Multiple-Choice Options" in prompt
-    assert "[question: <the question> || choice1 | choice2 | ...]" in prompt
+    assert "[question: <the question> || Option 1 | Option 2 | ...]" in prompt
 
     # Check background execution instructions are included
-    assert "# Background Execution & Long-Running Tasks" in prompt
-    assert "run_shell_command" in prompt
+    assert "# Background Tasks" in prompt
 
     # Check Memory and Chat History instructions are included
     assert "# Memory and Chat History Systems" in prompt
-    assert "list_memories" in prompt
-    assert "view_chat_history_summary" in prompt
-    assert "lcm_grep" in prompt
-    assert "lcm_expand" in prompt
-    assert "lcm_expand_query" in prompt
-    assert "lcm_describe" in prompt
-    assert "lcm_status" in prompt
+    assert "user_preferences" in prompt
+    assert "progress" in prompt
+    assert "memo" in prompt
 
 
 
@@ -39,7 +30,7 @@ def test_build_sys_prompt_with_custom_context() -> None:
     custom_context = "You are inside a specialized testing environment."
     prompt = build_sys_prompt(custom_prompt=custom_context)
 
-    assert "# Sending Files and Voice Messages to the User" in prompt
+    assert "# Output Formatting Rules" in prompt
     assert custom_context in prompt
 
 
