@@ -23,7 +23,7 @@ To ensure transactional safety and clean boundaries, Kesoku uses a structured SQ
 ```sql
 CREATE TABLE IF NOT EXISTS agent_memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    category TEXT NOT NULL,         -- 'progress', 'learnings', 'user_preferences', 'memo'
+    category TEXT NOT NULL,         -- 'progress', 'user_preferences', 'memo'
     key TEXT NOT NULL,              -- unique snake_case identifier (e.g. 'standard_japanese')
     title TEXT NOT NULL,            -- human-readable label
     content TEXT NOT NULL,          -- Markdown or JSON content (max 500 chars)
@@ -34,13 +34,13 @@ CREATE TABLE IF NOT EXISTS agent_memories (
 ```
 
 ### 2.1 Category Descriptions & Scoping
-*   **`progress` / `learnings`**: Used for tracking project work, development milestones, and learning progress. These are **globally shared** across all personas and use the `"default"` role scope.
+*   **`progress`**: Used for tracking project work and development milestones. These are **globally shared** across all personas and use the `"default"` role scope.
 *   **`user_preferences`**: Stores user details, speech/TTS pronunciation guidelines, personality background, and style preferences. These are **persona-isolated** and bound to the active channel persona.
 *   **`memo`**: Custom user-defined notes or memories. These are **persona-isolated**.
 
 ### 2.2 Security & Write Lifecycles
 *   **User Preferences & Rules**: **Protected (Read-Only for Agent)**. To prevent model hallucinations from fabricating or overwriting preferences, these are only modifiable by the user.
-*   **Progress & Learnings**: **Collaborative (Read-Write for Agent)**. The agent is allowed to write and update these records atomically via tool calls (`INSERT OR REPLACE` mapping), avoiding any overwrite hazards.
+*   **Progress**: **Collaborative (Read-Write for Agent)**. The agent is allowed to write and update these records atomically via tool calls (`INSERT OR REPLACE` mapping), avoiding any overwrite hazards.
 
 ---
 

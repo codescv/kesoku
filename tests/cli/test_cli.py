@@ -823,7 +823,7 @@ title = "Japanese Study Progress"
 content = "Studying N3 grammar."
 updated_at = 99999.9
 
-[asuka.learnings.favorite_food]
+[asuka.memo.favorite_food]
 title = "Favorite Food"
 content = "Melon pan"
 """
@@ -847,7 +847,7 @@ content = "Melon pan"
     assert row["content"] == "Studying N3 grammar."
 
     cursor.execute(
-        "SELECT * FROM agent_memories WHERE role = 'asuka' AND category = 'learnings' AND key = 'favorite_food'"
+        "SELECT * FROM agent_memories WHERE role = 'asuka' AND category = 'memo' AND key = 'favorite_food'"
     )
     row = cursor.fetchone()
     assert row is not None

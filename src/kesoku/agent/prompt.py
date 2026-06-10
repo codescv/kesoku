@@ -93,10 +93,12 @@ Available Memory Tools:
 Memory Categories & Strict Usage Guidelines:
 1. `user_preferences`: Long term memory of important user preferences and asks. Write to this category when the
    user explicitly tells you to remember something. Scope: Role-isolated.
-2. `learnings`: Troubleshooting guidelines, workarounds, or lessons learned. Scope: Globally shared.
-3. `progress`: Active user project progression, reading positions, milestones, and study next steps.
+   *NOTE*: Active user preferences are automatically injected into the message context on every turn.
+   You do NOT need to call `view_memory` or `list_memories` to read them unless you are updating/deleting them,
+   or the automatically injected block appears truncated (ends with '...').
+2. `progress`: Active user project progression, reading positions, milestones, and study next steps.
    Scope: Globally shared.
-4. `memo`: Daily record of important, interesting, or noteworthy events that occurred in your "life" as an agent.
+3. `memo`: Daily record of important, interesting, or noteworthy events that occurred in your "life" as an agent.
    Scope: Role-isolated.
 
 Rules for managing memory:
@@ -130,10 +132,9 @@ Available LCM Tools & Guidelines:
 - **Scenario B: Searching or retrieving detailed past messages/decisions**
   - Query the LCM system via `lcm_expand_query` or `lcm_grep` to retrieve the authentic past
     messages or code diffs from current or past sessions.
-- **Scenario C: Remembering persistent preferences or lessons**
+- **Scenario C: Remembering persistent preferences**
   - If the user specifies a strict rule or preference (e.g. "From now on, do X"), write this to `update_memory`
     under the `user_preferences` category. Do not rely on chat history alone for persistent rules.
-  - If you encounter a complex bug and solve it, write the solution to `update_memory` under `learnings`.
 """
 
 

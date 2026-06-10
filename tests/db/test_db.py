@@ -182,14 +182,14 @@ def test_message_crud(db_manager):
 def test_agent_memory_crud(db_manager):
     """Tests agent memory upsertion, retrieval, listing, and deletion."""
     db_manager.upsert_agent_memory(
-        category="learnings",
+        category="memo",
         key="python_pref",
         title="Python Preference",
         content="User prefers type-annotated Python code.",
         role="default",
     )
     db_manager.upsert_agent_memory(
-        category="learnings",
+        category="memo",
         key="rust_pref",
         title="Rust Preference",
         content="User likes cargo clean.",
@@ -197,18 +197,18 @@ def test_agent_memory_crud(db_manager):
     )
 
     # Get Specific
-    mem = db_manager.get_agent_memory(category="learnings", key="python_pref", role="default")
+    mem = db_manager.get_agent_memory(category="memo", key="python_pref", role="default")
     assert mem is not None
     assert mem["title"] == "Python Preference"
     assert mem["content"] == "User prefers type-annotated Python code."
 
     # List filtered by category & role (should include default)
-    mems = db_manager.get_agent_memories(category="learnings", role="coder")
+    mems = db_manager.get_agent_memories(category="memo", role="coder")
     assert len(mems) == 2  # Should fetch both 'coder' and 'default' memories
 
     # Delete
-    db_manager.delete_agent_memory(category="learnings", key="python_pref", role="default")
-    assert db_manager.get_agent_memory(category="learnings", key="python_pref", role="default") is None
+    db_manager.delete_agent_memory(category="memo", key="python_pref", role="default")
+    assert db_manager.get_agent_memory(category="memo", key="python_pref", role="default") is None
 
 
 def test_cross_session_context_and_locking(db_manager):

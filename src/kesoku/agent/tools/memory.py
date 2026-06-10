@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import time
+from typing import Literal
 
 from kesoku.agent.skills import SkillManager
 from kesoku.agent.tools.registry import ToolContext, default_registry
@@ -13,6 +14,8 @@ from kesoku.utils.async_fs import (
     async_get_subdirectories,
     async_isdir,
 )
+
+MemoryCategory = Literal["progress", "user_preferences", "memo"]
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +78,7 @@ async def _resolve_memory_role(category: str, role_param: str | None, context: T
     category = category.strip().lower()
 
     # Rule 1: Standard categories ALWAYS use "default" role
-    if category in {"progress", "learnings"}:
+    if category == "progress":
         return "default"
 
     # Rule 2: user_preferences and memo categories use current channel's active role
@@ -100,7 +103,7 @@ async def _resolve_memory_role(category: str, role_param: str | None, context: T
 
 @default_registry.register
 async def list_memories(
-    category: str,
+    category: MemoryCategory,
     role: str | None = None,
     context: ToolContext | None = None,
 ) -> str:
@@ -136,7 +139,7 @@ async def list_memories(
 
 @default_registry.register
 async def view_memory(
-    category: str,
+    category: MemoryCategory,
     key: str | None = None,
     role: str | None = None,
     context: ToolContext | None = None,
@@ -191,7 +194,7 @@ async def view_memory(
 
 @default_registry.register
 async def update_memory(
-    category: str,
+    category: MemoryCategory,
     key: str,
     title: str,
     content: str,
@@ -289,7 +292,7 @@ async def update_memory(
 
 @default_registry.register
 async def delete_memory(
-    category: str,
+    category: MemoryCategory,
     key: str,
     role: str | None = None,
     context: ToolContext | None = None,

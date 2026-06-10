@@ -26,9 +26,9 @@ async def test_database_memory_crud(tmp_path) -> None:
         role="default",
     )
 
-    # 2. Upsert role-specific learnings memory
+    # 2. Upsert role-specific memo memory
     db.upsert_agent_memory(
-        category="learnings",
+        category="memo",
         key="proxy_setting",
         title="代理配置",
         content="联网需要配置环境变量 HTTP_PROXY",
@@ -42,7 +42,7 @@ async def test_database_memory_crud(tmp_path) -> None:
     assert mem1["content"] == "学习完了第22课"
     assert mem1["role"] == "default"
 
-    mem2 = db.get_agent_memory(category="learnings", key="proxy_setting", role="asuka")
+    mem2 = db.get_agent_memory(category="memo", key="proxy_setting", role="asuka")
     assert mem2 is not None
     assert mem2["title"] == "代理配置"
     assert mem2["role"] == "asuka"
@@ -55,7 +55,7 @@ async def test_database_memory_crud(tmp_path) -> None:
 
     # Query with role='asuka' (should fetch both default + asuka's memories)
     all_asuka_mems = db.get_agent_memories(role="asuka")
-    # Both default progress and asuka specific learnings are in the system
+    # Both default progress and asuka specific memo are in the system
     assert len(all_asuka_mems) == 2
 
     # Query with role='tifa' (should fetch only default memories, and tifa specific ones if they existed)
@@ -64,8 +64,8 @@ async def test_database_memory_crud(tmp_path) -> None:
     assert all_tifa_mems[0]["key"] == "standard_japanese"
 
     # 5. Deleting memory
-    db.delete_agent_memory(category="learnings", key="proxy_setting", role="asuka")
-    deleted_mem = db.get_agent_memory(category="learnings", key="proxy_setting", role="asuka")
+    db.delete_agent_memory(category="memo", key="proxy_setting", role="asuka")
+    deleted_mem = db.get_agent_memory(category="memo", key="proxy_setting", role="asuka")
     assert deleted_mem is None
 
 

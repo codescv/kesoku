@@ -55,7 +55,7 @@ class AgentMemory(BaseModel):
     """Represents a structured agent memory record in the SQLite database."""
 
     id: int | None = Field(default=None, description="Database autoincrement primary key")
-    category: str = Field(..., description="Category: 'progress', 'learnings', 'user_preferences' etc.")
+    category: str = Field(..., description="Category: 'progress', 'user_preferences' etc.")
     key: str = Field(..., description="snake_case unique identifier")
     title: str = Field(..., description="Human-readable label or title for the entry")
     content: str = Field(..., description="Markdown text or structured content payload")

@@ -23,18 +23,18 @@
 ```sql
 CREATE TABLE IF NOT EXISTS agent_memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    category TEXT NOT NULL,         -- 'progress', 'learnings', 'user_preferences', 'memo'
+    category TEXT NOT NULL,         -- 'progress', 'user_preferences', 'memo'
     key TEXT NOT NULL,              -- 唯一的 snake_case 键名 (例如 'standard_japanese')
     title TEXT NOT NULL,            -- 人类可读标签
     content TEXT NOT NULL,          -- Markdown 或 JSON 内容 (最大 500 字符)
     updated_at REAL NOT NULL,       -- UNIX 时间戳浮点数
     role TEXT NOT NULL DEFAULT 'default', -- 绑定的角色人设范围
-    UNIQUE(category, key, role)     -- 安全更新和排重约束
+    UNIQUE(category, key, role)     -- 安全更新 and 排重约束
 );
 ```
 
 ### 2.1 类别描述与作用域
-*   **`progress` / `learnings`**：用于跟踪项目开发进度和个人学习节点。这些数据是**全局共享**的，统一绑定在默认角色 `"default"` 作用域下。
+*   **`progress`**：用于跟踪项目开发进度。这些数据是**全局共享**的，统一绑定在默认角色 `"default"` 作用域下。
 *   **`user_preferences`**：存储用户个人基本信息、语音/TTS 发音习惯以及回复风格偏好。这些是**角色隔离**的，绑定在当前频道活跃的角色人设下。
 *   **`memo`**：自定义用户备忘笔记或零散记忆。这些是**角色隔离**的。
 
