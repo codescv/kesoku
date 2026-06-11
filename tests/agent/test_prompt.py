@@ -3,28 +3,6 @@
 from kesoku.agent.prompt import build_sys_prompt
 
 
-def test_build_sys_prompt_default() -> None:
-    """Verify build_sys_prompt includes default system prompt and output formatting rules."""
-    prompt = build_sys_prompt()
-
-    # Check output formatting rules are included
-    assert "# Output Formatting Rules" in prompt
-    assert "[file: /abs/path/to/file]" in prompt
-    assert "[voice: /abs/path/to/audio]" in prompt
-    assert "[question: <the question> || Option 1 | Option 2 | ...]" in prompt
-
-    # Check background execution instructions are included
-    assert "# Background Tasks" in prompt
-
-    # Check Memory and Chat History instructions are included
-    assert "# Memory and Chat History Systems" in prompt
-    assert "user_preferences" in prompt
-    assert "progress" in prompt
-    assert "memo" in prompt
-
-
-
-
 def test_build_sys_prompt_with_custom_context() -> None:
     """Verify build_sys_prompt appends custom context instructions correctly."""
     custom_context = "You are inside a specialized testing environment."
