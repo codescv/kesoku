@@ -262,3 +262,136 @@ def test_thought_signature_preservation() -> None:
     assert msgs[0].metadata.get("thought_signature") == "sig_123456"
 
 
+def test_messages_to_openlcm_dicts_strips_historical_thoughts() -> None:
+    """Verify that messages_to_openlcm_dicts strips thoughts from completed turns only."""
+    history = [
+        # Turn 1 (Completed)
+        Message(
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="User",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="Hello",
+        ),
+        Message(
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.THOUGHT,
+            content="Historical thought",
+        ),
+        Message(
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="Hi there",
+        ),
+        # Turn 2 (Active/Latest)
+        Message(
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="User",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="How are you?",
+        ),
+        Message(
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.THOUGHT,
+            content="Active thought",
+        ),
+        Message(
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="I am good",
+        ),
+    ]
+
+    dicts = messages_to_openlcm_dicts(history)
+
+    # We should have:
+    # 1. user: "Hello"
+    # 2. assistant: "Hi there" (without "Historical thought")
+    # 3. user: "How are you?"
+    # 4. assistant: "<thought>Active thought</thought>\n\nI am good"
+    assert len(dicts) == 4
+    assert dicts[0]["role"] == "user"
+    assert dicts[0]["content"] == "Hello"
+    assert dicts[1]["role"] == "assistant"
+    assert dicts[1]["content"] == "Hi there"
+    assert dicts[2]["role"] == "user"
+    assert dicts[2]["content"] == "How are you?"
+    assert dicts[3]["role"] == "assistant"
+    assert dicts[3]["content"] == "<thought>Active thought</thought>\n\nI am good"
+
+
+def test_path_sanitization_and_restoration() -> None:
+    """Verify that absolute paths under sessions staging dir are sanitized and restored."""
+    history = [
+        Message(
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="Check file: /path/to/sessions/sess1/file.png",
+        ),
+        Message(
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="Kesoku",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_CALL,
+            content="Calling tool",
+            metadata={
+                "tool_name": "test_tool",
+                "tool_arguments": {"path": "/path/to/sessions/sess1/file.png"},
+                "tool_call_id": "tc_1",
+            },
+        ),
+    ]
+
+    # 1. Sanitize (to OpenLCM dicts)
+    dicts = messages_to_openlcm_dicts(history)
+    assert len(dicts) == 2
+    assert dicts[0]["content"] == "Check file: $STAGING_DIR/file.png"
+    assert "tool_calls" in dicts[1]
+    import json
+    args = json.loads(dicts[1]["tool_calls"][0]["function"]["arguments"])
+    assert args["path"] == "$STAGING_DIR/file.png"
+
+    # 2. Restore (back to Messages)
+    msgs = openlcm_dicts_to_messages(
+        dicts,
+        session_id="sess1",
+        chatbot_id="cli",
+        channel_id="chan1",
+        workspace_name="sess1",
+    )
+    assert len(msgs) == 2
+    # Verify replaced path contains the correct staging dir path
+    assert "sessions/sess1/file.png" in msgs[0].content
+    assert msgs[1].role == MessageRole.TOOL
+    assert msgs[1].type == MessageType.TOOL_CALL
+    assert "sessions/sess1/file.png" in msgs[1].metadata["tool_arguments"]["path"]
+
+
+

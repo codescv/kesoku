@@ -46,7 +46,7 @@ class KesokuContext:
         """Create and bind a session-specific LCMEngine instance to prevent concurrent clobbering."""
         if session_id not in self._lcm_engines:
             async def lcm_summarize_fn(prompt: str, max_tokens: int) -> str:
-                model_client = self.get_llm()
+                model_client = self.get_llm(use_lcm=True)
                 res = await model_client.generate(prompt=prompt)
                 return res.content
 
@@ -70,11 +70,12 @@ class KesokuContext:
             return self._config
         return get_config()
 
-    def get_llm(self, provider: str | None = None) -> BaseLLM:
+    def get_llm(self, provider: str | None = None, use_lcm: bool = False) -> BaseLLM:
         """Dynamically resolve and build an LLM provider instance at execution time.
 
         Args:
             provider: Optional provider name (e.g. 'gemini', 'claude'). If None, resolves from config.
+            use_lcm: Whether to resolve using LCM settings.
 
         Returns:
             An instance of BaseLLM.
@@ -82,5 +83,9 @@ class KesokuContext:
         if self._llm is not None and provider is None:
             return self._llm
 
-        target_provider = provider or self.config.agent.llm
-        return get_llm(provider=target_provider, config=self.config)
+        target_provider = provider or (
+            self.config.agent.lcm_llm
+            if use_lcm and self.config.agent.lcm_llm
+            else self.config.agent.llm
+        )
+        return get_llm(provider=target_provider, config=self.config, use_lcm=use_lcm)

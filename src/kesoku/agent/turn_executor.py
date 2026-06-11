@@ -476,7 +476,7 @@ class TurnExecutor:
             )
 
             # 3. Invoke LLM
-            llm = self.context.get_llm()
+            llm = self.context.get_llm(use_lcm=True)
             res = await llm.generate(
                 system_prompt="You are an expert background memory consolidator.",
                 prompt=prompt,
@@ -672,11 +672,14 @@ class TurnExecutor:
             compressed_lcm_msgs = await lcm_engine.compress(lcm_input)
 
             # Translate OpenLCM output dictionaries back to Kesoku Messages
+            session = await self.context.db.get_session(self.session_id)
+            workspace_name = session.workspace_name if session else None
             history = openlcm_dicts_to_messages(
                 compressed_lcm_msgs,
                 session_id=self.session_id,
                 chatbot_id=current_msg.chatbot_id,
                 channel_id=current_msg.channel_id,
+                workspace_name=workspace_name,
             )
 
         return history

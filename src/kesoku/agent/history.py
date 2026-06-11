@@ -154,6 +154,32 @@ def messages_to_openlcm_dicts(history: list[Message]) -> list[dict[str, Any]]:
     Returns:
         A list of raw dictionaries matching the OpenAI/Anthropic format expected by OpenLCM.
     """
+    # 1. Group messages into turns and strip historical thoughts (Question 1)
+    turns: list[list[Message]] = []
+    current_turn: list[Message] = []
+    for m in history:
+        if m.role in (MessageRole.USER, MessageRole.SYSTEM):
+            if current_turn:
+                turns.append(current_turn)
+            current_turn = [m]
+        else:
+            if current_turn:
+                current_turn.append(m)
+            else:
+                current_turn = [m]
+    if current_turn:
+        turns.append(current_turn)
+
+    cleaned_history = []
+    num_turns = len(turns)
+    for idx, turn in enumerate(turns):
+        is_latest = idx == num_turns - 1
+        for m in turn:
+            if not is_latest and m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT:
+                continue
+            cleaned_history.append(m)
+
+    # 2. Sanitize paths and process messages (Question 4)
     lcm_msgs = []
     current_thought: str | None = None
     current_tool_calls: list[dict[str, Any]] = []
@@ -171,18 +197,35 @@ def messages_to_openlcm_dicts(history: list[Message]) -> list[dict[str, Any]]:
             current_thought = None
             current_tool_calls = []
 
-    for msg in history:
+    for msg in cleaned_history:
+        # Sanitize absolute paths in message content to reduce token count and prevent file lists (Question 4)
+        msg_content = msg.content or ""
+        if msg_content:
+            # Replace absolute paths under sessions staging directory with $STAGING_DIR/filename.ext
+            pattern = r'/[^\s\'\"\]]*/sessions/[^/]+/([^\s\'\"\]]*)'
+            msg_content = re.sub(pattern, r'$STAGING_DIR/\1', msg_content)
+
         if msg.role == MessageRole.ASSISTANT and msg.type == MessageType.THOUGHT:
             flush_assistant()
-            current_thought = msg.content
+            current_thought = msg_content
         elif msg.role == MessageRole.TOOL and msg.type == MessageType.TOOL_CALL:
             tool_call_id = msg.metadata.get("tool_call_id") or msg.id
             tool_name = msg.metadata.get("tool_name") or msg.sender
             tool_arguments = msg.metadata.get("tool_arguments") or {}
             if isinstance(tool_arguments, dict):
-                tool_arguments_str = json.dumps(tool_arguments, ensure_ascii=False)
+                # Also sanitize paths in tool arguments if they are strings
+                sanitized_args = {}
+                for k, v in tool_arguments.items():
+                    if isinstance(v, str):
+                        pattern = r'/[^\s\'\"\]]*/sessions/[^/]+/([^\s\'\"\]]*)'
+                        sanitized_args[k] = re.sub(pattern, r'$STAGING_DIR/\1', v)
+                    else:
+                        sanitized_args[k] = v
+                tool_arguments_str = json.dumps(sanitized_args, ensure_ascii=False)
             else:
                 tool_arguments_str = str(tool_arguments)
+                pattern = r'/[^\s\'\"\]]*/sessions/[^/]+/([^\s\'\"\]]*)'
+                tool_arguments_str = re.sub(pattern, r'$STAGING_DIR/\1', tool_arguments_str)
 
             tc_dict = {
                 "id": tool_call_id,
@@ -200,7 +243,10 @@ def messages_to_openlcm_dicts(history: list[Message]) -> list[dict[str, Any]]:
             flush_assistant()
             tool_call_id = msg.metadata.get("tool_call_id") or msg.parent_id or ""
             tool_name = msg.metadata.get("tool_name") or msg.sender
-            tool_result_content = msg.metadata.get("tool_result") or msg.content
+            tool_result_content = msg.metadata.get("tool_result") or msg_content
+            if isinstance(tool_result_content, str):
+                pattern = r'/[^\s\'\"\]]*/sessions/[^/]+/([^\s\'\"\]]*)'
+                tool_result_content = re.sub(pattern, r'$STAGING_DIR/\1', tool_result_content)
             lcm_msgs.append({
                 "role": "tool",
                 "content": tool_result_content,
@@ -209,7 +255,7 @@ def messages_to_openlcm_dicts(history: list[Message]) -> list[dict[str, Any]]:
             })
         elif msg.role == MessageRole.ASSISTANT and msg.type == MessageType.TEXT:
             if current_thought is not None:
-                merged_content = f"<thought>{current_thought}</thought>\n\n{msg.content}"
+                merged_content = f"<thought>{current_thought}</thought>\n\n{msg_content}"
                 lcm_msgs.append({
                     "role": "assistant",
                     "content": merged_content,
@@ -218,14 +264,14 @@ def messages_to_openlcm_dicts(history: list[Message]) -> list[dict[str, Any]]:
             else:
                 lcm_msgs.append({
                     "role": "assistant",
-                    "content": msg.content,
+                    "content": msg_content,
                 })
         else:
             flush_assistant()
             role_val = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
             lcm_msgs.append({
                 "role": role_val,
-                "content": msg.content,
+                "content": msg_content,
             })
 
     flush_assistant()
@@ -237,6 +283,7 @@ def openlcm_dicts_to_messages(
     session_id: str,
     chatbot_id: str,
     channel_id: str,
+    workspace_name: str | None = None,
 ) -> list[Message]:
     """Reconstruct Kesoku Message list from OpenLCM dictionaries.
 
@@ -249,10 +296,35 @@ def openlcm_dicts_to_messages(
         session_id: Target conversational session identifier.
         chatbot_id: Unique chatbot platform identifier.
         channel_id: External platform channel identifier.
+        workspace_name: Optional workspace name to restore $STAGING_DIR paths.
 
     Returns:
         A reconstructed list of Kesoku Message objects.
     """
+    if workspace_name:
+        from kesoku.config import get_config
+        cfg = get_config()
+        staging_dir = os.path.realpath(os.path.join(cfg.workspace.sessions_dir, workspace_name))
+
+        restored_dicts = []
+        for d in dicts:
+            d_copy = dict(d)
+            if "content" in d_copy and d_copy["content"]:
+                d_copy["content"] = d_copy["content"].replace("$STAGING_DIR", staging_dir)
+            if "tool_calls" in d_copy and d_copy["tool_calls"]:
+                tcs_copy = []
+                for tc in d_copy["tool_calls"]:
+                    tc_copy = dict(tc)
+                    if "function" in tc_copy and tc_copy["function"]:
+                        fn_copy = dict(tc_copy["function"])
+                        if "arguments" in fn_copy and fn_copy["arguments"]:
+                            fn_copy["arguments"] = fn_copy["arguments"].replace("$STAGING_DIR", staging_dir)
+                        tc_copy["function"] = fn_copy
+                    tcs_copy.append(tc_copy)
+                d_copy["tool_calls"] = tcs_copy
+            restored_dicts.append(d_copy)
+        dicts = restored_dicts
+
     msgs = []
     for d in dicts:
         role_str = d["role"]

@@ -63,6 +63,40 @@ def test_get_llm_providers() -> None:
     assert "Unsupported LLM provider" in str(exc_info.value)
 
 
+def test_get_llm_with_lcm_override() -> None:
+    """Verify get_llm applies use_lcm overrides for provider and model configuration."""
+    from kesoku.config import KesokuConfig
+    cfg = KesokuConfig()
+    cfg.agent.llm = "gemini"
+    cfg.agent.lcm_llm = "claude"
+    cfg.gemini.model_name = "gemini-3.5-pro"
+    cfg.gemini.lcm_model_name = "gemini-2.0-flash-lite"
+    cfg.claude.model_name = "claude-3-5-sonnet"
+    cfg.claude.lcm_model_name = "claude-3-5-haiku"
+
+    # Case 1: no use_lcm (resolves to gemini model_name)
+    with patch("kesoku.agent.llm.GeminiLLM") as mock_gemini:
+        get_llm(config=cfg)
+        mock_gemini.assert_called_once()
+        called_config = mock_gemini.call_args[1]["config"]
+        assert called_config.model_name == "gemini-3.5-pro"
+
+    # Case 2: use_lcm=True, which overrides provider to claude and uses claude's lcm_model_name
+    with patch("kesoku.agent.llm.ClaudeLLM") as mock_claude:
+        get_llm(config=cfg, use_lcm=True)
+        mock_claude.assert_called_once()
+        called_config = mock_claude.call_args[1]["config"]
+        assert called_config.model_name == "claude-3-5-haiku"
+
+    # Case 3: use_lcm=True, but provider explicitly overridden to gemini (uses gemini's lcm_model_name)
+    with patch("kesoku.agent.llm.GeminiLLM") as mock_gemini:
+        get_llm(provider="gemini", config=cfg, use_lcm=True)
+        mock_gemini.assert_called_once()
+        called_config = mock_gemini.call_args[1]["config"]
+        assert called_config.model_name == "gemini-2.0-flash-lite"
+
+
+
 @pytest.mark.asyncio
 async def test_claude_llm_generate_history_conversion() -> None:
     """Verify ClaudeLLM converts conversational history to Anthropic format correctly."""
