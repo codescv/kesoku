@@ -57,10 +57,16 @@ async def lcm_grep(
     if not context or not context.gateway:
         return "Error: ToolContext is missing."
 
-    # Resolve active role to restrict session access to current persona memory
     active_role = await _resolve_memory_role(category="user_preferences", role_param=None, context=context)
     allowed_sessions = await context.gateway.db.get_role_session_ids(active_role)
     allowed_sessions_set = set(allowed_sessions)
+    for s in allowed_sessions:
+        h = 2166136261
+        for c in s.encode("utf-8"):
+            h ^= c
+            h = (h * 16777619) & 0xFFFFFFFF
+        allowed_sessions_set.add(f"{h:08x}")
+        allowed_sessions_set.add(s[:8])
 
     lcm_engine = context.lcm_engine
     args = {
@@ -79,7 +85,12 @@ async def lcm_grep(
     try:
         data = json.loads(raw_response)
         if "results" in data:
-            data["results"] = data["results"][:limit]
+            filtered_results = [
+                res
+                for res in data["results"]
+                if res.get("session_id") in allowed_sessions_set
+            ]
+            data["results"] = filtered_results[:limit]
             data["total_results"] = len(data["results"])
             return json.dumps(data)
     except Exception as e:
@@ -274,6 +285,13 @@ async def lcm_semantic_search(
     active_role = await _resolve_memory_role(category="user_preferences", role_param=None, context=context)
     allowed_sessions = await context.gateway.db.get_role_session_ids(active_role)
     allowed_sessions_set = set(allowed_sessions)
+    for s in allowed_sessions:
+        h = 2166136261
+        for c in s.encode("utf-8"):
+            h ^= c
+            h = (h * 16777619) & 0xFFFFFFFF
+        allowed_sessions_set.add(f"{h:08x}")
+        allowed_sessions_set.add(s[:8])
 
     lcm_engine = context.lcm_engine
     es = getattr(lcm_engine, "_embeddings", None)
