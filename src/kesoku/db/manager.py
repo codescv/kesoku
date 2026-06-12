@@ -983,6 +983,11 @@ class DatabaseManager:
         """
         with self.connection_provider.connection() as conn:
             query = """
+                SELECT DISTINCT m.session_id
+                FROM messages m
+                LEFT JOIN channel_roles cr ON m.chatbot_id = cr.chatbot_id AND m.channel_id = cr.channel_id
+                WHERE COALESCE(cr.role, 'default') IN (?, 'default')
+                UNION
                 SELECT DISTINCT cs.session_id
                 FROM channel_sessions cs
                 LEFT JOIN channel_roles cr_direct
@@ -1000,10 +1005,10 @@ class DatabaseManager:
                 LEFT JOIN channel_roles cr_parent
                   ON cs.chatbot_id = cr_parent.chatbot_id
                  AND parent_info.parent_channel_id = cr_parent.channel_id
-                WHERE COALESCE(cr_direct.role, cr_parent.role, 'default') = ?
+                WHERE COALESCE(cr_direct.role, cr_parent.role, 'default') IN (?, 'default')
             """
             cursor = conn.cursor()
-            cursor.execute(query, (role,))
+            cursor.execute(query, (role, role))
             rows = cursor.fetchall()
             return [row[0] for row in rows if row[0]]
 

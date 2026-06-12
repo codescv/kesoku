@@ -55,20 +55,12 @@ When conversations grow long, older messages are compacted into a hierarchical S
 (Summary DAG). Use LCM tools to search, browse, or read past chat history, especially compacted history or
 messages from other sessions.
 
-## 3. When to Use Which (And How to Combine Them)
-- **Scenario A: Synchronizing with other channels/conversations**
-  - First, call `view_chat_history_summary` to get a high-level timeline of recent discussions.
-  - If you identify an event, decision, or message snippet that you need to inspect in detail, look for its
-    associated session ID, message ID, or keywords.
-  - Then, use `lcm_grep` to search and retrieve the full
-    raw chat history of that specific conversation.
-- **Scenario B: Searching or retrieving detailed past messages/decisions**
-  - Query the LCM system via `lcm_grep` to retrieve the authentic past
-    messages or code diffs from current or past sessions.
-  - (Use `lcm_expand_query` ONLY when querying compacted summary nodes).
-- **Scenario C: Remembering persistent preferences**
-  - If the user specifies a strict rule or preference (e.g. "From now on, do X"), write this to `update_memory`
-    under the `user_preferences` category. Do not rely on chat history alone for persistent rules.
+## 3. When to Use Which
+- Use `view_memory` to recall facts and progresses that you explicitly recorded.
+- Use `view_chat_history_summary` to get a high-level timeline of recent (last ~2 weeks) discussions.
+- Use `lcm_grep` (keyword / wildcard match) and `lcm_semantic_search` (semantic match) to search
+  chat histories.
+- Use `lcm_query` and `lcm_expand_query` to expand / answer questions about compacted nodes.
 """
 
 
