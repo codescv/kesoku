@@ -206,7 +206,7 @@ class Chatbot(ABC):
     def _register_default_commands(self) -> None:
         """Register platform-agnostic standard commands."""
 
-        async def handle_restart(reply_func: Callable[[str], Awaitable[None]]) -> None:
+        async def handle_restart(reply_func: Callable[[str], Awaitable[None]], **kwargs: Any) -> None:
             await reply_func("🔄 Restarting service...")
             await self.restart_service()
 
@@ -421,6 +421,7 @@ class Chatbot(ABC):
         async def handle_cronjob(
             reply_func: Callable[[str], Awaitable[None]],
             tag: str = "",
+            **kwargs: Any,
         ) -> None:
             if tag:
                 status_msg = await self.trigger_cronjobs_by_tag(tag)
