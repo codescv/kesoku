@@ -19,9 +19,6 @@ from openlcm.core.tools import (
     lcm_grep as _lcm_grep,
 )
 from openlcm.core.tools import (
-    lcm_semantic_search as _lcm_semantic_search,
-)
-from openlcm.core.tools import (
     lcm_status as _lcm_status,
 )
 
@@ -314,32 +311,40 @@ async def lcm_semantic_search(
     allowed_sessions_set = set(allowed_sessions)
 
     lcm_engine = context.lcm_engine
-    if getattr(lcm_engine, "_embeddings", None):
-        if not lcm_engine._embeddings.enabled:
-            lcm_engine._embeddings._init_db()
-        await _ensure_embeddings_indexed(lcm_engine)
+    es = getattr(lcm_engine, "_embeddings", None)
+    if not es:
+        return json.dumps({"results": [], "total": 0})
 
-    args = {
-        "query": query,
-        "limit": limit,
-        "content_type": content_type,
-    }
-    raw_response = await asyncio.to_thread(_lcm_semantic_search, args, engine=lcm_engine)
+    if not es.enabled:
+        es._init_db()
+    await _ensure_embeddings_indexed(lcm_engine)
 
     try:
-        data = json.loads(raw_response)
-        if "results" in data:
-            filtered = []
-            for res in data["results"]:
-                if res.get("content_type") == "node":
-                    if res.get("session_id") in allowed_sessions_set:
-                        filtered.append(res)
-                else:
-                    filtered.append(res)
-            data["results"] = filtered[:limit]
-            data["total"] = len(data["results"])
-            return json.dumps(data)
-    except Exception:
-        pass
+        target_ct = content_type if content_type in ("node", "fact") else None
+        hits = await es.search(query, content_type=target_ct, limit=limit * 2)
+        filtered = []
+        for hit in hits:
+            if hit.get("content_type") == "node":
+                node_id = hit.get("content_id")
+                node = lcm_engine._dag.get_node(node_id) if hasattr(lcm_engine._dag, "get_node") else None
+                if node and node.session_id in allowed_sessions_set:
+                    hit["session_id"] = node.session_id
+                    hit["summary_preview"] = node.summary[:300] if node.summary else ""
+                    hit["depth"] = node.depth
+                    hit["created_at"] = node.created_at
+                    filtered.append(hit)
+            else:
+                filtered.append(hit)
 
-    return raw_response
+        results = filtered[:limit]
+        return json.dumps({
+            "query": query,
+            "content_type": content_type,
+            "limit": limit,
+            "total": len(results),
+            "results": results,
+            "model": es.embedding_model,
+        })
+    except Exception as exc:
+        logger.error(f"Semantic search error: {exc}")
+        return json.dumps({"error": str(exc), "results": []})

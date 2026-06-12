@@ -4,13 +4,97 @@ This avoids global mutable state and supports dependency injection.
 """
 
 import os
+from typing import Any
 
 from openlcm import LCMEngine
+from openlcm.core.embeddings import EmbeddingStore
 
 from kesoku.agent.llm import BaseLLM, get_llm
 from kesoku.agent.tools import ActiveJobsRegistry, ToolRegistry, default_registry
 from kesoku.config import KesokuConfig, get_config
 from kesoku.db import AsyncDatabaseManager, DatabaseManager
+
+
+def _apply_embedding_monkey_patch() -> None:
+    if getattr(EmbeddingStore, "_patched_by_kesoku", False):
+        return
+
+    def _patched_init_db(self: EmbeddingStore) -> None:
+        import logging
+        import sqlite3
+
+        try:
+            import sqlite_vec
+
+            self._conn = sqlite3.connect(str(self.db_path), timeout=5.0, check_same_thread=False)
+            try:
+                self._conn.enable_load_extension(True)
+            except AttributeError:
+                pass
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            sqlite_vec.load(self._conn)
+            self._enabled = True
+        except Exception as exc:
+            logging.getLogger(__name__).debug("EmbeddingStore disabled: %s", exc)
+            self._enabled = False
+            self._conn = None
+
+    EmbeddingStore._init_db = _patched_init_db
+
+    async def _patched_search(
+        self: EmbeddingStore,
+        query_text: str,
+        *,
+        content_type: str | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        if not self._enabled or not self._conn or not query_text:
+            return []
+        query_vec = await self._get_embedding(query_text)
+        if query_vec is None:
+            return []
+
+        import logging
+        import struct
+
+        query_blob = struct.pack(f"{len(query_vec)}f", *query_vec)
+
+        try:
+            where = "AND content_type = ?" if content_type else ""
+            args: list[Any] = [query_blob]
+            if content_type:
+                args.append(content_type)
+            args.append(limit)
+
+            rows = self._conn.execute(
+                f"""
+                SELECT content_type, content_id,
+                       vec_distance_cosine(embedding, ?) AS distance
+                FROM lcm_embeddings
+                WHERE 1=1 {where}
+                ORDER BY distance ASC
+                LIMIT ?
+                """,
+                args,
+            ).fetchall()
+            return [
+                {
+                    "content_type": r[0],
+                    "content_id": r[1],
+                    "score": round(1.0 - float(r[2]), 4),
+                    "distance": round(float(r[2]), 4),
+                }
+                for r in rows
+            ]
+        except Exception as exc:
+            logging.getLogger(__name__).debug("Embedding search failed: %s", exc)
+            return []
+
+    EmbeddingStore.search = _patched_search
+    EmbeddingStore._patched_by_kesoku = True
+
+
+_apply_embedding_monkey_patch()
 
 
 class KesokuContext:
