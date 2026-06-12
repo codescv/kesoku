@@ -5,6 +5,7 @@ import json
 import logging
 from typing import Any
 
+from openlcm.core.embeddings import EmbeddingStore
 from openlcm.core.tools import (
     lcm_describe as _lcm_describe,
 )
@@ -28,6 +29,40 @@ from kesoku.agent.tools.memory import _resolve_memory_role
 from kesoku.agent.tools.registry import ToolContext, default_registry
 
 logger = logging.getLogger(__name__)
+
+
+
+
+def _apply_embedding_monkey_patch() -> None:
+    if getattr(EmbeddingStore, "_patched_by_kesoku", False):
+        return
+
+    def _patched_init_db(self: EmbeddingStore) -> None:
+        import logging
+        import sqlite3
+
+        try:
+            import sqlite_vec
+
+            self._conn = sqlite3.connect(str(self.db_path), timeout=5.0, check_same_thread=False)
+            try:
+                self._conn.enable_load_extension(True)
+            except AttributeError:
+                pass
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            sqlite_vec.load(self._conn)
+            self._enabled = True
+            logger.debug("EmbeddingStore ready with patched sqlite_vec model=%s", self.embedding_model)
+        except Exception as exc:
+            logging.getLogger("openlcm.core.embeddings").debug("EmbeddingStore disabled: %s", exc)
+            self._enabled = False
+            self._conn = None
+
+    EmbeddingStore._init_db = _patched_init_db
+    EmbeddingStore._patched_by_kesoku = True
+
+
+_apply_embedding_monkey_patch()
 
 
 @default_registry.register
@@ -220,6 +255,9 @@ async def lcm_semantic_search(
     allowed_sessions_set = set(allowed_sessions)
 
     lcm_engine = context.lcm_engine
+    if getattr(lcm_engine, "_embeddings", None) and not lcm_engine._embeddings.enabled:
+        lcm_engine._embeddings._init_db()
+
     args = {
         "query": query,
         "limit": limit,
