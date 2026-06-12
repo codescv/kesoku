@@ -83,17 +83,28 @@ async def _resolve_memory_role(category: str, role_param: str | None, context: T
 
     # Rule 2: user_preferences and memo categories use current channel's active role
     if category in {"user_preferences", "memo"}:
-        if context and context.gateway and context.original_msg_id:
+        if context and context.gateway:
             db = context.gateway.db
-            try:
-                msg_list = await db.get_messages_by_filters({"id": context.original_msg_id})
-                if msg_list:
-                    msg = msg_list[0]
-                    return await db.get_channel_role_with_inheritance(
-                        msg.chatbot_id, msg.channel_id, context.session_id
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to resolve active role for memory category {category}: {e}")
+            if context.original_msg_id:
+                try:
+                    msg_list = await db.get_messages_by_filters({"id": context.original_msg_id})
+                    if msg_list:
+                        msg = msg_list[0]
+                        return await db.get_channel_role_with_inheritance(
+                            msg.chatbot_id, msg.channel_id, context.session_id
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to resolve active role for memory category {category}: {e}")
+            if context.session_id:
+                try:
+                    mapping = await db.get_channel_by_session(context.session_id)
+                    if mapping:
+                        chatbot_id, channel_id = mapping
+                        return await db.get_channel_role_with_inheritance(
+                            chatbot_id, channel_id, context.session_id
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to resolve active role from session_id for memory category {category}: {e}")
         # Fallback
         return role_param if role_param else "default"
 

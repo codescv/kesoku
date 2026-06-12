@@ -454,5 +454,58 @@ async def test_lcm_grep_role_isolation(tmp_path) -> None:
     assert "Asuka" not in res_tifa["results"][0]["snippet"]
 
 
+@pytest.mark.asyncio
+async def test_lcm_grep_slash_command(tmp_path) -> None:
+    """Verify that chatbot /lcm-grep command triggers lcm_grep tool across all role sessions."""
+    import time
+
+    from kesoku.config import KesokuConfig, WorkspaceConfig
+    from kesoku.context import KesokuContext
+    from kesoku.db import DatabaseManager, Message, Session
+    from kesoku.gateway.chatbot.base import Chatbot
+    from kesoku.gateway.gateway import Gateway
+
+    temp_db = str(tmp_path / "test_slash_grep.db")
+    db_mgr = DatabaseManager(temp_db)
+    db_mgr.init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    ctx = KesokuContext(config=cfg, db=db_mgr)
+    gw = Gateway(context=ctx)
+
+    sess = Session(
+        id="sess_slash",
+        title="Slash Session",
+        created_at=time.time(),
+        updated_at=time.time(),
+    )
+    db_mgr.create_session(sess)
+    db_mgr.set_channel_role(chatbot_id="cli", channel_id="ch_slash", role="default")
+    db_mgr.set_active_session_for_channel(chatbot_id="cli", channel_id="ch_slash", session_id="sess_slash")
+
+    lcm_engine = ctx.get_lcm_engine("sess_slash")
+    lcm_engine._ingest_messages([
+        {"role": "user", "content": "Testing lcm-grep keyword match."}
+    ])
+
+    class DummyChatbot(Chatbot):
+        async def handle_message(self, message: Message) -> None:
+            pass
+
+    bot = DummyChatbot("cli", gw)
+
+    reply_msg = None
+
+    async def mock_reply(content: str) -> None:
+        nonlocal reply_msg
+        reply_msg = content
+
+    await bot.execute_command_from_text("/lcm-grep keyword", mock_reply, channel_id="ch_slash")
+
+    assert reply_msg is not None
+    assert "Search Results for `keyword`" in reply_msg
+    assert "Testing lcm-grep >>>keyword<<< match." in reply_msg
+
+
+
 
 

@@ -3,6 +3,7 @@
 import asyncio
 import datetime
 import difflib
+import json
 import os
 import re
 import time
@@ -15,6 +16,8 @@ from pydantic import BaseModel, Field
 
 from kesoku.agent.history import build_history, messages_to_openlcm_dicts
 from kesoku.agent.prompt import build_sys_prompt
+from kesoku.agent.tools.lcm import lcm_grep
+from kesoku.agent.tools.registry import ToolContext
 from kesoku.config import get_config
 from kesoku.constants import SYSTEM_START_TIME, MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
@@ -257,6 +260,66 @@ class Chatbot(ABC):
             handle_lcm,
         )
 
+        async def handle_lcm_grep(
+            reply_func: Callable[..., Awaitable[None]],
+            channel_id: str,
+            query: str = "",
+        ) -> None:
+            if not query:
+                await reply_func("⚠️ Please provide search keywords (e.g., /lcm-grep keyword).")
+                return
+
+            session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
+            if not session:
+                session = await self.gateway.create_session(
+                    session_id=None,
+                    title=f"LCM Grep {channel_id}",
+                    chatbot_id=self.chatbot_id,
+                    channel_id=channel_id,
+                )
+
+            ctx = ToolContext(
+                session_id=session.id,
+                session_workspace=session.workspace_name,
+                gateway=self.gateway,
+            )
+            try:
+                res = await lcm_grep(query=query, context=ctx)
+                try:
+                    data = json.loads(res)
+                    if not data.get("results"):
+                        await reply_func(f"🔍 No results found for `{query}`.")
+                        return
+
+                    total = data.get("total_results", len(data["results"]))
+                    lines = [f"🔍 **Search Results for `{query}` (Total: {total}):**"]
+                    for idx, hit in enumerate(data["results"]):
+                        sess_id = hit.get("session_id")
+                        role_str = f"[{hit.get('role')}]" if hit.get("role") else ""
+                        time_str = ""
+                        if hit.get("timestamp"):
+                            dt = datetime.datetime.fromtimestamp(hit["timestamp"])
+                            time_str = f" ({dt.strftime('%m-%d %H:%M')})"
+                        snippet = hit.get("snippet", "").strip().replace("\n", " ")
+                        lines.append(f"{idx + 1}. **{sess_id}**{time_str} {role_str}: {snippet}")
+                    await reply_func("\n".join(lines))
+                except Exception:
+                    await reply_func(res)
+            except Exception as e:
+                logger.error(f"Failed lcm-grep execution: {e}")
+                await reply_func(f"⚠️ Failed to execute lcm-grep: {e}")
+
+        self.commands.register(
+            "lcm-grep",
+            "Grep conversation history across all sessions of the current bound role.",
+            handle_lcm_grep,
+        )
+        self.commands.register(
+            "lcm_grep",
+            "Grep conversation history across all sessions of the current bound role.",
+            handle_lcm_grep,
+        )
+
         async def handle_debug(
             reply_func: Callable[[str], Awaitable[None]],
             channel_id: str,
@@ -377,6 +440,12 @@ class Chatbot(ABC):
                 await self.commands.execute("role", reply_func, channel_id=channel_id, role_name=role_name)
             elif command == "restart":
                 await self.commands.execute(command, reply_func)
+            elif command in {"lcm-grep", "lcm_grep"}:
+                if not channel_id:
+                    await reply_func("⚠️ Channel ID is required for this command.")
+                    return
+                query = " ".join(parts[1:]) if len(parts) > 1 else ""
+                await self.commands.execute(command, reply_func, channel_id=channel_id, query=query)
             elif command == "cronjob":
                 tag = " ".join(parts[1:]) if len(parts) > 1 else ""
                 await self.commands.execute("cronjob", reply_func, tag=tag)
