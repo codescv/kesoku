@@ -232,6 +232,65 @@ async def lcm_status(context: ToolContext | None = None) -> str:
     return await asyncio.to_thread(_lcm_status, {}, engine=lcm_engine)
 
 
+async def _ensure_embeddings_indexed(engine: Any) -> None:
+    es = getattr(engine, "_embeddings", None)
+    if not es or not es.enabled or not getattr(es, "_conn", None):
+        return
+
+    conn = es._conn
+    try:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS lcm_embeddings (
+                emb_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                content_type  TEXT NOT NULL,
+                content_id    INTEGER NOT NULL,
+                model         TEXT NOT NULL DEFAULT '',
+                embedding     BLOB NOT NULL,
+                created_at    REAL NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_emb_content
+                ON lcm_embeddings(content_type, content_id, model);
+        """)
+    except Exception as e:
+        logger.error(f"Failed to ensure lcm_embeddings table: {e}")
+        return
+
+    model_name = es.embedding_model
+    try:
+        nodes = conn.execute(
+            """
+            SELECT node_id, summary FROM lcm_nodes
+            WHERE node_id NOT IN (
+                SELECT content_id FROM lcm_embeddings
+                WHERE content_type = 'node' AND model = ?
+            )
+            """,
+            (model_name,),
+        ).fetchall()
+        for node_id, summary in nodes:
+            if summary and summary.strip():
+                await es.embed("node", node_id, summary)
+    except Exception as e:
+        logger.error(f"Failed to backfill node embeddings: {e}")
+
+    try:
+        facts = conn.execute(
+            """
+            SELECT fact_id, value FROM lcm_facts
+            WHERE fact_id NOT IN (
+                SELECT content_id FROM lcm_embeddings
+                WHERE content_type = 'fact' AND model = ?
+            )
+            """,
+            (model_name,),
+        ).fetchall()
+        for fact_id, value in facts:
+            if value and value.strip():
+                await es.embed("fact", fact_id, value)
+    except Exception as e:
+        logger.error(f"Failed to backfill fact embeddings: {e}")
+
+
 @default_registry.register
 async def lcm_semantic_search(
     query: str,
@@ -255,8 +314,10 @@ async def lcm_semantic_search(
     allowed_sessions_set = set(allowed_sessions)
 
     lcm_engine = context.lcm_engine
-    if getattr(lcm_engine, "_embeddings", None) and not lcm_engine._embeddings.enabled:
-        lcm_engine._embeddings._init_db()
+    if getattr(lcm_engine, "_embeddings", None):
+        if not lcm_engine._embeddings.enabled:
+            lcm_engine._embeddings._init_db()
+        await _ensure_embeddings_indexed(lcm_engine)
 
     args = {
         "query": query,
