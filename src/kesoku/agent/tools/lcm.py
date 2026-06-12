@@ -31,8 +31,6 @@ logger = logging.getLogger(__name__)
 async def lcm_grep(
     query: str,
     limit: int = 10,
-    session_scope: str = "current",
-    session_id: str | None = None,
     source: str | None = None,
     role: str | None = None,
     time_from: Any = None,
@@ -40,13 +38,11 @@ async def lcm_grep(
     sort: str | None = None,
     context: ToolContext | None = None,
 ) -> str:
-    """Search raw history messages and summaries, including cross-session scoping if specified.
+    """Search raw history messages and summaries across all sessions of the current role.
 
     Args:
         query: Search query keywords (supports exact phrase quoting).
         limit: Maximum result hits to return.
-        session_scope: Search range: 'current' (default), 'all' (cross-session), 'session'.
-        session_id: Explicit target session ID (required if session_scope='session').
         source: Filter by message sender or file/tool source name.
         role: Filter by message sender role (system, user, assistant, tool).
         time_from: Filter messages after this Unix timestamp or timezone-aware ISO 8601 time.
@@ -62,24 +58,12 @@ async def lcm_grep(
     allowed_sessions = await context.gateway.db.get_role_session_ids(active_role)
     allowed_sessions_set = set(allowed_sessions)
 
-    # Verify target session if explicitly requested
-    if session_scope == "session" and session_id:
-        if session_id not in allowed_sessions_set:
-            return json.dumps({
-                "query": query,
-                "session_scope": session_scope,
-                "session_id": session_id,
-                "total_results": 0,
-                "results": [],
-                "error": f"Session {session_id} does not belong to role {active_role}"
-            })
-
     lcm_engine = context.lcm_engine
     args = {
         "query": query,
         "limit": limit,
-        "session_scope": session_scope,
-        "session_id": session_id,
+        "session_scope": "all",
+        "session_id": None,
         "source": source,
         "role": role,
         "time_from": time_from,
@@ -88,20 +72,18 @@ async def lcm_grep(
     }
     raw_response = await asyncio.to_thread(_lcm_grep, args, engine=lcm_engine)
 
-    # If cross-session, post-filter results to preserve role isolation
-    if session_scope == "all":
-        try:
-            data = json.loads(raw_response)
-            if "results" in data:
-                filtered_results = [
-                    res for res in data["results"]
-                    if res.get("session_id") in allowed_sessions_set
-                ]
-                data["results"] = filtered_results[:limit]
-                data["total_results"] = len(data["results"])
-                return json.dumps(data)
-        except Exception as e:
-            logger.error(f"Failed to post-filter lcm_grep results: {e}")
+    try:
+        data = json.loads(raw_response)
+        if "results" in data:
+            filtered_results = [
+                res for res in data["results"]
+                if res.get("session_id") in allowed_sessions_set
+            ]
+            data["results"] = filtered_results[:limit]
+            data["total_results"] = len(data["results"])
+            return json.dumps(data)
+    except Exception as e:
+        logger.error(f"Failed to post-filter lcm_grep results: {e}")
 
     return raw_response
 
@@ -151,15 +133,15 @@ async def lcm_expand_query(
     max_results: int = 5,
     context: ToolContext | None = None,
 ) -> str:
-    """Answer a specific question by searching, expanding, and synthesizing uncompacted context segments.
+    """Answer a specific question by searching, expanding, and synthesizing compacted summary nodes.
 
     Args:
         prompt: The target question or instruction to solve.
-        query: Search query keywords to find relevant context nodes to expand.
+        query: Search query keywords to find relevant compacted summary nodes to expand.
         node_ids: Explicit list of summary node IDs to expand.
         max_tokens: Token budget for the generated answer.
         context_max_tokens: Maximum total tokens of uncompacted history to feed into the query synthesis model.
-        max_results: Maximum number of context summaries to expand.
+        max_results: Maximum number of compacted summary nodes to expand.
         context: Injected tool execution context (automatically resolved).
     """
     if not context or not context.gateway:

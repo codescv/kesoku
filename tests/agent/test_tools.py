@@ -423,8 +423,7 @@ async def test_lcm_grep_role_isolation(tmp_path) -> None:
         original_msg_id="msg_asuka_original"
     )
 
-    # We must search with session_scope="all"
-    res_asuka_str = await lcm_grep(query="secret", session_scope="all", context=ctx_asuka)
+    res_asuka_str = await lcm_grep(query="secret", context=ctx_asuka)
     res_asuka = json.loads(res_asuka_str)
 
     # Assertions for Asuka search
@@ -443,7 +442,7 @@ async def test_lcm_grep_role_isolation(tmp_path) -> None:
         original_msg_id="msg_tifa_original"
     )
 
-    res_tifa_str = await lcm_grep(query="secret", session_scope="all", context=ctx_tifa)
+    res_tifa_str = await lcm_grep(query="secret", context=ctx_tifa)
     res_tifa = json.loads(res_tifa_str)
 
     # Assertions for Tifa search
@@ -453,13 +452,6 @@ async def test_lcm_grep_role_isolation(tmp_path) -> None:
     assert res_tifa["results"][0]["session_id"] == "sess_tifa"
     assert "Tifa" in res_tifa["results"][0]["snippet"]
     assert "Asuka" not in res_tifa["results"][0]["snippet"]
-
-    # 8. Test explicit session_id check (Asuka trying to access Tifa's session)
-    res_hack_str = await lcm_grep(query="secret", session_scope="session", session_id="sess_tifa", context=ctx_asuka)
-    res_hack = json.loads(res_hack_str)
-    assert res_hack["total_results"] == 0
-    assert "error" in res_hack
-    assert "does not belong to role" in res_hack["error"]
 
 
 

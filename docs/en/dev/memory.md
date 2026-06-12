@@ -101,7 +101,7 @@ graph TD
 
 ### 4.2 Lossless Retrieval Tools
 If the LLM needs to recall details of a compacted section, it can call the following LCM Tools:
-*   **`lcm_grep`**: Search raw messages/summaries with keywords and filters (role, timestamps, session scope). Cross-session results are automatically post-filtered to preserve role-isolation.
+*   **`lcm_grep`**: Search raw messages/summaries with keywords and filters (source, role, timestamps) across all sessions of the current role.
 *   **`lcm_expand`**: Retrieve the full uncompacted text of a specific summary node or message.
 *   **`lcm_expand_query`**: Run natural language queries against compacted history, returning a synthesized answer.
 *   **`lcm_describe`**: Inspect the hierarchical topology of the memory DAG.

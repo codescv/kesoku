@@ -60,11 +60,12 @@ messages from other sessions.
   - First, call `view_chat_history_summary` to get a high-level timeline of recent discussions.
   - If you identify an event, decision, or message snippet that you need to inspect in detail, look for its
     associated session ID, message ID, or keywords.
-  - Then, use `lcm_grep` (setting `session_scope='all'`) or `lcm_expand_query` to search and retrieve the full
+  - Then, use `lcm_grep` to search and retrieve the full
     raw chat history of that specific conversation.
 - **Scenario B: Searching or retrieving detailed past messages/decisions**
-  - Query the LCM system via `lcm_expand_query` or `lcm_grep` to retrieve the authentic past
+  - Query the LCM system via `lcm_grep` to retrieve the authentic past
     messages or code diffs from current or past sessions.
+  - (Use `lcm_expand_query` ONLY when querying compacted summary nodes).
 - **Scenario C: Remembering persistent preferences**
   - If the user specifies a strict rule or preference (e.g. "From now on, do X"), write this to `update_memory`
     under the `user_preferences` category. Do not rely on chat history alone for persistent rules.
