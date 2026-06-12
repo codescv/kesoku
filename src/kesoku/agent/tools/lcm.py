@@ -79,11 +79,7 @@ async def lcm_grep(
     try:
         data = json.loads(raw_response)
         if "results" in data:
-            filtered_results = [
-                res for res in data["results"]
-                if res.get("session_id") in allowed_sessions_set
-            ]
-            data["results"] = filtered_results[:limit]
+            data["results"] = data["results"][:limit]
             data["total_results"] = len(data["results"])
             return json.dumps(data)
     except Exception as e:
