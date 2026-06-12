@@ -372,6 +372,11 @@ def load_config(config_path: str) -> KesokuConfig:
                 os.environ[k] = str(v)
             logger.debug(f"Injected env var: {k}={os.environ[k]}")
 
+        if cfg.gemini.project_id:
+            os.environ["VERTEXAI_PROJECT"] = cfg.gemini.project_id
+            if cfg.gemini.location:
+                os.environ["VERTEXAI_LOCATION"] = cfg.gemini.location
+
         logger.info(f"Loaded configuration from {config_path}")
         _global_config = cfg
         return cfg

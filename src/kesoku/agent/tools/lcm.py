@@ -259,7 +259,7 @@ async def _ensure_embeddings_indexed(engine: Any) -> None:
     try:
         nodes = conn.execute(
             """
-            SELECT node_id, summary FROM lcm_nodes
+            SELECT node_id, summary FROM summary_nodes
             WHERE node_id NOT IN (
                 SELECT content_id FROM lcm_embeddings
                 WHERE content_type = 'node' AND model = ?
