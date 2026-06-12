@@ -18,6 +18,9 @@ from openlcm.core.tools import (
     lcm_grep as _lcm_grep,
 )
 from openlcm.core.tools import (
+    lcm_semantic_search as _lcm_semantic_search,
+)
+from openlcm.core.tools import (
     lcm_status as _lcm_status,
 )
 
@@ -192,3 +195,52 @@ async def lcm_status(context: ToolContext | None = None) -> str:
         return "Error: ToolContext is missing."
     lcm_engine = context.lcm_engine
     return await asyncio.to_thread(_lcm_status, {}, engine=lcm_engine)
+
+
+@default_registry.register
+async def lcm_semantic_search(
+    query: str,
+    limit: int = 10,
+    content_type: str = "all",
+    context: ToolContext | None = None,
+) -> str:
+    """Semantic similarity search across LCM nodes and facts using embeddings.
+
+    Args:
+        query: Natural language search query.
+        limit: Maximum results to return.
+        content_type: Content type to search: 'all', 'node', 'fact'.
+        context: Injected tool execution context (automatically resolved).
+    """
+    if not context or not context.gateway:
+        return "Error: ToolContext is missing."
+
+    active_role = await _resolve_memory_role(category="user_preferences", role_param=None, context=context)
+    allowed_sessions = await context.gateway.db.get_role_session_ids(active_role)
+    allowed_sessions_set = set(allowed_sessions)
+
+    lcm_engine = context.lcm_engine
+    args = {
+        "query": query,
+        "limit": limit,
+        "content_type": content_type,
+    }
+    raw_response = await asyncio.to_thread(_lcm_semantic_search, args, engine=lcm_engine)
+
+    try:
+        data = json.loads(raw_response)
+        if "results" in data:
+            filtered = []
+            for res in data["results"]:
+                if res.get("content_type") == "node":
+                    if res.get("session_id") in allowed_sessions_set:
+                        filtered.append(res)
+                else:
+                    filtered.append(res)
+            data["results"] = filtered[:limit]
+            data["total"] = len(data["results"])
+            return json.dumps(data)
+    except Exception:
+        pass
+
+    return raw_response

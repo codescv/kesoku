@@ -5,6 +5,7 @@ from kesoku.agent.tools.lcm import (
     lcm_expand,
     lcm_expand_query,
     lcm_grep,
+    lcm_semantic_search,
     lcm_status,
 )
 from kesoku.agent.tools.memory import (
@@ -54,6 +55,7 @@ __all__ = [
     "play_role",
     "view_chat_history_summary",
     "lcm_grep",
+    "lcm_semantic_search",
     "lcm_expand",
     "lcm_expand_query",
     "lcm_describe",

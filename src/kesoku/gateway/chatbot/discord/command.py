@@ -24,7 +24,7 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
 
     for name, cmd_info in chatbot.commands.get_commands().items():
         # Skip duplicate aliases to avoid Discord command registration collision
-        if name == "reset":
+        if name in {"reset", "lcm_grep", "lcm_search"}:
             continue
 
         cmd_name = name
@@ -90,6 +90,39 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
                 description=description,
                 callback=cronjob_callback,
             )
+        elif cmd_name in {"lcm-grep", "lcm-search"}:
+
+            async def search_callback(interaction: discord.Interaction, query: str = "") -> None:
+                logger.info(
+                    f"Received /{cmd_name} slash command with query='{query}' from user {interaction.user.name} "
+                    f"(ID: {interaction.user.id}) in channel {interaction.channel_id}"
+                )
+                await interaction.response.defer()
+
+                async def reply_func(text: str) -> None:
+                    from kesoku.utils.text import split_text_into_chunks
+
+                    chunks = split_text_into_chunks(text, 2000)
+                    for chunk in chunks:
+                        if chunk.strip():
+                            await interaction.followup.send(chunk)
+
+                try:
+                    await chatbot.commands.execute(
+                        cmd_name,
+                        reply_func,
+                        channel_id=str(interaction.channel_id),
+                        query=query,
+                    )
+                except Exception as e:
+                    logger.error(f"Discord command /{cmd_name} execution failed: {e}")
+                    await reply_func(f"⚠️ Failed to execute command: {e}")
+
+            cmd = app_commands.Command(
+                name=cmd_name,
+                description=description,
+                callback=search_callback,
+            )
         else:
 
             def make_callback(c_name: str) -> Callable[[discord.Interaction], Awaitable[None]]:
@@ -113,7 +146,19 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
                                     await interaction.followup.send(chunk)
 
                     try:
-                        if c_name in {"clear", "reset", "status", "compact", "lcm", "context", "debug"}:
+                        if c_name in {
+                            "clear",
+                            "reset",
+                            "status",
+                            "compact",
+                            "lcm",
+                            "context",
+                            "debug",
+                            "lcm-grep",
+                            "lcm_grep",
+                            "lcm-search",
+                            "lcm_search",
+                        }:
                             await chatbot.commands.execute(c_name, reply_func, channel_id=str(interaction.channel_id))
                         else:
                             await chatbot.commands.execute(c_name, reply_func)

@@ -320,6 +320,80 @@ class Chatbot(ABC):
             handle_lcm_grep,
         )
 
+        async def handle_lcm_search(
+            reply_func: Callable[..., Awaitable[None]],
+            channel_id: str,
+            query: str = "",
+        ) -> None:
+            if not query:
+                await reply_func("⚠️ Please provide search keywords (e.g., /lcm-search keyword).")
+                return
+
+            session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
+            if not session:
+                session = await self.gateway.create_session(
+                    session_id=None,
+                    title=f"LCM Search {channel_id}",
+                    chatbot_id=self.chatbot_id,
+                    channel_id=channel_id,
+                )
+
+            from kesoku.agent.tools.lcm import lcm_semantic_search
+            from kesoku.agent.tools.registry import ToolContext
+
+            ctx = ToolContext(
+                session_id=session.id,
+                session_workspace=session.workspace_name,
+                gateway=self.gateway,
+            )
+            try:
+                res = await lcm_semantic_search(query=query, limit=10, content_type="all", context=ctx)
+                try:
+                    data = json.loads(res)
+                    if data.get("error"):
+                        hint = f"\nHint: {data['hint']}" if data.get("hint") else ""
+                        await reply_func(f"⚠️ Semantic search unavailable: {data['error']}{hint}")
+                        return
+
+                    if not data.get("results"):
+                        await reply_func(f"🔍 No semantic results found for `{query}`.")
+                        return
+
+                    total = data.get("total", len(data["results"]))
+                    model = data.get("model", "embedding")
+                    lines = [f"🔍 **Semantic Search Results for `{query}` (Model: `{model}`, Total: {total}):**"]
+                    for idx, hit in enumerate(data["results"]):
+                        score = hit.get("score", 0.0)
+                        ct = hit.get("content_type", "")
+                        if ct == "node":
+                            sess_id = hit.get("session_id", "")
+                            preview = hit.get("summary_preview", "").strip().replace("\n", " ")
+                            lines.append(f"{idx + 1}. **{sess_id}** [node, score: {score}]: {preview}")
+                        elif ct == "fact":
+                            key = hit.get("key", "")
+                            val = hit.get("value", "").strip().replace("\n", " ")
+                            lines.append(f"{idx + 1}. **[fact:{key}]** [score: {score}]: {val}")
+                        else:
+                            val = str(hit).strip().replace("\n", " ")
+                            lines.append(f"{idx + 1}. [score: {score}]: {val}")
+                    await reply_func("\n".join(lines))
+                except Exception:
+                    await reply_func(res)
+            except Exception as e:
+                logger.error(f"Failed lcm-search execution: {e}")
+                await reply_func(f"⚠️ Failed to execute lcm-search: {e}")
+
+        self.commands.register(
+            "lcm-search",
+            "Semantic similarity search across LCM nodes and facts using embeddings.",
+            handle_lcm_search,
+        )
+        self.commands.register(
+            "lcm_search",
+            "Semantic similarity search across LCM nodes and facts using embeddings.",
+            handle_lcm_search,
+        )
+
         async def handle_debug(
             reply_func: Callable[[str], Awaitable[None]],
             channel_id: str,
@@ -440,7 +514,7 @@ class Chatbot(ABC):
                 await self.commands.execute("role", reply_func, channel_id=channel_id, role_name=role_name)
             elif command == "restart":
                 await self.commands.execute(command, reply_func)
-            elif command in {"lcm-grep", "lcm_grep"}:
+            elif command in {"lcm-grep", "lcm_grep", "lcm-search", "lcm_search"}:
                 if not channel_id:
                     await reply_func("⚠️ Channel ID is required for this command.")
                     return
