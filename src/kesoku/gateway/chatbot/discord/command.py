@@ -92,36 +92,39 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
             )
         elif cmd_name in {"lcm-grep", "lcm-search"}:
 
-            async def search_callback(interaction: discord.Interaction, query: str = "") -> None:
-                logger.info(
-                    f"Received /{cmd_name} slash command with query='{query}' from user {interaction.user.name} "
-                    f"(ID: {interaction.user.id}) in channel {interaction.channel_id}"
-                )
-                await interaction.response.defer()
-
-                async def reply_func(text: str) -> None:
-                    from kesoku.utils.text import split_text_into_chunks
-
-                    chunks = split_text_into_chunks(text, 2000)
-                    for chunk in chunks:
-                        if chunk.strip():
-                            await interaction.followup.send(chunk)
-
-                try:
-                    await chatbot.commands.execute(
-                        cmd_name,
-                        reply_func,
-                        channel_id=str(interaction.channel_id),
-                        query=query,
+            def make_search_callback(c_name: str) -> Callable[..., Awaitable[None]]:
+                async def search_callback(interaction: discord.Interaction, query: str = "") -> None:
+                    logger.info(
+                        f"Received /{c_name} slash command with query='{query}' from user {interaction.user.name} "
+                        f"(ID: {interaction.user.id}) in channel {interaction.channel_id}"
                     )
-                except Exception as e:
-                    logger.error(f"Discord command /{cmd_name} execution failed: {e}")
-                    await reply_func(f"⚠️ Failed to execute command: {e}")
+                    await interaction.response.defer()
+
+                    async def reply_func(text: str) -> None:
+                        from kesoku.utils.text import split_text_into_chunks
+
+                        chunks = split_text_into_chunks(text, 2000)
+                        for chunk in chunks:
+                            if chunk.strip():
+                                await interaction.followup.send(chunk)
+
+                    try:
+                        await chatbot.commands.execute(
+                            c_name,
+                            reply_func,
+                            channel_id=str(interaction.channel_id),
+                            query=query,
+                        )
+                    except Exception as e:
+                        logger.error(f"Discord command /{c_name} execution failed: {e}")
+                        await reply_func(f"⚠️ Failed to execute command: {e}")
+
+                return search_callback
 
             cmd = app_commands.Command(
                 name=cmd_name,
                 description=description,
-                callback=search_callback,
+                callback=make_search_callback(cmd_name),
             )
         else:
 
