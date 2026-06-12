@@ -290,20 +290,36 @@ async def lcm_semantic_search(
 
     try:
         target_ct = content_type if content_type in ("node", "fact") else None
-        hits = await es.search(query, content_type=target_ct, limit=limit * 2)
+        hits = await es.search(query, content_type=target_ct, limit=limit * 3)
         filtered = []
         for hit in hits:
-            if hit.get("content_type") == "node":
-                node_id = hit.get("content_id")
-                node = lcm_engine._dag.get_node(node_id) if hasattr(lcm_engine._dag, "get_node") else None
+            ct = hit.get("content_type")
+            cid = hit.get("content_id")
+            if ct == "node":
+                node = lcm_engine._dag.get_node(cid) if hasattr(lcm_engine._dag, "get_node") else None
                 if node and node.session_id in allowed_sessions_set:
                     hit["session_id"] = node.session_id
                     hit["summary_preview"] = node.summary[:300] if node.summary else ""
                     hit["depth"] = node.depth
                     hit["created_at"] = node.created_at
                     filtered.append(hit)
-            else:
-                filtered.append(hit)
+            elif ct == "fact":
+                row = es._conn.execute(
+                    "SELECT scope, key, value, created_at, source_session_id FROM lcm_facts WHERE fact_id = ?",
+                    (cid,),
+                ).fetchone()
+                if row:
+                    scope, key, value, created_at, source_sess = row
+                    if (
+                        scope in allowed_sessions_set
+                        or (source_sess and source_sess in allowed_sessions_set)
+                        or scope == "global"
+                    ):
+                        hit["scope"] = scope
+                        hit["key"] = key
+                        hit["value"] = value
+                        hit["created_at"] = created_at
+                        filtered.append(hit)
 
         results = filtered[:limit]
         return json.dumps({
