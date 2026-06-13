@@ -57,6 +57,7 @@ class DatabaseManager:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             system_prompt=row["system_prompt"],
+            role_name=row["role_name"] if "role_name" in row.keys() and row["role_name"] else "default",
         )
 
     def _ensure_migrations(self, conn: sqlite3.Connection) -> None:
@@ -72,6 +73,10 @@ class DatabaseManager:
                     conn.execute("ALTER TABLE messages ADD COLUMN type TEXT NOT NULL DEFAULT 'text'")
                 if "parent_id" not in columns:
                     conn.execute("ALTER TABLE messages ADD COLUMN parent_id TEXT")
+                cursor.execute("PRAGMA table_info(sessions)")
+                sess_columns = [row["name"] for row in cursor.fetchall()]
+                if "role_name" not in sess_columns:
+                    conn.execute("ALTER TABLE sessions ADD COLUMN role_name TEXT")
                 # Clean up redundant single-column session index since idx_messages_session_timestamp supersedes it
                 conn.execute("DROP INDEX IF EXISTS idx_messages_session")
                 # Ensure channel_sessions table exists
@@ -199,7 +204,8 @@ class DatabaseManager:
                             title TEXT NOT NULL,
                             created_at REAL NOT NULL,
                             updated_at REAL NOT NULL,
-                            system_prompt TEXT NOT NULL DEFAULT ''
+                            system_prompt TEXT NOT NULL DEFAULT '',
+                            role_name TEXT
                         );
                         """
                     )
@@ -258,10 +264,17 @@ class DatabaseManager:
                 conn.execute(
                     """
                     INSERT INTO sessions
-                    (id, title, created_at, updated_at, system_prompt)
-                    VALUES (?, ?, ?, ?, ?)
+                    (id, title, created_at, updated_at, system_prompt, role_name)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (session.id, session.title, session.created_at, session.updated_at, session.system_prompt),
+                    (
+                        session.id,
+                        session.title,
+                        session.created_at,
+                        session.updated_at,
+                        session.system_prompt,
+                        session.role_name,
+                    ),
                 )
 
     def get_session(self, session_id: str) -> Session | None:
@@ -983,10 +996,12 @@ class DatabaseManager:
         """
         with self.connection_provider.connection() as conn:
             query = """
+                SELECT id FROM sessions WHERE role_name = ?
+                UNION
                 SELECT DISTINCT m.session_id
                 FROM messages m
                 LEFT JOIN channel_roles cr ON m.chatbot_id = cr.chatbot_id AND m.channel_id = cr.channel_id
-                WHERE COALESCE(cr.role, 'default') IN (?, 'default')
+                WHERE COALESCE(cr.role, 'default') = ?
                 UNION
                 SELECT DISTINCT cs.session_id
                 FROM channel_sessions cs
@@ -1005,10 +1020,10 @@ class DatabaseManager:
                 LEFT JOIN channel_roles cr_parent
                   ON cs.chatbot_id = cr_parent.chatbot_id
                  AND parent_info.parent_channel_id = cr_parent.channel_id
-                WHERE COALESCE(cr_direct.role, cr_parent.role, 'default') IN (?, 'default')
+                WHERE COALESCE(cr_direct.role, cr_parent.role, 'default') = ?
             """
             cursor = conn.cursor()
-            cursor.execute(query, (role, role))
+            cursor.execute(query, (role, role, role))
             rows = cursor.fetchall()
             return [row[0] for row in rows if row[0]]
 
@@ -1023,6 +1038,8 @@ class DatabaseManager:
         """
         with self.connection_provider.connection() as conn:
             query = """
+                SELECT id FROM sessions WHERE role_name IS NOT NULL AND role_name != ? AND role_name != 'default'
+                UNION
                 SELECT DISTINCT m.session_id
                 FROM messages m
                 JOIN channel_roles cr ON m.chatbot_id = cr.chatbot_id AND m.channel_id = cr.channel_id
@@ -1036,7 +1053,7 @@ class DatabaseManager:
                 WHERE cr_direct.role IS NOT NULL AND cr_direct.role != ? AND cr_direct.role != 'default'
             """
             cursor = conn.cursor()
-            cursor.execute(query, (role, role))
+            cursor.execute(query, (role, role, role))
             rows = cursor.fetchall()
             other_set = {row[0] for row in rows if row[0]}
             expanded = set()
