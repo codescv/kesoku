@@ -319,6 +319,7 @@ async def lcm_semantic_search(
             if ct == "node":
                 node = lcm_engine._dag.get_node(cid) if hasattr(lcm_engine._dag, "get_node") else None
                 if node and node.session_id in allowed_sessions_set:
+                    hit["node_id"] = cid
                     hit["session_id"] = node.session_id
                     hit["summary_preview"] = node.summary[:300] if node.summary else ""
                     hit["depth"] = node.depth
@@ -336,6 +337,7 @@ async def lcm_semantic_search(
                         or (source_sess and source_sess in allowed_sessions_set)
                         or scope == "global"
                     ):
+                        hit["fact_id"] = cid
                         hit["scope"] = scope
                         hit["key"] = key
                         hit["value"] = value
