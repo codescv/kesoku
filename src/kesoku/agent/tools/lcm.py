@@ -311,7 +311,7 @@ async def lcm_semantic_search(
 
     try:
         target_ct = content_type if content_type in ("node", "fact") else None
-        hits = await es.search(query, content_type=target_ct, limit=limit * 3)
+        hits = await es.search(query, content_type=target_ct, limit=limit * 10)
         filtered = []
         for hit in hits:
             ct = hit.get("content_type")
