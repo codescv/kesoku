@@ -27,8 +27,27 @@ from kesoku.agent.tools.registry import ToolContext, default_registry
 logger = logging.getLogger(__name__)
 
 
+def _expand_to_lcm_sessions(sessions: set[str]) -> set[str]:
+    """Expand a set of external session IDs to include their OpenLCM FNV-1a 32-bit short hash equivalents.
 
+    OpenLCM internally binds and stores sessions using 8-character FNV-1a hashes.
+    This ensures external long session IDs correctly match their hashed equivalents during searches.
 
+    Args:
+        sessions: Set of external or short session ID strings.
+
+    Returns:
+        Expanded set including original IDs, FNV-1a hashes, and short prefixes.
+    """
+    expanded = set(sessions)
+    for s in sessions:
+        h = 2166136261
+        for c in s.encode("utf-8"):
+            h ^= c
+            h = (h * 16777619) & 0xFFFFFFFF
+        expanded.add(f"{h:08x}")
+        expanded.add(s[:8])
+    return expanded
 
 
 @default_registry.register
@@ -60,14 +79,7 @@ async def lcm_grep(
     active_role = await _resolve_memory_role(category="user_preferences", role_param=None, context=context)
     all_sessions = await asyncio.to_thread(context.gateway.db.sync_db.list_sessions)
     allowed = {s.id for s in all_sessions if s.role_name == active_role}
-    allowed_sessions_set = set(allowed)
-    for s in allowed:
-        h = 2166136261
-        for c in s.encode("utf-8"):
-            h ^= c
-            h = (h * 16777619) & 0xFFFFFFFF
-        allowed_sessions_set.add(f"{h:08x}")
-        allowed_sessions_set.add(s[:8])
+    allowed_sessions_set = _expand_to_lcm_sessions(allowed)
 
     lcm_engine = context.lcm_engine
     args = {
@@ -286,14 +298,7 @@ async def lcm_semantic_search(
     active_role = await _resolve_memory_role(category="user_preferences", role_param=None, context=context)
     all_sessions = await asyncio.to_thread(context.gateway.db.sync_db.list_sessions)
     allowed = {s.id for s in all_sessions if s.role_name == active_role}
-    allowed_sessions_set = set(allowed)
-    for s in allowed:
-        h = 2166136261
-        for c in s.encode("utf-8"):
-            h ^= c
-            h = (h * 16777619) & 0xFFFFFFFF
-        allowed_sessions_set.add(f"{h:08x}")
-        allowed_sessions_set.add(s[:8])
+    allowed_sessions_set = _expand_to_lcm_sessions(allowed)
 
     lcm_engine = context.lcm_engine
     es = getattr(lcm_engine, "_embeddings", None)
