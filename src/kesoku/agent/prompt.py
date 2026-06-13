@@ -58,9 +58,9 @@ messages from other sessions.
 ## 3. When to Use Which
 - Use `view_memory` to recall facts and progresses that you explicitly recorded.
 - Use `view_chat_history_summary` to get a high-level timeline of recent (last ~2 weeks) discussions.
-- Use `lcm_grep` (keyword / wildcard match) and `lcm_semantic_search` (semantic match) to search
-  chat histories.
-- Use `lcm_query` and `lcm_expand_query` to expand / answer questions about compacted nodes.
+- Use `lcm_grep` (keyword / wildcard match) and `lcm_semantic_search` (semantic match for long sentences)
+  to search chat histories.
+- Use `lcm_expand` and `lcm_expand_query` to expand / answer questions about compacted nodes.
 """
 
 

@@ -84,7 +84,7 @@ async def lcm_grep(
     lcm_engine = context.lcm_engine
     args = {
         "query": query,
-        "limit": limit,
+        "limit": limit * 10,
         "session_scope": "all",
         "session_id": None,
         "source": source,
