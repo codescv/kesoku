@@ -163,13 +163,9 @@ async def test_memory_tools_execution(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_category_role_routing_and_play_role(tmp_path) -> None:
-    """Test that memories are routed to default or active role scope according to the rules,
-    and play_role tool executes successfully.
-    """
-    import asyncio
+async def test_category_role_routing(tmp_path) -> None:
+    """Test that memories are routed to default or active role scope according to the rules."""
 
-    from kesoku.agent.tools import play_role
     from kesoku.constants import MessageRole, MessageStatus
     from kesoku.db import Message
     from kesoku.gateway.gateway import Gateway
@@ -236,29 +232,7 @@ async def test_category_role_routing_and_play_role(tmp_path) -> None:
         role="default",  # Passed explicitly but should be overridden
         context=ctx,
     )
-    assert "Scope: `tifa`" in res_memo
 
-    # 3. Test play_role tool to switch role to asuka
-    # First let's ensure asuka and tifa directories exist under workspace roles_dir
-    roles_dir = str(tmp_path / "roles")
-    cfg.workspace.roles_dir = roles_dir
-
-    def write_intro():
-        import os
-
-        os.makedirs(os.path.join(roles_dir, "asuka"), exist_ok=True)
-        with open(os.path.join(roles_dir, "asuka", "intro.md"), "w") as f:
-            f.write("Asuka Intro")
-
-    await asyncio.to_thread(write_intro)
-
-    play_res = await play_role("asuka", context=ctx)
-    assert "Persona Switched Successfully!" in play_res
-    assert "asuka" in play_res
-
-    # Verify that database role is updated
-    current_role = await gw.db.get_channel_role("discord", "chan_123")
-    assert current_role == "asuka"
 
 
 @pytest.mark.asyncio

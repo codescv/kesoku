@@ -83,9 +83,6 @@ Use the `/role` command inside your chat platforms (Discord or WeChat) to manage
 > [!TIP]
 > **Discord Thread Inheritance**: In Discord, active threads automatically inherit their parent channel's persona binding by default, but you can run `/role {name}` inside the thread to bind a distinct persona!
 
-### 2. Dynamic Agent Persona Switching (`play_role` tool)
-The agent itself can switch its persona dynamically based on user prompt requirements by calling:
-- `play_role(role="character_name")`
 
 ---
 

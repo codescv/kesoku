@@ -1,19 +1,12 @@
 """Memory management, role persona switching, and skill listing tools for Kesoku AI Agent."""
 
 import logging
-import os
 import re
 import time
 from typing import Literal
 
 from kesoku.agent.skills import SkillManager
 from kesoku.agent.tools.registry import ToolContext, default_registry
-from kesoku.config import get_config
-from kesoku.utils.async_fs import (
-    async_exists,
-    async_get_subdirectories,
-    async_isdir,
-)
 
 MemoryCategory = Literal["progress", "user_preferences", "memo"]
 
@@ -344,65 +337,6 @@ async def delete_memory(
     except Exception as e:
         logger.error(f"Failed to delete memory: {e}", exc_info=True)
         return f"Error deleting memory: {e}"
-
-
-@default_registry.register
-async def play_role(role: str, context: ToolContext) -> str:
-    """Switch the active roleplay persona for the current channel.
-
-    Switching the role automatically loads and injects the role's profile instructions (intro.md)
-    into the system prompt for the active session.
-
-    Args:
-        role: The name of the character role to play (e.g. 'default', 'tifa', 'asuka').
-        context: The tool execution context (injected automatically).
-
-    Returns:
-        A status message confirming the role switch.
-    """
-    role = role.strip()
-    cfg = get_config()
-
-    # 1. Validate role directory exists
-    roles_dir = cfg.workspace.roles_dir
-    role_dir = os.path.join(roles_dir, role)
-    if not await async_exists(role_dir) or not await async_isdir(role_dir):
-        # Get available roles
-        available_roles = await async_get_subdirectories(roles_dir)
-        if not available_roles:
-            available_roles = ["default"]
-        return (
-            f"⚠️ **Error:** Persona `{role}` does not exist.\n"
-            f"✨ **Available Personas:** {', '.join(f'`{r}`' for r in sorted(available_roles))}"
-        )
-
-    # 2. Query original message to find chatbot_id and channel_id
-    db = context.gateway.db
-    msg_list = await db.get_messages_by_filters({"id": context.original_msg_id})
-    if not msg_list:
-        return "⚠️ **Error:** Failed to resolve current channel mapping for this tool call."
-
-    msg = msg_list[0]
-    chatbot_id = msg.chatbot_id
-    channel_id = msg.channel_id
-
-    # 3. Save binding in database
-    await db.set_channel_role(chatbot_id, channel_id, role)
-
-    # 4. Rebuild active session's system prompt
-    session = await context.gateway.db.get_session(context.session_id)
-    if session:
-        from kesoku.agent.prompt import build_sys_prompt
-
-        new_sys_prompt = build_sys_prompt(session=session)
-        await context.gateway.db.update_session_system_prompt(context.session_id, new_sys_prompt)
-
-    return (
-        f"🎭 **Persona Switched Successfully!**\n"
-        f"Character role has been set to **`{role}`** for this channel.\n"
-        f"The instructions from `{role}/intro.md` have been successfully injected into your system prompt. "
-        f"Please adopt this persona immediately."
-    )
 
 
 @default_registry.register
