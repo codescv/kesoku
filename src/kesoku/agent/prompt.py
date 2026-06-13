@@ -45,22 +45,21 @@ Memory Categories & Strict Usage Guidelines:
    Scope: Role-isolated.
 
 Rules for managing memory:
-- Key naming constraints: Memory keys must strictly contain ONLY lowercase letters, underscores, and numbers
-  (regex: ^[a-z0-9_]+$). Do not use hyphens, uppercase letters, spaces, or other special characters.
-- Category selection: Only use the categories above.
+- Key naming constraints: Memory keys must strictly contain ONLY lowercase letters, underscores, and numbers.
+- Category constraints: Only use the categories above.
 - Preventing Overwrites: ALWAYS use `view_memory` to read the current content before updating an existing key.
 
-## 2. Local Context Memory (LCM) & Compacted Chat History (Summary DAG)
-When conversations grow long, older messages are compacted into a hierarchical Summary Directed Acyclic Graph
-(Summary DAG). Use LCM tools to search, browse, or read past chat history, especially compacted history or
-messages from other sessions.
+## 2. Local Context Memory (LCM) for Chat History
+When conversations grow long, older messages are compacted into nodes in a hierarchical DAG.
+Use LCM tools to search and browse chat history across sessions.
 
 ## 3. When to Use Which
 - Use `view_memory` to recall facts and progresses that you explicitly recorded.
 - Use `view_chat_history_summary` to get a high-level timeline of recent (last ~2 weeks) discussions.
-- Use `lcm_grep` (keyword / wildcard match) and `lcm_semantic_search` (semantic match for long sentences)
-  to search chat histories.
-- Use `lcm_expand` and `lcm_expand_query` to expand / answer questions about compacted nodes.
+- Use `lcm_grep` to search for a keyword (postfix wildcard allowed) in raw messages and message summaries
+- Use `lcm_semantic_search` to semantic search compacted message summaries.
+- Use `lcm_expand` to view details of a raw message or a compacted summary node.
+- Use `lcm_expand_query` to answer questions about a group of summary nodes.
 """
 
 
