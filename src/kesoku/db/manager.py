@@ -374,6 +374,17 @@ class DatabaseManager:
                     """,
                     (chatbot_id, channel_id, session_id),
                 )
+                conn.execute(
+                    """
+                    UPDATE sessions
+                    SET role_name = (
+                        SELECT role FROM channel_roles
+                        WHERE chatbot_id = ? AND channel_id = ?
+                    )
+                    WHERE id = ?
+                    """,
+                    (chatbot_id, channel_id, session_id),
+                )
                 logger.info(f"Explicitly bound channel '{chatbot_id}:{channel_id}' to active session '{session_id}'")
 
     def delete_session(self, session_id: str) -> None:

@@ -357,6 +357,7 @@ async def test_lcm_grep_role_isolation(tmp_path) -> None:
         created_at=time.time(),
         updated_at=time.time(),
         system_prompt="System Asuka",
+        role_name="asuka",
     )
     db_mgr.create_session(sess_asuka_obj)
 
@@ -366,6 +367,7 @@ async def test_lcm_grep_role_isolation(tmp_path) -> None:
         created_at=time.time(),
         updated_at=time.time(),
         system_prompt="System Tifa",
+        role_name="tifa",
     )
     db_mgr.create_session(sess_tifa_obj)
 

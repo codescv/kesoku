@@ -137,6 +137,7 @@ class KesokuContext:
             engine = LCMEngine(
                 summarize_fn=lcm_summarize_fn,
                 db_path=self.lcm_db_path,
+                embedding_model="vertex_ai/text-embedding-004",
             )
             engine.bind_session(session_id=session_id, context_length=context_length)
             self._lcm_engines[session_id] = engine
