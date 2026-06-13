@@ -58,15 +58,7 @@ async def lcm_grep(
         return "Error: ToolContext is missing."
 
     active_role = await _resolve_memory_role(category="user_preferences", role_param=None, context=context)
-    allowed_sessions = await context.gateway.db.get_role_session_ids(active_role)
-    allowed_sessions_set = set(allowed_sessions)
-    for s in allowed_sessions:
-        h = 2166136261
-        for c in s.encode("utf-8"):
-            h ^= c
-            h = (h * 16777619) & 0xFFFFFFFF
-        allowed_sessions_set.add(f"{h:08x}")
-        allowed_sessions_set.add(s[:8])
+    other_sessions = await context.gateway.db.get_other_role_session_ids(active_role)
 
     lcm_engine = context.lcm_engine
     args = {
@@ -88,7 +80,7 @@ async def lcm_grep(
             filtered_results = [
                 res
                 for res in data["results"]
-                if res.get("session_id") in allowed_sessions_set
+                if res.get("session_id") not in other_sessions
             ]
             data["results"] = filtered_results[:limit]
             data["total_results"] = len(data["results"])
@@ -283,15 +275,7 @@ async def lcm_semantic_search(
         return "Error: ToolContext is missing."
 
     active_role = await _resolve_memory_role(category="user_preferences", role_param=None, context=context)
-    allowed_sessions = await context.gateway.db.get_role_session_ids(active_role)
-    allowed_sessions_set = set(allowed_sessions)
-    for s in allowed_sessions:
-        h = 2166136261
-        for c in s.encode("utf-8"):
-            h ^= c
-            h = (h * 16777619) & 0xFFFFFFFF
-        allowed_sessions_set.add(f"{h:08x}")
-        allowed_sessions_set.add(s[:8])
+    other_sessions = await context.gateway.db.get_other_role_session_ids(active_role)
 
     lcm_engine = context.lcm_engine
     es = getattr(lcm_engine, "_embeddings", None)
@@ -311,7 +295,7 @@ async def lcm_semantic_search(
             cid = hit.get("content_id")
             if ct == "node":
                 node = lcm_engine._dag.get_node(cid) if hasattr(lcm_engine._dag, "get_node") else None
-                if node and node.session_id in allowed_sessions_set:
+                if node and node.session_id not in other_sessions:
                     hit["session_id"] = node.session_id
                     hit["summary_preview"] = node.summary[:300] if node.summary else ""
                     hit["depth"] = node.depth
@@ -324,11 +308,7 @@ async def lcm_semantic_search(
                 ).fetchone()
                 if row:
                     scope, key, value, created_at, source_sess = row
-                    if (
-                        scope in allowed_sessions_set
-                        or (source_sess and source_sess in allowed_sessions_set)
-                        or scope == "global"
-                    ):
+                    if scope not in other_sessions and (not source_sess or source_sess not in other_sessions):
                         hit["scope"] = scope
                         hit["key"] = key
                         hit["value"] = value
