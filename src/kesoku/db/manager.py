@@ -1038,45 +1038,6 @@ class DatabaseManager:
             rows = cursor.fetchall()
             return [row[0] for row in rows if row[0]]
 
-    def get_other_role_session_ids(self, role: str) -> set[str]:
-        """Retrieve all session IDs associated with roles OTHER than the given persona role.
-
-        Args:
-            role: Target role to exclude.
-
-        Returns:
-            Set of excluded session ID strings.
-        """
-        with self.connection_provider.connection() as conn:
-            query = """
-                SELECT id FROM sessions WHERE role_name IS NOT NULL AND role_name != ? AND role_name != 'default'
-                UNION
-                SELECT DISTINCT m.session_id
-                FROM messages m
-                JOIN channel_roles cr ON m.chatbot_id = cr.chatbot_id AND m.channel_id = cr.channel_id
-                WHERE cr.role IS NOT NULL AND cr.role != ? AND cr.role != 'default'
-                UNION
-                SELECT DISTINCT cs.session_id
-                FROM channel_sessions cs
-                JOIN channel_roles cr_direct
-                  ON cs.chatbot_id = cr_direct.chatbot_id
-                 AND cs.channel_id = cr_direct.channel_id
-                WHERE cr_direct.role IS NOT NULL AND cr_direct.role != ? AND cr_direct.role != 'default'
-            """
-            cursor = conn.cursor()
-            cursor.execute(query, (role, role, role))
-            rows = cursor.fetchall()
-            other_set = {row[0] for row in rows if row[0]}
-            expanded = set()
-            for s in other_set:
-                expanded.add(s)
-                h = 2166136261
-                for c in s.encode("utf-8"):
-                    h ^= c
-                    h = (h * 16777619) & 0xFFFFFFFF
-                expanded.add(f"{h:08x}")
-                expanded.add(s[:8])
-            return expanded
 
     # Cross Session Context CRUD
     def get_cross_session_context(self, role: str) -> CrossSessionContext | None:
@@ -1718,13 +1679,4 @@ class AsyncDatabaseManager:
         """
         return await asyncio.to_thread(self.sync_db.get_role_session_ids, role)
 
-    async def get_other_role_session_ids(self, role: str) -> set[str]:
-        """Retrieve all session IDs associated with roles OTHER than the given persona role (async).
 
-        Args:
-            role: Target role to exclude.
-
-        Returns:
-            Set of excluded session ID strings.
-        """
-        return await asyncio.to_thread(self.sync_db.get_other_role_session_ids, role)
