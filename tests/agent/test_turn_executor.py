@@ -451,11 +451,12 @@ async def test_turn_executor_user_preferences_injection(temp_db: str) -> None:
             session_staging_dir="/tmp/sess_pref_inject",
         )
 
-    # Assert that the user preferences guidelines were successfully prepended
+    # Assert that the user preferences guidelines were successfully prepended in the consolidated sync guidelines
     assert len(llm.captured_history) == 1
     content = llm.captured_history[0].content
     assert "Run task!" in content
-    assert '<background_context type="user_preferences">' in content
+    assert '<background_context type="sync_guidelines">' in content
+    assert "User Preferences:" in content
     assert "Saved user preferences exist for this role" in content
     assert content.index("Run task!") > content.index("<background_context")
 
@@ -716,10 +717,11 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     await gw.post(msg1)
     content1 = await run_turn(msg1)
 
-    # MUST contain both Sync Guidelines, User Preferences Guidelines, and Time Context
+    # MUST contain Consolidated Sync Guidelines (including Timeline, User Preferences, LCM), and Time Context
     assert '<background_context type="sync_guidelines">' in content1
-    assert '<background_context type="user_preferences">' in content1
-    assert "Saved user preferences exist for this role" in content1
+    assert "Timeline Sync:" in content1
+    assert "User Preferences:" in content1
+    assert "Lossless Chat History (LCM):" in content1
     assert 'from="u1"' in content1
     assert 'timezone="' in content1
     assert "First message" in content1
@@ -745,10 +747,11 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     await gw.post(msg2)
     content2 = await run_turn(msg2)
 
-    # MUST NOT contain Sync Guidelines nor User Preferences Guidelines
+    # MUST NOT contain Consolidated Sync Guidelines
     assert '<background_context type="sync_guidelines">' not in content2
-    assert '<background_context type="user_preferences">' not in content2
-    assert "Saved user preferences exist for this role" not in content2
+    assert "Timeline Sync:" not in content2
+    assert "User Preferences:" not in content2
+    assert "Lossless Chat History (LCM):" not in content2
     assert 'from="u1"' in content2
     assert 'timezone="' in content2
     assert "Second message" in content2
@@ -773,10 +776,11 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     await gw.post(msg3)
     content3 = await run_turn(msg3)
 
-    # MUST contain both again due to idle resumption, and Time Context
+    # MUST contain Consolidated Sync Guidelines again due to idle resumption, and Time Context
     assert '<background_context type="sync_guidelines">' in content3
-    assert '<background_context type="user_preferences">' in content3
-    assert "Saved user preferences exist for this role" in content3
+    assert "Timeline Sync:" in content3
+    assert "User Preferences:" in content3
+    assert "Lossless Chat History (LCM):" in content3
     assert 'from="u1"' in content3
     assert 'timezone="' in content3
     assert "Third message" in content3

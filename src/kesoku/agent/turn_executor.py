@@ -550,35 +550,30 @@ class TurnExecutor:
             role=active_role,
         )
 
-        # 3. Prepend Sync Guidelines (if Bootstrap), Preferences Guidelines (if Bootstrap and present), and Time Context
-        guidelines_prefix = ""
+        # 3. Prepend Consolidated Passive Synchronization, Preferences, and LCM Guidelines (if Bootstrap)
+        full_prefix = ""
         if is_bootstrap:
-            guidelines_prefix = (
-                '<background_context type="sync_guidelines">\n'
-                "# Passive Synchronization Guidelines:\n"
-                f"- 💡 You are playing the active persona role: {active_role}.\n"
-                "- 💡 You have access to the `view_chat_history_summary` tool, which retrieves a "
-                "consolidated chat history summary and chronological timeline "
-                "of recent events across active threads/channels.\n"
-                "- 💡 If the user's current request below refers to external threads, other chats, "
-                "or events you cannot locate in this session's history, you MUST call "
-                "`view_chat_history_summary` to read the global context and synchronize before providing a response.\n"
-                "</background_context>\n\n"
+            lines = [
+                '<background_context type="sync_guidelines">',
+                "# Passive Synchronization & Memory Guidelines:",
+                f"- 💡 Persona: You are playing the active persona role '{active_role}'.",
+                "- 💡 Timeline Sync: You have access to `view_chat_history_summary` to retrieve a chronological "
+                "timeline and summary of recent events across all threads/channels. Call it if the user's "
+                "request refers to external events you cannot locate in this session.",
+            ]
+            if user_prefs:
+                lines.append(
+                    "- 💡 User Preferences: Saved user preferences exist for this role. "
+                    "You have access to `view_memory` (category='user_preferences') to retrieve them. "
+                    "Call it if the request assumes or refers to remembered guidelines."
+                )
+            lines.append(
+                "- 💡 Lossless Chat History (LCM): Older raw messages across long conversations are compacted into "
+                "a hierarchical DAG. You have access to LCM tools (`lcm_grep`, `lcm_semantic_search`, `lcm_expand`, "
+                "`lcm_expand_query`) to search and inspect historical discussions across sessions when needed."
             )
-
-        pref_prefix = ""
-        if is_bootstrap and user_prefs:
-            pref_prefix = (
-                '<background_context type="user_preferences">\n'
-                "# Active User Preferences Guidelines:\n"
-                "- 💡 Saved user preferences exist for this role.\n"
-                "- 💡 You have access to the `view_memory` tool (category='user_preferences') to retrieve them.\n"
-                "- 💡 If the user's request below assumes or refers to remembered preferences "
-                "or guidelines, you MUST call `view_memory` to read them before providing a response.\n"
-                "</background_context>\n\n"
-            )
-
-        full_prefix = guidelines_prefix + pref_prefix
+            lines.append("</background_context>\n\n")
+            full_prefix = "\n".join(lines)
 
         msg_idx = history.index(latest_user_msg)
         copied_msg = latest_user_msg.model_copy()
@@ -600,7 +595,7 @@ class TurnExecutor:
         logger.info(
             f"Wrapped active user message {copied_msg.id} in <current_request "
             f'from="{sender_name}" time="{time_str}" timezone="{tz_name}"> '
-            f"(guidelines: {is_bootstrap}, preferences: {bool(pref_prefix)})"
+            f"(bootstrap: {is_bootstrap})"
         )
 
 
