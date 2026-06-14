@@ -117,21 +117,26 @@ async def test_cron_manager_duplicates_and_trigger():
 
         manager = CronManager(chatbots=[mock_bot], config_dir=tmpdir_real)
 
-        # First execution: matches and triggers
-        await manager._check_and_trigger_jobs([job])
-        await asyncio.sleep(0.1)  # yield to background tasks
-        mock_bot.trigger_cronjob.assert_called_once_with(
-            channel_id="999",
-            prompt_content="Hello from cron!",
-            mention_user_id="111",
-            tag=None,
-        )
+        fixed_now = datetime.datetime(2026, 6, 14, 12, 0, 0)
+        from unittest.mock import patch
 
-        # Second execution within same minute: matches but skipped (prevent duplicates)
-        mock_bot.trigger_cronjob.reset_mock()
-        await manager._check_and_trigger_jobs([job])
-        await asyncio.sleep(0.1)
-        mock_bot.trigger_cronjob.assert_not_called()
+        with patch("kesoku.cron.datetime.datetime") as mock_dt:
+            mock_dt.now.return_value = fixed_now
+            # First execution: matches and triggers
+            await manager._check_and_trigger_jobs([job])
+            await asyncio.sleep(0.1)  # yield to background tasks
+            mock_bot.trigger_cronjob.assert_called_once_with(
+                channel_id="999",
+                prompt_content="Hello from cron!",
+                mention_user_id="111",
+                tag=None,
+            )
+
+            # Second execution within same minute: matches but skipped (prevent duplicates)
+            mock_bot.trigger_cronjob.reset_mock()
+            await manager._check_and_trigger_jobs([job])
+            await asyncio.sleep(0.1)
+            mock_bot.trigger_cronjob.assert_not_called()
 
 
 @pytest.mark.asyncio
