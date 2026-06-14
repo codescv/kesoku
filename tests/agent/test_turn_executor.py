@@ -800,7 +800,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     assert '<background_context type="sync_guidelines">' in content1
     assert '<user_preferences auto_loaded="true" need_update="no">' in content1
     assert "- Lang: Python" in content1
-    assert "[u1 at " in content1
+    assert 'from="u1"' in content1
     assert "First message" in content1
 
 
@@ -828,7 +828,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     assert '<background_context type="sync_guidelines">' not in content2
     assert '<user_preferences auto_loaded="true" need_update="no">' in content2
     assert "- Lang: Python" in content2
-    assert "[u1 at " in content2
+    assert 'from="u1"' in content2
     assert "Second message" in content2
 
 
@@ -855,7 +855,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     assert '<background_context type="sync_guidelines">' in content3
     assert '<user_preferences auto_loaded="true" need_update="no">' in content3
     assert "- Lang: Python" in content3
-    assert "[u1 at " in content3
+    assert 'from="u1"' in content3
     assert "Third message" in content3
 
 
@@ -954,7 +954,7 @@ async def test_turn_executor_user_context_injection(temp_db: str) -> None:
 
     assert len(llm.captured_history) == 1
     discord_content = llm.captured_history[0].content
-    assert "[Tifa Lockhart (ID: 123456) at " in discord_content
+    assert 'from="Tifa Lockhart (ID: 123456)"' in discord_content
 
     # --- Test Google Chat Injection ---
     # Mark previous turn processed to start a clean turn
@@ -992,7 +992,7 @@ async def test_turn_executor_user_context_injection(temp_db: str) -> None:
 
     assert len(llm.captured_history) > 0
     gchat_content = llm.captured_history[-1].content
-    assert "[Cloud Strife (Email: cloud@shinra.com) at " in gchat_content
+    assert 'from="Cloud Strife (Email: cloud@shinra.com)"' in gchat_content
 
 
 async def test_turn_executor_auto_compaction(temp_db: str) -> None:

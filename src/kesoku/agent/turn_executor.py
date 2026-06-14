@@ -1,6 +1,7 @@
 """Orchestrates conversational turn execution, including LLM inference, thought logging, and tool calling."""
 
 import asyncio
+import datetime
 import json
 import os
 import time
@@ -580,18 +581,25 @@ class TurnExecutor:
                 "</user_preferences>\n\n"
             )
 
-        if guidelines_prefix or pref_prefix:
-            full_prefix = guidelines_prefix + pref_prefix
+        full_prefix = guidelines_prefix + pref_prefix
 
-            msg_idx = history.index(latest_user_msg)
-            copied_msg = latest_user_msg.model_copy()
-            copied_msg.content = f"{full_prefix}<current_request>\n{copied_msg.content}\n</current_request>"
-            history[msg_idx] = copied_msg
-            latest_user_msg = copied_msg
-            logger.info(
-                f"Prepended context blocks (guidelines: {is_bootstrap}, preferences: {bool(pref_content)}) "
-                f"into user message {copied_msg.id}"
-            )
+        msg_idx = history.index(latest_user_msg)
+        copied_msg = latest_user_msg.model_copy()
+        msg_time = datetime.datetime.fromtimestamp(copied_msg.timestamp).astimezone()
+        time_str = msg_time.strftime("%Y-%m-%d %H:%M:%S (%A) %Z")
+        sender_name = copied_msg.metadata.get("sender_name") or copied_msg.sender
+
+        copied_msg.content = (
+            f'{full_prefix}<current_request from="{sender_name}" time="{time_str}">\n'
+            f'{copied_msg.content}\n'
+            '</current_request>'
+        )
+        history[msg_idx] = copied_msg
+        latest_user_msg = copied_msg
+        logger.info(
+            f'Wrapped active user message {copied_msg.id} in <current_request from="{sender_name}" time="{time_str}"> '
+            f"(guidelines: {is_bootstrap}, preferences: {bool(pref_content)})"
+        )
 
 
 

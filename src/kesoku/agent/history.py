@@ -126,6 +126,8 @@ def prepare_history_for_llm(history: list[Message]) -> list[Message]:
                 # Don't add header to the OpenLCM scaffold message
                 if "[Note: This conversation uses Lossless Context" in m.content:
                     final_history.append(m)
+                elif "<current_request" in m.content:
+                    final_history.append(m)
                 else:
                     m_copy = m.model_copy()
                     msg_time = datetime.datetime.fromtimestamp(m_copy.timestamp).astimezone()
