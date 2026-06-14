@@ -31,8 +31,6 @@ from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
-
-MAX_TOTAL_USER_PREFERENCES_LENGTH = 500
 MAX_TOTAL_CROSS_SESSION_CONTEXT_LENGTH = 3000
 MAX_CHATBOT_ERROR_MESSAGE_LENGTH = 500
 
@@ -547,19 +545,12 @@ class TurnExecutor:
         is_bootstrap = await self._is_bootstrap_turn(history, current_msg)
 
         # 2. Query user preferences ALWAYS (unconditional)
-        pref_content = ""
         user_prefs = await self.context.db.get_agent_memories(
             category="user_preferences",
             role=active_role,
         )
-        if user_prefs:
-            pref_content = "\n".join(
-                f"- {pref['title']}: {pref['content']}" for pref in user_prefs
-            )
-            if len(pref_content) > MAX_TOTAL_USER_PREFERENCES_LENGTH:
-                pref_content = pref_content[: MAX_TOTAL_USER_PREFERENCES_LENGTH - 3] + "..."
 
-        # 3. Prepend Sync Guidelines (if Bootstrap), Preferences (If present), and Time Context (Always)
+        # 3. Prepend Sync Guidelines (if Bootstrap), Preferences Guidelines (if Bootstrap and present), and Time Context
         guidelines_prefix = ""
         if is_bootstrap:
             guidelines_prefix = (
@@ -576,11 +567,15 @@ class TurnExecutor:
             )
 
         pref_prefix = ""
-        if is_bootstrap and pref_content:
+        if is_bootstrap and user_prefs:
             pref_prefix = (
-                '<user_preferences auto_loaded="true" need_update="no">\n'
-                f"{pref_content}\n"
-                "</user_preferences>\n\n"
+                '<background_context type="user_preferences">\n'
+                "# Active User Preferences Guidelines:\n"
+                "- 💡 Saved user preferences exist for this role.\n"
+                "- 💡 You have access to the `view_memory` tool (category='user_preferences') to retrieve them.\n"
+                "- 💡 If the user's request below assumes or refers to remembered preferences "
+                "or guidelines, you MUST call `view_memory` to read them before providing a response.\n"
+                "</background_context>\n\n"
             )
 
         full_prefix = guidelines_prefix + pref_prefix

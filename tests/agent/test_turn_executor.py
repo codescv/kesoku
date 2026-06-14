@@ -451,94 +451,14 @@ async def test_turn_executor_user_preferences_injection(temp_db: str) -> None:
             session_staging_dir="/tmp/sess_pref_inject",
         )
 
-    # Assert that the user preferences were successfully injected and prepended in the latest user message
+    # Assert that the user preferences guidelines were successfully prepended
     assert len(llm.captured_history) == 1
     content = llm.captured_history[0].content
     assert "Run task!" in content
-    assert "<user_preferences auto_loaded=\"true\" need_update=\"no\">" in content
-    assert "- No Codeblocks: Avoid Markdown" in content
-    assert content.index("Run task!") > content.index("<user_preferences")
+    assert '<background_context type="user_preferences">' in content
+    assert "Saved user preferences exist for this role" in content
+    assert content.index("Run task!") > content.index("<background_context")
 
-
-
-@pytest.mark.asyncio
-async def test_turn_executor_user_preferences_truncation(temp_db: str) -> None:
-    """Verify that TurnExecutor truncates injected user preferences if they exceed 500 characters."""
-    DatabaseManager(temp_db).init_tables()
-    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
-    gw = Gateway(context=KesokuContext(config=cfg))
-    await gw.create_session("sess_pref_trunc", title="Preferences Truncation Session")
-
-    # Add very long user preferences to trigger 500 characters truncation
-    await gw.db.set_channel_role("cli", "ch_pref_trunc", "tifa")
-    await gw.db.upsert_agent_memory(
-        category="user_preferences",
-        key="rule_long",
-        title="Long Preference",
-        content="A" * 600,
-        role="tifa",
-    )
-
-    user_msg = Message(
-        session_id="sess_pref_trunc",
-        chatbot_id="cli",
-        channel_id="ch_pref_trunc",
-        sender="u1",
-        role="user",
-        content="Go!",
-        status="pending_agent",
-    )
-    await gw.post(user_msg)
-
-    class MockTruncLLM(BaseLLM):
-        async def generate(
-            self,
-            prompt: str | None = None,
-            system_prompt: str | None = None,
-            history: list[Message] | None = None,
-            tools: list[Any] | None = None,
-            **kwargs: Any,
-        ) -> LLMResponse:
-            self.captured_history = list(history or [])
-            return LLMResponse(content="Response", total_tokens=5)
-
-    llm = MockTruncLLM()
-    tool_runner = MagicMock()
-    tool_runner.tool_registry.get_tools_list.return_value = []
-    turn_logger = MagicMock(spec=TurnLogger)
-
-    context = KesokuContext(config=cfg, llm=llm)
-    executor = TurnExecutor("sess_pref_trunc", gw, tool_runner, turn_logger, context=context)
-
-    worker = MagicMock()
-    type(worker).running = PropertyMock(side_effect=[True, False])
-
-    async def mock_pivot(m: Message) -> Message:
-        return m
-
-    worker.drain_queue_and_pivot.side_effect = mock_pivot
-    worker.queue_empty.return_value = True
-
-    with patch("kesoku.context.get_config", return_value=cfg):
-        await executor.process_turn(
-            current_msg=user_msg,
-            worker=worker,
-            session_staging_dir="/tmp/sess_pref_trunc",
-        )
-
-    # Assert that the user preferences block length was truncated and capped
-    assert len(llm.captured_history) == 1
-    content = llm.captured_history[0].content
-    assert "<user_preferences auto_loaded=\"true\" need_update=\"no\">" in content
-    from kesoku.agent.turn_executor import MAX_TOTAL_USER_PREFERENCES_LENGTH
-
-    start_tag = '<user_preferences auto_loaded="true" need_update="no">\n'
-    start_idx = content.index(start_tag) + len(start_tag)
-    end_idx = content.index("</user_preferences>", start_idx)
-    preference_part = content[start_idx : end_idx].strip()
-
-    assert len(preference_part) == MAX_TOTAL_USER_PREFERENCES_LENGTH
-    assert preference_part.endswith("...")
 
 
 
@@ -796,10 +716,10 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     await gw.post(msg1)
     content1 = await run_turn(msg1)
 
-    # MUST contain both Sync Guidelines, User Preferences, and Time Context
+    # MUST contain both Sync Guidelines, User Preferences Guidelines, and Time Context
     assert '<background_context type="sync_guidelines">' in content1
-    assert '<user_preferences auto_loaded="true" need_update="no">' in content1
-    assert "- Lang: Python" in content1
+    assert '<background_context type="user_preferences">' in content1
+    assert "Saved user preferences exist for this role" in content1
     assert 'from="u1"' in content1
     assert 'timezone="' in content1
     assert "First message" in content1
@@ -825,10 +745,10 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     await gw.post(msg2)
     content2 = await run_turn(msg2)
 
-    # MUST NOT contain Sync Guidelines nor User Preferences
+    # MUST NOT contain Sync Guidelines nor User Preferences Guidelines
     assert '<background_context type="sync_guidelines">' not in content2
-    assert '<user_preferences auto_loaded="true" need_update="no">' not in content2
-    assert "- Lang: Python" not in content2
+    assert '<background_context type="user_preferences">' not in content2
+    assert "Saved user preferences exist for this role" not in content2
     assert 'from="u1"' in content2
     assert 'timezone="' in content2
     assert "Second message" in content2
@@ -855,8 +775,8 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
 
     # MUST contain both again due to idle resumption, and Time Context
     assert '<background_context type="sync_guidelines">' in content3
-    assert '<user_preferences auto_loaded="true" need_update="no">' in content3
-    assert "- Lang: Python" in content3
+    assert '<background_context type="user_preferences">' in content3
+    assert "Saved user preferences exist for this role" in content3
     assert 'from="u1"' in content3
     assert 'timezone="' in content3
     assert "Third message" in content3
