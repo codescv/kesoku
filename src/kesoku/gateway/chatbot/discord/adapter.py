@@ -67,7 +67,7 @@ def _build_discord_custom_prompt(
         members_section = f"\n## Users on the server\n\n{members_str}\n"
 
     time_section = """\n## Time
-The current time is injected in the context header of your latest request.
+The current time and timezone are injected in the `time` and `timezone` attributes of your `<current_request>` tag.
 The time is very important to prevent your hallucination about the world status.\n"""
 
 

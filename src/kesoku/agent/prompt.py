@@ -72,6 +72,13 @@ If a command transitions to a background job:
 """
 
 
+TIME_INSTRUCTIONS = """
+# Time
+The current time and timezone are injected in the `time` and `timezone` attributes of the `<current_request>` tag.
+Always rely on these attributes for the accurate current time to prevent hallucination about world status.
+"""
+
+
 
 def build_sys_prompt(
     custom_prompt: str | None = None,
@@ -167,6 +174,7 @@ Unless the user explicitly instructs otherwise, do not refer to any file outside
             OUTPUT_FORMATTING_INSTRUCTIONS.strip(),
             MEMORY_AND_HISTORY_INSTRUCTIONS.strip(),
             BACKGROUND_EXECUTION_INSTRUCTIONS.strip(),
+            TIME_INSTRUCTIONS.strip(),
         ]
     )
 
