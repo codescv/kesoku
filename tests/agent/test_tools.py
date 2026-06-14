@@ -508,6 +508,52 @@ async def test_lcm_grep_slash_command(tmp_path) -> None:
     assert "Testing lcm-grep >>>keyword<<< match." in reply_msg
 
 
+@pytest.mark.asyncio
+async def test_analyze_media_tool_success(tmp_path) -> None:
+    """Test analyze_media tool successfully reads a file and invokes LLM analysis."""
+    from unittest.mock import AsyncMock, patch
+
+    from kesoku.agent.llm import LLMResponse
+    from kesoku.agent.tools.media import analyze_media
+
+    media_file = tmp_path / "test_image.png"
+    media_file.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    mock_llm = MagicMock()
+    mock_llm.generate = AsyncMock(return_value=LLMResponse(content="An image of a cute cat."))
+
+    mock_gateway = MagicMock()
+    mock_gateway.context.get_llm.return_value = mock_llm
+
+    ctx = ToolContext(
+        session_id="sess_media",
+        session_workspace="ws_media",
+        gateway=mock_gateway,
+    )
+
+    with patch("kesoku.agent.tools.media.PathResolver.resolve", return_value=str(media_file)):
+        res = await analyze_media(path="test_image.png", prompt="What is this image?", context=ctx)
+
+    assert res == "An image of a cute cat."
+    mock_llm.generate.assert_called_once()
+    call_args = mock_llm.generate.call_args
+    history_passed = call_args.kwargs["history"]
+    assert len(history_passed) == 1
+    assert history_passed[0].metadata["attachments"][0]["path"] == str(media_file)
+    assert history_passed[0].metadata["attachments"][0]["mime_type"] == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_analyze_media_tool_not_found() -> None:
+    """Test analyze_media returns clear error when media file does not exist."""
+    from kesoku.agent.tools.media import analyze_media
+
+    ctx = ToolContext(session_id="s1", session_workspace="ws1")
+    res = await analyze_media(path="non_existent_video.mp4", context=ctx)
+    assert "does not exist" in res
+
+
+
 
 
 

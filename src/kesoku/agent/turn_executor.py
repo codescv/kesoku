@@ -560,8 +560,7 @@ class TurnExecutor:
         guidelines_prefix = ""
         if is_bootstrap:
             guidelines_prefix = (
-                "[Background Context: Sync Guidelines]\n"
-                "======\n"
+                '<background_context type="sync_guidelines">\n'
                 "# Passive Synchronization Guidelines:\n"
                 f"- 💡 You are playing the active persona role: {active_role}.\n"
                 "- 💡 You have access to the `view_chat_history_summary` tool, which retrieves a "
@@ -570,22 +569,23 @@ class TurnExecutor:
                 "- 💡 If the user's current request below refers to external threads, other chats, "
                 "or events you cannot locate in this session's history, you MUST call "
                 "`view_chat_history_summary` to read the global context and synchronize before providing a response.\n"
-                "======\n\n"
+                "</background_context>\n\n"
             )
 
         pref_prefix = ""
         if pref_content:
             pref_prefix = (
-                "[User Preferences]\n"
-                f"{pref_content}\n\n"
+                '<user_preferences auto_loaded="true" need_update="no">\n'
+                f"{pref_content}\n"
+                "</user_preferences>\n\n"
             )
 
         if guidelines_prefix or pref_prefix:
-            full_prefix = guidelines_prefix + pref_prefix + "[Current Request]\n"
+            full_prefix = guidelines_prefix + pref_prefix
 
             msg_idx = history.index(latest_user_msg)
             copied_msg = latest_user_msg.model_copy()
-            copied_msg.content = full_prefix + copied_msg.content
+            copied_msg.content = f"{full_prefix}<current_request>\n{copied_msg.content}\n</current_request>"
             history[msg_idx] = copied_msg
             latest_user_msg = copied_msg
             logger.info(

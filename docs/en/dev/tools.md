@@ -77,3 +77,12 @@ All output values and exceptions are caught, serialized to strings, and packaged
 *   **Type**: `MessageType.TOOL_RESULT` (`"tool_result"`)
 *   **Status**: `MessageStatus.RESPONDED`
 *   **Parent Link**: `parent_id` points to the triggering `tool_call` message ID, maintaining clean turn alignment.
+
+---
+
+## 📸 Multimodal Tools (`analyze_media`)
+
+Kesoku provides built-in support for analyzing local multimedia files (images, audio, video) via LLM multimodal capabilities:
+
+*   **`analyze_media(path, prompt)`**: Resolves a media file path (absolute or relative to AWD/staging), detects its MIME type, and attaches it as a native multimodal block (`ImageBlock`, `DocumentBlock`, or `MediaBlock`) to execute QA against the file.
+

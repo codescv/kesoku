@@ -80,6 +80,14 @@ class DocumentBlock(BaseModel):
     data: bytes
 
 
+class MediaBlock(BaseModel):
+    """Represents a generic multimedia attachment (audio, video, etc.) containing raw bytes."""
+
+    type: Literal["media"] = "media"
+    media_type: str
+    data: bytes
+
+
 class ToolCallBlock(BaseModel):
     """Represents a requested tool call from the assistant."""
 
@@ -100,7 +108,7 @@ class ToolResultBlock(BaseModel):
     is_error: bool = False
 
 
-LLMBlock = TextBlock | ThoughtBlock | ImageBlock | DocumentBlock | ToolCallBlock | ToolResultBlock
+LLMBlock = TextBlock | ThoughtBlock | ImageBlock | DocumentBlock | MediaBlock | ToolCallBlock | ToolResultBlock
 
 
 class LLMTurn(BaseModel):
@@ -154,8 +162,8 @@ def _resize_and_compress_image(file_bytes: bytes, max_size: int = 1024) -> tuple
         return file_bytes, "image/webp"
 
 
-def _load_attachments(attachments: list[dict[str, Any]]) -> list[ImageBlock | DocumentBlock]:
-    """Load local attachments from paths and wrap them in ImageBlock or DocumentBlock.
+def _load_attachments(attachments: list[dict[str, Any]]) -> list[ImageBlock | DocumentBlock | MediaBlock]:
+    """Load local attachments from paths and wrap them in ImageBlock, DocumentBlock, or MediaBlock.
 
     Args:
         attachments: List of dictionaries containing 'path' and 'mime_type'.
@@ -163,7 +171,7 @@ def _load_attachments(attachments: list[dict[str, Any]]) -> list[ImageBlock | Do
     Returns:
         List of loaded blocks.
     """
-    blocks: list[ImageBlock | DocumentBlock] = []
+    blocks: list[ImageBlock | DocumentBlock | MediaBlock] = []
     for att in attachments:
         path = att.get("path")
         mime_type = att.get("mime_type", "application/octet-stream")
@@ -185,7 +193,8 @@ def _load_attachments(attachments: list[dict[str, Any]]) -> list[ImageBlock | Do
                     blocks.append(DocumentBlock(media_type="application/pdf", data=file_bytes))
                     logger.info(f"Loaded native document part: {path} ({mime_type})")
                 else:
-                    logger.warning(f"Unsupported attachment type: {mime_type}")
+                    blocks.append(MediaBlock(media_type=mime_type, data=file_bytes))
+                    logger.info(f"Loaded native media part: {path} ({mime_type})")
             except Exception as ex:
                 logger.error(f"Failed to load attachment {path}: {ex}")
     return blocks
@@ -563,6 +572,8 @@ class GeminiLLM(BaseLLM):
                     parts.append(types.Part.from_bytes(data=block.data, mime_type=block.media_type))
                 elif isinstance(block, DocumentBlock):
                     parts.append(types.Part.from_bytes(data=block.data, mime_type=block.media_type))
+                elif isinstance(block, MediaBlock):
+                    parts.append(types.Part.from_bytes(data=block.data, mime_type=block.media_type))
                 elif isinstance(block, ToolCallBlock):
                     part = types.Part.from_function_call(name=block.name, args=block.arguments)
                     if block.thought_signature:
@@ -813,6 +824,42 @@ class ClaudeLLM(BaseLLM):
                             },
                         }
                     )
+                elif isinstance(block, MediaBlock):
+                    if block.media_type.startswith("image/"):
+                        data_b64 = base64.b64encode(block.data).decode("utf-8")
+                        blocks.append(
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": block.media_type,
+                                    "data": data_b64,
+                                },
+                            }
+                        )
+                    elif block.media_type == "application/pdf":
+                        data_b64 = base64.b64encode(block.data).decode("utf-8")
+                        blocks.append(
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "application/pdf",
+                                    "data": data_b64,
+                                },
+                            }
+                        )
+                    else:
+                        logger.warning(f"Unsupported media type for Claude: {block.media_type}")
+                        blocks.append(
+                            {
+                                "type": "text",
+                                "text": (
+                                    f"[Multimedia Attachment: {block.media_type} "
+                                    "(not directly supported by Claude)]"
+                                ),
+                            }
+                        )
                 elif isinstance(block, ToolCallBlock):
                     tool_call_id = block.tool_call_id
                     if not tool_call_id.startswith("toolu_"):

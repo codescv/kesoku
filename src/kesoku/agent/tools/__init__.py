@@ -8,6 +8,7 @@ from kesoku.agent.tools.lcm import (
     lcm_semantic_search,
     lcm_status,
 )
+from kesoku.agent.tools.media import analyze_media
 from kesoku.agent.tools.memory import (
     MAX_MEMORY_CONTENT_LENGTH,
     delete_memory,
@@ -45,6 +46,7 @@ __all__ = [
     "ShellCommandError",
     "web_search",
     "WebSearchTool",
+    "analyze_media",
     "list_skills",
     "use_skill",
     "list_memories",

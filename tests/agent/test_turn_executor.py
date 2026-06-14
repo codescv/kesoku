@@ -455,9 +455,9 @@ async def test_turn_executor_user_preferences_injection(temp_db: str) -> None:
     assert len(llm.captured_history) == 1
     content = llm.captured_history[0].content
     assert "Run task!" in content
-    assert "[User Preferences]" in content
+    assert "<user_preferences auto_loaded=\"true\" need_update=\"no\">" in content
     assert "- No Codeblocks: Avoid Markdown" in content
-    assert content.index("Run task!") > content.index("[User Preferences]")
+    assert content.index("Run task!") > content.index("<user_preferences")
 
 
 
@@ -529,14 +529,15 @@ async def test_turn_executor_user_preferences_truncation(temp_db: str) -> None:
     # Assert that the user preferences block length was truncated and capped
     assert len(llm.captured_history) == 1
     content = llm.captured_history[0].content
-    assert "[User Preferences]" in content
+    assert "<user_preferences auto_loaded=\"true\" need_update=\"no\">" in content
     from kesoku.agent.turn_executor import MAX_TOTAL_USER_PREFERENCES_LENGTH
 
-    # Check the prefix to ensure proper capping (excluding indicator suffix)
-    end_idx = content.index("[Current Request]", content.index("[User Preferences]")) - 2
-    preference_part = content[content.index("[User Preferences]") : end_idx]
+    start_tag = '<user_preferences auto_loaded="true" need_update="no">\n'
+    start_idx = content.index(start_tag) + len(start_tag)
+    end_idx = content.index("</user_preferences>", start_idx)
+    preference_part = content[start_idx : end_idx].strip()
 
-    assert len(preference_part) == len("[User Preferences]\n") + MAX_TOTAL_USER_PREFERENCES_LENGTH
+    assert len(preference_part) == MAX_TOTAL_USER_PREFERENCES_LENGTH
     assert preference_part.endswith("...")
 
 
@@ -674,7 +675,7 @@ async def test_turn_executor_cross_session_context_injection_and_consolidation(t
     # Assert that guidelines were injected, but not the cross-session history (which is v2 on-demand tool only)
     assert len(llm.captured_history) == 1
     content = llm.captured_history[0].content
-    assert "[Background Context: Sync Guidelines]" in content
+    assert '<background_context type="sync_guidelines">' in content
     assert "view_chat_history_summary" in content
 
     assert "Initial context summary." not in content
@@ -796,8 +797,8 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     content1 = await run_turn(msg1)
 
     # MUST contain both Sync Guidelines, User Preferences, and Time Context
-    assert "[Background Context: Sync Guidelines]" in content1
-    assert "[User Preferences]" in content1
+    assert '<background_context type="sync_guidelines">' in content1
+    assert '<user_preferences auto_loaded="true" need_update="no">' in content1
     assert "- Lang: Python" in content1
     assert "[u1 at " in content1
     assert "First message" in content1
@@ -824,8 +825,8 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     content2 = await run_turn(msg2)
 
     # MUST NOT contain Sync Guidelines, but MUST contain User Preferences and Time Context
-    assert "[Background Context: Sync Guidelines]" not in content2
-    assert "[User Preferences]" in content2
+    assert '<background_context type="sync_guidelines">' not in content2
+    assert '<user_preferences auto_loaded="true" need_update="no">' in content2
     assert "- Lang: Python" in content2
     assert "[u1 at " in content2
     assert "Second message" in content2
@@ -851,8 +852,8 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     content3 = await run_turn(msg3)
 
     # MUST contain both again due to idle resumption, and Time Context
-    assert "[Background Context: Sync Guidelines]" in content3
-    assert "[User Preferences]" in content3
+    assert '<background_context type="sync_guidelines">' in content3
+    assert '<user_preferences auto_loaded="true" need_update="no">' in content3
     assert "- Lang: Python" in content3
     assert "[u1 at " in content3
     assert "Third message" in content3
