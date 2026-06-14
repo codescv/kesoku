@@ -35,7 +35,8 @@ persist indefinitely across sessions. Do NOT write raw chat history to this syst
 Memory Categories & Strict Usage Guidelines:
 1. `user_preferences`: Long term memory of important user preferences and asks. Write to this category when the
    user explicitly tells you to remember something. Scope: Role-isolated.
-   *NOTE*: Active user preferences are automatically injected into the message context on every turn.
+   *NOTE*: Active user preferences are automatically injected into the message context
+   when a session starts or resumes from idle.
    You do NOT need to call `view_memory` or `list_memories` to read them unless you are updating/deleting them,
    or the automatically injected block appears truncated (ends with '...').
 2. `progress`: Active user project progression, reading positions, milestones, and study next steps.

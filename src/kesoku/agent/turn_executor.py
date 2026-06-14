@@ -576,7 +576,7 @@ class TurnExecutor:
             )
 
         pref_prefix = ""
-        if pref_content:
+        if is_bootstrap and pref_content:
             pref_prefix = (
                 '<user_preferences auto_loaded="true" need_update="no">\n'
                 f"{pref_content}\n"
@@ -605,7 +605,7 @@ class TurnExecutor:
         logger.info(
             f"Wrapped active user message {copied_msg.id} in <current_request "
             f'from="{sender_name}" time="{time_str}" timezone="{tz_name}"> '
-            f"(guidelines: {is_bootstrap}, preferences: {bool(pref_content)})"
+            f"(guidelines: {is_bootstrap}, preferences: {bool(pref_prefix)})"
         )
 
 

@@ -825,10 +825,10 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     await gw.post(msg2)
     content2 = await run_turn(msg2)
 
-    # MUST NOT contain Sync Guidelines, but MUST contain User Preferences and Time Context
+    # MUST NOT contain Sync Guidelines nor User Preferences
     assert '<background_context type="sync_guidelines">' not in content2
-    assert '<user_preferences auto_loaded="true" need_update="no">' in content2
-    assert "- Lang: Python" in content2
+    assert '<user_preferences auto_loaded="true" need_update="no">' not in content2
+    assert "- Lang: Python" not in content2
     assert 'from="u1"' in content2
     assert 'timezone="' in content2
     assert "Second message" in content2
