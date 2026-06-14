@@ -8,6 +8,8 @@ import time
 import traceback
 from typing import TYPE_CHECKING
 
+import tzlocal
+
 from kesoku.agent.history import (
     build_history,
     messages_to_openlcm_dicts,
@@ -588,16 +590,21 @@ class TurnExecutor:
         msg_time = datetime.datetime.fromtimestamp(copied_msg.timestamp).astimezone()
         time_str = msg_time.strftime("%Y-%m-%d %H:%M:%S (%A) %Z")
         sender_name = copied_msg.metadata.get("sender_name") or copied_msg.sender
+        try:
+            tz_name = tzlocal.get_localzone_name()
+        except Exception:
+            tz_name = msg_time.tzname() or "UTC"
 
         copied_msg.content = (
-            f'{full_prefix}<current_request from="{sender_name}" time="{time_str}">\n'
+            f'{full_prefix}<current_request from="{sender_name}" time="{time_str}" timezone="{tz_name}">\n'
             f'{copied_msg.content}\n'
             '</current_request>'
         )
         history[msg_idx] = copied_msg
         latest_user_msg = copied_msg
         logger.info(
-            f'Wrapped active user message {copied_msg.id} in <current_request from="{sender_name}" time="{time_str}"> '
+            f"Wrapped active user message {copied_msg.id} in <current_request "
+            f'from="{sender_name}" time="{time_str}" timezone="{tz_name}"> '
             f"(guidelines: {is_bootstrap}, preferences: {bool(pref_content)})"
         )
 

@@ -801,6 +801,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     assert '<user_preferences auto_loaded="true" need_update="no">' in content1
     assert "- Lang: Python" in content1
     assert 'from="u1"' in content1
+    assert 'timezone="' in content1
     assert "First message" in content1
 
 
@@ -829,6 +830,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     assert '<user_preferences auto_loaded="true" need_update="no">' in content2
     assert "- Lang: Python" in content2
     assert 'from="u1"' in content2
+    assert 'timezone="' in content2
     assert "Second message" in content2
 
 
@@ -856,6 +858,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     assert '<user_preferences auto_loaded="true" need_update="no">' in content3
     assert "- Lang: Python" in content3
     assert 'from="u1"' in content3
+    assert 'timezone="' in content3
     assert "Third message" in content3
 
 
