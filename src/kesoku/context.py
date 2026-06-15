@@ -6,9 +6,9 @@ This avoids global mutable state and supports dependency injection.
 import os
 from typing import Any
 
+from openlcm import LCMEngine
 from openlcm.core.embeddings import EmbeddingStore
 
-from kesoku.agent.lcm_engine import KesokuLCMEngine
 from kesoku.agent.llm import BaseLLM, get_llm
 from kesoku.agent.tools import ActiveJobsRegistry, ToolRegistry, default_registry
 from kesoku.config import KesokuConfig, get_config
@@ -124,17 +124,17 @@ class KesokuContext:
 
         # Resolve OpenLCM SQLite DB path relative to kesoku.db directory
         self.lcm_db_path = os.path.join(os.path.dirname(self.config.workspace.db_path), "lcm.db")
-        self._lcm_engines: dict[str, KesokuLCMEngine] = {}
+        self._lcm_engines: dict[str, LCMEngine] = {}
 
-    def get_lcm_engine(self, session_id: str, context_length: int = 1048576) -> KesokuLCMEngine:
-        """Create and bind a session-specific KesokuLCMEngine instance to prevent concurrent clobbering."""
+    def get_lcm_engine(self, session_id: str, context_length: int = 1048576) -> LCMEngine:
+        """Create and bind a session-specific LCMEngine instance to prevent concurrent clobbering."""
         if session_id not in self._lcm_engines:
             async def lcm_summarize_fn(prompt: str, max_tokens: int) -> str:
                 model_client = self.get_llm(use_lcm=True)
                 res = await model_client.generate(prompt=prompt)
                 return res.content
 
-            engine = KesokuLCMEngine(
+            engine = LCMEngine(
                 summarize_fn=lcm_summarize_fn,
                 db_path=self.lcm_db_path,
                 embedding_model=self.config.agent.embedding_model,
