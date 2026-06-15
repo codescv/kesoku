@@ -3,6 +3,8 @@
 import asyncio
 import json
 import logging
+import os
+import sqlite3
 from typing import Any
 
 from openlcm.core.tools import (
@@ -79,12 +81,37 @@ async def lcm_grep(
     active_role = await _resolve_memory_role(category="user_preferences", role_param=None, context=context)
     all_sessions = await asyncio.to_thread(context.gateway.db.sync_db.list_sessions)
     allowed = {s.id for s in all_sessions if s.role_name == active_role}
-    allowed_sessions_set = _expand_to_lcm_sessions(allowed)
+
+    # Retrieve historical session roles from lcm.db
+    lcm_db_path = context.gateway.context.lcm_db_path
+    historical_allowed = set()
+    if await asyncio.to_thread(os.path.exists, lcm_db_path):
+        try:
+            def _sync_read_historical_roles():
+                conn = sqlite3.connect(lcm_db_path, timeout=10.0)
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='kesoku_session_roles'")
+                    if cur.fetchone():
+                        cur.execute("SELECT session_id FROM kesoku_session_roles WHERE role_name = ?", (active_role,))
+                        return {row[0] for row in cur.fetchall()}
+                    return set()
+                finally:
+                    conn.close()
+            historical_allowed = await asyncio.to_thread(_sync_read_historical_roles)
+        except Exception as e:
+            logger.warning(f"Failed to read historical roles from lcm.db: {e}")
+
+    allowed_sessions = allowed.union(historical_allowed)
+    allowed_sessions_set = _expand_to_lcm_sessions(allowed_sessions)
 
     lcm_engine = context.lcm_engine
+
+    # We query globally using a very large limit to prevent starvation, then post-filter
+    search_limit = min(limit * 100, 5000)
     args = {
         "query": query,
-        "limit": limit * 10,
+        "limit": search_limit,
         "session_scope": "all",
         "session_id": None,
         "source": source,
@@ -98,11 +125,23 @@ async def lcm_grep(
     try:
         data = json.loads(raw_response)
         if "results" in data:
-            filtered_results = [
-                res
-                for res in data["results"]
-                if res.get("session_id") in allowed_sessions_set
-            ]
+            filtered_results = []
+            for res in data["results"]:
+                # 1. Filter by allowed sessions (role match)
+                if res.get("session_id") not in allowed_sessions_set:
+                    continue
+
+                # 2. Filter by message sender role (user/assistant default)
+                msg_role = res.get("role")
+                if role is None:
+                    if msg_role not in ("user", "assistant"):
+                        continue
+                else:
+                    if msg_role != role:
+                        continue
+
+                filtered_results.append(res)
+
             data["results"] = filtered_results[:limit]
             data["total_results"] = len(data["results"])
             return json.dumps(data)

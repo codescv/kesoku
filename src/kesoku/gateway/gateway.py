@@ -7,6 +7,7 @@ via DatabaseManager using a Pure Broker Pattern.
 import asyncio
 import os
 import shutil
+import sqlite3
 import time
 from collections.abc import AsyncGenerator, Callable
 from typing import Any
@@ -112,6 +113,35 @@ class Gateway:
         # If chatbot/channel parameters are provided, explicitly bind the active session mapping
         if chatbot_id and channel_id:
             await self.db.set_active_session_for_channel(chatbot_id, channel_id, sess.id)
+
+        # Record session role in lcm.db for historical cross-session grep reference
+        lcm_db_path = self.context.lcm_db_path
+        try:
+            db_sess = await self.db.get_session(sess.id)
+            resolved_role = db_sess.role_name if db_sess else (role or "default")
+
+            def _sync_write_session_role():
+                conn = sqlite3.connect(lcm_db_path, timeout=10.0)
+                try:
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS kesoku_session_roles (
+                            session_id TEXT PRIMARY KEY,
+                            role_name TEXT NOT NULL
+                        )
+                        """
+                    )
+                    conn.execute(
+                        "INSERT OR REPLACE INTO kesoku_session_roles (session_id, role_name) VALUES (?, ?)",
+                        (sess.id, resolved_role),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+            await asyncio.to_thread(_sync_write_session_role)
+        except Exception as e:
+            logger.warning(f"Failed to record session role mapping to lcm.db: {e}")
 
         return sess
 
@@ -243,3 +273,4 @@ class Gateway:
             # Delete the SQLite database records
             await self.db.delete_session(session_id)
             logger.info(f"Successfully deleted session {session_id} from database.")
+
