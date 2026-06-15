@@ -557,15 +557,13 @@ class TurnExecutor:
                 '<background_context type="sync_guidelines">',
                 "# Passive Synchronization & Memory Guidelines:",
                 f"- 💡 Persona: You are playing the active persona role '{active_role}'.",
-                "- 💡 Timeline Sync: You have access to `view_chat_history_summary` to retrieve a chronological "
-                "timeline and summary of recent events across all threads/channels. Call it if the user's "
-                "request refers to external events you cannot locate in this session.",
+                "- 💡 Timeline Sync: You MUST USE `view_chat_history_summary` to retrieve a chronological "
+                "timeline and summary of recent events across all threads/channels.",
             ]
             if user_prefs:
                 lines.append(
                     "- 💡 User Preferences: Saved user preferences exist for this role. "
-                    "You have access to `view_memory` (category='user_preferences') to retrieve them. "
-                    "Call it if the request assumes or refers to remembered guidelines."
+                    "You MUST USE `view_memory` (category='user_preferences') to retrieve them."
                 )
             lines.append(
                 "- 💡 Lossless Chat History (LCM): Older raw messages across long conversations are compacted into "
