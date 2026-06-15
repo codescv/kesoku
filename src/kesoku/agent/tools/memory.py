@@ -382,3 +382,59 @@ async def view_chat_history_summary(context: ToolContext) -> str:
     except Exception as e:
         logger.error(f"Failed to retrieve chat history summary: {e}", exc_info=True)
         return f"Error retrieving chat history summary: {e}"
+
+
+@default_registry.register
+async def memory_grep(
+    query: str,
+    context: ToolContext | None = None,
+) -> str:
+    """Search active memories and past chat messages for the current role matching the query.
+
+    Args:
+        query: Text to search for.
+        context: Injected tool execution context.
+
+    Returns:
+        Formatted markdown summary of matching memories and messages.
+    """
+    if not context or not context.gateway:
+        return "Error: ToolContext is missing."
+
+    active_role = await _resolve_memory_role(category="user_preferences", role_param=None, context=context)
+    db = context.gateway.db
+
+    try:
+        memories = await db.search_role_memories(active_role, query)
+        messages = await db.search_role_messages(active_role, query)
+
+        if not memories and not messages:
+            return f"No memories or messages matching '{query}' found for role '{active_role}'."
+
+        lines = [f"🔍 **Search Results for '{query}' (Role: {active_role})**"]
+
+        if memories:
+            lines.append("\n### 🧠 Matching Memories")
+            for m in memories:
+                updated_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m["updated_at"]))
+                lines.append(f"- **[{m['category']}]** `{m['key']}`: \"{m['title']}\" (updated: {updated_str})")
+                content_snippet = m["content"].strip().replace("\n", " ")
+                if len(content_snippet) > 100:
+                    content_snippet = content_snippet[:100] + "..."
+                lines.append(f"  > {content_snippet}")
+
+        if messages:
+            lines.append("\n### 💬 Matching Messages")
+            for m in messages:
+                time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m.timestamp))
+                sender_str = f"**{m.sender}** ({m.role})"
+                content_snippet = m.content.strip().replace("\n", " ")
+                if len(content_snippet) > 150:
+                    content_snippet = content_snippet[:150] + "..."
+                lines.append(f"- [{time_str}] {sender_str} in session `{m.session_id}`:")
+                lines.append(f"  > {content_snippet}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"Failed to execute memory_grep: {e}", exc_info=True)
+        return f"Error executing memory_grep: {e}"

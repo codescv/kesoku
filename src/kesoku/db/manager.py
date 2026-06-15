@@ -823,6 +823,60 @@ class DatabaseManager:
                     (category, key, role),
                 )
 
+    def search_role_memories(self, role: str, query_text: str) -> list[dict[str, Any]]:
+        """Search agent memories for a role matching query_text in content or title.
+
+        Includes default memories.
+        """
+        with self.connection_provider.connection() as conn:
+            cursor = conn.cursor()
+            sql = """
+                SELECT * FROM agent_memories
+                WHERE (role = 'default' OR role = ?)
+                  AND (content LIKE ? OR title LIKE ?)
+                ORDER BY updated_at DESC
+            """
+            like_query = f"%{query_text}%"
+            cursor.execute(sql, (role, like_query, like_query))
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    def search_role_messages(self, role: str, query_text: str) -> list[Message]:
+        """Search user/assistant text messages for a role matching query_text.
+
+        Excludes thoughts, tool calls, and tool results.
+        """
+        with self.connection_provider.connection() as conn:
+            cursor = conn.cursor()
+            sql = """
+                SELECT m.* FROM messages m
+                JOIN channel_sessions cs ON m.session_id = cs.session_id
+                LEFT JOIN channel_roles cr_direct
+                  ON cs.chatbot_id = cr_direct.chatbot_id
+                 AND cs.channel_id = cr_direct.channel_id
+                LEFT JOIN (
+                    SELECT session_id,
+                           json_extract(metadata, '$.parent_channel_id') as parent_channel_id
+                    FROM messages
+                    WHERE role = 'user' AND metadata LIKE '%parent_channel_id%'
+                    GROUP BY session_id
+                ) parent_info
+                  ON m.session_id = parent_info.session_id
+                 AND cs.chatbot_id = 'discord'
+                LEFT JOIN channel_roles cr_parent
+                  ON cs.chatbot_id = cr_parent.chatbot_id
+                 AND parent_info.parent_channel_id = cr_parent.channel_id
+                WHERE COALESCE(cr_direct.role, cr_parent.role, 'default') = ?
+                  AND m.role IN ('user', 'assistant')
+                  AND m.type = 'text'
+                  AND m.content LIKE ?
+                ORDER BY m.timestamp DESC
+            """
+            like_query = f"%{query_text}%"
+            cursor.execute(sql, (role, like_query))
+            rows = cursor.fetchall()
+            return [self._row_to_message(row) for row in rows]
+
     def get_allowed_memory_categories(self) -> set[str]:
         """Retrieves the set of all currently permitted or existing memory categories."""
         categories = {"progress", "user_preferences", "memo"}
@@ -1488,6 +1542,14 @@ class AsyncDatabaseManager:
             role: The role associated with the memory.
         """
         await asyncio.to_thread(self.sync_db.delete_agent_memory, category, key, role)
+
+    async def search_role_memories(self, role: str, query_text: str) -> list[dict[str, Any]]:
+        """Search agent memories for a role matching query_text."""
+        return await asyncio.to_thread(self.sync_db.search_role_memories, role, query_text)
+
+    async def search_role_messages(self, role: str, query_text: str) -> list[Message]:
+        """Search messages for a role matching query_text."""
+        return await asyncio.to_thread(self.sync_db.search_role_messages, role, query_text)
 
     async def get_allowed_memory_categories(self) -> set[str]:
         """Retrieves the set of all currently permitted or existing memory categories.

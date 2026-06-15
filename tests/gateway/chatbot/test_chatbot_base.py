@@ -9,6 +9,7 @@ from kesoku.constants import (
     MessageRole,
     MessageType,
 )
+from kesoku.context import KesokuContext
 from kesoku.db import Message, Session
 from kesoku.gateway.chatbot.base import Chatbot, _format_uptime
 from kesoku.gateway.gateway import Gateway
@@ -188,3 +189,88 @@ async def test_resolve_outbound_path(tmp_path) -> None:
         # 8. Fuzzy match of a nested relative path under staging_dir (outtput/results.png -> output/result.png)
         resolved = await chatbot.resolve_outbound_path("outtput/results.png", "session123")
         assert resolved == str(nested_file.resolve())
+
+
+@pytest.mark.asyncio
+async def test_resolve_or_create_session_updates_prompt(tmp_path) -> None:
+    """Verify that _resolve_or_create_session updates the system prompt when custom_prompt changes."""
+    from kesoku.config import AgentConfig, KesokuConfig, WorkspaceConfig
+    from kesoku.db import DatabaseManager
+    from kesoku.gateway.chatbot.base import InboundMessageDTO
+
+    temp_db = str(tmp_path / "test_prompt_update.db")
+    db_mgr = DatabaseManager(temp_db)
+    db_mgr.init_tables()
+
+    # Create a dummy user prompt file
+    user_prompt_file = tmp_path / "User.md"
+    user_prompt_file.write_text("Initial User Instructions")
+
+    mock_cfg = KesokuConfig(
+        workspace=WorkspaceConfig(sessions_dir=str(tmp_path / "sessions"), db_path=temp_db),
+        agent=AgentConfig(user_prompts=[str(user_prompt_file)]),
+        agent_working_dir=str(tmp_path / "awd"),
+    )
+
+    with patch("kesoku.gateway.chatbot.base.get_config", return_value=mock_cfg), \
+         patch("kesoku.agent.prompt.get_config", return_value=mock_cfg):
+
+        mock_gateway = Gateway(context=KesokuContext(config=mock_cfg, db=db_mgr))
+        chatbot = MockChatbot(chatbot_id="mock_bot", gateway=mock_gateway)
+
+        # 1. Create session first time
+        dto1 = InboundMessageDTO(
+            sender_id="u1",
+            channel_id="c1",
+            text="Hello",
+            message_id="m1",
+            timestamp=1000.0,
+            custom_prompt="Custom Instructions V1",
+        )
+        session, created = await chatbot._resolve_or_create_session(dto1)
+        assert created is True
+        assert "Initial User Instructions" in session.system_prompt
+        assert "Custom Instructions V1" in session.system_prompt
+
+        # 2. Modify User.md on disk
+        user_prompt_file.write_text("Updated User Instructions")
+
+        # 3. Resolve session again with same custom prompt (simulating new message in existing session)
+        dto2 = InboundMessageDTO(
+            sender_id="u1",
+            channel_id="c1",
+            text="World",
+            message_id="m2",
+            timestamp=1002.0,
+            custom_prompt="Custom Instructions V1",
+        )
+        session2, created2 = await chatbot._resolve_or_create_session(dto2)
+        assert created2 is False
+
+        # Fetch session from DB to verify it was updated
+        db_session = await mock_gateway.db.get_session(session.id)
+        assert db_session is not None
+        assert "Updated User Instructions" in db_session.system_prompt
+        assert "Custom Instructions V1" in db_session.system_prompt
+        assert "Initial User Instructions" not in db_session.system_prompt
+
+        # 4. Modify User.md again
+        user_prompt_file.write_text("Final User Instructions")
+
+        # 5. Resolve session again with NO custom prompt
+        dto3 = InboundMessageDTO(
+            sender_id="u1",
+            channel_id="c1",
+            text="Again",
+            message_id="m3",
+            timestamp=1004.0,
+            custom_prompt=None,
+        )
+        session3, created3 = await chatbot._resolve_or_create_session(dto3)
+        assert created3 is False
+
+        db_session3 = await mock_gateway.db.get_session(session.id)
+        assert db_session3 is not None
+        assert "Final User Instructions" in db_session3.system_prompt
+        assert "Updated User Instructions" not in db_session3.system_prompt
+        assert "Custom Instructions V1" not in db_session3.system_prompt

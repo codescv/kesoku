@@ -1,13 +1,22 @@
 """Unit tests for the SQLite Category-based and Role-bound Agent Memory System."""
 
 import asyncio
+import time
 
 import pytest
 
-from kesoku.agent.tools import ToolContext, delete_memory, list_memories, update_memory, view_memory
+from kesoku.agent.tools import (
+    ToolContext,
+    delete_memory,
+    list_memories,
+    memory_grep,
+    update_memory,
+    view_memory,
+)
 from kesoku.config import KesokuConfig, WorkspaceConfig
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.context import KesokuContext
-from kesoku.db import DatabaseManager, Message
+from kesoku.db import DatabaseManager, Message, Session
 
 
 @pytest.mark.asyncio
@@ -461,3 +470,103 @@ async def test_memo_category(tmp_path) -> None:
     assert "Memory successfully saved!" in res
     assert "Category: `memo`" in res
     assert "Scope: `default`" in res
+
+
+@pytest.mark.asyncio
+async def test_memory_grep_tool(tmp_path) -> None:
+    """Test memory_grep tool finds matching memories and messages for the active role."""
+    from kesoku.gateway.gateway import Gateway
+
+    temp_db = str(tmp_path / "test_grep_tool.db")
+    db = DatabaseManager(temp_db)
+    db.init_tables()
+
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    # Set up role 'coder' on channel 'chan_1'
+    await gw.db.set_channel_role("discord", "chan_1", "coder")
+    session1 = Session(id="sess_1", title="Sess 1", created_at=time.time(), updated_at=time.time())
+    await gw.db.create_session(session1)
+    await gw.db.set_active_session_for_channel("discord", "chan_1", "sess_1")
+
+    # Create a mock user message to simulate active channel context
+    msg_context = Message(
+        id="msg_ctx",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="User",
+        role=MessageRole.USER,
+        content="Context message",
+        status=MessageStatus.RESPONDED,
+    )
+    await gw.post(msg_context)
+
+    ctx = ToolContext(
+        session_id="sess_1",
+        session_workspace="test_ws",
+        original_msg_id="msg_ctx",
+        gateway=gw,
+    )
+
+    # Save messages
+    msg1 = Message(
+        id="m1",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="I love python coding",
+        timestamp=time.time(),
+        status=MessageStatus.PROCESSED,
+    )
+    msg2 = Message(
+        id="m2",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.THOUGHT,
+        content="Thinking about python",
+        timestamp=time.time() + 1,
+        status=MessageStatus.RESPONDED,
+    )
+    msg3 = Message(
+        id="m3",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="Here is python code",
+        timestamp=time.time() + 2,
+        status=MessageStatus.DELIVERED,
+    )
+    await gw.post(msg1)
+    await gw.post(msg2)
+    await gw.post(msg3)
+
+    # Insert memories
+    await gw.db.upsert_agent_memory("memo", "mem1", "Python Tip", "Python is great", "default")
+    await gw.db.upsert_agent_memory("memo", "mem2", "Coder Tip", "Write python code", "coder")
+    await gw.db.upsert_agent_memory("memo", "mem3", "Helper Tip", "Help python users", "helper")
+
+    # Run memory_grep
+    res = await memory_grep(query="python", context=ctx)
+
+    # Assertions
+    assert "Search Results for 'python' (Role: coder)" in res
+    assert "Matching Memories" in res
+    assert "Python Tip" in res  # mem1 (default)
+    assert "Coder Tip" in res  # mem2 (coder)
+    assert "Helper Tip" not in res  # mem3 (helper)
+
+    assert "Matching Messages" in res
+    assert "I love python coding" in res  # m1
+    assert "Here is python code" in res  # m3
+    assert "Thinking about python" not in res  # m2 (thought)

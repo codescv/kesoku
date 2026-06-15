@@ -310,3 +310,89 @@ def test_cronjob_thread_aware_stats_and_timestamp(db_manager):
     last_msg_ts = db_manager.get_last_message_timestamp(chatbot_id="discord", channel_id="parent_chan_1")
     assert last_msg_ts is not None
     assert abs(last_msg_ts - (now - 30)) < 1e-3
+
+
+def test_search_role_data(db_manager):
+    """Tests search_role_memories and search_role_messages."""
+    # Set up role 'coder' on channel 'chan_1'
+    db_manager.set_channel_role("discord", "chan_1", "coder")
+
+    session1 = Session(id="sess_1", title="Sess 1", created_at=time.time(), updated_at=time.time())
+    db_manager.create_session(session1)
+    db_manager.set_active_session_for_channel("discord", "chan_1", "sess_1")
+
+    # Save messages for sess_1 (role 'coder')
+    msg1 = Message(
+        id="m1",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="I love python coding",
+        timestamp=time.time(),
+        status=MessageStatus.PROCESSED,
+    )
+    msg2 = Message(
+        id="m2",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.THOUGHT,
+        content="Thinking about python",
+        timestamp=time.time() + 1,
+        status=MessageStatus.RESPONDED,
+    )
+    msg3 = Message(
+        id="m3",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="Here is python code",
+        timestamp=time.time() + 2,
+        status=MessageStatus.DELIVERED,
+    )
+    db_manager.save_message(msg1)
+    db_manager.save_message(msg2)
+    db_manager.save_message(msg3)
+
+    # Set up role 'helper' on channel 'chan_2'
+    db_manager.set_channel_role("discord", "chan_2", "helper")
+    session2 = Session(id="sess_2", title="Sess 2", created_at=time.time(), updated_at=time.time())
+    db_manager.create_session(session2)
+    db_manager.set_active_session_for_channel("discord", "chan_2", "sess_2")
+
+    msg4 = Message(
+        id="m4",
+        session_id="sess_2",
+        chatbot_id="discord",
+        channel_id="chan_2",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Help me with python please",
+        timestamp=time.time(),
+        status=MessageStatus.PROCESSED,
+    )
+    db_manager.save_message(msg4)
+
+    # Insert memories
+    db_manager.upsert_agent_memory("memo", "mem1", "Python Tip", "Python is great", "default")
+    db_manager.upsert_agent_memory("memo", "mem2", "Coder Tip", "Write python code", "coder")
+    db_manager.upsert_agent_memory("memo", "mem3", "Helper Tip", "Help python users", "helper")
+
+    # Search messages for 'coder'
+    coder_msgs = db_manager.search_role_messages("coder", "python")
+    assert len(coder_msgs) == 2
+    assert {m.id for m in coder_msgs} == {"m1", "m3"}
+
+    # Search memories for 'coder'
+    coder_mems = db_manager.search_role_memories("coder", "python")
+    assert len(coder_mems) == 2
+    assert {m["key"] for m in coder_mems} == {"mem1", "mem2"}

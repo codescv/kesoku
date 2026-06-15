@@ -1,12 +1,7 @@
 """Registry and skill tools package for Kesoku AI Agent."""
 
 from kesoku.agent.tools.lcm import (
-    lcm_describe,
     lcm_expand,
-    lcm_expand_query,
-    lcm_grep,
-    lcm_semantic_search,
-    lcm_status,
 )
 from kesoku.agent.tools.media import analyze_media
 from kesoku.agent.tools.memory import (
@@ -14,6 +9,7 @@ from kesoku.agent.tools.memory import (
     delete_memory,
     list_memories,
     list_skills,
+    memory_grep,
     sanitize_key,
     skill_manager,
     update_memory,
@@ -54,12 +50,8 @@ __all__ = [
     "update_memory",
     "delete_memory",
     "view_chat_history_summary",
-    "lcm_grep",
-    "lcm_semantic_search",
+    "memory_grep",
     "lcm_expand",
-    "lcm_expand_query",
-    "lcm_describe",
-    "lcm_status",
     "sanitize_key",
     "validate_key",
     "MAX_MEMORY_CONTENT_LENGTH",

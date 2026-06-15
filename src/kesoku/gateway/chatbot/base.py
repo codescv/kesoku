@@ -3,7 +3,6 @@
 import asyncio
 import datetime
 import difflib
-import json
 import os
 import re
 import time
@@ -16,7 +15,6 @@ from pydantic import BaseModel, Field
 
 from kesoku.agent.history import build_history, messages_to_openlcm_dicts
 from kesoku.agent.prompt import build_sys_prompt
-from kesoku.agent.tools.lcm import lcm_grep
 from kesoku.agent.tools.registry import ToolContext
 from kesoku.config import get_config
 from kesoku.constants import SYSTEM_START_TIME, MessageRole, MessageStatus, MessageType
@@ -260,23 +258,25 @@ class Chatbot(ABC):
             handle_lcm,
         )
 
-        async def handle_lcm_grep(
+        async def handle_grep(
             reply_func: Callable[..., Awaitable[None]],
             channel_id: str,
             query: str = "",
         ) -> None:
             if not query:
-                await reply_func("⚠️ Please provide search keywords (e.g., /lcm-grep keyword).")
+                await reply_func("⚠️ Please provide search keywords (e.g., /grep keyword).")
                 return
 
             session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
             if not session:
                 session = await self.gateway.create_session(
                     session_id=None,
-                    title=f"LCM Grep {channel_id}",
+                    title=f"Grep {channel_id}",
                     chatbot_id=self.chatbot_id,
                     channel_id=channel_id,
                 )
+
+            from kesoku.agent.tools.memory import memory_grep
 
             ctx = ToolContext(
                 session_id=session.id,
@@ -284,114 +284,21 @@ class Chatbot(ABC):
                 gateway=self.gateway,
             )
             try:
-                res = await lcm_grep(query=query, context=ctx)
-                try:
-                    data = json.loads(res)
-                    if not data.get("results"):
-                        await reply_func(f"🔍 No results found for `{query}`.")
-                        return
-
-                    total = data.get("total_results", len(data["results"]))
-                    lines = [f"🔍 **Search Results for `{query}` (Total: {total}):**"]
-                    for idx, hit in enumerate(data["results"]):
-                        sess_id = hit.get("session_id")
-                        role_str = f"[{hit.get('role')}]" if hit.get("role") else ""
-                        time_str = ""
-                        if hit.get("timestamp"):
-                            dt = datetime.datetime.fromtimestamp(hit["timestamp"])
-                            time_str = f" ({dt.strftime('%m-%d %H:%M')})"
-                        snippet = hit.get("snippet", "").strip().replace("\n", " ")
-                        lines.append(f"{idx + 1}. **{sess_id}**{time_str} {role_str}: {snippet}")
-                    await reply_func("\n".join(lines))
-                except Exception:
-                    await reply_func(res)
+                res = await memory_grep(query=query, context=ctx)
+                await reply_func(res)
             except Exception as e:
-                logger.error(f"Failed lcm-grep execution: {e}")
-                await reply_func(f"⚠️ Failed to execute lcm-grep: {e}")
+                logger.error(f"Failed grep execution: {e}")
+                await reply_func(f"⚠️ Failed to execute grep: {e}")
 
         self.commands.register(
-            "lcm-grep",
-            "Grep conversation history across all sessions of the current bound role.",
-            handle_lcm_grep,
+            "grep",
+            "Search active memories and past messages for the current bound role.",
+            handle_grep,
         )
         self.commands.register(
-            "lcm_grep",
-            "Grep conversation history across all sessions of the current bound role.",
-            handle_lcm_grep,
-        )
-
-        async def handle_lcm_search(
-            reply_func: Callable[..., Awaitable[None]],
-            channel_id: str,
-            query: str = "",
-        ) -> None:
-            if not query:
-                await reply_func("⚠️ Please provide search keywords (e.g., /lcm-search keyword).")
-                return
-
-            session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
-            if not session:
-                session = await self.gateway.create_session(
-                    session_id=None,
-                    title=f"LCM Search {channel_id}",
-                    chatbot_id=self.chatbot_id,
-                    channel_id=channel_id,
-                )
-
-            from kesoku.agent.tools.lcm import lcm_semantic_search
-            from kesoku.agent.tools.registry import ToolContext
-
-            ctx = ToolContext(
-                session_id=session.id,
-                session_workspace=session.workspace_name,
-                gateway=self.gateway,
-            )
-            try:
-                res = await lcm_semantic_search(query=query, limit=10, content_type="all", context=ctx)
-                try:
-                    data = json.loads(res)
-                    if data.get("error"):
-                        hint = f"\nHint: {data['hint']}" if data.get("hint") else ""
-                        await reply_func(f"⚠️ Semantic search unavailable: {data['error']}{hint}")
-                        return
-
-                    if not data.get("results"):
-                        await reply_func(f"🔍 No semantic results found for `{query}`.")
-                        return
-
-                    total = data.get("total", len(data["results"]))
-                    model = data.get("model", "embedding")
-                    lines = [f"🔍 **Semantic Search Results for `{query}` (Model: `{model}`, Total: {total}):**"]
-                    for idx, hit in enumerate(data["results"]):
-                        score = hit.get("score", 0.0)
-                        ct = hit.get("content_type", "")
-                        if ct == "node":
-                            sess_id = hit.get("session_id", "")
-                            preview = hit.get("summary_preview", "").strip().replace("\n", " ")
-                            lines.append(f"{idx + 1}. **{sess_id}** [node, score: {score}]: {preview}")
-                        elif ct == "fact":
-                            key = hit.get("key", "")
-                            val = hit.get("value", "").strip().replace("\n", " ")
-                            lines.append(f"{idx + 1}. **[fact:{key}]** [score: {score}]: {val}")
-                        else:
-                            val = str(hit).strip().replace("\n", " ")
-                            lines.append(f"{idx + 1}. [score: {score}]: {val}")
-                    await reply_func("\n".join(lines))
-                except Exception:
-                    await reply_func(res)
-            except Exception as e:
-                logger.error(f"Failed lcm-search execution: {e}")
-                await reply_func(f"⚠️ Failed to execute lcm-search: {e}")
-
-        self.commands.register(
-            "lcm-search",
-            "Semantic similarity search across LCM nodes and facts using embeddings.",
-            handle_lcm_search,
-        )
-        self.commands.register(
-            "lcm_search",
-            "Semantic similarity search across LCM nodes and facts using embeddings.",
-            handle_lcm_search,
+            "memory-grep",
+            "Search active memories and past messages for the current bound role.",
+            handle_grep,
         )
 
         async def handle_debug(
@@ -515,12 +422,12 @@ class Chatbot(ABC):
                 await self.commands.execute("role", reply_func, channel_id=channel_id, role_name=role_name)
             elif command == "restart":
                 await self.commands.execute(command, reply_func)
-            elif command in {"lcm-grep", "lcm_grep", "lcm-search", "lcm_search"}:
+            elif command in {"grep", "memory-grep", "memory_grep"}:
                 if not channel_id:
                     await reply_func("⚠️ Channel ID is required for this command.")
                     return
                 query = " ".join(parts[1:]) if len(parts) > 1 else ""
-                await self.commands.execute(command, reply_func, channel_id=channel_id, query=query)
+                await self.commands.execute("grep", reply_func, channel_id=channel_id, query=query)
             elif command == "cronjob":
                 tag = " ".join(parts[1:]) if len(parts) > 1 else ""
                 await self.commands.execute("cronjob", reply_func, tag=tag)
@@ -1104,9 +1011,9 @@ class Chatbot(ABC):
         else:
             await self.gateway.db.update_session_updated_at(session.id, time.time())
 
-            if dto.custom_prompt:
-                new_sys_prompt = build_sys_prompt(custom_prompt=dto.custom_prompt, session=session)
-                await self.gateway.db.update_session_system_prompt(session.id, new_sys_prompt)
+            # Always rebuild the system prompt to pick up on-disk template changes
+            new_sys_prompt = build_sys_prompt(custom_prompt=dto.custom_prompt or None, session=session)
+            await self.gateway.db.update_session_system_prompt(session.id, new_sys_prompt)
 
         return session, created
 

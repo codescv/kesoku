@@ -11,6 +11,7 @@ from rich.table import Table
 
 from kesoku.agent.agent import Agent
 from kesoku.agent.history import build_history
+from kesoku.agent.prompt import build_sys_prompt
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.chatbot.cli_bot import CLIChatbot
@@ -209,6 +210,10 @@ async def run_cli_chat_async(
     order = "grouped" if grouped else "phased"
     history = await build_history(gateway=gateway, session_id=session_id, order=order, heal_orphans=False)
     session = await gateway.db.get_session(session_id)
+    if is_resumed and session:
+        new_sys_prompt = build_sys_prompt(session=session)
+        await gateway.db.update_session_system_prompt(session_id, new_sys_prompt)
+        session = await gateway.db.get_session(session_id)
 
     if is_resumed:
         logger.info(f"Resuming Session '{session_id}' History:")
