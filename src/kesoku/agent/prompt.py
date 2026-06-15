@@ -71,11 +71,8 @@ Use LCM tools to search and browse chat history across sessions.
 - Use `view_memory` to recall facts and progresses that you actively recorded in Active Memory.
 - Use `view_chat_history_summary` to get a high-level timeline of recent (last ~2 weeks)
   discussions from chat history.
-- Use `lcm_grep` to search for a keyword (postfix wildcard allowed) in raw messages and
-  message summaries.
-- Use `lcm_semantic_search` to semantic search compacted message summaries.
+- Use `memory_grep` to search active memories and past messages for the current role.
 - Use `lcm_expand` to view details of a raw message or a compacted summary node.
-- Use `lcm_expand_query` to answer questions about a group of summary nodes.
 """
 
 

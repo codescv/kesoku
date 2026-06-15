@@ -567,8 +567,8 @@ class TurnExecutor:
                 )
             lines.append(
                 "- 💡 Lossless Chat History (LCM): Older raw messages across long conversations are compacted into "
-                "a hierarchical DAG. You have access to LCM tools (`lcm_grep`, `lcm_semantic_search`, `lcm_expand`, "
-                "`lcm_expand_query`) to search and inspect historical discussions across sessions when needed."
+                "a hierarchical DAG. You have access to `lcm_expand` to inspect historical discussions when needed. "
+                "To search across all memories and past messages, use `memory_grep`."
             )
             lines.append("</background_context>\n\n")
             full_prefix = "\n".join(lines)
