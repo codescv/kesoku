@@ -1,7 +1,7 @@
 """Unit tests for Kesoku Discord chatbot slash commands."""
 
 import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import discord
 import pytest
@@ -321,5 +321,43 @@ async def test_lcm_command_file_attachment(mock_chatbot: MagicMock) -> None:
         import os
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_grep_command_success(mock_chatbot: MagicMock) -> None:
+    """Test that the /grep slash command executes successfully and replies."""
+    setup_discord_commands(mock_chatbot)
+
+    commands = mock_chatbot.tree.get_commands()
+    grep_cmd = next((cmd for cmd in commands if cmd.name == "grep"), None)
+    assert grep_cmd is not None
+
+    # Verify command has 'query' parameter
+    assert len(grep_cmd.parameters) == 1
+    assert grep_cmd.parameters[0].name == "query"
+
+    # Mock interaction
+    interaction = AsyncMock(spec=discord.Interaction)
+    interaction.user = MagicMock(spec=discord.User)
+    interaction.user.name = "test_user"
+    interaction.user.id = 123456789
+    interaction.channel_id = 987654321
+
+    interaction.response = AsyncMock()
+    interaction.followup = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    # Mock chatbot.commands.execute
+    mock_chatbot.commands.execute = AsyncMock()
+
+    await grep_cmd.callback(interaction, query="test_query")
+
+    # Assert commands.execute was called with correct parameters
+    mock_chatbot.commands.execute.assert_called_once_with(
+        "grep",
+        ANY,
+        channel_id="987654321",
+        query="test_query"
+    )
 
 

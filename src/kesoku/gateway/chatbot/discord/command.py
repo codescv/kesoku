@@ -24,7 +24,7 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
 
     for name, cmd_info in chatbot.commands.get_commands().items():
         # Skip duplicate aliases to avoid Discord command registration collision
-        if name in {"reset", "lcm_grep", "lcm_search"}:
+        if name in {"reset"}:
             continue
 
         cmd_name = name
@@ -90,7 +90,7 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
                 description=description,
                 callback=cronjob_callback,
             )
-        elif cmd_name in {"lcm-grep", "lcm-search"}:
+        elif cmd_name in {"grep", "memory-grep"}:
 
             def make_search_callback(c_name: str) -> Callable[..., Awaitable[None]]:
                 async def search_callback(interaction: discord.Interaction, query: str = "") -> None:
@@ -157,10 +157,6 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
                             "lcm",
                             "context",
                             "debug",
-                            "lcm-grep",
-                            "lcm_grep",
-                            "lcm-search",
-                            "lcm_search",
                         }:
                             await chatbot.commands.execute(c_name, reply_func, channel_id=str(interaction.channel_id))
                         else:
