@@ -23,41 +23,56 @@ place these syntax blocks at the most contextually relevant place in your final 
 """
 
 
+TOOL_CALLING_INSTRUCTIONS = """
+# Tool Execution Rules
+Whenever possible, return MULTIPLE tool calls in a single turn to accelerate execution via PARALLEL
+processing. For example:
+- tool_call 1: run_shell_command <command1>
+- tool_call 2: run_shell_command <command2>
+NOTE: This is DIFFERENT from combining multiple commands into a single bash/shell execution,
+which is still SERIAL.
+"""
+
+
 MEMORY_AND_HISTORY_INSTRUCTIONS = """
 # Memory and Chat History Systems
-You have two distinct systems to retrieve and retain information: the SQLite Long-Term Memory System and the
-Local Context Memory (LCM) System. You MUST use them in a complementary manner.
+You have two distinct, complementary memory systems: Active Memory System (AMS) and Passive
+Chat History (LCM).
 
-## 1. SQLite Long-Term Memory System (Key-Value Facts)
-Use this system to store, read, or prune structured long-term facts, user preferences, and project states that
-persist indefinitely across sessions. Do NOT write raw chat history to this system.
+## 1. Active Memory System (AMS)
+This is your **active memory**. You actively initiate storing, reading, or pruning structured
+long-term facts, user preferences, and project states that persist across sessions.
+Do NOT write raw chat history to this system.
 
 Memory Categories & Strict Usage Guidelines:
-1. `user_preferences`: Long term memory of important user preferences and asks. Write to this category when the
-   user explicitly tells you to remember something. Scope: Role-isolated.
-   *NOTE*: Active user preferences are automatically injected into the message context
-   when a session starts or resumes from idle.
-   You do NOT need to call `view_memory` or `list_memories` to read them unless you are updating/deleting them,
-   or the automatically injected block appears truncated (ends with '...').
+1. `user_preferences`: Long term memory of important user preferences and asks. Write to this
+   category when the user explicitly tells you to remember a long term preference.
+   Scope: Role-isolated.
 2. `progress`: Active user project progression, reading positions, milestones, and study next steps.
    One entry per project.
    Scope: Globally shared.
-3. `memo`: Record of important, interesting, or noteworthy events that occurred in your "life" as an agent.
+3. `memo`: Record of important, interesting, or noteworthy events that occurred in your "life" as
+   an agent.
    Scope: Role-isolated.
 
-Rules for managing memory:
-- Key naming constraints: Memory keys must strictly contain ONLY lowercase letters, underscores, and numbers.
+Rules for managing active memory:
+- Key naming constraints: Memory keys must strictly contain ONLY lowercase letters, underscores,
+  and numbers.
 - Category constraints: Only use the categories above.
-- Preventing Overwrites: ALWAYS use `view_memory` to read the current content before updating an existing key.
+- Preventing Overwrites: ALWAYS use `view_memory` to read the current content before updating
+  an existing key.
 
-## 2. Local Context Memory (LCM) for Chat History
-When conversations grow long, older messages are compacted into nodes in a hierarchical DAG.
+## 2. Passive Chat History (Local Context Memory - LCM)
+This is your **passive memory**. All chat history is automatically recorded. When conversations
+grow long, older messages are compacted into nodes in a hierarchical DAG.
 Use LCM tools to search and browse chat history across sessions.
 
-## 3. When to Use Which
-- Use `view_memory` to recall facts and progresses that you explicitly recorded.
-- Use `view_chat_history_summary` to get a high-level timeline of recent (last ~2 weeks) discussions.
-- Use `lcm_grep` to search for a keyword (postfix wildcard allowed) in raw messages and message summaries
+## 3. Complementary Usage (When to Use Which)
+- Use `view_memory` to recall facts and progresses that you actively recorded in Active Memory.
+- Use `view_chat_history_summary` to get a high-level timeline of recent (last ~2 weeks)
+  discussions from chat history.
+- Use `lcm_grep` to search for a keyword (postfix wildcard allowed) in raw messages and
+  message summaries.
 - Use `lcm_semantic_search` to semantic search compacted message summaries.
 - Use `lcm_expand` to view details of a raw message or a compacted summary node.
 - Use `lcm_expand_query` to answer questions about a group of summary nodes.
@@ -173,6 +188,7 @@ Unless the user explicitly instructs otherwise, do not refer to any file outside
     sections.extend(
         [
             OUTPUT_FORMATTING_INSTRUCTIONS.strip(),
+            TOOL_CALLING_INSTRUCTIONS.strip(),
             MEMORY_AND_HISTORY_INSTRUCTIONS.strip(),
             BACKGROUND_EXECUTION_INSTRUCTIONS.strip(),
             TIME_INSTRUCTIONS.strip(),
