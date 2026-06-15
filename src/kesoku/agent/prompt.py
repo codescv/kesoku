@@ -90,8 +90,11 @@ If a command transitions to a background job:
 
 TIME_INSTRUCTIONS = """
 # Time
-The current time and timezone are injected in the `time` and `timezone` attributes of the `<current_request>` tag.
-Always rely on these attributes for the accurate current time to prevent hallucination about world status.
+The current physical time and timezone are injected in the `time` and `timezone`
+attributes of the `<current_message>` tag.
+CRITICAL: This represents the LIVE OPERATIONAL PHYSICAL CLOCK of the system
+right now. You MUST rely entirely on these attributes for the exact current
+time. NEVER interpret or treat it as a simulated or mock time reference.
 """
 
 

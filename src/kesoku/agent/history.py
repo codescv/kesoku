@@ -7,6 +7,8 @@ import os
 import re
 from typing import Any, Literal
 
+import tzlocal
+
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
@@ -126,15 +128,25 @@ def prepare_history_for_llm(history: list[Message]) -> list[Message]:
                 # Don't add header to the OpenLCM scaffold message
                 if "[Note: This conversation uses Lossless Context" in m.content:
                     final_history.append(m)
-                elif "<current_request" in m.content:
+                elif "<current_message" in m.content:
                     final_history.append(m)
                 else:
                     m_copy = m.model_copy()
                     msg_time = datetime.datetime.fromtimestamp(m_copy.timestamp).astimezone()
                     time_str = msg_time.strftime("%Y-%m-%d %H:%M:%S (%A) %Z")
                     sender_name = m_copy.metadata.get("sender_name") or m_copy.sender
-                    header = f"[{sender_name} at {time_str}]:\n"
-                    m_copy.content = header + m_copy.content
+                    if sender_name.lower() == "cronjob":
+                        sender_name = "system"
+                    try:
+                        tz_name = tzlocal.get_localzone_name()
+                    except Exception:
+                        tz_name = msg_time.tzname() or "UTC"
+
+                    m_copy.content = (
+                        f'<history_message from="{sender_name}" time="{time_str}" timezone="{tz_name}">\n'
+                        f'{m_copy.content}\n'
+                        '</history_message>'
+                    )
                     final_history.append(m_copy)
             else:
                 final_history.append(m)
