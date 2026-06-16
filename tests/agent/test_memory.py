@@ -62,15 +62,14 @@ async def test_database_memory_crud(tmp_path) -> None:
     assert len(progress_mems) == 1
     assert progress_mems[0]["key"] == "standard_japanese"
 
-    # Query with role='asuka' (should fetch both default + asuka's memories)
+    # Query with role='asuka' (should fetch only asuka's memories)
     all_asuka_mems = db.get_agent_memories(role="asuka")
-    # Both default progress and asuka specific memo are in the system
-    assert len(all_asuka_mems) == 2
+    assert len(all_asuka_mems) == 1
+    assert all_asuka_mems[0]["key"] == "proxy_setting"
 
-    # Query with role='tifa' (should fetch only default memories, and tifa specific ones if they existed)
+    # Query with role='tifa' (should fetch only tifa memories, which is empty)
     all_tifa_mems = db.get_agent_memories(role="tifa")
-    assert len(all_tifa_mems) == 1
-    assert all_tifa_mems[0]["key"] == "standard_japanese"
+    assert len(all_tifa_mems) == 0
 
     # 5. Deleting memory
     db.delete_agent_memory(category="memo", key="proxy_setting", role="asuka")
@@ -144,23 +143,22 @@ async def test_memory_tools_execution(tmp_path) -> None:
 
     # List memories as Tifa
     list_tifa = await list_memories(category="user_preferences", role="tifa", context=ctx)
-    # Tifa can see default memories but NOT Asuka's memories
-    assert "funny_general_event" in list_tifa
+    # Tifa should NOT see default memories or Asuka's memories
+    assert "funny_general_event" not in list_tifa
     assert "funny_asuka_event" not in list_tifa
 
     # List memories as Asuka
     list_asuka = await list_memories(category="user_preferences", role="asuka", context=ctx)
-    # Asuka can see both default and Asuka-specific memories
-    assert "funny_general_event" in list_asuka
+    # Asuka can see only Asuka-specific memories
+    assert "funny_general_event" not in list_asuka
     assert "funny_asuka_event" in list_asuka
 
     # 5. Testing view_memory tool with dynamic in-memory Markdown aggregation (key=None)
     view_asuka_all = await view_memory(category="user_preferences", key=None, role="asuka", context=ctx)
     assert "# Category: user_preferences (scope: asuka)" in view_asuka_all
-    assert "## General Fun (key: `funny_general_event`, scope: `default`)" in view_asuka_all
     assert "## Asuka Day 1 (key: `funny_asuka_event`, scope: `asuka`)" in view_asuka_all
-    assert "Someone made a joke today" in view_asuka_all
     assert "Asuka was tsundere today" in view_asuka_all
+    assert "General Fun" not in view_asuka_all
 
     # 6. Testing delete_memory tool
     delete_res = await delete_memory(category="user_preferences", key="funny_asuka_event", role="asuka", context=ctx)
@@ -220,7 +218,7 @@ async def test_category_role_routing(tmp_path) -> None:
         role="tifa",  # Passed explicitly
         context=ctx,
     )
-    assert "Scope: `default`" in res
+    assert "Scope: `tifa`" in res
 
     # 2. Update 'user_preferences' memory - it should go to 'tifa' active role scope
     res = await update_memory(
@@ -562,7 +560,7 @@ async def test_memory_grep_tool(tmp_path) -> None:
     # Assertions
     assert "Search Results for 'python' (Role: coder)" in res
     assert "Matching Memories" in res
-    assert "Python Tip" in res  # mem1 (default)
+    assert "Python Tip" not in res  # mem1 (default)
     assert "Coder Tip" in res  # mem2 (coder)
     assert "Helper Tip" not in res  # mem3 (helper)
 
@@ -708,7 +706,7 @@ async def test_memory_search_tool_and_real_time_indexing(tmp_path) -> None:
         # Assertions
         assert "Semantic Search Results for 'python' (Role: coder)" in res
         assert "Matching Memories" in res
-        assert "Python Tip" in res  # mem1 (default)
+        assert "Python Tip" not in res  # mem1 (default)
         assert "Coder Tip" in res  # mem2 (coder)
         assert "Helper Tip" not in res  # mem3 (helper - wrong role)
         assert "JS Tip" not in res  # mem_js (wrong topic - JS)

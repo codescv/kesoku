@@ -71,12 +71,8 @@ async def _resolve_memory_role(category: str, role_param: str | None, context: T
     """Resolve the correct role scope based on the memory category and context rules."""
     category = category.strip().lower()
 
-    # Rule 1: Standard categories ALWAYS use "default" role
-    if category == "progress":
-        return "default"
-
-    # Rule 2: user_preferences and memo categories use current channel's active role
-    if category in {"user_preferences", "memo"}:
+    # Make all active memory categories (progress, user_preferences, memo) role-based
+    if category in {"progress", "user_preferences", "memo"}:
         if context and context.gateway:
             db = context.gateway.db
             if context.original_msg_id:
@@ -94,9 +90,7 @@ async def _resolve_memory_role(category: str, role_param: str | None, context: T
                     mapping = await db.get_channel_by_session(context.session_id)
                     if mapping:
                         chatbot_id, channel_id = mapping
-                        return await db.get_channel_role_with_inheritance(
-                            chatbot_id, channel_id, context.session_id
-                        )
+                        return await db.get_channel_role_with_inheritance(chatbot_id, channel_id, context.session_id)
                 except Exception as e:
                     logger.warning(f"Failed to resolve active role from session_id for memory category {category}: {e}")
         # Fallback
@@ -460,7 +454,7 @@ async def memory_grep(
             lines.append("\n### 🧠 Matching Memories")
             for m in memories:
                 updated_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m["updated_at"]))
-                lines.append(f"- **[{m['category']}]** `{m['key']}`: \"{m['title']}\" (updated: {updated_str})")
+                lines.append(f'- **[{m["category"]}]** `{m["key"]}`: "{m["title"]}" (updated: {updated_str})')
                 content_snippet = extract_grep_snippet(m["content"], query, window=70)
                 lines.append(f"  > {content_snippet}")
 
@@ -509,18 +503,9 @@ async def memory_search(
 
     try:
         # Search messages for the active role
-        msg_results = await embedding_store.search(
-            query, content_type=f"kesoku_message:{active_role}", limit=50
-        )
-        # Search memories for the active role and default role
-        mem_role_results = await embedding_store.search(
-            query, content_type=f"kesoku_memory:{active_role}", limit=50
-        )
-        mem_default_results = []
-        if active_role != "default":
-            mem_default_results = await embedding_store.search(
-                query, content_type="kesoku_memory:default", limit=50
-            )
+        msg_results = await embedding_store.search(query, content_type=f"kesoku_message:{active_role}", limit=50)
+        # Search memories only for the active role
+        mem_role_results = await embedding_store.search(query, content_type=f"kesoku_memory:{active_role}", limit=50)
 
         matched_messages = []
         for r in msg_results:
@@ -530,7 +515,7 @@ async def memory_search(
             if msg:
                 matched_messages.append((msg, r["score"]))
 
-        combined_mems = mem_role_results + mem_default_results
+        combined_mems = mem_role_results
         # Sort combined list by score descending
         combined_mems.sort(key=lambda x: x["score"], reverse=True)
 
@@ -564,8 +549,7 @@ async def memory_search(
             for m, score in matched_memories:
                 updated_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m["updated_at"]))
                 lines.append(
-                    f"- **[{m['category']}]** `{m['key']}`: \"{m['title']}\" "
-                    f"(updated: {updated_str}, score: {score:.2f})"
+                    f'- **[{m["category"]}]** `{m["key"]}`: "{m["title"]}" (updated: {updated_str}, score: {score:.2f})'
                 )
                 content_snippet = extract_grep_snippet(m["content"], query, window=70)
                 lines.append(f"  > {content_snippet}")
@@ -576,9 +560,7 @@ async def memory_search(
                 time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m.timestamp))
                 sender_str = f"**{m.sender}** ({m.role})"
                 content_snippet = extract_grep_snippet(m.content, query, window=70)
-                lines.append(
-                    f"- [{time_str}] {sender_str} in session `{m.session_id}` (score: {score:.2f}):"
-                )
+                lines.append(f"- [{time_str}] {sender_str} in session `{m.session_id}` (score: {score:.2f}):")
                 lines.append(f"  > {content_snippet}")
 
         return "\n".join(lines)

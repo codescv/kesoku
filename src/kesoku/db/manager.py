@@ -156,8 +156,7 @@ class DatabaseManager:
                 self._ensure_migrations(conn)
             except sqlite3.DatabaseError as e:
                 raise RuntimeError(
-                    f"Database at '{self.db_path}' is invalid or corrupt. "
-                    "Please run 'kesoku init' first."
+                    f"Database at '{self.db_path}' is invalid or corrupt. Please run 'kesoku init' first."
                 ) from e
 
     def init_tables(self, overwrite: bool = False) -> None:
@@ -419,7 +418,6 @@ class DatabaseManager:
                 )
                 logger.info(f"Database deleted {cursor.rowcount} messages out of {len(message_ids)} requested IDs.")
 
-
     def delete_messages_before_timestamp(
         self, session_id: str, timestamp: float, exclude_ids: list[str] | None = None
     ) -> int:
@@ -448,10 +446,6 @@ class DatabaseManager:
                     f"(excluding {len(exclude_ids) if exclude_ids else 0} IDs) in session {session_id}."
                 )
                 return deleted_count
-
-
-
-
 
     # Message CRUD
     def save_message(self, msg: Message) -> None:
@@ -814,7 +808,7 @@ class DatabaseManager:
                 params.append(category)
 
             if role:
-                clauses.append("(role = 'default' OR role = ?)")
+                clauses.append("role = ?")
                 params.append(role)
 
             if clauses:
@@ -844,11 +838,11 @@ class DatabaseManager:
     ) -> list[dict[str, Any]]:
         """Search agent memories for a role matching query_text in content or title.
 
-        Includes default memories. Supporting time range queries.
+        Supporting time range queries.
         """
         with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
-            conditions = ["(role = 'default' OR role = ?)"]
+            conditions = ["role = ?"]
             args: list[Any] = [role]
 
             is_wildcard = not query_text or query_text == "*"
@@ -890,11 +884,7 @@ class DatabaseManager:
         """
         with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
-            conditions = [
-                "COALESCE(s.role_name, 'default') = ?",
-                "m.role IN ('user', 'assistant')",
-                "m.type = 'text'"
-            ]
+            conditions = ["COALESCE(s.role_name, 'default') = ?", "m.role IN ('user', 'assistant')", "m.type = 'text'"]
             args: list[Any] = [role]
 
             is_wildcard = not query_text or query_text == "*"
@@ -1137,7 +1127,6 @@ class DatabaseManager:
             rows = cursor.fetchall()
             return [row[0] for row in rows if row[0]]
 
-
     # Cross Session Context CRUD
     def get_cross_session_context(self, role: str) -> CrossSessionContext | None:
         """Retrieve the cross-session context for a specific role.
@@ -1269,18 +1258,14 @@ class AsyncDatabaseManager:
         """
         self.sync_db = sync_db
         self._on_message_saved_listeners: list[Callable[[Message], Awaitable[None]]] = []
-        self._on_memory_upserted_listeners: list[
-            Callable[[str, str, str, str, str], Awaitable[None]]
-        ] = []
+        self._on_memory_upserted_listeners: list[Callable[[str, str, str, str, str], Awaitable[None]]] = []
         self._on_memory_deleted_listeners: list[Callable[[str, str, str], Awaitable[None]]] = []
 
     def register_on_message_saved(self, callback: Callable[[Message], Awaitable[None]]) -> None:
         """Register a callback to be triggered when a message is successfully saved."""
         self._on_message_saved_listeners.append(callback)
 
-    def register_on_memory_upserted(
-        self, callback: Callable[[str, str, str, str, str], Awaitable[None]]
-    ) -> None:
+    def register_on_memory_upserted(self, callback: Callable[[str, str, str, str, str], Awaitable[None]]) -> None:
         """Register a callback to be triggered when an agent memory is upserted."""
         self._on_memory_upserted_listeners.append(callback)
 
@@ -1365,6 +1350,7 @@ class AsyncDatabaseManager:
             session_id: The ID of the session to make active.
         """
         await asyncio.to_thread(self.sync_db.set_active_session_for_channel, chatbot_id, channel_id, session_id)
+
     async def delete_session(self, session_id: str) -> None:
         """Delete a session and its associated messages.
 
@@ -1397,9 +1383,6 @@ class AsyncDatabaseManager:
         return await asyncio.to_thread(
             self.sync_db.delete_messages_before_timestamp, session_id, timestamp, exclude_ids
         )
-
-
-
 
     async def save_message(self, msg: Message) -> None:
         """Save a message to the database.
@@ -1858,5 +1841,3 @@ class AsyncDatabaseManager:
             List of session ID strings.
         """
         return await asyncio.to_thread(self.sync_db.get_role_session_ids, role)
-
-

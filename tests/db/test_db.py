@@ -97,9 +97,7 @@ def test_channel_session_mappings(db_manager):
     db_manager.create_session(session)
 
     # Set mapping
-    db_manager.set_active_session_for_channel(
-        chatbot_id="discord", channel_id="123456", session_id="session_mapping"
-    )
+    db_manager.set_active_session_for_channel(chatbot_id="discord", channel_id="123456", session_id="session_mapping")
 
     # Retrieve session by channel
     bound_session = db_manager.get_session_by_channel(chatbot_id="discord", channel_id="123456")
@@ -202,9 +200,9 @@ def test_agent_memory_crud(db_manager):
     assert mem["title"] == "Python Preference"
     assert mem["content"] == "User prefers type-annotated Python code."
 
-    # List filtered by category & role (should include default)
+    # List filtered by category & role (should NOT include default)
     mems = db_manager.get_agent_memories(category="memo", role="coder")
-    assert len(mems) == 2  # Should fetch both 'coder' and 'default' memories
+    assert len(mems) == 1  # Should fetch only 'coder' memories
 
     # Delete
     db_manager.delete_agent_memory(category="memo", key="python_pref", role="default")
@@ -394,8 +392,8 @@ def test_search_role_data(db_manager):
 
     # Search memories for 'coder'
     coder_mems = db_manager.search_role_memories("coder", "python")
-    assert len(coder_mems) == 2
-    assert {m["key"] for m in coder_mems} == {"mem1", "mem2"}
+    assert len(coder_mems) == 1
+    assert {m["key"] for m in coder_mems} == {"mem2"}
 
 
 def test_search_role_data_wildcard_and_filters(db_manager):
@@ -412,19 +410,40 @@ def test_search_role_data_wildcard_and_filters(db_manager):
     base_ts = 1781534400.0
 
     msg1 = Message(
-        id="m1", session_id="sess_1", chatbot_id="discord", channel_id="chan_1",
-        sender="user", role=MessageRole.USER, type=MessageType.TEXT,
-        content="First python msg", timestamp=base_ts, status=MessageStatus.PROCESSED,
+        id="m1",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="First python msg",
+        timestamp=base_ts,
+        status=MessageStatus.PROCESSED,
     )
     msg2 = Message(
-        id="m2", session_id="sess_1", chatbot_id="discord", channel_id="chan_1",
-        sender="assistant", role=MessageRole.ASSISTANT, type=MessageType.TEXT,
-        content="Second python msg", timestamp=base_ts + 3600, status=MessageStatus.RESPONDED, # +1 hr
+        id="m2",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="Second python msg",
+        timestamp=base_ts + 3600,
+        status=MessageStatus.RESPONDED,  # +1 hr
     )
     msg3 = Message(
-        id="m3", session_id="sess_1", chatbot_id="discord", channel_id="chan_1",
-        sender="user", role=MessageRole.USER, type=MessageType.TEXT,
-        content="Third java msg", timestamp=base_ts + 7200, status=MessageStatus.PROCESSED, # +2 hr
+        id="m3",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Third java msg",
+        timestamp=base_ts + 7200,
+        status=MessageStatus.PROCESSED,  # +2 hr
     )
     db_manager.save_message(msg1)
     db_manager.save_message(msg2)
@@ -449,10 +468,10 @@ def test_search_role_data_wildcard_and_filters(db_manager):
     assert len(msgs_empty) == 3
     assert {m.id for m in msgs_empty} == {"m1", "m2", "m3"}
 
-    # Test 2: Wildcard content search for memories
+    # Test 2: Wildcard content search for memories (should NOT include default)
     mems = db_manager.search_role_memories("coder", "*")
-    assert len(mems) == 2
-    assert {m["key"] for m in mems} == {"mem1", "mem2"}
+    assert len(mems) == 1
+    assert {m["key"] for m in mems} == {"mem2"}
 
     # Test 3: Time range filtering for messages
     msgs_time = db_manager.search_role_messages("coder", "*", start_time=base_ts, end_time=base_ts + 4000)
@@ -470,4 +489,3 @@ def test_search_role_data_wildcard_and_filters(db_manager):
     # Should return latest first
     assert msgs_limit[0].id == "m3"
     assert msgs_limit[1].id == "m2"
-

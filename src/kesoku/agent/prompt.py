@@ -47,13 +47,10 @@ Do NOT write raw chat history to this system.
 Memory Categories & Strict Usage Guidelines:
 1. `user_preferences`: Long term memory of important user preferences and asks. Write to this
    category when the user explicitly tells you to remember a long term preference.
-   Scope: Role-isolated.
 2. `progress`: Active user project progression, reading positions, milestones, and study next steps.
    One entry per project.
-   Scope: Globally shared.
 3. `memo`: Record of important, interesting, or noteworthy events that occurred in your "life" as
    an agent.
-   Scope: Role-isolated.
 
 Rules for managing active memory:
 - Key naming constraints: Memory keys must strictly contain ONLY lowercase letters, underscores,
@@ -95,7 +92,6 @@ CRITICAL: This represents the LIVE OPERATIONAL PHYSICAL CLOCK of the system
 right now. You MUST rely entirely on these attributes for the exact current
 time. NEVER interpret or treat it as a simulated or mock time reference.
 """
-
 
 
 def build_sys_prompt(
