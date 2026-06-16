@@ -653,21 +653,37 @@ class TurnExecutor:
             context_length=llm.context_window_limit,
         )
 
-        # Convert custom Kesoku Messages to OpenLCM raw dictionaries
-        lcm_input = messages_to_openlcm_dicts(history)
-
         frontier_store_id = lcm_engine._last_compacted_store_id
         is_compacted = isinstance(frontier_store_id, (int, float)) and frontier_store_id > 0
 
-        if system_prompt:
-            lcm_input.insert(0, {"role": "system", "content": system_prompt})
+        # Determine the uncompacted tail and construct the assembled input
+        max_timestamp = None
+        if is_compacted:
+            cursor = lcm_engine._store._conn.execute(
+                "SELECT MAX(timestamp) FROM messages WHERE session_id = ? AND store_id <= ?",
+                (self.session_id, frontier_store_id),
+            )
+            max_timestamp = cursor.fetchone()[0]
 
-        # We trigger compression if:
-        # 1. LCM engine determines it's eligible (which handles the threshold check for raw backlog)
-        # 2. Or, the session has already been compacted in the past (to assemble the scaffold)
+        if max_timestamp:
+            compacted_count = sum(1 for m in history if m.timestamp <= max_timestamp)
+            uncompacted_history = history[compacted_count:]
+        else:
+            uncompacted_history = history
+
+        # Convert uncompacted Kesoku Messages to OpenLCM raw dictionaries
+        uncompacted_lcm_msgs = messages_to_openlcm_dicts(uncompacted_history)
+
+        # Reconstruct the previously compressed context (scaffold summaries + tail)
+        system_msg_dict = {"role": "system", "content": system_prompt} if system_prompt else None
+        lcm_input = lcm_engine._assemble_context(
+            system_message=system_msg_dict,
+            remaining_messages=uncompacted_lcm_msgs,
+        )
+
+        # Trigger compression if eligible or already compacted
         if is_compacted or lcm_engine.should_compress_preflight(lcm_input):
             logger.info(f"Initiating Lossless Context Compaction via OpenLCM for session {self.session_id}.")
-            # Compresses old backlog turns recursively and injects summaries scaffold
             compressed_lcm_msgs = await lcm_engine.compress(lcm_input)
 
             # Translate OpenLCM output dictionaries back to Kesoku Messages
