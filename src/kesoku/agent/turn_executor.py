@@ -209,19 +209,13 @@ class TurnExecutor:
                     active_cache_name = None
                     cached_messages_len = 0
 
-                await self._inject_context_and_trigger_consolidation(
-                    history, current_msg, llm
-                )
+                await self._inject_context_and_trigger_consolidation(history, current_msg, llm)
 
                 # Prepare history for the LLM by stripping thoughts and attachments dynamically
                 llm_history = prepare_history_for_llm(history)
 
                 # Setup context cache if enabled, Gemini model, and not already created
-                if (
-                    cfg.gemini.context_caching
-                    and llm.__class__.__name__ == "GeminiLLM"
-                    and active_cache_name is None
-                ):
+                if cfg.gemini.context_caching and llm.__class__.__name__ == "GeminiLLM" and active_cache_name is None:
                     prefix_messages = []
                     last_user_idx = None
                     for idx, msg in enumerate(llm_history):
@@ -237,8 +231,7 @@ class TurnExecutor:
                         )
                         if prefix_tokens >= cfg.gemini.context_caching_threshold:
                             logger.info(
-                                f"Session prefix has {prefix_tokens} tokens. "
-                                f"Creating explicit context cache..."
+                                f"Session prefix has {prefix_tokens} tokens. Creating explicit context cache..."
                             )
                             active_cache_name = await llm.create_cache(
                                 contents=prefix_messages,
@@ -328,12 +321,14 @@ class TurnExecutor:
 
                 # Update OpenLCM engine metrics
                 try:
-                    self.context.get_lcm_engine(self.session_id).update_from_response({
-                        "prompt_tokens": res.prompt_tokens,
-                        "completion_tokens": res.candidates_tokens,
-                        "total_tokens": res.total_tokens,
-                        "cache_read_tokens": res.cached_tokens,
-                    })
+                    self.context.get_lcm_engine(self.session_id).update_from_response(
+                        {
+                            "prompt_tokens": res.prompt_tokens,
+                            "completion_tokens": res.candidates_tokens,
+                            "total_tokens": res.total_tokens,
+                            "cache_read_tokens": res.cached_tokens,
+                        }
+                    )
                 except Exception as oe:
                     logger.warning(f"Failed to update OpenLCM engine token metrics: {oe}")
 
@@ -421,7 +416,6 @@ class TurnExecutor:
                     await llm.delete_cache(active_cache_name)
                 except Exception as de:
                     logger.warning(f"Failed to delete context cache during turn cleanup: {de}")
-
 
     async def _summarize_cross_session_context_bg(
         self, role: str, current_context: str, since_timestamp: float
@@ -568,7 +562,8 @@ class TurnExecutor:
             lines.append(
                 "- 💡 Lossless Chat History (LCM): Older raw messages across long conversations are compacted into "
                 "a hierarchical DAG. You have access to `lcm_expand` to inspect historical discussions when needed. "
-                "To search across all memories and past messages, use `memory_grep`."
+                "To search past messages and memories, use `memory_search` (for conceptual/semantic matching) "
+                "or `memory_grep` (for keywords or retrieving recent messages using wildcard '*' and time filters)."
             )
             lines.append("</background_context>\n\n")
             full_prefix = "\n".join(lines)
@@ -587,8 +582,8 @@ class TurnExecutor:
 
         copied_msg.content = (
             f'{full_prefix}<current_message from="{sender_name}" time="{time_str}" timezone="{tz_name}">\n'
-            f'{copied_msg.content}\n'
-            '</current_message>'
+            f"{copied_msg.content}\n"
+            "</current_message>"
         )
         history[msg_idx] = copied_msg
         latest_user_msg = copied_msg
@@ -597,9 +592,6 @@ class TurnExecutor:
             f'from="{sender_name}" time="{time_str}" timezone="{tz_name}"> '
             f"(bootstrap: {is_bootstrap})"
         )
-
-
-
 
         # 4. Background Consolidation Trigger (Unchanged)
         # Retrieve Cross-Session Memory context parameters solely to check and trigger consolidation asynchronously
@@ -634,9 +626,7 @@ class TurnExecutor:
             )
             if locked:
                 logger.info(f"Claimed lock for cross-session context update on role '{active_role}'")
-                asyncio.create_task(
-                    self._summarize_cross_session_context_bg(active_role, stored_content, last_updated)
-                )
+                asyncio.create_task(self._summarize_cross_session_context_bg(active_role, stored_content, last_updated))
 
         return latest_user_msg
 
@@ -665,14 +655,27 @@ class TurnExecutor:
 
         # Convert custom Kesoku Messages to OpenLCM raw dictionaries
         lcm_input = messages_to_openlcm_dicts(history)
+
+        frontier_store_id = lcm_engine._last_compacted_store_id
+        is_compacted = isinstance(frontier_store_id, (int, float)) and frontier_store_id > 0
+
+        if is_compacted:
+            cursor = lcm_engine._store._conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ? AND store_id <= ?",
+                (self.session_id, frontier_store_id),
+            )
+            compacted_count = cursor.fetchone()[0]
+            if compacted_count > 0:
+                lcm_input = lcm_input[compacted_count:]
+
         if system_prompt:
             lcm_input.insert(0, {"role": "system", "content": system_prompt})
 
-        # Pre-flight check: should we compress?
-        if lcm_engine.should_compress_preflight(lcm_input):
-            logger.info(
-                f"Initiating Lossless Context Compaction via OpenLCM for session {self.session_id}."
-            )
+        # We trigger compression if:
+        # 1. LCM engine determines it's eligible (which handles the threshold check for raw backlog)
+        # 2. Or, the session has already been compacted in the past (to assemble the scaffold)
+        if is_compacted or lcm_engine.should_compress_preflight(lcm_input):
+            logger.info(f"Initiating Lossless Context Compaction via OpenLCM for session {self.session_id}.")
             # Compresses old backlog turns recursively and injects summaries scaffold
             compressed_lcm_msgs = await lcm_engine.compress(lcm_input)
 
@@ -840,8 +843,7 @@ class TurnExecutor:
                 return True, True  # should_continue=True, nudged=True
             else:
                 logger.warning(
-                    f"LLM returned empty content again after nudge in session "
-                    f"{self.session_id}. Using fallback."
+                    f"LLM returned empty content again after nudge in session {self.session_id}. Using fallback."
                 )
                 final_content = "Processed request successfully."
 
@@ -875,5 +877,3 @@ class TurnExecutor:
         await self.gateway.post(final_msg)
         await self.context.db.update_message_status(current_msg.id, MessageStatus.PROCESSED)
         return False, nudged  # should_continue=False, nudged unmodified
-
-

@@ -396,3 +396,78 @@ def test_search_role_data(db_manager):
     coder_mems = db_manager.search_role_memories("coder", "python")
     assert len(coder_mems) == 2
     assert {m["key"] for m in coder_mems} == {"mem1", "mem2"}
+
+
+def test_search_role_data_wildcard_and_filters(db_manager):
+    """Tests search_role_memories and search_role_messages with wildcard and filters."""
+    # Set up role 'coder' on channel 'chan_1'
+    db_manager.set_channel_role("discord", "chan_1", "coder")
+
+    session1 = Session(id="sess_1", title="Sess 1", created_at=1700000000, updated_at=1700000000)
+    db_manager.create_session(session1)
+    db_manager.set_active_session_for_channel("discord", "chan_1", "sess_1")
+
+    # Save messages with specific timestamps
+    # 2026-06-15 12:00:00 UTC (1781534400.0)
+    base_ts = 1781534400.0
+
+    msg1 = Message(
+        id="m1", session_id="sess_1", chatbot_id="discord", channel_id="chan_1",
+        sender="user", role=MessageRole.USER, type=MessageType.TEXT,
+        content="First python msg", timestamp=base_ts, status=MessageStatus.PROCESSED,
+    )
+    msg2 = Message(
+        id="m2", session_id="sess_1", chatbot_id="discord", channel_id="chan_1",
+        sender="assistant", role=MessageRole.ASSISTANT, type=MessageType.TEXT,
+        content="Second python msg", timestamp=base_ts + 3600, status=MessageStatus.RESPONDED, # +1 hr
+    )
+    msg3 = Message(
+        id="m3", session_id="sess_1", chatbot_id="discord", channel_id="chan_1",
+        sender="user", role=MessageRole.USER, type=MessageType.TEXT,
+        content="Third java msg", timestamp=base_ts + 7200, status=MessageStatus.PROCESSED, # +2 hr
+    )
+    db_manager.save_message(msg1)
+    db_manager.save_message(msg2)
+    db_manager.save_message(msg3)
+
+    # Insert memories
+    db_manager.upsert_agent_memory("memo", "mem1", "Python Tip", "Python is great", "default")
+    db_manager.upsert_agent_memory("memo", "mem2", "Java Tip", "Java is verbose", "coder")
+
+    # We need to set explicit updated_at for memories
+    with db_manager.connection_provider.connection() as conn:
+        with conn:
+            conn.execute("UPDATE agent_memories SET updated_at = ? WHERE key = 'mem1'", (base_ts,))
+            conn.execute("UPDATE agent_memories SET updated_at = ? WHERE key = 'mem2'", (base_ts + 3600,))
+
+    # Test 1: Wildcard content search for messages (returns all messages)
+    msgs = db_manager.search_role_messages("coder", "*")
+    assert len(msgs) == 3
+    assert {m.id for m in msgs} == {"m1", "m2", "m3"}
+
+    msgs_empty = db_manager.search_role_messages("coder", "")
+    assert len(msgs_empty) == 3
+    assert {m.id for m in msgs_empty} == {"m1", "m2", "m3"}
+
+    # Test 2: Wildcard content search for memories
+    mems = db_manager.search_role_memories("coder", "*")
+    assert len(mems) == 2
+    assert {m["key"] for m in mems} == {"mem1", "mem2"}
+
+    # Test 3: Time range filtering for messages
+    msgs_time = db_manager.search_role_messages("coder", "*", start_time=base_ts, end_time=base_ts + 4000)
+    assert len(msgs_time) == 2
+    assert {m.id for m in msgs_time} == {"m1", "m2"}
+
+    # Test 4: Time range filtering for memories
+    mems_time = db_manager.search_role_memories("coder", "*", start_time=base_ts + 1000, end_time=base_ts + 5000)
+    assert len(mems_time) == 1
+    assert mems_time[0]["key"] == "mem2"
+
+    # Test 5: Limit filtering
+    msgs_limit = db_manager.search_role_messages("coder", "*", limit=2)
+    assert len(msgs_limit) == 2
+    # Should return latest first
+    assert msgs_limit[0].id == "m3"
+    assert msgs_limit[1].id == "m2"
+

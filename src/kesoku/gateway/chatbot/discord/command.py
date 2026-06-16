@@ -90,7 +90,7 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
                 description=description,
                 callback=cronjob_callback,
             )
-        elif cmd_name in {"grep", "memory-grep"}:
+        elif cmd_name in {"grep", "memory-grep", "search", "memory-search"}:
 
             def make_search_callback(c_name: str) -> Callable[..., Awaitable[None]]:
                 async def search_callback(interaction: discord.Interaction, query: str = "") -> None:

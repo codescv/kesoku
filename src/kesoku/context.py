@@ -3,6 +3,8 @@
 This avoids global mutable state and supports dependency injection.
 """
 
+import asyncio
+import logging
 import os
 from typing import Any
 
@@ -23,6 +25,8 @@ def _apply_embedding_monkey_patch() -> None:
         import logging
         import sqlite3
 
+        from openlcm.core.db_bootstrap import run_versioned_migrations
+
         try:
             import sqlite_vec
 
@@ -33,6 +37,11 @@ def _apply_embedding_monkey_patch() -> None:
                 pass
             self._conn.execute("PRAGMA journal_mode=WAL")
             sqlite_vec.load(self._conn)
+
+            # Ensure tables are bootstrapped
+            run_versioned_migrations(self._conn)
+            self._conn.commit()
+
             self._enabled = True
         except Exception as exc:
             logging.getLogger(__name__).debug("EmbeddingStore disabled: %s", exc)
@@ -40,6 +49,29 @@ def _apply_embedding_monkey_patch() -> None:
             self._conn = None
 
     EmbeddingStore._init_db = _patched_init_db
+
+    async def _patched_get_embedding(
+        self: EmbeddingStore, text: str, task_type: str | None = None
+    ) -> list[float] | None:
+        if not self._enabled or not text:
+            return None
+        try:
+            import litellm
+
+            actual_task_type = task_type or "RETRIEVAL_DOCUMENT"
+            kwargs = {}
+            if self.embedding_model.startswith("vertex_ai/"):
+                kwargs["task_type"] = actual_task_type
+            resp = await litellm.aembedding(model=self.embedding_model, input=[text[:8000]], **kwargs)
+            vec = resp.data[0]["embedding"]
+            if self._dim == 0:
+                self._dim = len(vec)
+            return vec
+        except Exception as exc:
+            logging.getLogger(__name__).debug("Embedding call failed: %s", exc)
+            return None
+
+    EmbeddingStore._get_embedding = _patched_get_embedding
 
     async def _patched_search(
         self: EmbeddingStore,
@@ -50,7 +82,7 @@ def _apply_embedding_monkey_patch() -> None:
     ) -> list[dict[str, Any]]:
         if not self._enabled or not self._conn or not query_text:
             return []
-        query_vec = await self._get_embedding(query_text)
+        query_vec = await self._get_embedding(query_text, task_type="RETRIEVAL_QUERY")
         if query_vec is None:
             return []
 
@@ -126,9 +158,62 @@ class KesokuContext:
         self.lcm_db_path = os.path.join(os.path.dirname(self.config.workspace.db_path), "lcm.db")
         self._lcm_engines: dict[str, LCMEngine] = {}
 
+        # Initialize global EmbeddingStore for general indexing
+        self.embedding_store = EmbeddingStore(
+            db_path=self.lcm_db_path,
+            embedding_model=self.config.agent.embedding_model,
+        )
+
+        if self.embedding_store.enabled:
+            self._register_embedding_listeners()
+
+    def _register_embedding_listeners(self) -> None:
+        """Register listeners on database manager to update embedding index in real-time."""
+        from kesoku.db.models import Message
+
+        async def on_message_saved(msg: Message) -> None:
+            if (msg.role in ("user", "assistant")) and (msg.type == "text"):
+                # Query session to get its role_name for role-based index separation
+                session = await self.db.get_session(msg.session_id)
+                session_role = (session.role_name if session else None) or "default"
+                content_type = f"kesoku_message:{session_role}"
+                asyncio.create_task(
+                    self.embedding_store.embed(
+                        content_type=content_type,
+                        content_id=msg.id,
+                        text=msg.content,
+                    )
+                )
+
+        async def on_memory_upserted(category: str, key: str, title: str, content: str, role: str) -> None:
+            content_type = f"kesoku_memory:{role}"
+            content_id = f"{category}:{key}"
+            text_to_index = f"{key}: {title}\n{content}"
+            asyncio.create_task(
+                self.embedding_store.embed(
+                    content_type=content_type,
+                    content_id=content_id,
+                    text=text_to_index,
+                )
+            )
+
+        async def on_memory_deleted(category: str, key: str, role: str) -> None:
+            content_type = f"kesoku_memory:{role}"
+            content_id = f"{category}:{key}"
+            # delete is synchronous but run in thread lock
+            self.embedding_store.delete(content_type=content_type, content_id=content_id)
+
+        if hasattr(self.db, "register_on_message_saved"):
+            self.db.register_on_message_saved(on_message_saved)
+        if hasattr(self.db, "register_on_memory_upserted"):
+            self.db.register_on_memory_upserted(on_memory_upserted)
+        if hasattr(self.db, "register_on_memory_deleted"):
+            self.db.register_on_memory_deleted(on_memory_deleted)
+
     def get_lcm_engine(self, session_id: str, context_length: int = 1048576) -> LCMEngine:
         """Create and bind a session-specific LCMEngine instance to prevent concurrent clobbering."""
         if session_id not in self._lcm_engines:
+
             async def lcm_summarize_fn(prompt: str, max_tokens: int) -> str:
                 model_client = self.get_llm(use_lcm=True)
                 res = await model_client.generate(prompt=prompt)
@@ -169,8 +254,6 @@ class KesokuContext:
             return self._llm
 
         target_provider = provider or (
-            self.config.agent.lcm_llm
-            if use_lcm and self.config.agent.lcm_llm
-            else self.config.agent.llm
+            self.config.agent.lcm_llm if use_lcm and self.config.agent.lcm_llm else self.config.agent.llm
         )
         return get_llm(provider=target_provider, config=self.config, use_lcm=use_lcm)

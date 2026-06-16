@@ -6,6 +6,7 @@ import os
 import shutil
 import sqlite3
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
 from kesoku.agent.history_sorter import sort_session_messages
@@ -419,7 +420,6 @@ class DatabaseManager:
                 logger.info(f"Database deleted {cursor.rowcount} messages out of {len(message_ids)} requested IDs.")
 
 
-
     def delete_messages_before_timestamp(
         self, session_id: str, timestamp: float, exclude_ids: list[str] | None = None
     ) -> int:
@@ -569,6 +569,16 @@ class DatabaseManager:
             all_msgs = sort_session_messages(all_msgs, order)
 
             return all_msgs[-limit:] if limit else all_msgs
+
+    def get_message(self, message_id: str) -> Message | None:
+        """Retrieve a specific message by its unique ID."""
+        with self.connection_provider.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM messages WHERE id = ?", (message_id,))
+            row = cursor.fetchone()
+            if row:
+                return self._row_to_message(row)
+            return None
 
     def get_messages_by_filters(
         self,
@@ -824,42 +834,91 @@ class DatabaseManager:
                     (category, key, role),
                 )
 
-    def search_role_memories(self, role: str, query_text: str) -> list[dict[str, Any]]:
+    def search_role_memories(
+        self,
+        role: str,
+        query_text: str,
+        start_time: float | None = None,
+        end_time: float | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
         """Search agent memories for a role matching query_text in content or title.
 
-        Includes default memories.
+        Includes default memories. Supporting time range queries.
         """
         with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
-            sql = """
+            conditions = ["(role = 'default' OR role = ?)"]
+            args: list[Any] = [role]
+
+            is_wildcard = not query_text or query_text == "*"
+            if not is_wildcard:
+                conditions.append("(content LIKE ? OR title LIKE ?)")
+                like_query = f"%{query_text}%"
+                args.extend([like_query, like_query])
+
+            if start_time is not None:
+                conditions.append("updated_at >= ?")
+                args.append(start_time)
+            if end_time is not None:
+                conditions.append("updated_at <= ?")
+                args.append(end_time)
+
+            where_clause = " AND ".join(conditions)
+            sql = f"""
                 SELECT * FROM agent_memories
-                WHERE (role = 'default' OR role = ?)
-                  AND (content LIKE ? OR title LIKE ?)
+                WHERE {where_clause}
                 ORDER BY updated_at DESC
+                LIMIT ?
             """
-            like_query = f"%{query_text}%"
-            cursor.execute(sql, (role, like_query, like_query))
+            args.append(limit)
+            cursor.execute(sql, tuple(args))
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
 
-    def search_role_messages(self, role: str, query_text: str) -> list[Message]:
+    def search_role_messages(
+        self,
+        role: str,
+        query_text: str,
+        start_time: float | None = None,
+        end_time: float | None = None,
+        limit: int = 50,
+    ) -> list[Message]:
         """Search user/assistant text messages for a role matching query_text.
 
-        Excludes thoughts, tool calls, and tool results.
+        Excludes thoughts, tool calls, and tool results. Supporting time range queries.
         """
         with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
-            sql = """
+            conditions = [
+                "COALESCE(s.role_name, 'default') = ?",
+                "m.role IN ('user', 'assistant')",
+                "m.type = 'text'"
+            ]
+            args: list[Any] = [role]
+
+            is_wildcard = not query_text or query_text == "*"
+            if not is_wildcard:
+                conditions.append("m.content LIKE ?")
+                args.append(f"%{query_text}%")
+
+            if start_time is not None:
+                conditions.append("m.timestamp >= ?")
+                args.append(start_time)
+            if end_time is not None:
+                conditions.append("m.timestamp <= ?")
+                args.append(end_time)
+
+            where_clause = " AND ".join(conditions)
+            sql = f"""
                 SELECT m.* FROM messages m
                 JOIN sessions s ON m.session_id = s.id
-                WHERE COALESCE(s.role_name, 'default') = ?
-                  AND m.role IN ('user', 'assistant')
-                  AND m.type = 'text'
-                  AND m.content LIKE ?
+                WHERE {where_clause}
                 ORDER BY m.timestamp DESC
+                LIMIT ?
             """
-            like_query = f"%{query_text}%"
-            cursor.execute(sql, (role, like_query))
+            args.append(limit)
+            cursor.execute(sql, tuple(args))
             rows = cursor.fetchall()
             return [self._row_to_message(row) for row in rows]
 
@@ -1209,6 +1268,25 @@ class AsyncDatabaseManager:
             sync_db: The underlying synchronous DatabaseManager instance.
         """
         self.sync_db = sync_db
+        self._on_message_saved_listeners: list[Callable[[Message], Awaitable[None]]] = []
+        self._on_memory_upserted_listeners: list[
+            Callable[[str, str, str, str, str], Awaitable[None]]
+        ] = []
+        self._on_memory_deleted_listeners: list[Callable[[str, str, str], Awaitable[None]]] = []
+
+    def register_on_message_saved(self, callback: Callable[[Message], Awaitable[None]]) -> None:
+        """Register a callback to be triggered when a message is successfully saved."""
+        self._on_message_saved_listeners.append(callback)
+
+    def register_on_memory_upserted(
+        self, callback: Callable[[str, str, str, str, str], Awaitable[None]]
+    ) -> None:
+        """Register a callback to be triggered when an agent memory is upserted."""
+        self._on_memory_upserted_listeners.append(callback)
+
+    def register_on_memory_deleted(self, callback: Callable[[str, str, str], Awaitable[None]]) -> None:
+        """Register a callback to be triggered when an agent memory is deleted."""
+        self._on_memory_deleted_listeners.append(callback)
 
     async def verify_db(self) -> None:
         """Verify the database connection and schema."""
@@ -1330,6 +1408,11 @@ class AsyncDatabaseManager:
             msg: The message to save.
         """
         await asyncio.to_thread(self.sync_db.save_message, msg)
+        for listener in self._on_message_saved_listeners:
+            try:
+                await listener(msg)
+            except Exception as e:
+                logger.error(f"Error in on_message_saved listener: {e}", exc_info=True)
 
     async def update_message_status(self, message_id: str, status: str) -> None:
         """Update the status of a message.
@@ -1388,6 +1471,17 @@ class AsyncDatabaseManager:
             A list of messages.
         """
         return await asyncio.to_thread(self.sync_db.get_session_history, session_id, limit, order)
+
+    async def get_message(self, message_id: str) -> Message | None:
+        """Retrieve a specific message by its unique ID.
+
+        Args:
+            message_id: The ID of the message.
+
+        Returns:
+            The message if found, else None.
+        """
+        return await asyncio.to_thread(self.sync_db.get_message, message_id)
 
     async def get_messages_by_filters(
         self,
@@ -1493,6 +1587,11 @@ class AsyncDatabaseManager:
             role: The role associated with the memory.
         """
         await asyncio.to_thread(self.sync_db.upsert_agent_memory, category, key, title, content, role)
+        for listener in self._on_memory_upserted_listeners:
+            try:
+                await listener(category, key, title, content, role)
+            except Exception as e:
+                logger.error(f"Error in on_memory_upserted listener: {e}", exc_info=True)
 
     async def get_agent_memory(self, category: str, key: str, role: str = "default") -> dict[str, Any] | None:
         """Retrieve a specific agent memory entry.
@@ -1528,14 +1627,47 @@ class AsyncDatabaseManager:
             role: The role associated with the memory.
         """
         await asyncio.to_thread(self.sync_db.delete_agent_memory, category, key, role)
+        for listener in self._on_memory_deleted_listeners:
+            try:
+                await listener(category, key, role)
+            except Exception as e:
+                logger.error(f"Error in on_memory_deleted listener: {e}", exc_info=True)
 
-    async def search_role_memories(self, role: str, query_text: str) -> list[dict[str, Any]]:
+    async def search_role_memories(
+        self,
+        role: str,
+        query_text: str,
+        start_time: float | None = None,
+        end_time: float | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
         """Search agent memories for a role matching query_text."""
-        return await asyncio.to_thread(self.sync_db.search_role_memories, role, query_text)
+        return await asyncio.to_thread(
+            self.sync_db.search_role_memories,
+            role,
+            query_text,
+            start_time,
+            end_time,
+            limit,
+        )
 
-    async def search_role_messages(self, role: str, query_text: str) -> list[Message]:
+    async def search_role_messages(
+        self,
+        role: str,
+        query_text: str,
+        start_time: float | None = None,
+        end_time: float | None = None,
+        limit: int = 50,
+    ) -> list[Message]:
         """Search messages for a role matching query_text."""
-        return await asyncio.to_thread(self.sync_db.search_role_messages, role, query_text)
+        return await asyncio.to_thread(
+            self.sync_db.search_role_messages,
+            role,
+            query_text,
+            start_time,
+            end_time,
+            limit,
+        )
 
     async def get_allowed_memory_categories(self) -> set[str]:
         """Retrieves the set of all currently permitted or existing memory categories.

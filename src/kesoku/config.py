@@ -90,8 +90,12 @@ class AgentConfig(BaseModel):
         description="LLM provider identifier for LCM and background memory (if None, defaults to llm)",
     )
     embedding_model: str = Field(
-        default_factory=lambda: os.getenv("LCM_EMBEDDING_MODEL", "vertex_ai/text-embedding-004"),
+        default_factory=lambda: os.getenv("LCM_EMBEDDING_MODEL", "vertex_ai/text-multilingual-embedding-002"),
         description="Model name to use for OpenLCM vector embedding generation",
+    )
+    search_threshold: float = Field(
+        default=0.35,
+        description="Minimum similarity score threshold for semantic search results (between 0.0 and 1.0)",
     )
 
 

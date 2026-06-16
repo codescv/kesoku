@@ -680,5 +680,95 @@ def start_cmd(
         logger.info("Kesoku service stopped by user.")
 
 
+@app.command("index")
+def cli_index(
+    config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
+    concurrency: Annotated[int, typer.Option("--concurrency", help="Max concurrent embedding requests")] = 10,
+) -> None:
+    """Rebuild the semantic vector index for memories and messages."""
+    import sqlite3
+
+    load_config(config)
+
+    async def _run_indexing():
+        from kesoku.context import KesokuContext
+
+        ctx = KesokuContext()
+        if not ctx.embedding_store.enabled:
+            Console().print(
+                "[bold red]Error: Semantic search is disabled. "
+                "Check embedding_model configuration or sqlite-vec installation.[/bold red]"
+            )
+            sys.exit(1)
+
+        console = Console()
+        console.print("[yellow]Starting bulk indexing...[/yellow]")
+
+        db = ctx.sync_db
+
+        # 1. Fetch memories
+        memories = db.get_agent_memories()
+        console.print(f"Found {len(memories)} memories to index.")
+
+        # 2. Fetch messages
+        with db.connection_provider.connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT m.id, m.content, COALESCE(s.role_name, 'default') AS session_role
+                FROM messages m
+                JOIN sessions s ON m.session_id = s.id
+                WHERE m.role IN ('user', 'assistant')
+                  AND m.type = 'text'
+            """)
+            messages = cursor.fetchall()
+        console.print(f"Found {len(messages)} messages to index.")
+
+        total = len(memories) + len(messages)
+        if total == 0:
+            console.print("[green]Nothing to index.[/green]")
+            return
+
+        sem = asyncio.Semaphore(concurrency)
+        processed = 0
+        failed = 0
+
+        async def embed_item(content_type: str, content_id: str, text: str):
+            nonlocal processed, failed
+            async with sem:
+                try:
+                    success = await ctx.embedding_store.embed(
+                        content_type=content_type, content_id=content_id, text=text
+                    )
+                    if success:
+                        processed += 1
+                    else:
+                        failed += 1
+                except Exception as ex:
+                    logger.error(f"Failed to embed {content_type} {content_id}: {ex}")
+                    failed += 1
+
+        tasks = []
+        for m in memories:
+            content_type = f"kesoku_memory:{m['role']}"
+            content_id = f"{m['category']}:{m['key']}"
+            text_to_index = f"{m['key']}: {m['title']}\n{m['content']}"
+            tasks.append(embed_item(content_type, content_id, text_to_index))
+
+        for m in messages:
+            content_type = f"kesoku_message:{m['session_role']}"
+            tasks.append(embed_item(content_type, m["id"], m["content"]))
+
+        console.print(f"Indexing {total} items with concurrency={concurrency}...")
+
+        await asyncio.gather(*tasks)
+
+        console.print(
+            f"[bold green]Indexing completed![/bold green] Processed: {processed}, Failed: {failed}"
+        )
+
+    asyncio.run(_run_indexing())
+
+
 if __name__ == "__main__":
     app()

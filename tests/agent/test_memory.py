@@ -183,6 +183,7 @@ async def test_category_role_routing(tmp_path) -> None:
     DatabaseManager(temp_db).init_tables()
 
     from kesoku.config import get_config
+
     cfg = get_config()
     cfg.workspace.db_path = temp_db
     gw = Gateway(context=KesokuContext(config=cfg))
@@ -241,7 +242,6 @@ async def test_category_role_routing(tmp_path) -> None:
         role="default",  # Passed explicitly but should be overridden
         context=ctx,
     )
-
 
 
 @pytest.mark.asyncio
@@ -570,3 +570,295 @@ async def test_memory_grep_tool(tmp_path) -> None:
     assert "I love python coding" in res  # m1
     assert "Here is python code" in res  # m3
     assert "Thinking about python" not in res  # m2 (thought)
+
+
+@pytest.mark.asyncio
+async def test_memory_search_tool_and_real_time_indexing(tmp_path) -> None:
+    """Test memory_search tool and real-time embedding indexing."""
+    from unittest.mock import patch
+
+    from openlcm.core.embeddings import EmbeddingStore
+
+    from kesoku.agent.tools import memory_search
+    from kesoku.gateway.gateway import Gateway
+
+    temp_db = str(tmp_path / "test_search_tool.db")
+    DatabaseManager(temp_db).init_tables()
+
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    # We must ensure embedding model is set so store is enabled
+    cfg.agent.embedding_model = "mock-embedding-model"
+
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    # Set up role 'coder' on channel 'chan_1'
+    await gw.db.set_channel_role("discord", "chan_1", "coder")
+    session1 = Session(
+        id="sess_1",
+        title="Sess 1",
+        created_at=time.time(),
+        updated_at=time.time(),
+        role_name="coder",
+    )
+    await gw.db.create_session(session1)
+    await gw.db.set_active_session_for_channel("discord", "chan_1", "sess_1")
+
+    # Mock _get_embedding to return vectors based on content for semantic match mock
+    async def mock_get_embedding(self, text: str, *args, **kwargs) -> list[float] | None:
+        text_lower = text.lower()
+        if "python" in text_lower or "coder" in text_lower:
+            return [0.9, 0.1, 0.0]  # Vector for Python topic
+        elif "javascript" in text_lower:
+            return [0.1, 0.9, 0.0]  # Vector for JS topic
+        else:
+            return [0.1, 0.1, 0.8]  # Other topic
+
+    # Create a mock user message to simulate active channel context
+    msg_context = Message(
+        id="msg_ctx",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="User",
+        role=MessageRole.USER,
+        content="Context message",
+        status=MessageStatus.RESPONDED,
+    )
+
+    ctx = ToolContext(
+        session_id="sess_1",
+        session_workspace="test_ws",
+        original_msg_id="msg_ctx",
+        gateway=gw,
+    )
+
+    # Patch the EmbeddingStore._get_embedding method
+    with patch.object(EmbeddingStore, "_get_embedding", mock_get_embedding):
+        # Trigger real-time indexing by posting context message
+        await gw.post(msg_context)
+
+        # Post some test messages (these should trigger real-time indexing!)
+        msg1 = Message(
+            id="m1",
+            session_id="sess_1",
+            chatbot_id="discord",
+            channel_id="chan_1",
+            sender="user",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="I love python coding",
+            timestamp=time.time(),
+            status=MessageStatus.PROCESSED,
+        )
+        msg2 = Message(
+            id="m2",
+            session_id="sess_1",
+            chatbot_id="discord",
+            channel_id="chan_1",
+            sender="assistant",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="Here is python code",
+            timestamp=time.time() + 1,
+            status=MessageStatus.DELIVERED,
+        )
+        msg_other = Message(
+            id="m_other",
+            session_id="sess_1",
+            chatbot_id="discord",
+            channel_id="chan_1",
+            sender="user",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="I write javascript apps",
+            timestamp=time.time() + 2,
+            status=MessageStatus.PROCESSED,
+        )
+        # Thoughts should be ignored
+        msg_thought = Message(
+            id="m_thought",
+            session_id="sess_1",
+            chatbot_id="discord",
+            channel_id="chan_1",
+            sender="assistant",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.THOUGHT,
+            content="Thinking about python",
+            timestamp=time.time() + 3,
+            status=MessageStatus.RESPONDED,
+        )
+
+        await gw.post(msg1)
+        await gw.post(msg2)
+        await gw.post(msg_other)
+        await gw.post(msg_thought)
+
+        # Trigger real-time indexing for memories by upserting
+        await gw.db.upsert_agent_memory("memo", "mem1", "Python Tip", "Python is great", "default")
+        await gw.db.upsert_agent_memory("memo", "mem2", "Coder Tip", "Write python code", "coder")
+        await gw.db.upsert_agent_memory("memo", "mem3", "Helper Tip", "Help python users", "helper")
+        await gw.db.upsert_agent_memory("memo", "mem_js", "JS Tip", "Use javascript framework", "coder")
+
+        # Give a brief moment for background indexing tasks to complete
+        await asyncio.sleep(0.5)
+
+        # Search for "python" semantically
+        res = await memory_search(query="python", context=ctx)
+
+        # Assertions
+        assert "Semantic Search Results for 'python' (Role: coder)" in res
+        assert "Matching Memories" in res
+        assert "Python Tip" in res  # mem1 (default)
+        assert "Coder Tip" in res  # mem2 (coder)
+        assert "Helper Tip" not in res  # mem3 (helper - wrong role)
+        assert "JS Tip" not in res  # mem_js (wrong topic - JS)
+
+        assert "Matching Messages" in res
+        assert "I love python coding" in res  # m1 (coder role, python topic)
+        assert "Here is python code" in res  # m2 (coder role, python topic)
+        assert "javascript apps" not in res  # m_other (coder role, but wrong topic)
+        assert "Thinking about python" not in res  # m_thought (ignored type thought)
+
+
+@pytest.mark.asyncio
+async def test_memory_grep_tool_wildcard_and_filters(tmp_path) -> None:
+    """Test memory_grep tool with wildcard query and time/limit filters."""
+    from kesoku.gateway.gateway import Gateway
+
+    temp_db = str(tmp_path / "test_grep_filters.db")
+    db = DatabaseManager(temp_db)
+    db.init_tables()
+
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    # Set up role 'coder' on channel 'chan_1'
+    await gw.db.set_channel_role("discord", "chan_1", "coder")
+    session1 = Session(id="sess_1", title="Sess 1", created_at=time.time(), updated_at=time.time())
+    await gw.db.create_session(session1)
+    await gw.db.set_active_session_for_channel("discord", "chan_1", "sess_1")
+
+    # Create a mock user message to simulate active channel context
+    msg_context = Message(
+        id="msg_ctx",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="User",
+        role=MessageRole.USER,
+        content="Context message",
+        status=MessageStatus.RESPONDED,
+    )
+    await gw.post(msg_context)
+
+    # Base timestamp: 2026-06-15 12:00:00 UTC (1781534400.0)
+    base_ts = 1781534400.0
+
+    # Set msg_ctx timestamp to be older (Sunday, one day before Monday base_ts)
+    with gw.db.sync_db.connection_provider.connection() as conn:
+        with conn:
+            conn.execute("UPDATE messages SET timestamp = ? WHERE id = 'msg_ctx'", (base_ts - 86400,))
+
+    ctx = ToolContext(
+        session_id="sess_1",
+        session_workspace="test_ws",
+        original_msg_id="msg_ctx",
+        gateway=gw,
+    )
+
+    # Save messages with specific timestamps
+    msg1 = Message(
+        id="m1",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="First message on Monday",
+        timestamp=base_ts,
+        status=MessageStatus.PROCESSED,
+    )
+    msg2 = Message(
+        id="m2",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="Second message on Monday",
+        timestamp=base_ts + 3600,
+        status=MessageStatus.RESPONDED,
+    )
+    msg3 = Message(
+        id="m3",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Third message on Tuesday",
+        timestamp=base_ts + 86400,
+        status=MessageStatus.PROCESSED,
+    )
+
+    # We bypass gw.post because gw.post sets timestamp=time.time()
+    # Let's save directly to DB
+    gw.db.sync_db.save_message(msg1)
+    gw.db.sync_db.save_message(msg2)
+    gw.db.sync_db.save_message(msg3)
+
+    # Insert memories
+    await gw.db.upsert_agent_memory("memo", "mem1", "Python Tip", "Python is great", "default")
+    await gw.db.upsert_agent_memory("memo", "mem2", "Java Tip", "Java is verbose", "coder")
+
+    # We need to set explicit updated_at for memories
+    with gw.db.sync_db.connection_provider.connection() as conn:
+        with conn:
+            conn.execute("UPDATE agent_memories SET updated_at = ? WHERE key = 'mem1'", (base_ts,))
+            conn.execute("UPDATE agent_memories SET updated_at = ? WHERE key = 'mem2'", (base_ts + 3600,))
+
+    # Test 1: Wildcard search (returns messages only, no memories)
+    res_wildcard = await memory_grep(query="*", context=ctx)
+    assert "Search Results for '*'" in res_wildcard
+    assert "Matching Messages" in res_wildcard
+    assert "First message on Monday" in res_wildcard
+    assert "Second message on Monday" in res_wildcard
+    assert "Third message on Tuesday" in res_wildcard
+    assert "Matching Memories" not in res_wildcard  # Wildcard should skip memories
+
+    # Test 2: Wildcard search with date filters (Monday only)
+    res_date = await memory_grep(
+        query="*",
+        start_time="2026-06-15T00:00:00",
+        end_time="2026-06-15T23:59:59",
+        context=ctx,
+    )
+    assert "Search Results for '*'" in res_date
+    assert "First message on Monday" in res_date
+    assert "Second message on Monday" in res_date
+    assert "Third message on Tuesday" not in res_date  # Tuesday msg should be excluded
+
+    # Test 3: Normal query with date filters (should filter both)
+    res_normal = await memory_grep(
+        query="message",
+        start_time="2026-06-15T00:00:00",
+        end_time="2026-06-15T23:59:59",
+        context=ctx,
+    )
+    assert "Search Results for 'message'" in res_normal
+    assert "First message on Monday" in res_normal
+    assert "Second message on Monday" in res_normal
+    assert "Third message on Tuesday" not in res_normal
+
+    # Test 4: Limit filter
+    res_limit = await memory_grep(
+        query="*",
+        limit=2,
+        context=ctx,
+    )
+    assert "Third message on Tuesday" in res_limit
+    assert "Second message on Monday" in res_limit
+    assert "First message on Monday" not in res_limit
