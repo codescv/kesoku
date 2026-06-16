@@ -374,18 +374,16 @@ class DatabaseManager:
                     """,
                     (chatbot_id, channel_id, session_id),
                 )
+                role = self.get_channel_role_with_inheritance(chatbot_id, channel_id, session_id)
                 conn.execute(
                     """
                     UPDATE sessions
-                    SET role_name = (
-                        SELECT role FROM channel_roles
-                        WHERE chatbot_id = ? AND channel_id = ?
-                    )
+                    SET role_name = ?
                     WHERE id = ?
                     """,
-                    (chatbot_id, channel_id, session_id),
+                    (role, session_id),
                 )
-                logger.info(f"Explicitly bound channel '{chatbot_id}:{channel_id}' to active session '{session_id}'")
+                logger.info(f"Explicitly bound channel '{chatbot_id}:{channel_id}' to active session '{session_id}' (role: {role})")
 
     def delete_session(self, session_id: str) -> None:
         """Delete a session and all its associated messages from the database.
@@ -850,23 +848,8 @@ class DatabaseManager:
             cursor = conn.cursor()
             sql = """
                 SELECT m.* FROM messages m
-                JOIN channel_sessions cs ON m.session_id = cs.session_id
-                LEFT JOIN channel_roles cr_direct
-                  ON cs.chatbot_id = cr_direct.chatbot_id
-                 AND cs.channel_id = cr_direct.channel_id
-                LEFT JOIN (
-                    SELECT session_id,
-                           json_extract(metadata, '$.parent_channel_id') as parent_channel_id
-                    FROM messages
-                    WHERE role = 'user' AND metadata LIKE '%parent_channel_id%'
-                    GROUP BY session_id
-                ) parent_info
-                  ON m.session_id = parent_info.session_id
-                 AND cs.chatbot_id = 'discord'
-                LEFT JOIN channel_roles cr_parent
-                  ON cs.chatbot_id = cr_parent.chatbot_id
-                 AND parent_info.parent_channel_id = cr_parent.channel_id
-                WHERE COALESCE(cr_direct.role, cr_parent.role, 'default') = ?
+                JOIN sessions s ON m.session_id = s.id
+                WHERE COALESCE(s.role_name, 'default') = ?
                   AND m.role IN ('user', 'assistant')
                   AND m.type = 'text'
                   AND m.content LIKE ?
