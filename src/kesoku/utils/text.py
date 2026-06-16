@@ -533,3 +533,30 @@ def clean_latex(text: str) -> str:
     return "```".join(parts)
 
 
+def extract_grep_snippet(text: str, query: str, window: int = 70) -> str:
+    """Extract a snippet of text around the first occurrence of query (case-insensitive).
+
+    If the query is not found, returns the start of the text.
+    """
+    if not text:
+        return ""
+
+    text_lower = text.lower()
+    query_lower = query.lower()
+
+    idx = text_lower.find(query_lower)
+    if idx == -1:
+        # Fallback to start if not found
+        if len(text) > window * 2:
+            return text[:window * 2].strip().replace("\n", " ") + "..."
+        return text.strip().replace("\n", " ")
+
+    start = max(0, idx - window)
+    end = min(len(text), idx + len(query) + window)
+
+    snippet = text[start:end]
+
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(text) else ""
+
+    return prefix + snippet.strip().replace("\n", " ") + suffix

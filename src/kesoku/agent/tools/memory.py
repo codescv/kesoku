@@ -7,6 +7,7 @@ from typing import Literal
 
 from kesoku.agent.skills import SkillManager
 from kesoku.agent.tools.registry import ToolContext, default_registry
+from kesoku.utils.text import extract_grep_snippet
 
 MemoryCategory = Literal["progress", "user_preferences", "memo"]
 
@@ -418,9 +419,7 @@ async def memory_grep(
             for m in memories:
                 updated_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m["updated_at"]))
                 lines.append(f"- **[{m['category']}]** `{m['key']}`: \"{m['title']}\" (updated: {updated_str})")
-                content_snippet = m["content"].strip().replace("\n", " ")
-                if len(content_snippet) > 100:
-                    content_snippet = content_snippet[:100] + "..."
+                content_snippet = extract_grep_snippet(m["content"], query, window=70)
                 lines.append(f"  > {content_snippet}")
 
         if messages:
@@ -428,9 +427,7 @@ async def memory_grep(
             for m in messages:
                 time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m.timestamp))
                 sender_str = f"**{m.sender}** ({m.role})"
-                content_snippet = m.content.strip().replace("\n", " ")
-                if len(content_snippet) > 150:
-                    content_snippet = content_snippet[:150] + "..."
+                content_snippet = extract_grep_snippet(m.content, query, window=70)
                 lines.append(f"- [{time_str}] {sender_str} in session `{m.session_id}`:")
                 lines.append(f"  > {content_snippet}")
 

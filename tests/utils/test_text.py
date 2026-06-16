@@ -1,6 +1,6 @@
 """Unit tests for the text and markdown processing utility functions."""
 
-from kesoku.utils.text import format_text, split_text_into_chunks, truncate_middle
+from kesoku.utils.text import extract_grep_snippet, format_text, split_text_into_chunks, truncate_middle
 
 
 def test_format_text_headers_shifting() -> None:
@@ -106,6 +106,45 @@ def test_truncate_middle() -> None:
     res = truncate_middle(text, max_len=15, placeholder="...")
     assert "Hello" in res
     assert "Content" in res
+
+
+def test_extract_grep_snippet() -> None:
+    """Test extract_grep_snippet text helper."""
+    # Case 1: Query in the middle
+    text = "This is a very long string that contains the keyword in the middle of it."
+    query = "keyword"
+    res = extract_grep_snippet(text, query, window=10)
+    assert res == "...tains the keyword in the mi..."
+
+    # Case 2: Query near the start
+    text = "Keyword is at the start of this string."
+    query = "keyword"
+    res = extract_grep_snippet(text, query, window=10)
+    assert res == "Keyword is at the..."
+
+    # Case 3: Query near the end
+    text = "This string ends with the keyword"
+    query = "keyword"
+    res = extract_grep_snippet(text, query, window=10)
+    assert res == "...with the keyword"
+
+    # Case 4: Query not found (fallback to start)
+    text = "This string does not contain it."
+    query = "missing"
+    res = extract_grep_snippet(text, query, window=10)
+    assert res == "This string does not..."
+
+    # Case 5: Short text
+    text = "Short"
+    query = "Short"
+    res = extract_grep_snippet(text, query, window=10)
+    assert res == "Short"
+
+    # Case 6: Case insensitivity
+    text = "Contains KEYWORD here"
+    query = "keyword"
+    res = extract_grep_snippet(text, query, window=5)
+    assert res == "...ains KEYWORD here"
 
 
 
