@@ -659,15 +659,6 @@ class TurnExecutor:
         frontier_store_id = lcm_engine._last_compacted_store_id
         is_compacted = isinstance(frontier_store_id, (int, float)) and frontier_store_id > 0
 
-        if is_compacted:
-            cursor = lcm_engine._store._conn.execute(
-                "SELECT COUNT(*) FROM messages WHERE session_id = ? AND store_id <= ?",
-                (self.session_id, frontier_store_id),
-            )
-            compacted_count = cursor.fetchone()[0]
-            if compacted_count > 0:
-                lcm_input = lcm_input[compacted_count:]
-
         if system_prompt:
             lcm_input.insert(0, {"role": "system", "content": system_prompt})
 
