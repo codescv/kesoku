@@ -224,17 +224,13 @@ class MessageHeaderView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
 
         try:
-            # 1. Locate the active dispatcher agent and stop the session worker immediately if running
-            agent = self.gateway.agent
-            if agent:
-                await agent.stop_session_worker(self.session_id, immediate=True)
+            status_msg = "⚠️ Chatbot adapter is unavailable."
+            channel_id_str = str(interaction.channel_id)
 
-            # 2. Delete the session and its history/workspace via Gateway
-            await self.gateway.delete_session(self.session_id)
-
-            # 3. Stop typing task and clean up intermediate special messages in Discord UI
             if self.chatbot:
-                channel_id_str = str(interaction.channel_id)
+                status_msg = await self.chatbot.clear_session_by_channel(channel_id_str)
+
+                # Stop typing task and clean up intermediate special messages in Discord UI
                 typing_task = self.chatbot._typing_tasks.pop(channel_id_str, None)
                 if typing_task:
                     typing_task.cancel()
@@ -258,7 +254,7 @@ class MessageHeaderView(discord.ui.View):
                 self.chatbot._turn_special_msg.pop(self.session_id, None)
 
             await interaction.followup.send(
-                content="♻️ Session successfully cleared. The next message will initiate a new session.",
+                content=status_msg,
                 ephemeral=True,
             )
         except Exception as e:

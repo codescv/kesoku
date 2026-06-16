@@ -323,13 +323,22 @@ async def test_wechat_chatbot_slash_command_clear(
         # Handle message containing command
         await bot._process_message(inbound_payload)
 
-        # Verify session deletion was triggered via gateway
-        mock_gateway.delete_session.assert_called_once_with("sess123")
+        # Verify session worker was stopped
+        mock_agent.stop_session_worker.assert_called_once_with("sess123", immediate=True)
+
+        # Verify new session creation was triggered via gateway
+        mock_gateway.create_session.assert_called_once_with(
+            session_id=None,
+            title="New Session",
+            chatbot_id="wechat_test",
+            channel_id="user_alice",
+        )
 
         # Verify confirmation message was sent
         mock_session.post.assert_called_once()
         body = json.loads(mock_session.post.call_args[1]["data"])
-        assert "Session successfully cleared" in body["msg"]["item_list"][0]["text_item"]["text"]
+        assert "New session" in body["msg"]["item_list"][0]["text_item"]["text"]
+        assert "preserved" in body["msg"]["item_list"][0]["text_item"]["text"]
 
 
 @pytest.mark.asyncio

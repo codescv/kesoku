@@ -437,20 +437,34 @@ class Chatbot(ABC):
             logger.error(f"Command /{command} execution failed: {e}", exc_info=True)
             await reply_func(f"⚠️ Failed to execute command: {e}")
 
-    async def clear_session(self, session_id: str) -> None:
-        """Stop any active worker for the session, and delete the session database record and workspace."""
-        logger.info(f"Chatbot '{self.chatbot_id}' clearing session '{session_id}'.")
-        agent = self.gateway.agent
-        if agent:
-            await agent.stop_session_worker(session_id, immediate=True)
-        await self.gateway.delete_session(session_id)
-
     async def clear_session_by_channel(self, channel_id: str) -> str:
-        """Clear session associated with the channel. Returns status message."""
+        """Unbind the active session for the channel, stop its workers/jobs, and start a new session.
+
+        Preserves the old session data in the database.
+        """
         session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
         if session:
-            await self.clear_session(session.id)
-            return "♻️ Session successfully cleared. The next message will initiate a new session."
+            logger.info(f"Chatbot '{self.chatbot_id}' unbinding and stopping session '{session.id}'.")
+
+            # 1. Stop worker
+            agent = self.gateway.agent
+            if agent:
+                await agent.stop_session_worker(session.id, immediate=True)
+
+            # 2. Stop background jobs
+            try:
+                await self.gateway.context.active_jobs.stop_all_for_session(session.id)
+            except Exception as e:
+                logger.warning(f"Failed to clean up background jobs in clear_session_by_channel: {e}")
+
+            # 3. Create and bind new session (overwrites active mapping)
+            new_session = await self.gateway.create_session(
+                session_id=None,
+                title="New Session",
+                chatbot_id=self.chatbot_id,
+                channel_id=channel_id,
+            )
+            return f"♻️ New session '{new_session.id}' started. Old session '{session.id}' preserved."
         return "⚠️ No active session found for this chat."
 
     async def manual_compact_session_by_channel(self, channel_id: str) -> str:

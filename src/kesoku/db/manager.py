@@ -383,7 +383,10 @@ class DatabaseManager:
                     """,
                     (role, session_id),
                 )
-                logger.info(f"Explicitly bound channel '{chatbot_id}:{channel_id}' to active session '{session_id}' (role: {role})")
+                logger.info(
+                    f"Explicitly bound channel '{chatbot_id}:{channel_id}' "
+                    f"to active session '{session_id}' (role: {role})"
+                )
 
     def delete_session(self, session_id: str) -> None:
         """Delete a session and all its associated messages from the database.

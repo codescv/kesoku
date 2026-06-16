@@ -314,6 +314,7 @@ async def test_clear_session_callback(mock_gateway: MagicMock) -> None:
     mock_gateway.delete_session = AsyncMock()
 
     mock_chatbot = MagicMock()
+    mock_chatbot.clear_session_by_channel = AsyncMock(return_value="recreated")
     mock_typing_task = MagicMock()
     mock_chatbot._typing_tasks = {"chan_abc": mock_typing_task}
     mock_msg1 = AsyncMock(spec=discord.Message)
@@ -335,10 +336,8 @@ async def test_clear_session_callback(mock_gateway: MagicMock) -> None:
 
     # Asserts:
     mock_interaction.response.defer.assert_called_once_with(ephemeral=True)
-    # stop_session_worker should be called
-    mock_agent.stop_session_worker.assert_called_once_with("s123", immediate=True)
-    # delete_session called on Gateway
-    mock_gateway.delete_session.assert_called_once_with("s123")
+    # clear_session_by_channel should be called
+    mock_chatbot.clear_session_by_channel.assert_called_once_with("chan_abc")
     # Typing task cancelled
     mock_typing_task.cancel.assert_called_once()
     # Intermediate message deleted
@@ -350,7 +349,7 @@ async def test_clear_session_callback(mock_gateway: MagicMock) -> None:
     assert "s123" not in mock_chatbot._turn_special_items
     assert "s123" not in mock_chatbot._turn_special_msg
     # Sent feedback followup
-    mock_interaction.followup.send.assert_called_once()
+    mock_interaction.followup.send.assert_called_once_with(content="recreated", ephemeral=True)
 
 
 @pytest.mark.asyncio
