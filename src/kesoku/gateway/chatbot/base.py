@@ -611,10 +611,28 @@ class Chatbot(ABC):
         lcm_engine = self.gateway.context.get_lcm_engine(session.id)
 
         try:
-            lcm_input = messages_to_openlcm_dicts(history)
+            frontier_store_id = lcm_engine._last_compacted_store_id
+            is_compacted = isinstance(frontier_store_id, (int, float)) and frontier_store_id > 0
+
+            # Determine the uncompacted tail
+            max_timestamp = None
+            if is_compacted:
+                cursor = lcm_engine._store._conn.execute(
+                    "SELECT MAX(timestamp) FROM messages WHERE session_id = ? AND store_id <= ?",
+                    (session.id, frontier_store_id),
+                )
+                max_timestamp = cursor.fetchone()[0]
+
+            if max_timestamp:
+                compacted_count = sum(1 for m in history if m.timestamp <= max_timestamp)
+                uncompacted_history = history[compacted_count:]
+            else:
+                uncompacted_history = history
+
+            uncompacted_lcm_msgs = messages_to_openlcm_dicts(uncompacted_history)
 
             system_message = None
-            remaining_messages = list(lcm_input)
+            remaining_messages = list(uncompacted_lcm_msgs)
             if remaining_messages and remaining_messages[0].get("role") == "system":
                 system_message = remaining_messages.pop(0)
 
