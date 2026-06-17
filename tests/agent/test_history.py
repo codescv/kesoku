@@ -394,4 +394,73 @@ def test_path_sanitization_and_restoration() -> None:
     assert "sessions/sess1/file.png" in msgs[1].metadata["tool_arguments"]["path"]
 
 
+def test_messages_to_openlcm_dicts_tool_sorting() -> None:
+    """Verify that tool results are sorted to match the order of tool calls."""
+    history = [
+        Message(
+            id="call_1",
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="Kesoku",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_CALL,
+            content="Call 1",
+            metadata={"tool_name": "tool_1", "tool_call_id": "tc_1"},
+        ),
+        Message(
+            id="call_2",
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="Kesoku",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_CALL,
+            content="Call 2",
+            metadata={"tool_name": "tool_2", "tool_call_id": "tc_2"},
+        ),
+        # Out of order results: result 2 finishes and is recorded first
+        Message(
+            id="res_2",
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="tool_2",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content="Result 2",
+            parent_id="call_2",
+            metadata={"tool_name": "tool_2", "tool_result": "r2", "tool_call_id": "tc_2"},
+        ),
+        Message(
+            id="res_1",
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="tool_1",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content="Result 1",
+            parent_id="call_1",
+            metadata={"tool_name": "tool_1", "tool_result": "r1", "tool_call_id": "tc_1"},
+        ),
+    ]
+
+    dicts = messages_to_openlcm_dicts(history)
+
+    assert len(dicts) == 3
+    assert dicts[0]["role"] == "assistant"
+    assert len(dicts[0]["tool_calls"]) == 2
+    assert dicts[0]["tool_calls"][0]["id"] == "tc_1"
+    assert dicts[0]["tool_calls"][1]["id"] == "tc_2"
+
+    assert dicts[1]["role"] == "tool"
+    assert dicts[1]["tool_call_id"] == "tc_1"
+    assert dicts[1]["content"] == "r1"
+
+    assert dicts[2]["role"] == "tool"
+    assert dicts[2]["tool_call_id"] == "tc_2"
+    assert dicts[2]["content"] == "r2"
+
+
 

@@ -188,10 +188,36 @@ def messages_to_openlcm_dicts(history: list[Message]) -> list[dict[str, Any]]:
     num_turns = len(turns)
     for idx, turn in enumerate(turns):
         is_latest = idx == num_turns - 1
+
+        # Separate tool calls and results to allow sorting/alignment
+        tool_calls = []
+        tool_results = []
+        others_before = []
+        others_after = []
+        has_seen_tool_result = False
+
         for m in turn:
-            if not is_latest and m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT:
-                continue
-            cleaned_history.append(m)
+            if m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT:
+                if not is_latest:
+                    continue
+                others_before.append(m)
+            elif m.role == MessageRole.TOOL and m.type == MessageType.TOOL_CALL:
+                tool_calls.append(m)
+            elif m.role == MessageRole.TOOL and m.type == MessageType.TOOL_RESULT:
+                tool_results.append(m)
+                has_seen_tool_result = True
+            else:
+                if has_seen_tool_result:
+                    others_after.append(m)
+                else:
+                    others_before.append(m)
+
+        # Sort tool results to match the order of their corresponding tool calls (by message ID)
+        call_id_to_index = {call.id: i for i, call in enumerate(tool_calls)}
+        tool_results.sort(key=lambda r: call_id_to_index.get(r.parent_id, len(tool_calls)))
+
+        # Reconstruct the sorted turn list
+        cleaned_history.extend(others_before + tool_calls + tool_results + others_after)
 
     # 2. Sanitize paths and process messages (Question 4)
     lcm_msgs = []
