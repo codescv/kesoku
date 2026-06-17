@@ -674,17 +674,25 @@ class TurnExecutor:
         # Convert uncompacted Kesoku Messages to OpenLCM raw dictionaries
         uncompacted_lcm_msgs = messages_to_openlcm_dicts(uncompacted_history)
 
-        # Reconstruct the previously compressed context (scaffold summaries + tail)
-        system_msg_dict = {"role": "system", "content": system_prompt} if system_prompt else None
-        lcm_input = lcm_engine._assemble_context(
-            system_message=system_msg_dict,
-            remaining_messages=uncompacted_lcm_msgs,
-        )
-
         # Trigger compression if eligible or already compacted
-        if is_compacted or lcm_engine.should_compress_preflight(lcm_input):
+        if is_compacted or lcm_engine.should_compress_preflight(uncompacted_lcm_msgs):
             logger.info(f"Initiating Lossless Context Compaction via OpenLCM for session {self.session_id}.")
-            compressed_lcm_msgs = await lcm_engine.compress(lcm_input)
+            compressed_lcm_msgs = await lcm_engine.compress(uncompacted_lcm_msgs)
+
+            if lcm_engine._last_compression_status == "noop":
+                # If no compaction occurred, we manually assemble the context to prepend active summaries scaffold
+                system_msg_dict = None
+                remaining_msgs = list(compressed_lcm_msgs)
+                if remaining_msgs and remaining_msgs[0].get("role") == "system":
+                    system_msg_dict = remaining_msgs.pop(0)
+
+                if not system_msg_dict and system_prompt:
+                    system_msg_dict = {"role": "system", "content": system_prompt}
+
+                compressed_lcm_msgs = lcm_engine._assemble_context(
+                    system_message=system_msg_dict,
+                    remaining_messages=remaining_msgs,
+                )
 
             # Translate OpenLCM output dictionaries back to Kesoku Messages
             session = await self.context.db.get_session(self.session_id)
