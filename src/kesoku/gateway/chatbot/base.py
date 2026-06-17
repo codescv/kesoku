@@ -626,12 +626,16 @@ class Chatbot(ABC):
             sys_msg = ""
             fresh_msgs = []
 
-            for msg in assembled:
+            # Extract the actual system prompt from the first message if present
+            msgs_to_process = assembled
+            if assembled and assembled[0].get("role") == "system":
+                sys_msg = assembled[0].get("content") or ""
+                msgs_to_process = assembled[1:]
+
+            for msg in msgs_to_process:
                 role = msg.get("role")
                 content = msg.get("content") or ""
-                if role == "system":
-                    sys_msg = content
-                elif role == "user" and "[Note: This conversation uses Lossless Context Management" in content:
+                if role == "user" and "[Note: This conversation uses Lossless Context Management" in content:
                     continue
                 elif role == "assistant" and (
                     "I have access to the full conversation history through LCM tools" in content
