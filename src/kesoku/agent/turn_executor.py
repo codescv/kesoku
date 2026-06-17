@@ -687,19 +687,49 @@ class TurnExecutor:
             compressed_lcm_msgs = await lcm_engine.compress(uncompacted_lcm_msgs)
 
             if lcm_engine._last_compression_status == "noop":
-                # If no compaction occurred, we manually assemble the context to prepend active summaries scaffold
-                system_msg_dict = None
-                remaining_msgs = list(compressed_lcm_msgs)
-                if remaining_msgs and remaining_msgs[0].get("role") == "system":
-                    system_msg_dict = remaining_msgs.pop(0)
+                # Retrieve active summary nodes from DAG to reconstruct scaffold without clipping
+                dag_nodes = lcm_engine._dag.get_active_nodes(self.session_id)
+                if dag_nodes:
+                    from collections import defaultdict
+                    by_depth = defaultdict(list)
+                    for node in dag_nodes:
+                        by_depth[node.depth].append(node)
 
-                if not system_msg_dict and system_prompt:
-                    system_msg_dict = {"role": "system", "content": system_prompt}
+                    scaffold_parts = [
+                        "[Note: This conversation uses Lossless Context Management (LCM). "
+                        "Earlier turns have been compacted into hierarchical summaries below. "
+                        "Use lcm_grep, lcm_expand, or lcm_expand_query to recall specifics.]\n"
+                    ]
+                    max_dag_depth = max(by_depth.keys())
+                    for depth in range(max_dag_depth, -1, -1):
+                        nodes_at_depth = sorted(by_depth.get(depth, []), key=lambda nd: nd.created_at)
+                        depth_label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(depth, f"Depth-{depth}")
+                        for node in nodes_at_depth:
+                            scaffold_parts.append(
+                                f"\n[{depth_label} Summary (d{depth}, node {node.node_id})]"
+                                f"\n{node.summary}"
+                                f"\n[{node.expand_hint or 'Expand for details'}]"
+                            )
+                    scaffold_content = "\n".join(scaffold_parts)
 
-                compressed_lcm_msgs = lcm_engine._assemble_context(
-                    system_message=system_msg_dict,
-                    remaining_messages=remaining_msgs,
-                )
+                    system_msg_dict = None
+                    remaining_msgs = list(uncompacted_lcm_msgs)
+                    if remaining_msgs and remaining_msgs[0].get("role") == "system":
+                        system_msg_dict = remaining_msgs.pop(0)
+
+                    if not system_msg_dict and system_prompt:
+                        system_msg_dict = {"role": "system", "content": system_prompt}
+
+                    assembled_msgs = []
+                    if system_msg_dict:
+                        assembled_msgs.append(system_msg_dict)
+                    assembled_msgs.append({"role": "user", "content": scaffold_content})
+                    assembled_msgs.append({
+                        "role": "assistant",
+                        "content": "Understood. I have access to the full conversation history through LCM tools."
+                    })
+                    assembled_msgs.extend(remaining_msgs)
+                    compressed_lcm_msgs = assembled_msgs
 
             # Translate OpenLCM output dictionaries back to Kesoku Messages
             session = await self.context.db.get_session(self.session_id)
