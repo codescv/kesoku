@@ -143,8 +143,12 @@ class TurnExecutor:
         last_context_tokens = 0
         last_cached_tokens = 0
 
-        active_cache_name = None
-        cached_messages_len = 0
+        active_cache_name = getattr(worker, "active_cache_name", None)
+        if active_cache_name is not None and not isinstance(active_cache_name, str):
+            active_cache_name = None
+        cached_messages_len = getattr(worker, "cached_messages_len", 0)
+        if not isinstance(cached_messages_len, int):
+            cached_messages_len = 0
 
         nudged = False
         try:
@@ -172,6 +176,8 @@ class TurnExecutor:
                             logger.warning(f"Failed to delete cache on pivot: {de}")
                         active_cache_name = None
                         cached_messages_len = 0
+                        worker.active_cache_name = None
+                        worker.cached_messages_len = 0
 
                 # Resolve LLM dynamically for the current message
                 llm = self._resolve_llm(current_msg)
@@ -208,6 +214,8 @@ class TurnExecutor:
                         logger.warning(f"Failed to delete obsolete cache: {de}")
                     active_cache_name = None
                     cached_messages_len = 0
+                    worker.active_cache_name = None
+                    worker.cached_messages_len = 0
 
                 await self._inject_context_and_trigger_consolidation(history, current_msg, llm)
 
@@ -242,6 +250,8 @@ class TurnExecutor:
                             )
                             if active_cache_name:
                                 cached_messages_len = len(prefix_messages)
+                                worker.active_cache_name = active_cache_name
+                                worker.cached_messages_len = cached_messages_len
 
                 # If the prepared history length is somehow less than cached_messages_len, the cache is obsolete.
                 if active_cache_name and len(llm_history) < cached_messages_len:
@@ -252,6 +262,8 @@ class TurnExecutor:
                         logger.warning(f"Failed to delete obsolete cache: {de}")
                     active_cache_name = None
                     cached_messages_len = 0
+                    worker.active_cache_name = None
+                    worker.cached_messages_len = 0
 
                 # Partition history if using context cache
                 logger.info(
@@ -285,6 +297,8 @@ class TurnExecutor:
                         )
                         active_cache_name = None
                         cached_messages_len = 0
+                        worker.active_cache_name = None
+                        worker.cached_messages_len = 0
                         generate_history = llm_history
                         generate_system_prompt = system_prompt
                         generate_tools = tools_list
@@ -409,13 +423,6 @@ class TurnExecutor:
             )
             await self.gateway.post(error_msg)
             await self.context.db.update_message_status(current_msg.id, MessageStatus.ERROR)
-        finally:
-            if active_cache_name:
-                try:
-                    # Clean up context cache at the end of the turn
-                    await llm.delete_cache(active_cache_name)
-                except Exception as de:
-                    logger.warning(f"Failed to delete context cache during turn cleanup: {de}")
 
     async def _summarize_cross_session_context_bg(
         self, role: str, current_context: str, since_timestamp: float

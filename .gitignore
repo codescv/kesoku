@@ -25,6 +25,7 @@ wheels/
 
 # store private data (reserved for testing etc)
 private/
+lcm-large-outputs/
 
 # MkDocs build directory
 site/

@@ -49,6 +49,8 @@ class SessionWorker:
         self.task: asyncio.Task[None] | None = None
         self._processing_turn = False
         self._turn_finished_event = asyncio.Event()
+        self.active_cache_name: str | None = None
+        self.cached_messages_len: int = 0
 
     @property
     def running(self) -> bool:
@@ -93,6 +95,16 @@ class SessionWorker:
                     )
             if not self.task.done():
                 self.task.cancel()
+
+        if self.active_cache_name:
+            logger.info("Cleaning up session context cache on worker stop...")
+            try:
+                llm = self.context.get_llm()
+                await llm.delete_cache(self.active_cache_name)
+            except Exception as e:
+                logger.warning(f"Failed to delete context cache on worker stop: {e}")
+            self.active_cache_name = None
+            self.cached_messages_len = 0
 
     def queue_empty(self) -> bool:
         """Check if the message queue is empty.
