@@ -641,26 +641,15 @@ class Chatbot(ABC):
 
             assembled = lcm_engine._assemble_context(system_message, remaining_messages)
 
-            sys_msg = ""
-            fresh_msgs = []
+            # Separate remaining_messages into backlog and fresh tail
+            n = len(remaining_messages)
+            fresh_tail_count = lcm_engine._config.fresh_tail_count
+            fresh_tail_start = max(0, n - fresh_tail_count)
 
-            # Extract the actual system prompt from the first message if present
-            msgs_to_process = assembled
-            if assembled and assembled[0].get("role") == "system":
-                sys_msg = assembled[0].get("content") or ""
-                msgs_to_process = assembled[1:]
+            backlog_msgs = remaining_messages[:fresh_tail_start]
+            fresh_msgs = remaining_messages[fresh_tail_start:]
 
-            for msg in msgs_to_process:
-                role = msg.get("role")
-                content = msg.get("content") or ""
-                if role == "user" and "[Note: This conversation uses Lossless Context Management" in content:
-                    continue
-                elif role == "assistant" and (
-                    "I have access to the full conversation history through LCM tools" in content
-                ):
-                    continue
-                else:
-                    fresh_msgs.append(msg)
+            sys_msg = system_message.get("content") or "" if system_message else ""
 
             all_nodes = lcm_engine._dag.get_session_nodes(session.id)
             active_nodes = lcm_engine._dag.get_active_nodes(session.id)
@@ -671,6 +660,7 @@ class Chatbot(ABC):
                 all_nodes=all_nodes,
                 active_node_ids=active_node_ids,
                 fresh_msgs=fresh_msgs,
+                backlog_msgs=backlog_msgs,
                 sys_msg=sys_msg,
                 assembled_context=assembled,
             )

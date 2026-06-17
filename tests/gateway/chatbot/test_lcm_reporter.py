@@ -47,11 +47,16 @@ def test_render_to_temp_file() -> None:
         {"role": "assistant", "content": "Hi there!"},
     ]
 
+    backlog_msgs = [
+        {"role": "user", "content": "Backlog item"},
+    ]
+
     temp_file_path = LcmHtmlReporter.render_to_temp_file(
         session=session,
         all_nodes=all_nodes,
         active_node_ids=active_node_ids,
         fresh_msgs=fresh_msgs,
+        backlog_msgs=backlog_msgs,
         sys_msg=sys_msg,
         assembled_context=assembled_context,
     )
@@ -71,6 +76,8 @@ def test_render_to_temp_file() -> None:
         assert "Command stdout results" in content
         assert "run_shell_command" in content
         assert "You are a helpful assistant." in content
+        assert "Backlog item" in content
+        assert "Uncompacted Backlog" in content
     finally:
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)

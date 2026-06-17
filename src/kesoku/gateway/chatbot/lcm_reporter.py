@@ -18,73 +18,9 @@ class LcmHtmlReporter:
     """Utility class to render LCM Active Context into a beautiful interactive HTML page."""
 
     @staticmethod
-    def render_to_temp_file(
-        session: Session,
-        all_nodes: list[Any],
-        active_node_ids: set[int],
-        fresh_msgs: list[dict[str, Any]],
-        sys_msg: str,
-        assembled_context: list[dict[str, Any]],
-    ) -> str:
-        """Render the LCM context state into a temporary HTML file.
-
-        Args:
-            session: Session object context.
-            all_nodes: All DAG nodes in the session.
-            active_node_ids: Set of active node IDs.
-            fresh_msgs: Message dicts in the fresh tail.
-            sys_msg: Resolved system prompt instructions.
-            assembled_context: Combined/assembled context message list.
-
-        Returns:
-            The absolute path of the generated temporary HTML file.
-        """
-        total_tokens = count_messages_tokens(assembled_context)
-
-        # Build summary nodes HTML
-        summary_nodes_html = []
-        by_depth = defaultdict(list)
-        for node in all_nodes:
-            by_depth[node.depth].append(node)
-
-        max_dag_depth = max(by_depth.keys()) if by_depth else -1
-        for depth in range(max_dag_depth, -1, -1):
-            nodes_at_depth = sorted(by_depth.get(depth, []), key=lambda nd: nd.created_at)
-            depth_label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(depth, f"Depth-{depth}")
-            for node in nodes_at_depth:
-                is_active = node.node_id in active_node_ids
-                card_cls = "node-card" if is_active else "node-card inactive"
-                badge_cls = f"badge depth-{node.depth}" if is_active else "badge inactive"
-                active_suffix = "" if is_active else " (Condensed)"
-
-                safe_summary = html.escape(node.summary).replace("\n", "<br>")
-                savings = round(node.source_token_count / node.token_count, 1) if node.token_count > 0 else 1
-                hint_text = node.expand_hint or f"lcm_expand(node_id={node.node_id}) to retrieve details"
-                safe_hint = html.escape(hint_text)
-
-                node_html = f"""
-                <div class="{card_cls}">
-                    <div class="node-header">
-                        <span class="{badge_cls}">{depth_label} Node {node.node_id}{active_suffix}</span>
-                        <span style="font-size:0.85rem;color:#8899a6;">
-                            {node.source_token_count} tokens &rarr; {node.token_count} tokens ({savings}x savings)
-                        </span>
-                    </div>
-                    <div style="white-space: pre-wrap; font-size:0.95rem;">{safe_summary}</div>
-                    <div style="font-size:0.8rem;color:#1d9bf0;margin-top:8px;font-style:italic;">
-                        Hint: {safe_hint}
-                    </div>
-                </div>
-                """
-                summary_nodes_html.append(node_html)
-
-        summary_nodes_html_str = (
-            "\n".join(summary_nodes_html) if summary_nodes_html else "<p>*(No active compacted summary nodes)*</p>"
-        )
-
-        # Build fresh tail HTML
-        fresh_tail_html = []
-        for msg in fresh_msgs:
+    def _render_messages_to_html(msgs: list[dict[str, Any]]) -> str:
+        html_bubbles = []
+        for msg in msgs:
             role = msg.get("role")
             content = msg.get("content") or ""
 
@@ -154,9 +90,85 @@ class LcmHtmlReporter:
                 </div>
             </div>
             """
-            fresh_tail_html.append(msg_html)
+            html_bubbles.append(msg_html)
 
-        fresh_tail_html_str = "\n".join(fresh_tail_html) if fresh_tail_html else "<p>*(Fresh tail is empty)*</p>"
+        return "\n".join(html_bubbles)
+
+    @staticmethod
+    def render_to_temp_file(
+        session: Session,
+        all_nodes: list[Any],
+        active_node_ids: set[int],
+        fresh_msgs: list[dict[str, Any]],
+        backlog_msgs: list[dict[str, Any]],
+        sys_msg: str,
+        assembled_context: list[dict[str, Any]],
+    ) -> str:
+        """Render the LCM context state into a temporary HTML file.
+
+        Args:
+            session: Session object context.
+            all_nodes: All DAG nodes in the session.
+            active_node_ids: Set of active node IDs.
+            fresh_msgs: Message dicts in the fresh tail.
+            backlog_msgs: Message dicts in the raw backlog (limbo).
+            sys_msg: Resolved system prompt instructions.
+            assembled_context: Combined/assembled context message list.
+
+        Returns:
+            The absolute path of the generated temporary HTML file.
+        """
+        total_tokens = count_messages_tokens(assembled_context)
+
+        # Build summary nodes HTML
+        summary_nodes_html = []
+        by_depth = defaultdict(list)
+        for node in all_nodes:
+            by_depth[node.depth].append(node)
+
+        max_dag_depth = max(by_depth.keys()) if by_depth else -1
+        for depth in range(max_dag_depth, -1, -1):
+            nodes_at_depth = sorted(by_depth.get(depth, []), key=lambda nd: nd.created_at)
+            depth_label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(depth, f"Depth-{depth}")
+            for node in nodes_at_depth:
+                is_active = node.node_id in active_node_ids
+                card_cls = "node-card" if is_active else "node-card inactive"
+                badge_cls = f"badge depth-{node.depth}" if is_active else "badge inactive"
+                active_suffix = "" if is_active else " (Condensed)"
+
+                safe_summary = html.escape(node.summary).replace("\n", "<br>")
+                savings = round(node.source_token_count / node.token_count, 1) if node.token_count > 0 else 1
+                hint_text = node.expand_hint or f"lcm_expand(node_id={node.node_id}) to retrieve details"
+                safe_hint = html.escape(hint_text)
+
+                node_html = f"""
+                <div class="{card_cls}">
+                    <div class="node-header">
+                        <span class="{badge_cls}">{depth_label} Node {node.node_id}{active_suffix}</span>
+                        <span style="font-size:0.85rem;color:#8899a6;">
+                            {node.source_token_count} tokens &rarr; {node.token_count} tokens ({savings}x savings)
+                        </span>
+                    </div>
+                    <div style="white-space: pre-wrap; font-size:0.95rem;">{safe_summary}</div>
+                    <div style="font-size:0.8rem;color:#1d9bf0;margin-top:8px;font-style:italic;">
+                        Hint: {safe_hint}
+                    </div>
+                </div>
+                """
+                summary_nodes_html.append(node_html)
+
+        summary_nodes_html_str = (
+            "\n".join(summary_nodes_html) if summary_nodes_html else "<p>*(No active compacted summary nodes)*</p>"
+        )
+
+        # Build message HTMLs
+        fresh_tail_html_str = (
+            LcmHtmlReporter._render_messages_to_html(fresh_msgs) or "<p>*(Fresh tail is empty)*</p>"
+        )
+        backlog_html_str = (
+            LcmHtmlReporter._render_messages_to_html(backlog_msgs)
+            or "<p>*(No backlog messages in limbo)*</p>"
+        )
 
         # Combined HTML / CSS template
         html_template = f"""<!DOCTYPE html>
@@ -365,6 +377,10 @@ class LcmHtmlReporter:
                     <div class="stat-value">{len(all_nodes)} Nodes</div>
                 </div>
                 <div class="stat-card">
+                    <div class="stat-label">Raw Backlog</div>
+                    <div class="stat-value">{len(backlog_msgs)} Messages</div>
+                </div>
+                <div class="stat-card">
                     <div class="stat-label">Fresh Tail</div>
                     <div class="stat-value">{len(fresh_msgs)} Messages</div>
                 </div>
@@ -384,6 +400,13 @@ class LcmHtmlReporter:
             <summary>📦 Compacted Summary Scaffold (DAG Nodes)</summary>
             <div style="margin-top: 15px;">
                 {summary_nodes_html_str}
+            </div>
+        </details>
+
+        <details>
+            <summary>⏳ Uncompacted Backlog (Pending Compaction)</summary>
+            <div style="margin-top: 15px; display: flex; flex-direction: column;">
+                {backlog_html_str}
             </div>
         </details>
 
