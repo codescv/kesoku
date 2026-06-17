@@ -238,6 +238,7 @@ async def run_shell_command(
     command: str,
     cwd: str | None = None,
     background_threshold_seconds: float | None = None,
+    max_output_chars: int = 1000,
     context: ToolContext | None = None,
 ) -> str:
     """Execute a CLI shell command within a target directory, defaulting to the AWD (Agent Working Directory).
@@ -253,11 +254,9 @@ async def run_shell_command(
       and write at most 4000 characters per command.
     - NEVER run commands that are more than 5000 characters just to be safe.
     - If you have a command that is very long, only emit 1 tool call to avoid token limit exceed error.
-    - Tool output is capped at 30000 characters to save tokens. If you need to view
-      a large file, read it by chunks of lines.
+    - Tool output is capped at `max_output_chars` (default 1000, max 30000) characters to save tokens.
+      If you need more output, increase the `max_output_chars` parameter, or filter/redirect the command output.
     - You are encouraged to combine commands using '|', '&&', ';' etc to save turns.
-    - If you think the output of the command is long or not important, redirect it to
-      a file in /tmp or filter the output (e.g. `ls -R | grep .py`)
 
     Args:
         command: The command string to execute (e.g., 'uv run pytest' or 'echo hello').
@@ -266,10 +265,12 @@ async def run_shell_command(
         background_threshold_seconds: Optional foreground timeout limit (in seconds) override.
             If the command takes longer than this limit, it transitions to background execution.
             If not provided, defaults to configuration setting.
+        max_output_chars: Maximum output characters to return. Defaults to 1000.
+            Output exceeding this length is truncated and full output saved to a staging file.
         context: Optional tool execution context.
 
     Returns:
-        Command execution stdout and stderr, or a file reference if output exceeds 1000 characters.
+        Command execution stdout and stderr, or truncated preview if output exceeds max_output_chars.
     """
     config = get_config()
     if not config.shell.enabled:
@@ -439,25 +440,32 @@ async def run_shell_command(
     out_str = f"=== STDOUT ===\n{stdout}\n=== STDERR ===\n{stderr}"
 
     # Unified truncation logic
+    effective_max = min(max_output_chars, MAX_TOOL_OUTPUT_LENGTH)
     final_output = out_str
-    if len(out_str) > MAX_TOOL_OUTPUT_LENGTH:
+    if len(out_str) > effective_max:
         timestamp = int(time.time())
         output_filename = f"cmd_output_{timestamp}.txt"
         output_filepath = os.path.join(session_staging_dir, output_filename)
         try:
             await async_write_text_file(output_filepath, out_str)
-            preview_len = MAX_TOOL_OUTPUT_LENGTH // 2
             final_output = (
                 f"Output truncated (total length {len(out_str)} bytes). "
                 f"Full output saved to session workspace file: `{output_filepath}`.\n"
                 f"You can use tool `run_shell_command` (e.g., `cat {output_filename}`) "
                 f"on this path to examine the full output.\n\n"
-                f"Preview:\n{out_str[:preview_len]}...\n{out_str[-preview_len:]}"
+                f"Preview (first {effective_max} chars):\n{out_str[:effective_max]}\n\n"
+                f"[Output truncated. If you need to view more output, you can set the 'max_output_chars' "
+                f"parameter to a larger value (up to 30000), or filter the command output "
+                f"(e.g., using grep/awk/head/tail/etc.).]"
             )
         except Exception as ex:
             logger.error(f"Failed to save truncated output to '{output_filepath}': {ex}")
             final_output = (
-                f"Output truncated (total length {len(out_str)} bytes). Preview:\n{out_str[:MAX_TOOL_OUTPUT_LENGTH]}"
+                f"Output truncated (total length {len(out_str)} bytes). "
+                f"Preview:\n{out_str[:effective_max]}\n\n"
+                f"[Output truncated. If you need to view more output, you can set the 'max_output_chars' "
+                f"parameter to a larger value (up to 30000), or filter the command output "
+                f"(e.g., using grep/awk/head/tail/etc.).]"
             )
 
     if proc.returncode != 0:

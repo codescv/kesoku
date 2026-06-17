@@ -270,6 +270,44 @@ async def test_run_shell_command_failure_truncation(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_shell_command_max_output_chars(tmp_path) -> None:
+    """Test that run_shell_command truncates output to max_output_chars and appends help message."""
+    import kesoku.config
+    from kesoku.config import init_config, load_config
+
+    original_config = kesoku.config._global_config
+    try:
+        config_path = tmp_path / "config.toml"
+        init_config(str(config_path))
+        cfg = load_config(str(config_path))
+        cfg.agent_working_dir = str(tmp_path)
+
+        ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
+
+        # Test default (max_output_chars = 1000)
+        cmd_1200 = "python3 -c 'print(\"a\" * 1200)'"
+        res = await run_shell_command(cmd_1200, context=ctx)
+
+        assert "Output truncated" in res
+        assert "Preview (first 1000 chars):" in res
+        assert "[Output truncated. If you need to view more output, you can set the 'max_output_chars'" in res
+
+        # Test custom max_output_chars = 100
+        res_custom = await run_shell_command(cmd_1200, max_output_chars=100, context=ctx)
+        assert "Output truncated" in res_custom
+        assert "Preview (first 100 chars):" in res_custom
+
+        # Test no truncation if content is shorter than max_output_chars
+        cmd_50 = "python3 -c 'print(\"a\" * 50)'"
+        res_short = await run_shell_command(cmd_50, max_output_chars=100, context=ctx)
+        assert "Output truncated" not in res_short
+        assert "a" * 50 in res_short
+
+    finally:
+        kesoku.config._global_config = original_config
+
+
+@pytest.mark.asyncio
 async def test_manual_compact_command(tmp_path) -> None:
     """Verify that manual chatbot /compact command triggers compaction eligibility check."""
     from kesoku.config import KesokuConfig, WorkspaceConfig
