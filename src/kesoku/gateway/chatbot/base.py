@@ -1069,6 +1069,32 @@ class Chatbot(ABC):
         """Resolve an existing session or create a new one for the channel."""
         session = await self.gateway.db.get_session_by_channel(self.chatbot_id, dto.channel_id)
         created = False
+
+        current_role = dto.role
+        if current_role is None:
+            current_role = await self.gateway.db.get_channel_role_with_inheritance(
+                self.chatbot_id, dto.channel_id, session.id if session else None
+            )
+
+        if session:
+            if session.role_name != current_role:
+                agent = self.gateway.agent
+                if agent:
+                    await agent.stop_session_worker(session.id, immediate=True)
+                try:
+                    await self.gateway.context.active_jobs.stop_all_for_session(session.id)
+                except Exception as e:
+                    logger.warning(f"Failed to clean up background jobs when switching session role: {e}")
+
+                last_sess = await self.gateway.db.get_last_session_by_channel_and_role(
+                    self.chatbot_id, dto.channel_id, current_role
+                )
+                if last_sess:
+                    await self.gateway.db.set_active_session_for_channel(self.chatbot_id, dto.channel_id, last_sess.id)
+                    session = last_sess
+                else:
+                    session = None
+
         if not session:
             title = dto.session_title or f"Session: {dto.text[:30]}"
             custom_prompt = dto.custom_prompt or ""
@@ -1079,7 +1105,7 @@ class Chatbot(ABC):
                 custom_prompt=custom_prompt,
                 chatbot_id=self.chatbot_id,
                 channel_id=dto.channel_id,
-                role=dto.role,
+                role=current_role,
                 created_at=dto.timestamp,
             )
             created = True
@@ -1205,9 +1231,30 @@ class Chatbot(ABC):
         await self.gateway.db.set_channel_role(self.chatbot_id, channel_id, role_name)
 
         # 2. Rebuild the active session system prompt if a session exists
-        session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
+        old_session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
+        if old_session:
+            agent = self.gateway.agent
+            if agent:
+                await agent.stop_session_worker(old_session.id, immediate=True)
+            try:
+                await self.gateway.context.active_jobs.stop_all_for_session(old_session.id)
+            except Exception as e:
+                logger.warning(f"Failed to clean up background jobs when switching role: {e}")
+
+        session = await self.gateway.db.get_last_session_by_channel_and_role(
+            self.chatbot_id, channel_id, role_name
+        )
         if session:
+            await self.gateway.db.set_active_session_for_channel(self.chatbot_id, channel_id, session.id)
             new_sys_prompt = build_sys_prompt(session=session)
             await self.gateway.db.update_session_system_prompt(session.id, new_sys_prompt)
+        else:
+            await self.gateway.create_session(
+                session_id=None,
+                title=f"{role_name.capitalize()} Session",
+                chatbot_id=self.chatbot_id,
+                channel_id=channel_id,
+                role=role_name,
+            )
 
         return f"🎭 Persona for this channel has been successfully changed to **`{role_name}`**."

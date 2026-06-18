@@ -274,3 +274,145 @@ async def test_resolve_or_create_session_updates_prompt(tmp_path) -> None:
         assert "Final User Instructions" in db_session3.system_prompt
         assert "Updated User Instructions" not in db_session3.system_prompt
         assert "Custom Instructions V1" not in db_session3.system_prompt
+
+
+@pytest.mark.asyncio
+async def test_role_switching_session_isolation(tmp_path) -> None:
+    """Test that switching roles in a channel isolates the session contexts and grep searches."""
+    from kesoku.agent.tools import memory_grep
+    from kesoku.agent.tools.registry import ToolContext
+    from kesoku.config import AgentConfig, KesokuConfig, WorkspaceConfig
+    from kesoku.constants import MessageRole, MessageStatus, MessageType
+    from kesoku.context import KesokuContext
+    from kesoku.db import DatabaseManager, Message
+    from kesoku.gateway.chatbot.base import InboundMessageDTO
+
+    temp_db = str(tmp_path / "test_role_switch.db")
+    db_mgr = DatabaseManager(temp_db)
+    db_mgr.init_tables()
+
+    # Create dummy roles dir
+    roles_dir = tmp_path / "roles"
+    roles_dir.mkdir()
+    (roles_dir / "default").mkdir()
+    (roles_dir / "asuka").mkdir()
+
+    # Create intro.md for each
+    (roles_dir / "default" / "intro.md").write_text("Default role description")
+    (roles_dir / "asuka" / "intro.md").write_text("Asuka role description")
+
+    mock_cfg = KesokuConfig(
+        workspace=WorkspaceConfig(
+            sessions_dir=str(tmp_path / "sessions"),
+            db_path=temp_db,
+            roles_dir=str(roles_dir)
+        ),
+        agent=AgentConfig(user_prompts=[]),
+        agent_working_dir=str(tmp_path),
+    )
+
+    with patch("kesoku.gateway.chatbot.base.get_config", return_value=mock_cfg), \
+         patch("kesoku.agent.prompt.get_config", return_value=mock_cfg):
+
+        mock_gateway = Gateway(context=KesokuContext(config=mock_cfg, db=db_mgr))
+        chatbot = MockChatbot(chatbot_id="mock_bot", gateway=mock_gateway)
+
+        # 1. Start on channel c1 with default role, resolve a session
+        dto1 = InboundMessageDTO(
+            sender_id="user1",
+            channel_id="c1",
+            text="Hello default",
+            timestamp=1000.0,
+        )
+        session_default, created = await chatbot._resolve_or_create_session(dto1)
+        assert created is True
+        assert session_default.role_name == "default"
+
+        # Save a message to default session
+        msg1 = Message(
+            id="m1",
+            session_id=session_default.id,
+            chatbot_id="mock_bot",
+            channel_id="c1",
+            sender="user1",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="Hello default message content",
+            timestamp=1000.0,
+            status=MessageStatus.PROCESSED,
+        )
+        await mock_gateway.post(msg1)
+
+        # 2. Switch role to 'asuka'
+        status_msg = await chatbot.update_role_by_channel("c1", "asuka")
+        assert "changed to **`asuka`**" in status_msg
+
+        # Resolve session under the new channel role 'asuka'
+        dto2 = InboundMessageDTO(
+            sender_id="user1",
+            channel_id="c1",
+            text="Hello asuka",
+            timestamp=1005.0,
+        )
+        session_asuka, created2 = await chatbot._resolve_or_create_session(dto2)
+        # Because update_role_by_channel already created and bound the session, created2 should be False
+        assert created2 is False
+        assert session_asuka.id != session_default.id
+        assert session_asuka.role_name == "asuka"
+
+        # Save a message to asuka session
+        msg2 = Message(
+            id="m2",
+            session_id=session_asuka.id,
+            chatbot_id="mock_bot",
+            channel_id="c1",
+            sender="user1",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="Hello asuka message content",
+            timestamp=1005.0,
+            status=MessageStatus.PROCESSED,
+        )
+        await mock_gateway.post(msg2)
+
+        # 3. Simulate role switch directly in DB (Scenario B: e.g. third party tool updates channel role)
+        # We manually change c1 role to 'default' in DB, but do NOT update channel_sessions
+        # (so active session remains session_asuka)
+        await mock_gateway.db.set_channel_role("mock_bot", "c1", "default")
+
+        # Resolve session under 'default' channel role.
+        # Since active session is session_asuka (role: 'asuka'), it should detect mismatch
+        # and switch to last default session (session_default)!
+        dto3 = InboundMessageDTO(
+            sender_id="user1",
+            channel_id="c1",
+            text="Back to default",
+            timestamp=1010.0,
+        )
+        session_back, created3 = await chatbot._resolve_or_create_session(dto3)
+        # Since it successfully switched back to existing session_default, created3 should be False
+        assert created3 is False
+        assert session_back.id == session_default.id
+        assert session_back.role_name == "default"
+
+        # 4. Perform memory_grep under 'default' role
+        ctx_default = ToolContext(
+            session_id=session_default.id,
+            session_workspace="test_ws",
+            gateway=mock_gateway,
+        )
+        res_default = await memory_grep(query="*", context=ctx_default)
+        assert "Hello default message content" in res_default
+        assert "Hello asuka message content" not in res_default  # Isolate check!
+
+        # 5. Perform memory_grep under 'asuka' role
+        ctx_asuka = ToolContext(
+            session_id=session_asuka.id,
+            session_workspace="test_ws",
+            gateway=mock_gateway,
+        )
+        res_asuka = await memory_grep(query="*", context=ctx_asuka)
+        assert "Hello asuka message content" in res_asuka
+        assert "Hello default message content" not in res_asuka  # Isolate check!
+
+

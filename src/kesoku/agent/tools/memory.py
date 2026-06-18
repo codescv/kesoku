@@ -75,6 +75,14 @@ async def _resolve_memory_role(category: str, role_param: str | None, context: T
     if category in {"progress", "user_preferences", "memo"}:
         if context and context.gateway:
             db = context.gateway.db
+            if context.session_id:
+                try:
+                    sess = await db.get_session(context.session_id)
+                    if sess and sess.role_name:
+                        return sess.role_name
+                except Exception as e:
+                    logger.warning(f"Failed to resolve session role for memory category {category}: {e}")
+
             if context.original_msg_id:
                 try:
                     msg_list = await db.get_messages_by_filters({"id": context.original_msg_id})

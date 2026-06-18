@@ -356,6 +356,36 @@ class DatabaseManager:
                 return self._row_to_session(row)
             return None
 
+    def get_last_session_by_channel_and_role(
+        self, chatbot_id: str, channel_id: str, role: str
+    ) -> Session | None:
+        """Retrieve the most recent session for a chatbot channel under a specific role.
+
+        Args:
+            chatbot_id: Unique identifier of the chatbot.
+            channel_id: Channel or room identifier.
+            role: The role name.
+
+        Returns:
+            The Session object if found, None otherwise.
+        """
+        with self.connection_provider.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT s.* FROM sessions s
+                JOIN messages m ON s.id = m.session_id
+                WHERE m.chatbot_id = ? AND m.channel_id = ? AND COALESCE(s.role_name, 'default') = ?
+                ORDER BY m.timestamp DESC
+                LIMIT 1
+                """,
+                (chatbot_id, channel_id, role),
+            )
+            row = cursor.fetchone()
+            if row:
+                return self._row_to_session(row)
+            return None
+
     def set_active_session_for_channel(self, chatbot_id: str, channel_id: str, session_id: str) -> None:
         """Bind a session as the active session for a chatbot channel (UPSERT).
 
@@ -1340,6 +1370,23 @@ class AsyncDatabaseManager:
             The active session if found, else None.
         """
         return await asyncio.to_thread(self.sync_db.get_session_by_channel, chatbot_id, channel_id)
+
+    async def get_last_session_by_channel_and_role(
+        self, chatbot_id: str, channel_id: str, role: str
+    ) -> Session | None:
+        """Retrieve the most recent session for a chatbot channel under a specific role.
+
+        Args:
+            chatbot_id: The ID of the chatbot.
+            channel_id: The ID of the channel.
+            role: The role name.
+
+        Returns:
+            The Session object if found, None otherwise.
+        """
+        return await asyncio.to_thread(
+            self.sync_db.get_last_session_by_channel_and_role, chatbot_id, channel_id, role
+        )
 
     async def set_active_session_for_channel(self, chatbot_id: str, channel_id: str, session_id: str) -> None:
         """Set the active session for a given chatbot and channel.
