@@ -194,9 +194,8 @@ class TurnExecutor:
                     session_id=self.session_id,
                     heal_orphans=True,
                 )
-                history_len_before = len(history)
                 # Check and automatically compact history in-place if it exceeds threshold
-                history = await self._check_and_auto_compact_history(
+                history, compacted_occurred = await self._check_and_auto_compact_history(
                     history=history,
                     system_prompt=system_prompt,
                     tools_list=tools_list,
@@ -206,7 +205,7 @@ class TurnExecutor:
                 )
 
                 # If history was compacted, the existing cache is obsolete and must be deleted.
-                if len(history) < history_len_before and active_cache_name:
+                if compacted_occurred and active_cache_name:
                     logger.info("Session history was compacted. Deleting obsolete context cache...")
                     try:
                         await llm.delete_cache(active_cache_name)
@@ -645,14 +644,14 @@ class TurnExecutor:
         llm: BaseLLM,
         cfg,
         current_msg: Message,
-    ) -> list[Message]:
+    ) -> tuple[list[Message], bool]:
         """Check context window usage and automatically compact history in-place using OpenLCM.
 
         Returns:
-            The active message history list (potentially compacted with OpenLCM scaffold).
+            A tuple of (active message history list, compacted_occurred bool).
         """
         if not history:
-            return history
+            return history, False
 
         # Initialize/Bind the active session to OpenLCM engine
         lcm_engine = self.context.get_lcm_engine(
@@ -682,9 +681,11 @@ class TurnExecutor:
         uncompacted_lcm_msgs = messages_to_openlcm_dicts(uncompacted_history)
 
         # Trigger compression if eligible or already compacted
+        compacted_occurred = False
         if is_compacted or lcm_engine.should_compress_preflight(uncompacted_lcm_msgs):
             logger.info(f"Initiating Lossless Context Compaction via OpenLCM for session {self.session_id}.")
             compressed_lcm_msgs = await lcm_engine.compress(uncompacted_lcm_msgs)
+            compacted_occurred = (lcm_engine._last_compression_status != "noop")
 
             if lcm_engine._last_compression_status == "noop":
                 # Retrieve active summary nodes from DAG to reconstruct scaffold without clipping
@@ -742,7 +743,7 @@ class TurnExecutor:
                 workspace_name=workspace_name,
             )
 
-        return history
+        return history, compacted_occurred
 
     async def _execute_tool_calls(
         self,
