@@ -2654,7 +2654,7 @@ wheels = [
 [[package]]
 name = "openlcm"
 version = "0.1.3"
-source = { git = "https://github.com/codescv/OpenLCM.git#4c2aafe335732bc092ebe6187dc33bde4ff831c2" }
+source = { git = "https://github.com/codescv/OpenLCM.git#c1ffa67e97da5bd933849a35c843861e26c0614b" }
 dependencies = [
     { name = "anthropic" },
     { name = "autogen-agentchat" },
