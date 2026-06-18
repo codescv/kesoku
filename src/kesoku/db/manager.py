@@ -404,19 +404,37 @@ class DatabaseManager:
                     """,
                     (chatbot_id, channel_id, session_id),
                 )
-                role = self.get_channel_role_with_inheritance(chatbot_id, channel_id, session_id)
-                conn.execute(
-                    """
-                    UPDATE sessions
-                    SET role_name = ?
-                    WHERE id = ?
-                    """,
-                    (role, session_id),
-                )
-                logger.info(
-                    f"Explicitly bound channel '{chatbot_id}:{channel_id}' "
-                    f"to active session '{session_id}' (role: {role})"
-                )
+                cursor = conn.cursor()
+                cursor.execute("SELECT role_name FROM sessions WHERE id = ?", (session_id,))
+                row = cursor.fetchone()
+                current_sess_role = row["role_name"] if row else None
+
+                resolved_role = self.get_channel_role_with_inheritance(chatbot_id, channel_id, session_id)
+
+                should_update = False
+                if not current_sess_role:
+                    should_update = True
+                elif current_sess_role == "default" and resolved_role != "default":
+                    should_update = True
+
+                if should_update:
+                    conn.execute(
+                        """
+                        UPDATE sessions
+                        SET role_name = ?
+                        WHERE id = ?
+                        """,
+                        (resolved_role, session_id),
+                    )
+                    logger.info(
+                        f"Explicitly bound channel '{chatbot_id}:{channel_id}' "
+                        f"to active session '{session_id}' (role updated to: {resolved_role})"
+                    )
+                else:
+                    logger.info(
+                        f"Explicitly bound channel '{chatbot_id}:{channel_id}' "
+                        f"to active session '{session_id}' (kept role: {current_sess_role})"
+                    )
 
     def delete_session(self, session_id: str) -> None:
         """Delete a session and all its associated messages from the database.

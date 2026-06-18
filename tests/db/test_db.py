@@ -489,3 +489,35 @@ def test_search_role_data_wildcard_and_filters(db_manager):
     # Should return latest first
     assert msgs_limit[0].id == "m3"
     assert msgs_limit[1].id == "m2"
+
+
+def test_thread_session_role_inheritance(db_manager):
+    """Tests that a thread session created with a specific inherited role is not
+    overwritten to 'default' when set_active_session_for_channel is called.
+    """
+    # 1. Parent channel has role 'asuka'
+    db_manager.set_channel_role("discord", "parent_chan", "asuka")
+
+    # 2. Create a session initialized with role 'asuka'
+    session = Session(
+        id="sess_thread_asuka",
+        title="Thread Session with Asuka",
+        created_at=time.time(),
+        updated_at=time.time(),
+        role_name="asuka",
+    )
+    db_manager.create_session(session)
+
+    # 3. Call set_active_session_for_channel for the thread channel.
+    # Note that there are NO messages in this session yet, so querying parent channel via messages would fail.
+    db_manager.set_active_session_for_channel(
+        chatbot_id="discord",
+        channel_id="thread_chan",
+        session_id="sess_thread_asuka",
+    )
+
+    # 4. Verify that the session's role remains 'asuka' and was not overwritten by 'default'
+    retrieved = db_manager.get_session("sess_thread_asuka")
+    assert retrieved is not None
+    assert retrieved.role_name == "asuka"
+
