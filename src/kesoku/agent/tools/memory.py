@@ -103,6 +103,8 @@ async def _resolve_memory_role(category: str, role_param: str | None, context: T
 @default_registry.register
 async def list_memories(
     category: MemoryCategory,
+    limit: int = 10,
+    offset: int = 0,
     role: str | None = None,
     context: ToolContext | None = None,
 ) -> str:
@@ -110,6 +112,8 @@ async def list_memories(
 
     Args:
         category: The memory category (e.g., 'progress', 'learnings', 'user_preferences').
+        limit: Max number of entries to show (default: 10).
+        offset: Number of entries to skip (default: 0).
         role: Optional roleplay persona scope (defaults to None for implicit channel/default persona).
         context: Injected tool execution context.
 
@@ -126,10 +130,29 @@ async def list_memories(
         if not memories:
             return f"No memories found in category '{category}' for role scope '{resolved_role}'."
 
-        lines = [f"=== Memories in '{category}' (scope: {resolved_role}) ==="]
-        for m in memories:
+        total_count = len(memories)
+        paginated = memories[offset : offset + limit]
+
+        if not paginated:
+            return (
+                f"No memories found in category '{category}' for role scope '{resolved_role}' "
+                f"at offset {offset} (total entries: {total_count})."
+            )
+
+        lines = [
+            f"=== Memories in '{category}' (scope: {resolved_role}) "
+            f"(showing {offset + 1} to {offset + len(paginated)} of {total_count}) ==="
+        ]
+        for m in paginated:
             updated_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m["updated_at"]))
             lines.append(f'- key: `{m["key"]}` | title: "{m["title"]}" | updated: {updated_str} | scope: {m["role"]}')
+
+        if total_count > offset + len(paginated):
+            lines.append(
+                f"\n💡 Note: There are {total_count - (offset + len(paginated))} more memories in this category. "
+                f"You can view them by adjusting the `offset` parameter (e.g., offset={offset + limit}), "
+                f"or search for specific memories using `memory_grep` or `memory_search` tools."
+            )
         return "\n".join(lines)
     except Exception as e:
         logger.error(f"Failed to list memories: {e}", exc_info=True)
@@ -140,6 +163,8 @@ async def list_memories(
 async def view_memory(
     category: MemoryCategory,
     key: str | None = None,
+    limit: int = 10,
+    offset: int = 0,
     role: str | None = None,
     context: ToolContext | None = None,
 ) -> str:
@@ -152,6 +177,8 @@ async def view_memory(
     Args:
         category: The memory category (e.g., 'progress', 'learnings', 'user_preferences').
         key: Optional unique snake_case key. If omitted, renders all entries.
+        limit: Max number of entries to aggregate when key is None (default: 10).
+        offset: Number of entries to skip when key is None (default: 0).
         role: Optional roleplay persona scope (defaults to None for implicit channel/default persona).
         context: Injected tool execution context.
 
@@ -181,10 +208,30 @@ async def view_memory(
         if not memories:
             return f"No memories found in category '{category}' for role scope '{resolved_role}'."
 
-        lines = [f"# Category: {category} (scope: {resolved_role})"]
-        for m in memories:
+        total_count = len(memories)
+        paginated = memories[offset : offset + limit]
+
+        if not paginated:
+            return (
+                f"No memories found in category '{category}' for role scope '{resolved_role}' "
+                f"at offset {offset} (total entries: {total_count})."
+            )
+
+        lines = [
+            f"# Category: {category} (scope: {resolved_role}) "
+            f"(showing {offset + 1} to {offset + len(paginated)} of {total_count})"
+        ]
+        for m in paginated:
             lines.append(f"\n## {m['title']} (key: `{m['key']}`, scope: `{m['role']}`)")
             lines.append(m["content"].strip())
+
+        if total_count > offset + len(paginated):
+            lines.append(
+                f"\n---\n"
+                f"💡 Note: There are {total_count - (offset + len(paginated))} more memories in this category. "
+                f"Use `offset` parameter (e.g., offset={offset + limit}) to view next page, "
+                f"or search for specific entries using `memory_grep` or `memory_search`."
+            )
         return "\n".join(lines)
     except Exception as e:
         logger.error(f"Failed to view memory: {e}", exc_info=True)

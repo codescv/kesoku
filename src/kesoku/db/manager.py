@@ -847,9 +847,9 @@ class DatabaseManager:
 
             is_wildcard = not query_text or query_text == "*"
             if not is_wildcard:
-                conditions.append("(content LIKE ? OR title LIKE ?)")
+                conditions.append("(content LIKE ? OR title LIKE ? OR key LIKE ?)")
                 like_query = f"%{query_text}%"
-                args.extend([like_query, like_query])
+                args.extend([like_query, like_query, like_query])
 
             if start_time is not None:
                 conditions.append("updated_at >= ?")
