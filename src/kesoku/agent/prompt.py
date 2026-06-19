@@ -84,16 +84,6 @@ If a command transitions to a background job:
 """
 
 
-TIME_INSTRUCTIONS = """
-# Time
-The current physical time and timezone are injected in the `time` and `timezone`
-attributes of the `<current_message>` tag.
-CRITICAL: This represents the LIVE OPERATIONAL PHYSICAL CLOCK of the system
-right now. You MUST rely entirely on these attributes for the exact current
-time. NEVER interpret or treat it as a simulated or mock time reference.
-"""
-
-
 def build_sys_prompt(
     custom_prompt: str | None = None,
     session: Session | None = None,
@@ -189,7 +179,6 @@ Unless the user explicitly instructs otherwise, do not refer to any file outside
             TOOL_CALLING_INSTRUCTIONS.strip(),
             MEMORY_AND_HISTORY_INSTRUCTIONS.strip(),
             BACKGROUND_EXECUTION_INSTRUCTIONS.strip(),
-            TIME_INSTRUCTIONS.strip(),
         ]
     )
 

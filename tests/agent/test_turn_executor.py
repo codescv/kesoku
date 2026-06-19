@@ -724,6 +724,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     assert "Lossless Chat History (LCM):" in content1
     assert 'from="u1"' in content1
     assert 'timezone="' in content1
+    assert "CRITICAL: The time and timezone in the following <current_message>" in content1
     assert "First message" in content1
 
 
@@ -754,6 +755,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     assert "Lossless Chat History (LCM):" not in content2
     assert 'from="u1"' in content2
     assert 'timezone="' in content2
+    assert "CRITICAL: The time and timezone in the following <current_message>" in content2
     assert "Second message" in content2
 
 
@@ -783,6 +785,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     assert "Lossless Chat History (LCM):" in content3
     assert 'from="u1"' in content3
     assert 'timezone="' in content3
+    assert "CRITICAL: The time and timezone in the following <current_message>" in content3
     assert "Third message" in content3
 
 

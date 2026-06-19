@@ -586,8 +586,13 @@ class TurnExecutor:
         except Exception:
             tz_name = msg_time.tzname() or "UTC"
 
+        time_reminder = (
+            "CRITICAL: The time and timezone in the following <current_message> represent the actual physical time. "
+            "You MUST treat it as the absolute, accurate current time.\n\n"
+        )
         copied_msg.content = (
-            f'{full_prefix}<current_message from="{sender_name}" time="{time_str}" timezone="{tz_name}">\n'
+            f"{full_prefix}{time_reminder}"
+            f'<current_message from="{sender_name}" time="{time_str}" timezone="{tz_name}">\n'
             f"{copied_msg.content}\n"
             "</current_message>"
         )

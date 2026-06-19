@@ -513,7 +513,6 @@ def test_build_discord_custom_prompt_dm() -> None:
     assert "TestUser" not in prompt
     assert "Mentioning Users" not in prompt
     assert "Channel Topic" not in prompt
-    assert "Response Format" in prompt
 
 
 def test_build_discord_custom_prompt_thread_with_topic() -> None:
@@ -540,7 +539,6 @@ def test_build_discord_custom_prompt_thread_with_topic() -> None:
     assert 'You are currently chatting in a Discord thread named "#help-thread" (ID: 555)' in prompt
     assert "under channel \"#general\" (ID: 444) on the server 'AwesomeServer'." in prompt
     assert "## Channel Topic\nThis is the general channel topic." in prompt
-    assert "Response Format" in prompt
 
 
 @pytest.mark.asyncio

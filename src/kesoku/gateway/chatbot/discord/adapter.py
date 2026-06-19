@@ -66,11 +66,6 @@ def _build_discord_custom_prompt(
         members_str = "\n".join(member_lines)
         members_section = f"\n## Users on the server\n\n{members_str}\n"
 
-    time_section = """\n## Time
-The current time and timezone are injected in the `time` and `timezone` attributes of your `<current_request>` tag.
-The time is very important to prevent your hallucination about the world status.\n"""
-
-
     # Build location instruction and channel topic
     if is_dm:
         location_instruction = "You are talking to the user via discord."
@@ -105,23 +100,12 @@ The time is very important to prevent your hallucination about the world status.
             "\n## Mentioning Users\nWhen mentioning or referring to a user, use Discord tag syntax <@USER_ID>.\n"
         )
 
-    format_section = """
-## (CRITICAL!!! MUST FOLLOW) Response Format
-- IMPORTANT: Only use plain text or emojis when you want to show math. e.g. use "exp(x)"
-  instead of "$e^x$", use "∞" instead of "$\\inf$".
-- IMPORTANT: You can only use up to level 3 headings (# for h1, ## for h2, ### for h3).
-  Never use #### or beyond!
-- The above formatting requirement only applies for your response, not for writing files or running commands.
-    """
-
     discord_prompt = f"""
 # Discord Instructions
 {location_instruction}
 {members_section}
 {mention_section}
-{time_section}
 {topic_section}
-{format_section}
     """
     return discord_prompt
 
