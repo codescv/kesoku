@@ -416,3 +416,43 @@ async def test_role_switching_session_isolation(tmp_path) -> None:
         assert "Hello default message content" not in res_asuka  # Isolate check!
 
 
+@pytest.mark.asyncio
+async def test_cronjob_session_role_inheritance(tmp_path) -> None:
+    """Test that trigger_cronjob_message correctly inherits the role of the parent channel
+
+    when creating a new session.
+    """
+    from kesoku.config import AgentConfig, KesokuConfig, WorkspaceConfig
+    from kesoku.db import DatabaseManager
+
+    temp_db = str(tmp_path / "test_cron_role.db")
+    db_mgr = DatabaseManager(temp_db)
+    db_mgr.init_tables()
+
+    # Bind 'parent_chan' to 'asuka' role
+    db_mgr.set_channel_role("mock_bot", "parent_chan", "asuka")
+
+    mock_cfg = KesokuConfig(
+        workspace=WorkspaceConfig(sessions_dir=str(tmp_path / "sessions"), db_path=temp_db),
+        agent=AgentConfig(user_prompts=[]),
+        agent_working_dir=str(tmp_path / "awd"),
+    )
+
+    with patch("kesoku.gateway.chatbot.base.get_config", return_value=mock_cfg):
+        mock_gateway = Gateway(context=KesokuContext(config=mock_cfg, db=db_mgr))
+        chatbot = MockChatbot(chatbot_id="mock_bot", gateway=mock_gateway)
+
+        # Trigger cronjob message in a new thread channel with parent_channel_id in metadata
+        msg = await chatbot.trigger_cronjob_message(
+            channel_id="thread_chan",
+            prompt_content="Hello thread",
+            metadata={"parent_channel_id": "parent_chan"},
+        )
+
+        # Check that the session role is 'asuka'
+        session = db_mgr.get_session(msg.session_id)
+        assert session is not None
+        assert session.role_name == "asuka"
+
+
+

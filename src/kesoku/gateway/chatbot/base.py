@@ -689,12 +689,25 @@ class Chatbot(ABC):
                 session_title = f"Cronjob {self.chatbot_id} {tag}"
             else:
                 session_title = title or f"{self.chatbot_id.capitalize()} Scheduled Job {channel_id}"
+
+            # Resolve role with parent inheritance support
+            role = "default"
+            db_role = await self.gateway.db.get_channel_role(self.chatbot_id, channel_id)
+            if isinstance(db_role, str):
+                role = db_role
+            elif metadata and "parent_channel_id" in metadata:
+                parent_id = metadata["parent_channel_id"]
+                parent_role = await self.gateway.db.get_channel_role(self.chatbot_id, str(parent_id))
+                if isinstance(parent_role, str):
+                    role = parent_role
+
             session = await self.gateway.create_session(
                 session_id=None,
                 title=session_title,
                 custom_prompt=custom_prompt,
                 chatbot_id=self.chatbot_id,
                 channel_id=channel_id,
+                role=role,
             )
         else:
             await self.gateway.db.update_session_updated_at(session.id, time.time())
