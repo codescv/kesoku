@@ -614,3 +614,102 @@ async def test_gemini_llm_with_cached_content() -> None:
         assert config.cached_content == "projects/123/locations/global/cachedContents/456"
 
 
+@pytest.mark.asyncio
+async def test_gemini_llm_thought_signature_propagation() -> None:
+    """Verify GeminiLLM propagates thought_signature to all parallel function call parts in the same turn."""
+    msg_user = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="User",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Hello!",
+    )
+    msg_tool_call_1 = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="Kesoku",
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_CALL,
+        content="Calling tool_1",
+        metadata={
+            "tool_name": "tool_1",
+            "tool_arguments": {},
+            "thought_signature": "018f3d6b5fa186d9b97ce8d38cb72b29f029963400",
+        },
+    )
+    msg_tool_call_2 = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="Kesoku",
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_CALL,
+        content="Calling tool_2",
+        metadata={
+            "tool_name": "tool_2",
+            "tool_arguments": {},
+            "thought_signature": None,  # Missing signature (parallel tool call)
+        },
+    )
+    msg_tool_res_1 = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="tool_1",
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
+        content="res 1",
+        metadata={"tool_name": "tool_1", "tool_result": "1"},
+        parent_id=msg_tool_call_1.id,
+    )
+    msg_tool_res_2 = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="tool_2",
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
+        content="res 2",
+        metadata={"tool_name": "tool_2", "tool_result": "2"},
+        parent_id=msg_tool_call_2.id,
+    )
+
+    mock_client = MagicMock()
+    mock_res = MagicMock()
+    mock_res.parts = [MagicMock(text="Completed both!", thought=False, function_call=None)]
+    mock_res.usage_metadata = MagicMock(prompt_token_count=10, candidates_token_count=5, total_token_count=15)
+    mock_client.models.generate_content.return_value = mock_res
+
+    with patch("google.genai.Client", return_value=mock_client):
+        gemini = GeminiLLM()
+        await gemini.generate(
+            history=[msg_user, msg_tool_call_1, msg_tool_call_2, msg_tool_res_1, msg_tool_res_2],
+        )
+
+        called_contents = mock_client.models.generate_content.call_args[1]["contents"]
+        # Turn 0: user (Hello!)
+        # Turn 1: model (tool_1 call, tool_2 call) -> This is the assistant turn
+        # Turn 2: user (tool responses)
+
+        # Verify Turn 1 content (assistant)
+        assistant_content = called_contents[1]
+        assert assistant_content.role == "model"
+        assert len(assistant_content.parts) == 2
+
+        # Part 0: tool_1 function call (should have the original signature)
+        assert assistant_content.parts[0].function_call.name == "tool_1"
+        assert assistant_content.parts[0].thought_signature == bytes.fromhex(
+            "018f3d6b5fa186d9b97ce8d38cb72b29f029963400"
+        )
+
+        # Part 1: tool_2 function call (should have the signature propagated!)
+        assert assistant_content.parts[1].function_call.name == "tool_2"
+        assert assistant_content.parts[1].thought_signature == bytes.fromhex(
+            "018f3d6b5fa186d9b97ce8d38cb72b29f029963400"
+        )
+
+
+

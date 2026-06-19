@@ -560,6 +560,20 @@ class GeminiLLM(BaseLLM):
         contents: list[types.Content] = []
         for turn in turns:
             role = "model" if turn.role == "assistant" else turn.role
+
+            # Gemini 3.1 models only attach the thought_signature to the first parallel function call,
+            # but strict validation requires all function calls in the turn block to carry a thought_signature.
+            # We copy the thought signature to all parallel function call blocks in the same turn.
+            common_ts = None
+            for block in turn.blocks:
+                if isinstance(block, ToolCallBlock) and block.thought_signature:
+                    common_ts = block.thought_signature
+                    break
+            if common_ts:
+                for block in turn.blocks:
+                    if isinstance(block, ToolCallBlock) and not block.thought_signature:
+                        block.thought_signature = common_ts
+
             parts = []
             for block in turn.blocks:
                 if isinstance(block, TextBlock):
