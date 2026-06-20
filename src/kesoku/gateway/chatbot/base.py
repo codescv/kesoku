@@ -647,6 +647,13 @@ class Chatbot(ABC):
 
             sys_msg = session.system_prompt or ""
 
+            # Extract metrics of the last execution turn
+            last_metrics = None
+            for m in reversed(history):
+                if m.role == MessageRole.ASSISTANT and m.metadata and m.metadata.get("turn_metrics"):
+                    last_metrics = m.metadata.get("turn_metrics")
+                    break
+
             return LcmHtmlReporter.render_to_temp_file(
                 session=session,
                 root_summaries=root_summaries,
@@ -655,6 +662,7 @@ class Chatbot(ABC):
                 buffer=buffer,
                 protected_tail=protected_tail,
                 sys_msg=sys_msg,
+                last_metrics=last_metrics,
             )
         except Exception as e:
             logger.error(f"Failed to get LCM context by channel: {e}")

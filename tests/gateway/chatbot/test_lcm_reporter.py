@@ -90,6 +90,7 @@ def test_render_to_temp_file() -> None:
         buffer=buffer,
         protected_tail=protected_tail,
         sys_msg=sys_msg,
+        last_metrics={"context_tokens": 78000, "cached_tokens": 138000},
     )
 
     try:
@@ -109,6 +110,8 @@ def test_render_to_temp_file() -> None:
         assert "You are a helpful assistant." in content
         assert "Backlog item" in content
         assert "Active Buffer" in content
+        assert "Actual LLM Context (Last Turn)" in content
+        assert "78K active + 138K cached" in content
     finally:
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)

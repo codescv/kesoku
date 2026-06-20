@@ -4,10 +4,29 @@ import html
 import json
 import logging
 import tempfile
+from typing import Any
 
 from kesoku.db import Message, Session, SummaryNode
 
 logger = logging.getLogger(__name__)
+
+try:
+    import tiktoken
+    _tokenizer = tiktoken.get_encoding("cl100k_base")
+except ImportError:
+    _tokenizer = None
+
+
+def estimate_tokens(text: str) -> int:
+    """Accurately count tokens using tiktoken (cl100k_base) or fallback to char//4."""
+    if not text:
+        return 0
+    if _tokenizer is not None:
+        try:
+            return len(_tokenizer.encode(text))
+        except Exception:
+            pass
+    return len(text) // 4
 
 
 class LcmHtmlReporter:
@@ -99,6 +118,7 @@ class LcmHtmlReporter:
         buffer: list[Message],
         protected_tail: list[Message],
         sys_msg: str,
+        last_metrics: dict[str, Any] | None = None,
     ) -> str:
         """Render the custom context state into a temporary HTML file.
 
@@ -110,14 +130,11 @@ class LcmHtmlReporter:
             buffer: Messages in the middle buffer (pending compaction).
             protected_tail: Messages in the protected tail (fresh tail).
             sys_msg: Resolved system prompt instructions.
+            last_metrics: Extracted turn metrics of last assistant execution.
 
         Returns:
             The absolute path of the generated temporary HTML file.
         """
-        # Local token estimation helper
-        def estimate_tokens(text: str) -> int:
-            return len(text or "") // 4
-
         # Estimate active context tokens
         total_tokens = (
             estimate_tokens(sys_msg)
@@ -167,6 +184,24 @@ class LcmHtmlReporter:
         fresh_tail_html_str = (
             LcmHtmlReporter._render_messages_to_html(protected_tail) or "<p>*(Fresh tail is empty)*</p>"
         )
+
+        # Build actual LLM metrics card if available
+        actual_llm_html = ""
+        if last_metrics:
+            context_tokens = last_metrics.get("context_tokens", 0)
+            cached_tokens = last_metrics.get("cached_tokens", 0)
+            total_llm = context_tokens + cached_tokens
+            context_k = f"{round(context_tokens / 1000)}K" if context_tokens else "0K"
+            cached_k = f"{round(cached_tokens / 1000)}K" if cached_tokens else "0K"
+            actual_llm_html = f"""
+            <div class="stat-card" style="border-left: 4px solid #10b981;">
+                <div class="stat-label">Actual LLM Context (Last Turn)</div>
+                <div class="stat-value">{total_llm:,} Tokens</div>
+                <div style="font-size: 0.85rem; color: #8899a6; margin-top: 5px;">
+                    {context_k} active + {cached_k} cached
+                </div>
+            </div>
+            """
 
         # Combined HTML / CSS template
         html_template = f"""<!DOCTYPE html>
@@ -383,9 +418,10 @@ class LcmHtmlReporter:
                     <div class="stat-value">{len(protected_head)} / {len(protected_tail)} Messages</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Total Active Context Size</div>
-                    <div class="stat-value">{total_tokens} Tokens</div>
+                    <div class="stat-label">Chat History Size (Est.)</div>
+                    <div class="stat-value">{total_tokens:,} Tokens</div>
                 </div>
+                {actual_llm_html}
             </div>
         </header>
 
