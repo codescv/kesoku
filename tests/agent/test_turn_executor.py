@@ -1588,6 +1588,277 @@ async def test_turn_executor_cache_expiration_retry(temp_db: str) -> None:
     assert assistant_msgs[0].status == "pending"
 
 
+@pytest.mark.asyncio
+async def test_turn_executor_auto_compaction_buffer_exclusion(temp_db: str) -> None:
+    """Verify that compacted middle turns are correctly excluded from buffer in LLM history."""
+    from kesoku.constants import MessageRole
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.create_session("sess_exclude", title="Exclude Session")
+
+    # Create history: Turn 1 (user/assistant) -> Turn 2 (user/assistant) -> Turn 3 (user)
+    msg1 = Message(
+        session_id="sess_exclude",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="Turn 1 user",
+        status="processed",
+        timestamp=time.time() - 100,
+    )
+    await gw.post(msg1)
+    msg2 = Message(
+        session_id="sess_exclude",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="Turn 1 reply",
+        status="delivered",
+        timestamp=time.time() - 90,
+    )
+    await gw.post(msg2)
+
+    msg3 = Message(
+        session_id="sess_exclude",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="Turn 2 user",
+        status="processed",
+        timestamp=time.time() - 80,
+    )
+    await gw.post(msg3)
+    msg4 = Message(
+        session_id="sess_exclude",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="Turn 2 reply",
+        status="delivered",
+        timestamp=time.time() - 70,
+    )
+    await gw.post(msg4)
+
+    active_msg = Message(
+        session_id="sess_exclude",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="Turn 3 active",
+        status="pending_agent",
+        timestamp=time.time(),
+    )
+    await gw.post(active_msg)
+
+    # Mock LLM to capture history
+    class CaptureLLM(BaseLLM):
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+            **kwargs: Any,
+        ) -> LLMResponse:
+            self.captured_history = list(history or [])
+            return LLMResponse(content="Response content", total_tokens=10)
+
+    llm = CaptureLLM()
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    turn_logger = MagicMock(spec=TurnLogger)
+
+    # Mock auto compact to compress Turn 2 (middle turn) only!
+    from kesoku.db import SummaryNode
+    async def mock_auto_compact(session_id, history, llm, config):
+        node = SummaryNode(
+            id="node-2-uuid",
+            session_id=session_id,
+            level=0,
+            summary="Turn 2 summary content",
+            start_timestamp=time.time() - 80,
+            end_timestamp=time.time() - 70,
+            token_count=10,
+            source_token_count=100,
+            parent_id=None,
+        )
+        await gw.db.insert_summary_node(node)
+        await gw.db.update_messages_summary_node([msg3.id, msg4.id], "node-2-uuid")
+        # Update the memory message objects in history to match the database update
+        for msg in history:
+            if msg.id in (msg3.id, msg4.id):
+                msg.summary_node_id = "node-2-uuid"
+        return True
+
+    context = KesokuContext(config=cfg, llm=llm)
+    executor = TurnExecutor("sess_exclude", gw, tool_runner, turn_logger, context=context)
+
+    # Set parameters:
+    # protect_front = 1 (protects Turn 1)
+    # protect_tail = 1 (protects Turn 3 active)
+    # This leaves Turn 2 as middle/buffer candidate!
+    cfg.agent.protect_front_turns = 1
+    cfg.agent.protect_tail_turns = 1
+
+    worker = MagicMock()
+    type(worker).running = PropertyMock(side_effect=[True, False])
+    async def mock_pivot(m: Message) -> Message:
+        return m
+    worker.drain_queue_and_pivot.side_effect = mock_pivot
+    worker.queue_empty.return_value = True
+
+    with patch("kesoku.context.get_config", return_value=cfg), \
+         patch(
+             "kesoku.agent.compressor.HistoryCompressor.auto_compact_session",
+             side_effect=mock_auto_compact,
+         ) as mock_compact:
+        await executor.process_turn(
+            current_msg=active_msg,
+            worker=worker,
+            session_staging_dir="/tmp/sess_exclude",
+        )
+
+    mock_compact.assert_called_once()
+
+    # Reconstructed history must have:
+    # 1. Turn 1 (messages 1 and 2)
+    # 2. Scaffold message (with Turn 2 summary "Turn 2 summary content")
+    # 3. Scaffold ack
+    # 4. Turn 3 active message
+    # Turn 2 raw messages must NOT be in the history!
+
+    captured_contents = [m.content for m in llm.captured_history]
+
+    # Assert Turn 1 is present
+    assert any("Turn 1 user" in c for c in captured_contents)
+    assert any("Turn 1 reply" in c for c in captured_contents)
+
+    # Assert Scaffold with Turn 2 summary is present
+    assert any("Turn 2 summary content" in c for c in captured_contents)
+
+    # Assert Turn 3 is present
+    assert any("Turn 3 active" in c for c in captured_contents)
+
+    # Assert Turn 2 raw messages are NOT present!
+    assert not any("Turn 2 user" in c for c in captured_contents)
+    assert not any("Turn 2 reply" in c for c in captured_contents)
+
+
+@pytest.mark.asyncio
+async def test_history_compressor_in_place_update(temp_db: str) -> None:
+    """Verify that real HistoryCompressor.auto_compact_session updates Message objects in-place in memory."""
+    from kesoku.agent.compressor import HistoryCompressor
+    from kesoku.constants import MessageRole
+    DatabaseManager(temp_db).init_tables()
+
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    # Setup configuration to trigger compaction for 1 turn (Turn 1)
+    cfg.agent.protect_front_turns = 0
+    cfg.agent.protect_tail_turns = 1  # protect only the active Turn 2
+    cfg.agent.base_node_turns = 1
+    cfg.agent.base_node_min_tokens = 0
+
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.create_session("sess_real_compact", title="Real Compact Session")
+
+    # Turn 1: user and assistant (should get compacted)
+    msg1 = Message(
+        session_id="sess_real_compact",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="Turn 1 user text that is fairly long to satisfy logic" * 5,
+        status="processed",
+        timestamp=time.time() - 100,
+    )
+    await gw.post(msg1)
+    msg2 = Message(
+        session_id="sess_real_compact",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="Turn 1 reply text that is also fairly long" * 5,
+        status="delivered",
+        timestamp=time.time() - 90,
+    )
+    await gw.post(msg2)
+
+    # Active Turn 2: pending message (should NOT get compacted due to protect_tail_turns=1)
+    active_msg = Message(
+        session_id="sess_real_compact",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="Active query",
+        status="pending_agent",
+        timestamp=time.time(),
+    )
+    await gw.post(active_msg)
+
+    # Load history from gateway (which mimics the list passed to TurnExecutor/HistoryCompressor)
+    history = await gw.db.get_session_history("sess_real_compact", limit=0)
+    assert len(history) == 3
+
+    # Mock LLM used by HistoryCompressor to summarize the turn content
+    class CompactorLLM(BaseLLM):
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+            **kwargs: Any,
+        ) -> LLMResponse:
+            return LLMResponse(content="Summarized turn content successfully.", total_tokens=10)
+
+    llm = CompactorLLM()
+
+    # Verify that before compaction, summary_node_id is None for all messages
+    assert msg1.summary_node_id is None
+    assert msg2.summary_node_id is None
+    assert active_msg.summary_node_id is None
+
+    # Run the real HistoryCompressor auto_compact_session
+    compressor = HistoryCompressor(gw.db)
+    compacted = await compressor.auto_compact_session(
+        session_id="sess_real_compact",
+        history=history,
+        llm=llm,
+        config=cfg,
+    )
+
+    assert compacted is True
+
+    # Find the compacted message objects in the history list we passed!
+    mem_msg1 = next(m for m in history if m.id == msg1.id)
+    mem_msg2 = next(m for m in history if m.id == msg2.id)
+    mem_active = next(m for m in history if m.id == active_msg.id)
+
+    # VERIFY: In-memory Message objects must have summary_node_id updated!
+    assert mem_msg1.summary_node_id is not None
+    assert mem_msg2.summary_node_id is not None
+
+    # The active message should NOT be compacted (no summary_node_id)
+    assert mem_active.summary_node_id is None
+
+    # VERIFY: Database matches memory!
+    db_msg1 = await gw.db.get_message(msg1.id)
+    db_msg2 = await gw.db.get_message(msg2.id)
+    assert db_msg1.summary_node_id == mem_msg1.summary_node_id
+    assert db_msg2.summary_node_id == mem_msg2.summary_node_id
+
+
+
+
 
 
 

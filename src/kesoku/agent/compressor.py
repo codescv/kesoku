@@ -169,6 +169,11 @@ class HistoryCompressor:
                 all_msg_ids = [msg.id for t in current_chunk for msg in t]
                 await self.db.update_messages_summary_node(all_msg_ids, node_id)
 
+                # Update in-memory message references to prevent buffer duplication
+                for t in current_chunk:
+                    for msg in t:
+                        msg.summary_node_id = node_id
+
                 compacted_occurred = True
                 current_chunk.clear()
                 current_tokens = 0
