@@ -805,7 +805,8 @@ class TurnExecutor:
             return False
 
         result_msgs = await asyncio.gather(*exec_tasks)
-        for rm in result_msgs:
+        for idx, rm in enumerate(result_msgs):
+            rm.timestamp = time.time() + (idx * 0.001)
             await self.gateway.post(rm)
 
         # Check if history was compacted and session was transitioned
