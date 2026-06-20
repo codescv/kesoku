@@ -820,6 +820,44 @@ def test_history_to_turns_tool_results_sorting() -> None:
     assert turns[1].blocks[1].tool_call_id == "call_2"
 
 
+def test_gemini_llm_count_tokens_thought_signature() -> None:
+    """Verify GeminiLLM.count_tokens accounts for thought_signature length in extra_tokens."""
+    mock_client = MagicMock()
+    mock_res = MagicMock()
+    mock_res.total_tokens = 50
+    mock_client.models.count_tokens.return_value = mock_res
+
+    # A tool call message containing thought_signature hex string (representing 372 hex characters -> 186 bytes)
+    # 186 bytes / 3.72 = 50 extra tokens
+    ts_bytes = b"A" * 186
+    ts_hex = ts_bytes.hex()
+
+    msg = Message(
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="Kesoku",
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_CALL,
+        content="calling a tool",
+        metadata={
+            "tool_name": "calc",
+            "tool_arguments": {},
+            "thought_signature": ts_hex,
+        }
+    )
+
+    with patch("google.genai.Client", return_value=mock_client):
+        gemini = GeminiLLM()
+        tokens = gemini.count_tokens(history=[msg])
+
+        # Extra tokens = 186 / 3.72 = 50
+        # Total tokens = 50 (from API) + 50 (extra) = 100
+        assert tokens == 100
+        mock_client.models.count_tokens.assert_called_once()
+
+
+
 
 
 

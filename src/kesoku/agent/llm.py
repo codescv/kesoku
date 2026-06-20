@@ -798,7 +798,13 @@ class GeminiLLM(BaseLLM):
                 contents=native_input["contents"],
                 config=count_config,
             )
-            return res.total_tokens
+            extra_tokens = 0
+            for content in native_input["contents"]:
+                if content.parts:
+                    for part in content.parts:
+                        if part.thought_signature:
+                            extra_tokens += int(len(part.thought_signature) / 3.72)
+            return res.total_tokens + extra_tokens
         except Exception as e:
             logger.warning(f"Failed to count tokens via Gemini API: {e}. Falling back to estimation.")
             return self.estimate_tokens_fallback(prompt, resolved_system_prompt or system_prompt, history)
