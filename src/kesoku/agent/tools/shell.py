@@ -7,6 +7,7 @@ import re
 import shlex
 import signal
 import time
+import uuid
 from typing import Any
 
 from kesoku.agent.tools.registry import ToolContext, default_registry
@@ -312,7 +313,7 @@ async def run_shell_command(
         env["STAGING_DIR"] = PathResolver.get_session_staging_dir(context.session_workspace)
 
     # Prepare unique background job identifiers and log paths
-    job_id = f"job_{int(time.time())}"
+    job_id = f"job_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     log_filename_stdout = f"background_{job_id}.stdout"
     log_filename_stderr = f"background_{job_id}.stderr"
     folder_name = context.session_workspace
@@ -444,7 +445,7 @@ async def run_shell_command(
     final_output = out_str
     if len(out_str) > effective_max:
         timestamp = int(time.time())
-        output_filename = f"cmd_output_{timestamp}.txt"
+        output_filename = f"cmd_output_{timestamp}_{uuid.uuid4().hex[:8]}.txt"
         output_filepath = os.path.join(session_staging_dir, output_filename)
         try:
             await async_write_text_file(output_filepath, out_str)
