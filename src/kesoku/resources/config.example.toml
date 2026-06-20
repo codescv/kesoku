@@ -25,11 +25,24 @@ user_prompts = []
 # Whether to write raw LLM inputs and outputs to turn log files in the session directory.
 raw_llm_logs = false
 
-# Threshold percentage of context window limit before warning is shown (default: 80.0)
-compact_history_warning_threshold = 50.0
 
-# Threshold for automatic in-place history compaction (if >1 raw tokens, if <1 window ratio, default: 0.8)
-compact_history_threshold = 0.8
+# Number of turns from start protected from compression.
+protect_front_turns = 1
+
+# Number of turns from end protected from compression.
+protect_tail_turns = 5
+
+# Token threshold above which buffer turns are compressed.
+base_node_min_tokens = 20000
+
+# Number of turns grouped to form a Level-0 node.
+base_node_turns = 4
+
+# Branching factor K to merge K Level-n nodes into Level-n+1.
+context_consolidation_k = 4
+
+# Model name to use for semantic search and context compression vector embedding generation.
+embedding_model = "vertex_ai/text-multilingual-embedding-002"
 
 
 [gemini]
@@ -170,14 +183,3 @@ background_threshold_seconds = 300.0
 # Custom environment variables injected into subprocess execution environments.
 # PATH = "/usr/bin:/bin"
 
-
-[env]
-# OpenLCM tunables injected as environment variables on startup.
-# Configures the Lossless Context Management condensation thresholds.
-LCM_CONTEXT_THRESHOLD = 0.1
-LCM_FRESH_TAIL_COUNT = 40
-LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED = true
-LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED = true
-LCM_RESERVE_TOKENS_FLOOR = 50000
-LCM_MAX_ASSEMBLY_TOKENS = 300000
-LCM_INCREMENTAL_MAX_DEPTH = -1

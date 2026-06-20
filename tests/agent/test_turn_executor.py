@@ -1038,7 +1038,6 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
 
     executor = TurnExecutor("sess_auto_compact", gw, tool_runner, turn_logger, context=context)
 
-    cfg.agent.compact_history_threshold = 0.8  # 80% of 1000 = 800 tokens
     cfg.agent.protect_front_turns = 1
     cfg.agent.protect_tail_turns = 5
 

@@ -79,13 +79,27 @@ class EmbeddingStore:
             logger.debug("Embedding API call failed: %s", exc)
             return None
 
-    async def embed(self, content_type: str, content_id: str, text: str) -> None:
+    async def embed(self, content_type: str, content_id: str, text: str, overwrite: bool = False) -> bool:
         """Generate and save embedding for a given content item."""
         if not self.enabled or not self._conn or not text:
-            return
+            return False
+
+        if not overwrite:
+            # Check if embedding already exists
+            try:
+                cursor = self._conn.cursor()
+                cursor.execute(
+                    "SELECT 1 FROM context_embeddings WHERE content_type = ? AND content_id = ?",
+                    (content_type, content_id),
+                )
+                if cursor.fetchone():
+                    return True
+            except Exception as exc:
+                logger.debug("Failed to query existing embedding: %s", exc)
+
         vec = await self._get_embedding(text)
         if vec is None:
-            return
+            return False
 
         vec_blob = struct.pack(f"{len(vec)}f", *vec)
         try:
@@ -97,8 +111,10 @@ class EmbeddingStore:
                     """,
                     (content_type, content_id, vec_blob),
                 )
+            return True
         except Exception as exc:
             logger.debug("Failed to insert embedding into database: %s", exc)
+            return False
 
     def delete(self, content_type: str, content_id: str) -> None:
         """Remove embedding from storage by content coordinates."""

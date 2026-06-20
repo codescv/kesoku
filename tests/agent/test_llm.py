@@ -715,4 +715,45 @@ async def test_gemini_llm_thought_signature_propagation() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_gemini_llm_token_caching_calculations() -> None:
+    """Verify GeminiLLM correctly aggregates prompt tokens when using cached_content."""
+    mock_client = MagicMock()
+    mock_res = MagicMock()
+    mock_res.parts = [MagicMock(text="Response text", thought=False, function_call=None)]
+
+    # Configure usage metadata:
+    # prompt_token_count=10 (raw/uncached in API response), cached_content_token_count=100
+    usage = MagicMock()
+    usage.prompt_token_count = 10
+    usage.cached_content_token_count = 100
+    usage.candidates_token_count = 5
+    usage.total_token_count = 15  # Ignored/recomputed in our parser
+    mock_res.usage_metadata = usage
+    mock_client.models.generate_content.return_value = mock_res
+
+    # Case 1: With cached_content -> prompt_tokens should be raw prompt_token_count
+    with patch("google.genai.Client", return_value=mock_client):
+        gemini = GeminiLLM()
+        res = await gemini.generate(
+            prompt="Hello",
+            cached_content="projects/123/locations/global/cachedContents/456",
+        )
+        assert res.prompt_tokens == 10
+        assert res.cached_tokens == 100
+        assert res.total_tokens == 15
+
+    # Case 2: Without cached_content -> prompt_tokens should be raw prompt_token_count
+    with patch("google.genai.Client", return_value=mock_client):
+        gemini = GeminiLLM()
+        res = await gemini.generate(
+            prompt="Hello",
+            cached_content=None,
+        )
+        assert res.prompt_tokens == 10
+        assert res.cached_tokens == 100
+        assert res.total_tokens == 15
+
+
+
 

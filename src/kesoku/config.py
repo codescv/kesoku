@@ -77,14 +77,6 @@ class AgentConfig(BaseModel):
         default=True,
         description="Whether to write raw LLM inputs and outputs to turn log files in the session directory",
     )
-    compact_history_warning_threshold: float = Field(
-        default=80.0,
-        description="Threshold percentage of context window limit before warning is shown",
-    )
-    compact_history_threshold: float = Field(
-        default=0.8,
-        description="Threshold for automatic in-place history compaction (if >1 raw tokens, if <1 window ratio)",
-    )
     context_llm: str | None = Field(
         default=None,
         description="LLM provider identifier for context compression and background memory (if None, defaults to llm)",

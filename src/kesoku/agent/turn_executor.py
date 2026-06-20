@@ -323,10 +323,8 @@ class TurnExecutor:
                         logger.error(f"Failed to log LLM turn: {le}", exc_info=True)
 
                 # Accumulate token metrics
-                if res.prompt_tokens:
-                    last_context_tokens = res.prompt_tokens
-                if res.cached_tokens:
-                    last_cached_tokens = res.cached_tokens
+                last_context_tokens = res.prompt_tokens or 0
+                last_cached_tokens = res.cached_tokens or 0
                 if res.total_tokens:
                     turn_tokens += res.total_tokens
 

@@ -41,6 +41,13 @@ class KesokuContext:
         # Resolve SQLite DB path for embeddings relative to kesoku.db directory
         self.embedding_db_path = os.path.join(os.path.dirname(self.config.workspace.db_path), "context_embeddings.db")
 
+        # Ensure LiteLLM can locate the correct GCP project and location for Vertex AI
+        if self.config.agent.embedding_model.startswith("vertex_ai/"):
+            if self.config.gemini.project_id:
+                os.environ["VERTEX_PROJECT"] = self.config.gemini.project_id
+            if self.config.gemini.location:
+                os.environ["VERTEX_LOCATION"] = self.config.gemini.location
+
         # Initialize global EmbeddingStore for general indexing
         self.embedding_store = EmbeddingStore(
             db_path=self.embedding_db_path,
