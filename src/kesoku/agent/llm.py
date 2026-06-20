@@ -972,10 +972,10 @@ class ClaudeLLM(BaseLLM):
         total_tokens = None
         cached_tokens = None
         if getattr(raw_response, "usage", None):
-            prompt_tokens = raw_response.usage.input_tokens
+            cached_tokens = getattr(raw_response.usage, "cache_read_input_tokens", None)
+            prompt_tokens = raw_response.usage.input_tokens + (cached_tokens or 0)
             candidates_tokens = raw_response.usage.output_tokens
             total_tokens = prompt_tokens + candidates_tokens
-            cached_tokens = getattr(raw_response.usage, "cache_read_input_tokens", None)
 
         raw_json = None
         try:

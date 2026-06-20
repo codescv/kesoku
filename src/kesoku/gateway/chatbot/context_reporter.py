@@ -252,17 +252,17 @@ class ContextHtmlReporter:
         # Build actual LLM metrics card if available
         actual_llm_html = ""
         if last_metrics:
-            context_tokens = last_metrics.get("context_tokens", 0)
+            total_llm = last_metrics.get("context_tokens", 0)
             cached_tokens = last_metrics.get("cached_tokens", 0)
-            total_llm = context_tokens + cached_tokens
-            context_k = f"{round(context_tokens / 1000)}K" if context_tokens else "0K"
+            active_tokens = max(0, total_llm - cached_tokens)
+            active_k = f"{round(active_tokens / 1000)}K" if active_tokens else "0K"
             cached_k = f"{round(cached_tokens / 1000)}K" if cached_tokens else "0K"
             actual_llm_html = f"""
             <div class="stat-card" style="border-left: 4px solid #10b981;">
                 <div class="stat-label">Actual LLM Context (Last Turn)</div>
                 <div class="stat-value">{total_llm:,} Tokens</div>
                 <div style="font-size: 0.85rem; color: #8899a6; margin-top: 5px;">
-                    {context_k} active + {cached_k} cached
+                    {active_k} active + {cached_k} cached
                 </div>
             </div>
             """

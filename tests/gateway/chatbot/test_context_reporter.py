@@ -128,7 +128,7 @@ def test_render_to_temp_file() -> None:
         buffer=buffer,
         protected_tail=protected_tail,
         sys_msg=sys_msg,
-        last_metrics={"context_tokens": 78000, "cached_tokens": 138000},
+        last_metrics={"context_tokens": 216000, "cached_tokens": 138000},
     )
 
     try:

@@ -151,6 +151,7 @@ async def test_claude_llm_generate_history_conversion() -> None:
     mock_res.content = [MagicMock(type="text", text="The answer is 4.")]
     mock_res.usage.input_tokens = 10
     mock_res.usage.output_tokens = 5
+    mock_res.usage.cache_read_input_tokens = None
     mock_client.messages.create.return_value = mock_res
 
     with patch("kesoku.agent.llm.AnthropicVertex", return_value=mock_client):
@@ -266,6 +267,7 @@ async def test_claude_llm_with_attachments() -> None:
     mock_res.content = [MagicMock(type="text", text="Extracted PDF text")]
     mock_res.usage.input_tokens = 12
     mock_res.usage.output_tokens = 6
+    mock_res.usage.cache_read_input_tokens = None
     mock_client.messages.create.return_value = mock_res
 
     # Use patches to mock file presence and reading
