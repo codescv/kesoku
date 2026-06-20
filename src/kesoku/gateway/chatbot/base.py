@@ -641,13 +641,33 @@ class Chatbot(ABC):
 
             assembled = lcm_engine._assemble_context(system_message, remaining_messages)
 
-            # Separate remaining_messages into backlog and fresh tail
-            n = len(remaining_messages)
-            fresh_tail_count = lcm_engine._config.fresh_tail_count
-            fresh_tail_start = max(0, n - fresh_tail_count)
+            # Map store_ids from database to populate _lcm_store_id on remaining_messages
+            try:
+                tail_rows = lcm_engine._store.get_session_tail(session.id, limit=len(remaining_messages))
+                for i, row in enumerate(tail_rows):
+                    idx = len(remaining_messages) - len(tail_rows) + i
+                    if 0 <= idx < len(remaining_messages):
+                        remaining_messages[idx]["_lcm_store_id"] = row.get("store_id")
+            except Exception as e:
+                logger.debug("Failed to map store_ids for reporter: %s", e)
 
-            backlog_msgs = remaining_messages[:fresh_tail_start]
-            fresh_msgs = remaining_messages[fresh_tail_start:]
+            # Find the first message index after the compaction frontier
+            frontier_store_id = lcm_engine._last_compacted_store_id
+            frontier_index = 0
+            for idx, msg in enumerate(remaining_messages):
+                sid = msg.get("_lcm_store_id")
+                if sid is not None and sid <= frontier_store_id:
+                    frontier_index = idx + 1
+
+            uncompacted_msgs = remaining_messages[frontier_index:]
+
+            # Separate uncompacted messages into backlog and fresh tail
+            n_uncompacted = len(uncompacted_msgs)
+            fresh_tail_count = lcm_engine._config.fresh_tail_count
+            fresh_tail_start = max(0, n_uncompacted - fresh_tail_count)
+
+            backlog_msgs = uncompacted_msgs[:fresh_tail_start]
+            fresh_msgs = uncompacted_msgs[fresh_tail_start:]
 
             sys_msg = system_message.get("content") or "" if system_message else ""
 
