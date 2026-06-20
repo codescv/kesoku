@@ -12,8 +12,6 @@ import tzlocal
 
 from kesoku.agent.history import (
     build_history,
-    messages_to_openlcm_dicts,
-    openlcm_dicts_to_messages,
     prepare_history_for_llm,
 )
 from kesoku.agent.llm import BaseLLM
@@ -332,19 +330,6 @@ class TurnExecutor:
                 if res.total_tokens:
                     turn_tokens += res.total_tokens
 
-                # Update OpenLCM engine metrics
-                try:
-                    self.context.get_lcm_engine(self.session_id).update_from_response(
-                        {
-                            "prompt_tokens": res.prompt_tokens,
-                            "completion_tokens": res.candidates_tokens,
-                            "total_tokens": res.total_tokens,
-                            "cache_read_tokens": res.cached_tokens,
-                        }
-                    )
-                except Exception as oe:
-                    logger.warning(f"Failed to update OpenLCM engine token metrics: {oe}")
-
                 if res.tool_calls:
                     turn_tool_calls += len(res.tool_calls)
                     should_continue = await self._execute_tool_calls(res, current_msg, worker)
@@ -650,7 +635,7 @@ class TurnExecutor:
         cfg,
         current_msg: Message,
     ) -> tuple[list[Message], bool]:
-        """Check context window usage and automatically compact history in-place using OpenLCM.
+        """Check context window usage and automatically compact history using custom turn-based compressor.
 
         Returns:
             A tuple of (active message history list, compacted_occurred bool).
@@ -658,97 +643,97 @@ class TurnExecutor:
         if not history:
             return history, False
 
-        # Initialize/Bind the active session to OpenLCM engine
-        lcm_engine = self.context.get_lcm_engine(
+        from kesoku.agent.compressor import HistoryCompressor
+
+        compressor = HistoryCompressor(self.context.db)
+
+        # Trigger automatic compaction
+        compacted_occurred = await compressor.auto_compact_session(
             session_id=self.session_id,
-            context_length=llm.context_window_limit,
+            history=history,
+            llm=llm,
+            config=cfg,
         )
 
-        frontier_store_id = lcm_engine._last_compacted_store_id
-        is_compacted = isinstance(frontier_store_id, (int, float)) and frontier_store_id > 0
+        # Retrieve all root summary nodes from the database for this session
+        root_summaries = await self.context.db.get_root_summary_nodes(self.session_id)
 
-        # Determine the uncompacted tail and construct the assembled input
-        max_timestamp = None
-        if is_compacted:
-            cursor = lcm_engine._store._conn.execute(
-                "SELECT MAX(timestamp) FROM messages WHERE session_id = ? AND store_id <= ?",
-                (self.session_id, frontier_store_id),
+        if not root_summaries:
+            return history, compacted_occurred
+
+        # Re-segment and assemble the scaffold context
+        turns = compressor.segment_turns(history)
+        protect_front = cfg.agent.protect_front_turns
+        protect_tail = cfg.agent.protect_tail_turns
+
+        # Assemble Protected Head
+        protected_head = []
+        for t in turns[:protect_front]:
+            protected_head.extend(t)
+
+        # Assemble Protected Tail
+        protected_tail = []
+        if len(turns) > protect_front:
+            tail_start = max(protect_front, len(turns) - protect_tail)
+            for t in turns[tail_start:]:
+                protected_tail.extend(t)
+
+        # Assemble Buffer (uncompacted turns in the middle)
+        buffer = []
+        if len(turns) > protect_front + protect_tail:
+            middle_turns = turns[protect_front : -protect_tail]
+            for t in middle_turns:
+                if not any(msg.summary_node_id is not None for msg in t):
+                    buffer.extend(t)
+
+        # Format hierarchical summaries
+        scaffold_parts = [
+            "[Note: This conversation uses custom turn-based context management. "
+            "Earlier turns have been compacted into hierarchical summaries below. "
+            "You have access to search past messages and memories using standard search tools.]\n"
+        ]
+        for node in root_summaries:
+            depth_label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(node.level, f"Level-{node.level}")
+            scaffold_parts.append(
+                f"\n[{depth_label} Summary (Level {node.level}, node {node.id})]"
+                f"\n{node.summary}"
             )
-            max_timestamp = cursor.fetchone()[0]
+        scaffold_content = "\n".join(scaffold_parts)
 
-        if max_timestamp:
-            compacted_count = sum(1 for m in history if m.timestamp <= max_timestamp)
-            uncompacted_history = history[compacted_count:]
-        else:
-            uncompacted_history = history
+        # Build assembled messages in memory
+        assembled_history = []
+        assembled_history.extend(protected_head)
 
-        # Convert uncompacted Kesoku Messages to OpenLCM raw dictionaries
-        uncompacted_lcm_msgs = messages_to_openlcm_dicts(uncompacted_history)
+        # Append Scaffold as a USER message with an ASSISTANT acknowledgement
+        scaffold_msg = Message(
+            session_id=self.session_id,
+            chatbot_id=current_msg.chatbot_id,
+            channel_id=current_msg.channel_id,
+            sender="system",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content=scaffold_content,
+            status=MessageStatus.RESPONDED,
+            metadata={"is_scaffold": True},
+        )
+        ack_msg = Message(
+            session_id=self.session_id,
+            chatbot_id=current_msg.chatbot_id,
+            channel_id=current_msg.channel_id,
+            sender="assistant",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="Understood. I have access to the full conversation history.",
+            status=MessageStatus.RESPONDED,
+            metadata={"is_scaffold_ack": True},
+        )
+        assembled_history.append(scaffold_msg)
+        assembled_history.append(ack_msg)
 
-        # Trigger compression if eligible or already compacted
-        compacted_occurred = False
-        if is_compacted or lcm_engine.should_compress_preflight(uncompacted_lcm_msgs):
-            logger.info(f"Initiating Lossless Context Compaction via OpenLCM for session {self.session_id}.")
-            compressed_lcm_msgs = await lcm_engine.compress(uncompacted_lcm_msgs)
-            compacted_occurred = (lcm_engine._last_compression_status != "noop")
+        assembled_history.extend(buffer)
+        assembled_history.extend(protected_tail)
 
-            if lcm_engine._last_compression_status == "noop":
-                # Retrieve active summary nodes from DAG to reconstruct scaffold without clipping
-                dag_nodes = lcm_engine._dag.get_active_nodes(self.session_id)
-                if dag_nodes:
-                    from collections import defaultdict
-                    by_depth = defaultdict(list)
-                    for node in dag_nodes:
-                        by_depth[node.depth].append(node)
-
-                    scaffold_parts = [
-                        "[Note: This conversation uses Lossless Context Management (LCM). "
-                        "Earlier turns have been compacted into hierarchical summaries below. "
-                        "Use lcm_grep, lcm_expand, or lcm_expand_query to recall specifics.]\n"
-                    ]
-                    max_dag_depth = max(by_depth.keys())
-                    for depth in range(max_dag_depth, -1, -1):
-                        nodes_at_depth = sorted(by_depth.get(depth, []), key=lambda nd: nd.created_at)
-                        depth_label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(depth, f"Depth-{depth}")
-                        for node in nodes_at_depth:
-                            scaffold_parts.append(
-                                f"\n[{depth_label} Summary (d{depth}, node {node.node_id})]"
-                                f"\n{node.summary}"
-                                f"\n[{node.expand_hint or 'Expand for details'}]"
-                            )
-                    scaffold_content = "\n".join(scaffold_parts)
-
-                    system_msg_dict = None
-                    remaining_msgs = list(uncompacted_lcm_msgs)
-                    if remaining_msgs and remaining_msgs[0].get("role") == "system":
-                        system_msg_dict = remaining_msgs.pop(0)
-
-                    if not system_msg_dict and system_prompt:
-                        system_msg_dict = {"role": "system", "content": system_prompt}
-
-                    assembled_msgs = []
-                    if system_msg_dict:
-                        assembled_msgs.append(system_msg_dict)
-                    assembled_msgs.append({"role": "user", "content": scaffold_content})
-                    assembled_msgs.append({
-                        "role": "assistant",
-                        "content": "Understood. I have access to the full conversation history through LCM tools."
-                    })
-                    assembled_msgs.extend(remaining_msgs)
-                    compressed_lcm_msgs = assembled_msgs
-
-            # Translate OpenLCM output dictionaries back to Kesoku Messages
-            session = await self.context.db.get_session(self.session_id)
-            workspace_name = session.workspace_name if session else None
-            history = openlcm_dicts_to_messages(
-                compressed_lcm_msgs,
-                session_id=self.session_id,
-                chatbot_id=current_msg.chatbot_id,
-                channel_id=current_msg.channel_id,
-                workspace_name=workspace_name,
-            )
-
-        return history, compacted_occurred
+        return assembled_history, compacted_occurred
 
     async def _execute_tool_calls(
         self,

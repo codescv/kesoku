@@ -27,6 +27,10 @@ class Message(BaseModel):
     timestamp: float = Field(default_factory=time.time, description="Unix timestamp of when the message was created")
     status: MessageStatus = Field(default=MessageStatus.PENDING, description="Current lifecycle status of the message")
     parent_id: str | None = Field(default=None, description="Links tool results or followups to specific message/call")
+    summary_node_id: str | None = Field(
+        default=None,
+        description="Reference to Level-0 summary node this message is compressed in",
+    )
 
 
 class Session(BaseModel):
@@ -71,3 +75,18 @@ class CrossSessionContext(BaseModel):
     content: str = Field(..., description="The summarized memory/context content string")
     updated_at: float = Field(default_factory=time.time, description="Unix timestamp of last consolidation")
     status: str = Field(default="idle", description="Lock status: 'idle' or 'updating'")
+
+
+class SummaryNode(BaseModel):
+    """Represents a compressed context summary node inside the hierarchical compression forest."""
+
+    id: str = Field(..., description="Unique summary node identifier")
+    session_id: str = Field(..., description="The session this node belongs to")
+    level: int = Field(..., description="The hierarchical level (0 for base nodes)")
+    summary: str = Field(..., description="The text summary of this node's children/source content")
+    start_timestamp: float = Field(..., description="Start timestamp of the time range covered")
+    end_timestamp: float = Field(..., description="End timestamp of the time range covered")
+    token_count: int = Field(..., description="The token count of the summary text itself")
+    source_token_count: int = Field(..., description="The combined source token count of children/sources")
+    parent_id: str | None = Field(default=None, description="Reference to parent summary node ID")
+    created_at: float = Field(default_factory=time.time, description="Unix timestamp of node creation")

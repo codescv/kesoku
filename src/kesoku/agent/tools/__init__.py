@@ -1,8 +1,5 @@
 """Registry and skill tools package for Kesoku AI Agent."""
 
-from kesoku.agent.tools.lcm import (
-    lcm_expand,
-)
 from kesoku.agent.tools.media import analyze_media
 from kesoku.agent.tools.memory import (
     MAX_MEMORY_CONTENT_LENGTH,
@@ -53,7 +50,6 @@ __all__ = [
     "view_chat_history_summary",
     "memory_grep",
     "memory_search",
-    "lcm_expand",
     "sanitize_key",
     "validate_key",
     "MAX_MEMORY_CONTENT_LENGTH",

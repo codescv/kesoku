@@ -19,7 +19,6 @@ dependencies = [
     "qrcode>=8.2",
     "pillow>=12.2.0",
     "google-adk>1.28.1",
-    "openlcm",
     "sqlite-vec>=0.1.9",
 ]
 
@@ -87,7 +86,6 @@ indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
 
-[tool.uv.sources]
-openlcm = { git = "https://github.com/codescv/OpenLCM.git" }
+
 
 

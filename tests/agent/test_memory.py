@@ -575,9 +575,8 @@ async def test_memory_search_tool_and_real_time_indexing(tmp_path) -> None:
     """Test memory_search tool and real-time embedding indexing."""
     from unittest.mock import patch
 
-    from openlcm.core.embeddings import EmbeddingStore
-
     from kesoku.agent.tools import memory_search
+    from kesoku.db.embeddings import EmbeddingStore
     from kesoku.gateway.gateway import Gateway
 
     temp_db = str(tmp_path / "test_search_tool.db")

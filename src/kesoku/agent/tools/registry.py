@@ -23,11 +23,6 @@ class ToolContext(BaseModel):
     transitioned_to_session: str | None = Field(None, description="New session ID if history was compacted")
     gateway: Any = Field(None, exclude=True)
 
-    @property
-    def lcm_engine(self) -> Any:
-        """Dynamically retrieve the session-bound LCMEngine instance."""
-        return self.gateway.context.get_lcm_engine(self.session_id)
-
 
 def _create_schema_func(func: Callable) -> Callable:
     """Create a wrapper function with context parameter removed from its signature for LLM schema generation."""

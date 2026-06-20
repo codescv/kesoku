@@ -117,8 +117,8 @@ class Gateway:
         if chatbot_id and channel_id:
             await self.db.set_active_session_for_channel(chatbot_id, channel_id, sess.id)
 
-        # Record session role in lcm.db for historical cross-session grep reference
-        lcm_db_path = self.context.lcm_db_path
+        # Record session role in embeddings database for historical cross-session grep reference
+        lcm_db_path = self.context.embedding_db_path
         try:
             db_sess = await self.db.get_session(sess.id)
             resolved_role = db_sess.role_name if db_sess else (role or "default")

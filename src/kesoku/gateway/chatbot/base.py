@@ -13,7 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from kesoku.agent.history import build_history, messages_to_openlcm_dicts
+from kesoku.agent.history import build_history
 from kesoku.agent.prompt import build_sys_prompt
 from kesoku.agent.tools.registry import ToolContext
 from kesoku.config import get_config
@@ -517,7 +517,7 @@ class Chatbot(ABC):
         return "⚠️ No active session found for this chat."
 
     async def manual_compact_session_by_channel(self, channel_id: str) -> str:
-        """Manually trigger OpenLCM context compaction on the active history of this channel."""
+        """Manually trigger context compaction on the active history of this channel."""
         session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
         if not session:
             return "⚠️ No active session found for this chat."
@@ -527,26 +527,28 @@ class Chatbot(ABC):
         if not history:
             return "⚠️ Active session has no messages to compact."
 
-        lcm_engine = self.gateway.context.get_lcm_engine(session.id)
+        from kesoku.agent.compressor import HistoryCompressor
+        from kesoku.agent.llm import get_llm
+
+        compressor = HistoryCompressor(self.gateway.db)
+        cfg = self.gateway.context.config
+        llm = get_llm(provider=cfg.agent.llm, config=cfg)
 
         try:
-            lcm_input = messages_to_openlcm_dicts(history)
-
-            # Prepend system prompt
-            if session.system_prompt:
-                lcm_input.insert(0, {"role": "system", "content": session.system_prompt})
-
-            # Check if there is eligible raw backlog
-            eligible, reason = lcm_engine._leaf_compaction_candidate_status(lcm_input)
-            if not eligible:
-                return f"ℹ️ Context compaction is not needed right now: {reason}."
-
-            # Force compress
-            await lcm_engine.compress(lcm_input)
-            return (
-                "🔄 Lossless Context Compaction completed successfully! "
-                "Old turns have been compacted into summary nodes."
+            # Trigger compaction
+            compacted = await compressor.auto_compact_session(
+                session_id=session.id,
+                history=history,
+                llm=llm,
+                config=cfg,
             )
+            if compacted:
+                return (
+                    "🔄 Context Compaction completed successfully! "
+                    "Old turns have been compacted into summary nodes."
+                )
+            else:
+                return "ℹ️ Context compaction is not needed right now: turns do not meet threshold limits."
         except Exception as e:
             logger.error(f"Failed manual compaction for session {session.id}: {e}")
             return f"⚠️ Failed to compact history: {e}"
@@ -608,96 +610,51 @@ class Chatbot(ABC):
         if not history:
             return "⚠️ Active session has no messages."
 
-        lcm_engine = self.gateway.context.get_lcm_engine(session.id)
+        from kesoku.agent.compressor import HistoryCompressor
+
+        compressor = HistoryCompressor(self.gateway.db)
+        cfg = self.gateway.context.config
 
         try:
-            frontier_store_id = lcm_engine._last_compacted_store_id
-            is_compacted = isinstance(frontier_store_id, (int, float)) and frontier_store_id > 0
+            # Segment turns
+            turns = compressor.segment_turns(history)
+            protect_front = cfg.agent.protect_front_turns
+            protect_tail = cfg.agent.protect_tail_turns
 
-            # Determine the uncompacted tail
-            max_timestamp = None
-            if is_compacted:
-                cursor = lcm_engine._store._conn.execute(
-                    "SELECT MAX(timestamp) FROM messages WHERE session_id = ? AND store_id <= ?",
-                    (session.id, frontier_store_id),
-                )
-                max_timestamp = cursor.fetchone()[0]
+            # Assemble Protected Head
+            protected_head = []
+            for t in turns[:protect_front]:
+                protected_head.extend(t)
 
-            if max_timestamp:
-                compacted_count = sum(1 for m in history if m.timestamp <= max_timestamp)
-                uncompacted_history = history[compacted_count:]
-            else:
-                uncompacted_history = history
+            # Assemble Protected Tail
+            protected_tail = []
+            if len(turns) > protect_front:
+                tail_start = max(protect_front, len(turns) - protect_tail)
+                for t in turns[tail_start:]:
+                    protected_tail.extend(t)
 
-            uncompacted_lcm_msgs = messages_to_openlcm_dicts(uncompacted_history)
+            # Assemble Buffer
+            buffer = []
+            if len(turns) > protect_front + protect_tail:
+                middle_turns = turns[protect_front : -protect_tail]
+                for t in middle_turns:
+                    if not any(msg.summary_node_id is not None for msg in t):
+                        buffer.extend(t)
 
-            system_message = None
-            remaining_messages = list(uncompacted_lcm_msgs)
-            if remaining_messages and remaining_messages[0].get("role") == "system":
-                system_message = remaining_messages.pop(0)
+            # Query summaries
+            root_summaries = await self.gateway.db.get_root_summary_nodes(session.id)
+            all_summaries = await self.gateway.db.get_all_summary_nodes(session.id)
 
-            if not system_message and session.system_prompt:
-                system_message = {"role": "system", "content": session.system_prompt}
-
-            assembled = lcm_engine._assemble_context(system_message, remaining_messages)
-
-            # Map store_ids from database using heuristic matching to support thoughts/omissions
-            try:
-                tail_rows = lcm_engine._store.get_session_tail(
-                    session.id, limit=len(remaining_messages) * 3 + 20
-                )
-                used_store_ids = set()
-                for msg in remaining_messages:
-                    role_val = msg.get("role", "")
-                    content_val = msg.get("content") or ""
-                    content_norm = content_val.strip()
-                    for row in tail_rows:
-                        row_sid = row.get("store_id")
-                        if row_sid and row_sid not in used_store_ids and row.get("role") == role_val:
-                            row_content = (row.get("content") or "").strip()
-                            if (
-                                row_content == content_norm
-                                or row_content.startswith(content_norm[:80])
-                                or content_norm.startswith(row_content[:80])
-                            ):
-                                msg["_lcm_store_id"] = row_sid
-                                used_store_ids.add(row_sid)
-                                break
-            except Exception as e:
-                logger.debug("Failed to map store_ids for reporter: %s", e)
-
-            # Find the first message index after the compaction frontier
-            frontier_store_id = lcm_engine._last_compacted_store_id
-            frontier_index = 0
-            for idx, msg in enumerate(remaining_messages):
-                sid = msg.get("_lcm_store_id")
-                if sid is not None and sid <= frontier_store_id:
-                    frontier_index = idx + 1
-
-            uncompacted_msgs = remaining_messages[frontier_index:]
-
-            # Separate uncompacted messages into backlog and fresh tail
-            n_uncompacted = len(uncompacted_msgs)
-            fresh_tail_count = lcm_engine._config.fresh_tail_count
-            fresh_tail_start = max(0, n_uncompacted - fresh_tail_count)
-
-            backlog_msgs = uncompacted_msgs[:fresh_tail_start]
-            fresh_msgs = uncompacted_msgs[fresh_tail_start:]
-
-            sys_msg = system_message.get("content") or "" if system_message else ""
-
-            all_nodes = lcm_engine._dag.get_session_nodes(session.id)
-            active_nodes = lcm_engine._dag.get_active_nodes(session.id)
-            active_node_ids = {n.node_id for n in active_nodes}
+            sys_msg = session.system_prompt or ""
 
             return LcmHtmlReporter.render_to_temp_file(
                 session=session,
-                all_nodes=all_nodes,
-                active_node_ids=active_node_ids,
-                fresh_msgs=fresh_msgs,
-                backlog_msgs=backlog_msgs,
+                root_summaries=root_summaries,
+                all_summaries=all_summaries,
+                protected_head=protected_head,
+                buffer=buffer,
+                protected_tail=protected_tail,
                 sys_msg=sys_msg,
-                assembled_context=assembled,
             )
         except Exception as e:
             logger.error(f"Failed to get LCM context by channel: {e}")

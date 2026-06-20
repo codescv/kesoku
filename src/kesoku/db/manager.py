@@ -12,7 +12,7 @@ from typing import Any, Literal
 from kesoku.agent.history_sorter import sort_session_messages
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db.connection import ConnectionProvider
-from kesoku.db.models import CrossSessionContext, Message, Session
+from kesoku.db.models import CrossSessionContext, Message, Session, SummaryNode
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,7 @@ class DatabaseManager:
             timestamp=row["timestamp"],
             status=row["status"],
             parent_id=row["parent_id"],
+            summary_node_id=row["summary_node_id"] if "summary_node_id" in row.keys() else None,
         )
 
     def _row_to_session(self, row: sqlite3.Row) -> Session:
@@ -134,6 +135,36 @@ class DatabaseManager:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_agent_memories_category_role ON agent_memories(category, role);"
                 )
+                # Ensure summary_nodes table exists
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS summary_nodes (
+                        id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        level INTEGER NOT NULL,
+                        summary TEXT NOT NULL,
+                        start_timestamp REAL NOT NULL,
+                        end_timestamp REAL NOT NULL,
+                        token_count INTEGER NOT NULL,
+                        source_token_count INTEGER NOT NULL,
+                        parent_id TEXT,
+                        created_at REAL NOT NULL,
+                        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                        FOREIGN KEY (parent_id) REFERENCES summary_nodes(id) ON DELETE SET NULL
+                    );
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_summary_nodes_session_parent "
+                    "ON summary_nodes(session_id, parent_id);"
+                )
+                # Ensure summary_node_id exists in messages table
+                if "summary_node_id" not in columns:
+                    conn.execute(
+                        "ALTER TABLE messages ADD COLUMN summary_node_id TEXT "
+                        "REFERENCES summary_nodes(id) ON DELETE SET NULL;"
+                    )
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_summary_node ON messages(summary_node_id);")
         except Exception as e:
             logger.error(f"Failed to apply database schema migrations: {e}")
             raise RuntimeError(f"Database schema migration error: {e}") from e
@@ -181,6 +212,24 @@ class DatabaseManager:
                 with conn:
                     conn.execute(
                         """
+                        CREATE TABLE IF NOT EXISTS summary_nodes (
+                            id TEXT PRIMARY KEY,
+                            session_id TEXT NOT NULL,
+                            level INTEGER NOT NULL,
+                            summary TEXT NOT NULL,
+                            start_timestamp REAL NOT NULL,
+                            end_timestamp REAL NOT NULL,
+                            token_count INTEGER NOT NULL,
+                            source_token_count INTEGER NOT NULL,
+                            parent_id TEXT,
+                            created_at REAL NOT NULL,
+                            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                            FOREIGN KEY (parent_id) REFERENCES summary_nodes(id) ON DELETE SET NULL
+                        );
+                        """
+                    )
+                    conn.execute(
+                        """
                         CREATE TABLE IF NOT EXISTS messages (
                             id TEXT PRIMARY KEY,
                             session_id TEXT NOT NULL,
@@ -193,7 +242,9 @@ class DatabaseManager:
                             metadata TEXT NOT NULL,
                             timestamp REAL NOT NULL,
                             status TEXT NOT NULL,
-                            parent_id TEXT
+                            parent_id TEXT,
+                            summary_node_id TEXT,
+                            FOREIGN KEY (summary_node_id) REFERENCES summary_nodes(id) ON DELETE SET NULL
                         );
                         """
                     )
@@ -246,6 +297,11 @@ class DatabaseManager:
                     )
                     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(chatbot_id, channel_id);")
                     conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);")
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_summary_nodes_session_parent "
+                        "ON summary_nodes(session_id, parent_id);"
+                    )
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_summary_node ON messages(summary_node_id);")
                 self._ensure_migrations(conn)
                 logger.info(f"Database schema initialized successfully at {self.db_path}")
             except Exception as e:
@@ -508,8 +564,8 @@ class DatabaseManager:
                     """
                     INSERT INTO messages
                     (id, session_id, chatbot_id, channel_id, sender, role, type,
-                     content, metadata, timestamp, status, parent_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     content, metadata, timestamp, status, parent_id, summary_node_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         msg.id,
@@ -524,6 +580,7 @@ class DatabaseManager:
                         msg.timestamp,
                         msg.status,
                         msg.parent_id,
+                        msg.summary_node_id,
                     ),
                 )
 
@@ -1294,6 +1351,109 @@ class DatabaseManager:
                 cursor = conn.execute("UPDATE cross_session_contexts SET status = 'idle' WHERE status = 'updating'")
                 return cursor.rowcount
 
+    def _row_to_summary_node(self, row: sqlite3.Row) -> SummaryNode:
+        """Convert a sqlite Row to a SummaryNode Pydantic model."""
+        return SummaryNode(
+            id=row["id"],
+            session_id=row["session_id"],
+            level=row["level"],
+            summary=row["summary"],
+            start_timestamp=row["start_timestamp"],
+            end_timestamp=row["end_timestamp"],
+            token_count=row["token_count"],
+            source_token_count=row["source_token_count"],
+            parent_id=row["parent_id"],
+            created_at=row["created_at"],
+        )
+
+    def insert_summary_node(self, node: SummaryNode) -> None:
+        """Insert a new summary node into the database."""
+        with self.connection_provider.connection() as conn:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO summary_nodes (
+                        id, session_id, level, summary, start_timestamp, end_timestamp,
+                        token_count, source_token_count, parent_id, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        node.id,
+                        node.session_id,
+                        node.level,
+                        node.summary,
+                        node.start_timestamp,
+                        node.end_timestamp,
+                        node.token_count,
+                        node.source_token_count,
+                        node.parent_id,
+                        node.created_at,
+                    ),
+                )
+
+    def update_summary_node_parent(self, node_id: str, parent_id: str) -> None:
+        """Set the parent ID of an existing summary node."""
+        with self.connection_provider.connection() as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE summary_nodes SET parent_id = ? WHERE id = ?",
+                    (parent_id, node_id),
+                )
+
+    def get_root_summary_nodes(self, session_id: str, level: int | None = None) -> list[SummaryNode]:
+        """Retrieve all root summary nodes (parent_id IS NULL) for a session, sorted by start_timestamp ASC."""
+        with self.connection_provider.connection() as conn:
+            cursor = conn.cursor()
+            if level is not None:
+                cursor.execute(
+                    """
+                    SELECT * FROM summary_nodes
+                    WHERE session_id = ? AND level = ? AND parent_id IS NULL
+                    ORDER BY start_timestamp ASC
+                    """,
+                    (session_id, level),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT * FROM summary_nodes
+                    WHERE session_id = ? AND parent_id IS NULL
+                    ORDER BY start_timestamp ASC
+                    """,
+                    (session_id,),
+                )
+            rows = cursor.fetchall()
+            return [self._row_to_summary_node(r) for r in rows]
+
+    def get_all_summary_nodes(self, session_id: str) -> list[SummaryNode]:
+        """Retrieve all summary nodes for a session, sorted by creation time."""
+        with self.connection_provider.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM summary_nodes WHERE session_id = ? ORDER BY created_at ASC",
+                (session_id,),
+            )
+            rows = cursor.fetchall()
+            return [self._row_to_summary_node(r) for r in rows]
+
+    def delete_session_summary_nodes(self, session_id: str) -> None:
+        """Delete all summary nodes for a session."""
+        with self.connection_provider.connection() as conn:
+            with conn:
+                conn.execute("DELETE FROM summary_nodes WHERE session_id = ?", (session_id,))
+
+    def update_messages_summary_node(self, message_ids: list[str], summary_node_id: str | None) -> None:
+        """Associate multiple messages with a specific summary node ID."""
+        if not message_ids:
+            return
+        with self.connection_provider.connection() as conn:
+            with conn:
+                placeholders = ",".join("?" for _ in message_ids)
+                conn.execute(
+                    f"UPDATE messages SET summary_node_id = ? WHERE id IN ({placeholders})",
+                    (summary_node_id, *message_ids),
+                )
+
 
 class AsyncDatabaseManager:
     """Asynchronous wrapper around DatabaseManager running blocking calls in executor threads."""
@@ -1906,3 +2066,27 @@ class AsyncDatabaseManager:
             List of session ID strings.
         """
         return await asyncio.to_thread(self.sync_db.get_role_session_ids, role)
+
+    async def insert_summary_node(self, node: SummaryNode) -> None:
+        """Insert a new summary node into the database (async)."""
+        await asyncio.to_thread(self.sync_db.insert_summary_node, node)
+
+    async def update_summary_node_parent(self, node_id: str, parent_id: str) -> None:
+        """Set the parent ID of an existing summary node (async)."""
+        await asyncio.to_thread(self.sync_db.update_summary_node_parent, node_id, parent_id)
+
+    async def get_root_summary_nodes(self, session_id: str, level: int | None = None) -> list[SummaryNode]:
+        """Retrieve all root summary nodes (parent_id IS NULL) for a session, sorted by start_timestamp ASC (async)."""
+        return await asyncio.to_thread(self.sync_db.get_root_summary_nodes, session_id, level)
+
+    async def get_all_summary_nodes(self, session_id: str) -> list[SummaryNode]:
+        """Retrieve all summary nodes for a session, sorted by creation time (async)."""
+        return await asyncio.to_thread(self.sync_db.get_all_summary_nodes, session_id)
+
+    async def delete_session_summary_nodes(self, session_id: str) -> None:
+        """Delete all summary nodes for a session (async)."""
+        await asyncio.to_thread(self.sync_db.delete_session_summary_nodes, session_id)
+
+    async def update_messages_summary_node(self, message_ids: list[str], summary_node_id: str | None) -> None:
+        """Associate multiple messages with a specific summary node ID (async)."""
+        await asyncio.to_thread(self.sync_db.update_messages_summary_node, message_ids, summary_node_id)

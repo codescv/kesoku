@@ -97,6 +97,26 @@ class AgentConfig(BaseModel):
         default=0.35,
         description="Minimum similarity score threshold for semantic search results (between 0.0 and 1.0)",
     )
+    protect_front_turns: int = Field(
+        default=1,
+        description="Number of turns from start protected from compression",
+    )
+    protect_tail_turns: int = Field(
+        default=5,
+        description="Number of turns from end protected from compression",
+    )
+    base_node_min_tokens: int = Field(
+        default=20000,
+        description="Token threshold above which x buffer turns are compressed",
+    )
+    base_node_turns: int = Field(
+        default=4,
+        description="Number of turns x grouped to form a Level-0 node",
+    )
+    lcm_consolidation_k: int = Field(
+        default=4,
+        description="Branching factor K to merge K Level-n nodes into Level-n+1",
+    )
 
 
 

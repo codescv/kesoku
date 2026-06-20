@@ -1014,24 +1014,32 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
     tool_runner.tool_registry.get_tools_list.return_value = []
     turn_logger = MagicMock(spec=TurnLogger)
 
-    # Mock the OpenLCM engine
-    mock_lcm = MagicMock()
-    mock_lcm.should_compress_preflight.return_value = True
+    # Mock only the HistoryCompressor.auto_compact_session method
+    from kesoku.db import SummaryNode
 
-    async def mock_compress(messages):
-        return [
-            {"role": "system", "content": "[Note: This conversation uses Lossless Context Compression]"},
-            {"role": "user", "content": "Simulated user message"},
-            {"role": "assistant", "content": "Simulated assistant message"},
-        ]
-    mock_lcm.compress.side_effect = mock_compress
+    async def mock_auto_compact(session_id, history, llm, config):
+        node = SummaryNode(
+            id="node-1-uuid",
+            session_id=session_id,
+            level=0,
+            summary="Simulated summary node content",
+            start_timestamp=time.time() - 100,
+            end_timestamp=time.time() - 70,
+            token_count=10,
+            source_token_count=100,
+            parent_id=None,
+        )
+        await gw.db.insert_summary_node(node)
+        await gw.db.update_messages_summary_node([msg1.id, msg2.id], "node-1-uuid")
+        return True
 
     context = KesokuContext(config=cfg, llm=llm)
-    context.get_lcm_engine = MagicMock(return_value=mock_lcm)
 
     executor = TurnExecutor("sess_auto_compact", gw, tool_runner, turn_logger, context=context)
 
     cfg.agent.compact_history_threshold = 0.8  # 80% of 1000 = 800 tokens
+    cfg.agent.protect_front_turns = 1
+    cfg.agent.protect_tail_turns = 5
 
     worker = MagicMock()
     type(worker).running = PropertyMock(side_effect=[True, False])
@@ -1041,29 +1049,41 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
     worker.drain_queue_and_pivot.side_effect = mock_pivot
     worker.queue_empty.return_value = True
 
-    with patch("kesoku.context.get_config", return_value=cfg):
+    with patch("kesoku.context.get_config", return_value=cfg), \
+         patch(
+             "kesoku.agent.compressor.HistoryCompressor.auto_compact_session",
+             side_effect=mock_auto_compact,
+         ) as mock_compact:
         await executor.process_turn(
             current_msg=active_msg,
             worker=worker,
             session_staging_dir="/tmp/sess_auto_compact",
         )
 
-    # Assertions: Verify that the OpenLCM engine was correctly bound, checked, and executed
-    context.get_lcm_engine.assert_any_call(
-        session_id="sess_auto_compact",
-        context_length=1000
-    )
-    mock_lcm.should_compress_preflight.assert_called_once()
-    mock_lcm.compress.assert_called_once()
+    # Assertions: Verify that the HistoryCompressor was called
+    mock_compact.assert_called_once()
 
-    # Reconstructed messages verify they match the OpenLCM dictionaries
-    assert len(llm.captured_history) == 3
-    assert llm.captured_history[0].role == MessageRole.SYSTEM
-    assert "[Note: This conversation uses Lossless Context" in llm.captured_history[0].content
-    assert llm.captured_history[1].role == MessageRole.USER
-    assert "Simulated user message" in llm.captured_history[1].content
-    assert llm.captured_history[2].role == MessageRole.ASSISTANT
-    assert llm.captured_history[2].content == "Simulated assistant message"
+    # Reconstructed messages verify they match our custom turn-based structure
+    assert len(llm.captured_history) == 7
+    assert llm.captured_history[0].role == MessageRole.USER
+    assert "Turn 1 user" in llm.captured_history[0].content
+    assert llm.captured_history[1].role == MessageRole.ASSISTANT
+    assert llm.captured_history[1].content == "Turn 1 reply"
+
+    # Scaffold and scaffold ack
+    assert llm.captured_history[2].role == MessageRole.USER
+    assert "[Note: This conversation uses custom turn-based" in llm.captured_history[2].content
+    assert "Simulated summary node content" in llm.captured_history[2].content
+    assert llm.captured_history[3].role == MessageRole.ASSISTANT
+    assert "Understood" in llm.captured_history[3].content
+
+    # Tail turns
+    assert llm.captured_history[4].role == MessageRole.USER
+    assert "Turn 2 user" in llm.captured_history[4].content
+    assert llm.captured_history[5].role == MessageRole.ASSISTANT
+    assert llm.captured_history[5].content == "Turn 2 reply"
+    assert llm.captured_history[6].role == MessageRole.USER
+    assert "Turn 3 active" in llm.captured_history[6].content
 
     # Verify database is completely lossless (nothing was physically deleted!)
     db_history = await gw.db.get_session_history("sess_auto_compact", limit=0)
@@ -1233,33 +1253,51 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
 
     turn_logger = MagicMock(spec=TurnLogger)
 
-    # Mock the OpenLCM engine to simulate compaction
-    mock_lcm = MagicMock()
-    mock_lcm.should_compress_preflight.return_value = True
+    # Mock only the HistoryCompressor.auto_compact_session method
+    from kesoku.db import SummaryNode
 
     compaction_calls = 0
 
-    # Stateful compaction responses:
-    # 1st call: Compresses prefix to 2 messages
-    # 2nd call: Compresses including tool results to 3 messages
-    async def mock_compress(messages):
+    async def mock_auto_compact(session_id, history, llm, config):
         nonlocal compaction_calls
         compaction_calls += 1
         if compaction_calls == 1:
-            return [
-                {"role": "system", "content": "Compacted System Instruction"},
-                {"role": "user", "content": "Compacted user query"},
-            ]
+            # First call: compact Turn 1 into a summary node
+            node = SummaryNode(
+                id="node-1-uuid",
+                session_id=session_id,
+                level=0,
+                summary="Compacted user query",
+                start_timestamp=time.time() - 100,
+                end_timestamp=time.time() - 70,
+                token_count=10,
+                source_token_count=100,
+                parent_id=None,
+            )
+            await gw.db.insert_summary_node(node)
+            await gw.db.update_messages_summary_node([msg1.id, msg2.id], "node-1-uuid")
+            return True
         else:
-            return [
-                {"role": "system", "content": "Newly Compacted System Instruction"},
-                {"role": "user", "content": "Compacted user query"},
-                {"role": "user", "content": "Compacted tool result"},
-            ]
-    mock_lcm.compress.side_effect = mock_compress
+            # Second call: compact the tool messages too!
+            node2 = SummaryNode(
+                id="node-2-uuid",
+                session_id=session_id,
+                level=0,
+                summary="Compacted tool result",
+                start_timestamp=time.time() - 100,
+                end_timestamp=time.time(),
+                token_count=15,
+                source_token_count=150,
+                parent_id=None,
+            )
+            await gw.db.insert_summary_node(node2)
+            # Find the new tool messages and mark them compacted
+            tool_msgs = await gw.db.get_session_history(session_id, limit=0)
+            uncompacted_ids = [m.id for m in tool_msgs if m.summary_node_id is None]
+            await gw.db.update_messages_summary_node(uncompacted_ids, "node-2-uuid")
+            return True
 
     context = KesokuContext(config=cfg, llm=llm)
-    context.get_lcm_engine = MagicMock(return_value=mock_lcm)
 
     executor = TurnExecutor("sess_cache_compact", gw, tool_runner, turn_logger, context=context)
 
@@ -1277,7 +1315,11 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
     # Run the turn! It will run 2 iterations because the first iteration returns a tool call
     # which tells process_turn to "continue" the loop. The second iteration returns a final text,
     # which breaks the loop, exiting process_turn.
-    with patch("kesoku.context.get_config", return_value=cfg):
+    with patch("kesoku.context.get_config", return_value=cfg), \
+         patch(
+             "kesoku.agent.compressor.HistoryCompressor.auto_compact_session",
+             side_effect=mock_auto_compact,
+         ) as mock_compact:
         await executor.process_turn(
             current_msg=active_msg,
             worker=worker,
@@ -1287,13 +1329,14 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
     # ASSERTIONS:
     # 1. During the first iteration:
     # - A context cache was successfully created for the prefix of compacted history.
-    # - active_cache_name was set to "mock_cache_0" with cached_messages_len=1.
+    # - active_cache_name was set to "mock_cache_0" with cached_messages_len=2
+    #   (system prompt + scaffold prefix messages).
     assert len(llm.created_caches) == 1
     assert llm.created_caches[0]["name"] == "mock_cache_0"
 
     # 2. During the second iteration:
-    # - Compaction ran again (history length was reduced due to new tool results compacted).
-    # - Obsolete cache "mock_cache_0" was deleted.
+    # - Compaction ran again (but returned False).
+    # - Obsolete cache "mock_cache_0" was deleted because history length/content changed.
     # - No new cache was created (since token_count returned 50 < 100).
     assert len(llm.deleted_caches) == 1
     assert llm.deleted_caches[0] == "mock_cache_0"
@@ -1309,19 +1352,24 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
     assert gen_call_1["tools"] is None
     assert len(gen_call_1["history"]) == 1
     assert gen_call_1["history"][0].role == MessageRole.USER
-    assert "Compacted user query" in gen_call_1["history"][0].content
+    assert "Active user query" in gen_call_1["history"][0].content
 
     # - 2nd Generate:
     gen_call_2 = llm.captured_generates[1]
     assert gen_call_2["cached_content"] is None
     assert "Agent Working Directory" in gen_call_2["system_prompt"]
     assert gen_call_2["tools"] == ["dummy_tool"]
-    assert len(gen_call_2["history"]) == 3
-    assert gen_call_2["history"][0].role == MessageRole.SYSTEM
-    assert gen_call_2["history"][1].role == MessageRole.USER
-    assert "Compacted user query" in gen_call_2["history"][1].content
+    # history has: Turn 1 (2) + Scaffold (1) + Ack (1) + Turn 3 (active turn with tool call/response) (5)
+    assert len(gen_call_2["history"]) == 9
+    assert gen_call_2["history"][0].role == MessageRole.USER
+    assert "User message 1" in gen_call_2["history"][0].content
     assert gen_call_2["history"][2].role == MessageRole.USER
-    assert "Compacted tool result" in gen_call_2["history"][2].content
+    assert "[Note: This conversation uses custom turn-based" in gen_call_2["history"][2].content
+    assert "Compacted user query" in gen_call_2["history"][2].content
+    assert gen_call_2["history"][5].role == MessageRole.ASSISTANT
+    assert "I need to call a tool" in gen_call_2["history"][5].content
+    assert gen_call_2["history"][7].role == MessageRole.TOOL
+    assert "Tool output content" in gen_call_2["history"][7].content
 
 
 @pytest.mark.asyncio

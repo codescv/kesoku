@@ -4,12 +4,8 @@ import html
 import json
 import logging
 import tempfile
-from collections import defaultdict
-from typing import Any
 
-from openlcm.core.tokens import count_messages_tokens
-
-from kesoku.db import Session
+from kesoku.db import Message, Session, SummaryNode
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +14,11 @@ class LcmHtmlReporter:
     """Utility class to render LCM Active Context into a beautiful interactive HTML page."""
 
     @staticmethod
-    def _render_messages_to_html(msgs: list[dict[str, Any]]) -> str:
+    def _render_messages_to_html(msgs: list[Message]) -> str:
         html_bubbles = []
         for msg in msgs:
-            role = msg.get("role")
-            content = msg.get("content") or ""
+            role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
+            content = msg.content or ""
 
             bubble_class = (
                 "user"
@@ -43,7 +39,7 @@ class LcmHtmlReporter:
                 role_label = str(role).capitalize()
 
             if role == "tool":
-                tool_name = msg.get("name") or "unknown_tool"
+                tool_name = msg.metadata.get("tool_name") or msg.sender or "unknown_tool"
                 safe_content = f"""
                 <div class="tool-response-block">
                     📥 <strong>Tool Output (<code>{tool_name}</code>):</strong><br>
@@ -53,13 +49,13 @@ class LcmHtmlReporter:
             else:
                 safe_content = html.escape(content).replace("\n", "<br>")
 
-            # Display embedded tool calls if present inside the assistant role message
-            if role == "assistant" and msg.get("tool_calls"):
+            # Check if there are tool calls in assistant message metadata
+            tool_calls = msg.metadata.get("tool_calls")
+            if role == "assistant" and tool_calls:
                 tool_call_html_parts = []
-                for tc in msg["tool_calls"]:
-                    fn = tc.get("function", {})
-                    name = fn.get("name", "unknown_tool")
-                    arguments = fn.get("arguments", "")
+                for tc in tool_calls:
+                    name = tc.get("name") or tc.get("function", {}).get("name", "unknown_tool")
+                    arguments = tc.get("arguments") or tc.get("function", {}).get("arguments", "")
                     try:
                         if isinstance(arguments, str):
                             args_dict = json.loads(arguments)
@@ -97,77 +93,79 @@ class LcmHtmlReporter:
     @staticmethod
     def render_to_temp_file(
         session: Session,
-        all_nodes: list[Any],
-        active_node_ids: set[int],
-        fresh_msgs: list[dict[str, Any]],
-        backlog_msgs: list[dict[str, Any]],
+        root_summaries: list[SummaryNode],
+        all_summaries: list[SummaryNode],
+        protected_head: list[Message],
+        buffer: list[Message],
+        protected_tail: list[Message],
         sys_msg: str,
-        assembled_context: list[dict[str, Any]],
     ) -> str:
-        """Render the LCM context state into a temporary HTML file.
+        """Render the custom context state into a temporary HTML file.
 
         Args:
             session: Session object context.
-            all_nodes: All DAG nodes in the session.
-            active_node_ids: Set of active node IDs.
-            fresh_msgs: Message dicts in the fresh tail.
-            backlog_msgs: Message dicts in the raw backlog (limbo).
+            root_summaries: List of active root summary nodes.
+            all_summaries: List of all summary nodes (active & parented).
+            protected_head: Messages in the protected head.
+            buffer: Messages in the middle buffer (pending compaction).
+            protected_tail: Messages in the protected tail (fresh tail).
             sys_msg: Resolved system prompt instructions.
-            assembled_context: Combined/assembled context message list.
 
         Returns:
             The absolute path of the generated temporary HTML file.
         """
-        total_tokens = count_messages_tokens(assembled_context)
+        # Local token estimation helper
+        def estimate_tokens(text: str) -> int:
+            return len(text or "") // 4
+
+        # Estimate active context tokens
+        total_tokens = (
+            estimate_tokens(sys_msg)
+            + sum(estimate_tokens(m.content) for m in protected_head)
+            + sum(n.token_count for n in root_summaries)
+            + sum(estimate_tokens(m.content) for m in buffer)
+            + sum(estimate_tokens(m.content) for m in protected_tail)
+        )
 
         # Build summary nodes HTML
         summary_nodes_html = []
-        by_depth = defaultdict(list)
-        for node in all_nodes:
-            by_depth[node.depth].append(node)
+        # Sort all summaries by level descending, then start_timestamp ascending
+        sorted_summaries = sorted(all_summaries, key=lambda nd: (-nd.level, nd.start_timestamp))
+        for node in sorted_summaries:
+            is_active = node.parent_id is None
+            card_cls = "node-card" if is_active else "node-card inactive"
+            badge_cls = f"badge depth-{node.level}" if is_active else "badge inactive"
+            active_suffix = "" if is_active else " (Parented / Consolidated)"
 
-        max_dag_depth = max(by_depth.keys()) if by_depth else -1
-        for depth in range(max_dag_depth, -1, -1):
-            nodes_at_depth = sorted(by_depth.get(depth, []), key=lambda nd: nd.created_at)
-            depth_label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(depth, f"Depth-{depth}")
-            for node in nodes_at_depth:
-                is_active = node.node_id in active_node_ids
-                card_cls = "node-card" if is_active else "node-card inactive"
-                badge_cls = f"badge depth-{node.depth}" if is_active else "badge inactive"
-                active_suffix = "" if is_active else " (Condensed)"
+            safe_summary = html.escape(node.summary).replace("\n", "<br>")
+            savings = round(node.source_token_count / node.token_count, 1) if node.token_count > 0 else 1
 
-                safe_summary = html.escape(node.summary).replace("\n", "<br>")
-                savings = round(node.source_token_count / node.token_count, 1) if node.token_count > 0 else 1
-                hint_text = node.expand_hint or f"lcm_expand(node_id={node.node_id}) to retrieve details"
-                safe_hint = html.escape(hint_text)
-
-                node_html = f"""
-                <div class="{card_cls}">
-                    <div class="node-header">
-                        <span class="{badge_cls}">{depth_label} Node {node.node_id}{active_suffix}</span>
-                        <span style="font-size:0.85rem;color:#8899a6;">
-                            {node.source_token_count} tokens &rarr; {node.token_count} tokens ({savings}x savings)
-                        </span>
-                    </div>
-                    <div style="white-space: pre-wrap; font-size:0.95rem;">{safe_summary}</div>
-                    <div style="font-size:0.8rem;color:#1d9bf0;margin-top:8px;font-style:italic;">
-                        Hint: {safe_hint}
-                    </div>
+            node_html = f"""
+            <div class="{card_cls}">
+                <div class="node-header">
+                    <span class="{badge_cls}">Level-{node.level} Node {node.id[:8]}{active_suffix}</span>
+                    <span style="font-size:0.85rem;color:#8899a6;">
+                        {node.source_token_count} tokens &rarr; {node.token_count} tokens ({savings}x savings)
+                    </span>
                 </div>
-                """
-                summary_nodes_html.append(node_html)
+                <div style="white-space: pre-wrap; font-size:0.95rem;">{safe_summary}</div>
+            </div>
+            """
+            summary_nodes_html.append(node_html)
 
         summary_nodes_html_str = (
             "\n".join(summary_nodes_html) if summary_nodes_html else "<p>*(No active compacted summary nodes)*</p>"
         )
 
-        # Build message HTMLs
-        fresh_tail_html_str = (
-            LcmHtmlReporter._render_messages_to_html(fresh_msgs) or "<p>*(Fresh tail is empty)*</p>"
+        # Build message HTML segments
+        head_html_str = (
+            LcmHtmlReporter._render_messages_to_html(protected_head) or "<p>*(Protected head is empty)*</p>"
         )
-        backlog_html_str = (
-            LcmHtmlReporter._render_messages_to_html(backlog_msgs)
-            or "<p>*(No backlog messages in limbo)*</p>"
+        buffer_html_str = (
+            LcmHtmlReporter._render_messages_to_html(buffer) or "<p>*(No middle buffer messages)*</p>"
+        )
+        fresh_tail_html_str = (
+            LcmHtmlReporter._render_messages_to_html(protected_tail) or "<p>*(Fresh tail is empty)*</p>"
         )
 
         # Combined HTML / CSS template
@@ -374,15 +372,15 @@ class LcmHtmlReporter:
             <div class="stats-grid">
                 <div class="stat-card">
                     <div class="stat-label">Summaries</div>
-                    <div class="stat-value">{len(all_nodes)} Nodes</div>
+                    <div class="stat-value">{len(all_summaries)} Nodes ({len(root_summaries)} Active)</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Raw Backlog</div>
-                    <div class="stat-value">{len(backlog_msgs)} Messages</div>
+                    <div class="stat-label">Middle Buffer</div>
+                    <div class="stat-value">{len(buffer)} Messages</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Fresh Tail</div>
-                    <div class="stat-value">{len(fresh_msgs)} Messages</div>
+                    <div class="stat-label">Protected Front/Tail</div>
+                    <div class="stat-value">{len(protected_head)} / {len(protected_tail)} Messages</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-label">Total Active Context Size</div>
@@ -396,17 +394,24 @@ class LcmHtmlReporter:
             <pre>{html.escape(sys_msg)}</pre>
         </details>
 
+        <details>
+            <summary>🛡️ Protected Front Head (First Turn)</summary>
+            <div style="margin-top: 15px; display: flex; flex-direction: column;">
+                {head_html_str}
+            </div>
+        </details>
+
         <details open>
-            <summary>📦 Compacted Summary Scaffold (DAG Nodes)</summary>
+            <summary>📦 Compacted Summary Scaffold (Hierarchy Forest)</summary>
             <div style="margin-top: 15px;">
                 {summary_nodes_html_str}
             </div>
         </details>
 
-        <details>
-            <summary>⏳ Uncompacted Backlog (Pending Compaction)</summary>
+        <details open>
+            <summary>⏳ Active Buffer (Pending Compaction)</summary>
             <div style="margin-top: 15px; display: flex; flex-direction: column;">
-                {backlog_html_str}
+                {buffer_html_str}
             </div>
         </details>
 
