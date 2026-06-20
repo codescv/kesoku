@@ -520,14 +520,16 @@ async def test_question_view_duplicate_prefixes(mock_gateway: MagicMock) -> None
         choices=choices,
     )
     assert len(view.children) == 2
+    assert view.children[0].label == "A"
+    assert view.children[1].label == "B"
     assert view.children[0].custom_id == "btn_q_s123_0_This is a very long "
     assert view.children[1].custom_id == "btn_q_s123_1_This is a very long "
     assert view.children[0].custom_id != view.children[1].custom_id
 
 
 @pytest.mark.asyncio
-async def test_question_view_long_label_truncation(mock_gateway: MagicMock) -> None:
-    """Test that QuestionView truncates button labels longer than MAX_BUTTON_LABEL_LEN characters."""
+async def test_question_view_long_label_fallback(mock_gateway: MagicMock) -> None:
+    """Test that QuestionView uses short labels (A, B...) if choices are longer than 15 characters."""
     mock_chatbot = MagicMock()
     long_choice = "A" * (MAX_BUTTON_LABEL_LEN + 20)
     choices = [long_choice]
@@ -539,6 +541,5 @@ async def test_question_view_long_label_truncation(mock_gateway: MagicMock) -> N
         choices=choices,
     )
     assert len(view.children) == 1
-    assert len(view.children[0].label) == MAX_BUTTON_LABEL_LEN
-    assert view.children[0].label == "A" * (MAX_BUTTON_LABEL_LEN - 3) + "..."
+    assert view.children[0].label == "A"
     assert view.children[0].custom_id == f"btn_q_s123_0_{long_choice[:20]}"

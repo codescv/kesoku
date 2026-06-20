@@ -619,12 +619,16 @@ class QuestionView(discord.ui.View):
         self.chatbot = chatbot
         self.question = question
         self.choices = choices
+        self.use_short_labels = any(len(c) > 15 for c in choices)
 
         for idx, choice in enumerate(choices):
-            # Discord button label must be MAX_BUTTON_LABEL_LEN or fewer characters
-            label = choice
-            if len(label) > MAX_BUTTON_LABEL_LEN:
-                label = label[: MAX_BUTTON_LABEL_LEN - 3] + "..."
+            if self.use_short_labels:
+                label = chr(ord("A") + idx)
+            else:
+                # Discord button label must be MAX_BUTTON_LABEL_LEN or fewer characters
+                label = choice
+                if len(label) > MAX_BUTTON_LABEL_LEN:
+                    label = label[: MAX_BUTTON_LABEL_LEN - 3] + "..."
             button = discord.ui.Button(
                 style=discord.ButtonStyle.primary,
                 label=label,

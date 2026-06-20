@@ -819,6 +819,12 @@ class DiscordChatbot(Chatbot):
                 title=f"❓ {question}",
                 color=discord.Color.blurple(),
             )
+            if question_view.use_short_labels:
+                description_lines = [
+                    f"**{chr(ord('A') + idx)}.** {choice}"
+                    for idx, choice in enumerate(choices)
+                ]
+                embed.description = "\n".join(description_lines)
             await channel.send(embed=embed, view=question_view)
         except Exception as qe:
             logger.error(f"Failed to send question view to Discord: {qe}", exc_info=True)

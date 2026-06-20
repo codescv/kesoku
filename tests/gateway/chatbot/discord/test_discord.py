@@ -1631,3 +1631,91 @@ async def test_handle_intermediate_message_does_not_skip_if_queue_empty(
             # The method should proceed and initialize the session ID in _turn_special_items
             assert "session123" in bot._turn_special_items
 
+
+@pytest.mark.asyncio
+async def test_send_question_segment_short_choices(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test send_question_segment with short choice options (no markdown in embed, normal buttons)."""
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.TextChannel)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+
+            message = Message(
+                id="msg123",
+                session_id="session123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
+                content="question text",
+            )
+
+            choices = ["Short 1", "Short 2"]
+            await bot.send_question_segment(
+                channel_id="12345",
+                question="What's up?",
+                choices=choices,
+                message=message,
+            )
+
+            mock_channel.send.assert_called_once()
+            args, kwargs = mock_channel.send.call_args
+            embed = kwargs.get("embed")
+            view = kwargs.get("view")
+
+            assert embed is not None
+            assert embed.title == "❓ What's up?"
+            assert embed.description is None  # No description for short options
+
+            assert view is not None
+            assert len(view.children) == 2
+            assert view.children[0].label == "Short 1"
+            assert view.children[1].label == "Short 2"
+
+
+@pytest.mark.asyncio
+async def test_send_question_segment_long_choices(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test send_question_segment with a choice >15 chars (uses markdown in embed description, short button labels)."""
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.TextChannel)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+
+            message = Message(
+                id="msg123",
+                session_id="session123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
+                content="question text",
+            )
+
+            choices = ["This is a very long option (>15 chars)", "Short 2"]
+            await bot.send_question_segment(
+                channel_id="12345",
+                question="What's up?",
+                choices=choices,
+                message=message,
+            )
+
+            mock_channel.send.assert_called_once()
+            args, kwargs = mock_channel.send.call_args
+            embed = kwargs.get("embed")
+            view = kwargs.get("view")
+
+            assert embed is not None
+            assert embed.title == "❓ What's up?"
+            assert embed.description == "**A.** This is a very long option (>15 chars)\n**B.** Short 2"
+
+            assert view is not None
+            assert len(view.children) == 2
+            assert view.children[0].label == "A"
+            assert view.children[1].label == "B"
+
