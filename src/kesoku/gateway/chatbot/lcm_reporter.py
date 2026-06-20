@@ -167,19 +167,37 @@ class LcmHtmlReporter:
             The absolute path of the generated temporary HTML file.
         """
         # Use shared prepare_history_for_llm logic to clean historical turns
-        combined = []
-        head_len = len(protected_head)
-        buffer_len = len(buffer)
+        # Tag each message to trace its original segment boundary after thoughts are stripped.
+        tagged_messages = []
+        for m in protected_head:
+            m_copy = m.model_copy()
+            m_copy.metadata = dict(m_copy.metadata) if m_copy.metadata else {}
+            m_copy.metadata["_lcm_group"] = "head"
+            tagged_messages.append(m_copy)
 
-        combined.extend(protected_head)
-        combined.extend(buffer)
-        combined.extend(protected_tail)
+        for m in buffer:
+            m_copy = m.model_copy()
+            m_copy.metadata = dict(m_copy.metadata) if m_copy.metadata else {}
+            m_copy.metadata["_lcm_group"] = "buffer"
+            tagged_messages.append(m_copy)
 
-        cleaned = prepare_history_for_llm(combined)
+        for m in protected_tail:
+            m_copy = m.model_copy()
+            m_copy.metadata = dict(m_copy.metadata) if m_copy.metadata else {}
+            m_copy.metadata["_lcm_group"] = "tail"
+            tagged_messages.append(m_copy)
 
-        protected_head = cleaned[:head_len]
-        buffer = cleaned[head_len : head_len + buffer_len]
-        protected_tail = cleaned[head_len + buffer_len :]
+        cleaned = prepare_history_for_llm(tagged_messages)
+
+        protected_head = [m for m in cleaned if m.metadata.get("_lcm_group") == "head"]
+        buffer = [m for m in cleaned if m.metadata.get("_lcm_group") == "buffer"]
+        protected_tail = [m for m in cleaned if m.metadata.get("_lcm_group") == "tail"]
+
+        # Clean up temporary LCM group tracking metadata
+        for segment in (protected_head, buffer, protected_tail):
+            for m in segment:
+                if m.metadata:
+                    m.metadata.pop("_lcm_group", None)
 
         # Estimate active context tokens
         total_tokens = (
