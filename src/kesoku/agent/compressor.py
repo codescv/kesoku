@@ -17,10 +17,10 @@ Your task is to summarize the following segment of a conversation turn history i
 a highly dense, factual, and chronologically accurate narrative summary.
 
 Guidelines:
-1. Summarize key decisions, lessons learned / pitfalls encountered (踩过的坑), and any files
-   created or modified outside the session staging directory.
+1. Summarize key decisions, lessons learned / pitfalls encountered, and any files
+   created or modified **outside** the session's `$STAGING_DIR` (omit if none).
 2. Do not omit any crucial context, but do not include conversational fluff.
-3. Keep the summary structured and concise.
+3. Keep the summary structured and concise (< 1000 chars).
 
 Conversation Segment to Summarize:
 {segment}
@@ -35,7 +35,7 @@ Guidelines:
 1. Resolve any overlapping narrative threads to ensure a smooth, logical progression.
 2. If there are conflicting decisions or changes in approach, prioritize the latest decision
    and resolve contradictions in favor of the most recent events.
-3. Maintain high density and clear structure.
+3. Maintain high density and clear structure (< 1000 chars).
 
 Summaries to Merge (in chronological order):
 {summaries}
