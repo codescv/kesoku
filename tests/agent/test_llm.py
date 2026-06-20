@@ -755,5 +755,71 @@ async def test_gemini_llm_token_caching_calculations() -> None:
         assert res.total_tokens == 15
 
 
+def test_history_to_turns_tool_results_sorting() -> None:
+    """Verify history_to_turns correctly sorts tool results to match the preceding tool calls order."""
+    msg_call_1 = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="Kesoku",
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_CALL,
+        content="Call 1",
+        metadata={"tool_name": "tool_1", "tool_call_id": "call_1"},
+    )
+    msg_call_2 = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="Kesoku",
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_CALL,
+        content="Call 2",
+        metadata={"tool_name": "tool_2", "tool_call_id": "call_2"},
+    )
+
+    msg_res_2 = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="tool_2",
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
+        content="res 2",
+        metadata={"tool_name": "tool_2", "tool_result": "res 2", "tool_call_id": "call_2"},
+        parent_id=msg_call_2.id,
+    )
+    msg_res_1 = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="tool_1",
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
+        content="res 1",
+        metadata={"tool_name": "tool_1", "tool_result": "res 1", "tool_call_id": "call_1"},
+        parent_id=msg_call_1.id,
+    )
+
+    # Input sequence has call_1, call_2, then res_2, res_1
+    history = [msg_call_1, msg_call_2, msg_res_2, msg_res_1]
+    turns, _ = history_to_turns(history)
+
+    assert len(turns) == 2
+
+    # Turn 0 (Assistant/Model) contains the tool calls
+    assert turns[0].role == MessageRole.ASSISTANT
+    assert len(turns[0].blocks) == 2
+    assert turns[0].blocks[0].tool_call_id == "call_1"
+    assert turns[0].blocks[1].tool_call_id == "call_2"
+
+    # Turn 1 (Tool) contains tool results, sorted to match the call order (call_1, call_2)
+    assert turns[1].role == MessageRole.TOOL
+    assert len(turns[1].blocks) == 2
+    assert turns[1].blocks[0].tool_call_id == "call_1"
+    assert turns[1].blocks[1].tool_call_id == "call_2"
+
+
+
 
 

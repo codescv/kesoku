@@ -237,8 +237,43 @@ def history_to_turns(
                 tool_call_id = msg.metadata.get("tool_call_id") or msg.id
                 tool_call_ids[msg.id] = tool_call_id
 
+    accumulated_results = []
+
+    def flush_results() -> None:
+        nonlocal accumulated_results
+        if not accumulated_results:
+            return
+
+        # Find the last assistant turn containing the tool calls
+        prev_calls = []
+        if turns and turns[-1].role == MessageRole.ASSISTANT:
+            prev_calls = [b for b in turns[-1].blocks if isinstance(b, ToolCallBlock)]
+
+        if prev_calls:
+            # Sort accumulated results to match the order of previous tool calls
+            call_order = {c.tool_call_id: idx for idx, c in enumerate(prev_calls)}
+            matched_results = []
+            unmatched_results = []
+            for r in accumulated_results:
+                if r.tool_call_id in call_order:
+                    matched_results.append(r)
+                else:
+                    unmatched_results.append(r)
+
+            matched_results.sort(key=lambda r: call_order[r.tool_call_id])
+            sorted_results = matched_results + unmatched_results
+        else:
+            sorted_results = accumulated_results
+
+        add_blocks(MessageRole.TOOL, sorted_results)
+        accumulated_results = []
+
     if history:
         for msg in history:
+            # Flush results if transitioning away from TOOL_RESULT
+            if msg.role != MessageRole.TOOL or msg.type != MessageType.TOOL_RESULT:
+                flush_results()
+
             if msg.role == MessageRole.SYSTEM:
                 if resolved_system_prompt is None:
                     resolved_system_prompt = msg.content
@@ -290,17 +325,17 @@ def history_to_turns(
                     if not tool_call_id:
                         tool_call_id = tool_call_ids.get(msg.parent_id) or msg.parent_id or msg.id or "unknown"
 
-                    add_blocks(
-                        MessageRole.TOOL,
-                        [
-                            ToolResultBlock(
-                                name=tool_name,
-                                tool_call_id=tool_call_id,
-                                result=res_str,
-                                is_error=is_error,
-                            )
-                        ],
+                    accumulated_results.append(
+                        ToolResultBlock(
+                            name=tool_name,
+                            tool_call_id=tool_call_id,
+                            result=res_str,
+                            is_error=is_error,
+                        )
                     )
+
+        # Final flush
+        flush_results()
 
     if prompt:
         add_blocks(MessageRole.USER, [TextBlock(text=prompt)])
