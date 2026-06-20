@@ -17,7 +17,8 @@ Your task is to summarize the following segment of a conversation turn history i
 a highly dense, factual, and chronologically accurate narrative summary.
 
 Guidelines:
-1. Retain all technical details, user goals, filenames, code snippets, execution results, error logs, and key decisions.
+1. Summarize key decisions, lessons learned / pitfalls encountered (踩过的坑), and any files
+   created or modified outside the session staging directory.
 2. Do not omit any crucial context, but do not include conversational fluff.
 3. Keep the summary structured and concise.
 
@@ -31,8 +32,9 @@ Your task is to merge and consolidate the following chronological sequence of su
 into a single, cohesive, higher-level summary.
 
 Guidelines:
-1. Preserve all specific facts, paths, logs, errors, and outcomes.
-2. Resolve any overlapping narrative threads to ensure a smooth, logical progression.
+1. Resolve any overlapping narrative threads to ensure a smooth, logical progression.
+2. If there are conflicting decisions or changes in approach, prioritize the latest decision
+   and resolve contradictions in favor of the most recent events.
 3. Maintain high density and clear structure.
 
 Summaries to Merge (in chronological order):
