@@ -6,6 +6,7 @@ import logging
 import tempfile
 from typing import Any
 
+from kesoku.agent.history import prepare_history_for_llm
 from kesoku.db import Message, Session, SummaryNode
 
 logger = logging.getLogger(__name__)
@@ -37,39 +38,69 @@ class LcmHtmlReporter:
         html_bubbles = []
         for msg in msgs:
             role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
+            mtype = msg.type.value if hasattr(msg.type, "value") else str(msg.type)
             content = msg.content or ""
 
-            bubble_class = (
-                "user"
-                if role == "user"
-                else "assistant"
-                if role == "assistant"
-                else "tool"
-                if role == "tool"
-                else "system"
-            )
+            # Check role and type mapping
             if role == "user":
+                bubble_class = "user"
                 role_label = "User"
+                safe_content = html.escape(content).replace("\n", "<br>")
+            elif role == "system":
+                bubble_class = "system"
+                role_label = "System"
+                safe_content = html.escape(content).replace("\n", "<br>")
             elif role == "assistant":
-                role_label = "Assistant"
+                if mtype == "thought":
+                    bubble_class = "thought"
+                    role_label = "Assistant Thought"
+                    safe_content = html.escape(content).replace("\n", "<br>")
+                else:
+                    bubble_class = "assistant"
+                    role_label = "Assistant Response"
+                    safe_content = html.escape(content).replace("\n", "<br>")
             elif role == "tool":
-                role_label = "Tool Result"
+                if mtype == "tool_call":
+                    bubble_class = "tool-call"
+                    role_label = "Tool Call"
+                    metadata = msg.metadata or {}
+                    tool_name = metadata.get("tool_name") or msg.sender or "unknown_tool"
+                    tool_args = metadata.get("tool_arguments")
+                    if tool_args:
+                        try:
+                            if isinstance(tool_args, str):
+                                args_dict = json.loads(tool_args)
+                                arguments_pretty = json.dumps(args_dict, indent=2, ensure_ascii=False)
+                            else:
+                                arguments_pretty = json.dumps(tool_args, indent=2, ensure_ascii=False)
+                        except Exception:
+                            arguments_pretty = str(tool_args)
+                        safe_content = f"""
+                        <div class="tool-call-block" style="margin-top: 0;">
+                            🔧 <strong>Called Tool:</strong> <code>{tool_name}</code><br>
+                            <pre class="tool-args-pre">{html.escape(arguments_pretty)}</pre>
+                        </div>
+                        """
+                    else:
+                        safe_content = html.escape(content).replace("\n", "<br>")
+                else:
+                    bubble_class = "tool"
+                    role_label = "Tool Result"
+                    metadata = msg.metadata or {}
+                    tool_name = metadata.get("tool_name") or msg.sender or "unknown_tool"
+                    safe_content = f"""
+                    <div class="tool-response-block" style="margin-top: 0;">
+                        📥 <strong>Tool Output (<code>{tool_name}</code>):</strong><br>
+                        <pre class="tool-response-pre">{html.escape(content)}</pre>
+                    </div>
+                    """
             else:
+                bubble_class = "system"
                 role_label = str(role).capitalize()
-
-            if role == "tool":
-                tool_name = msg.metadata.get("tool_name") or msg.sender or "unknown_tool"
-                safe_content = f"""
-                <div class="tool-response-block">
-                    📥 <strong>Tool Output (<code>{tool_name}</code>):</strong><br>
-                    <pre class="tool-response-pre">{html.escape(content)}</pre>
-                </div>
-                """
-            else:
                 safe_content = html.escape(content).replace("\n", "<br>")
 
-            # Check if there are tool calls in assistant message metadata
-            tool_calls = msg.metadata.get("tool_calls")
+            # Fallback inline tool calls in metadata
+            tool_calls = msg.metadata.get("tool_calls") if msg.metadata else None
             if role == "assistant" and tool_calls:
                 tool_call_html_parts = []
                 for tc in tool_calls:
@@ -135,6 +166,21 @@ class LcmHtmlReporter:
         Returns:
             The absolute path of the generated temporary HTML file.
         """
+        # Use shared prepare_history_for_llm logic to clean historical turns
+        combined = []
+        head_len = len(protected_head)
+        buffer_len = len(buffer)
+
+        combined.extend(protected_head)
+        combined.extend(buffer)
+        combined.extend(protected_tail)
+
+        cleaned = prepare_history_for_llm(combined)
+
+        protected_head = cleaned[:head_len]
+        buffer = cleaned[head_len : head_len + buffer_len]
+        protected_tail = cleaned[head_len + buffer_len :]
+
         # Estimate active context tokens
         total_tokens = (
             estimate_tokens(sys_msg)
@@ -330,7 +376,16 @@ class LcmHtmlReporter:
             margin-right: auto;
             align-items: flex-start;
         }}
+        .chat-bubble.thought {{
+            margin-right: auto;
+            align-items: flex-start;
+        }}
         .chat-bubble.tool {{
+            margin-right: auto;
+            align-items: flex-start;
+            width: 100%;
+        }}
+        .chat-bubble.tool-call {{
             margin-right: auto;
             align-items: flex-start;
             width: 100%;
@@ -350,12 +405,26 @@ class LcmHtmlReporter:
             color: #e1e8ed;
             border-bottom-left-radius: 4px;
         }}
+        .chat-bubble.thought .bubble-content {{
+            background-color: #1e1e1e;
+            color: #8899a6;
+            border: 1px dashed #444;
+            border-bottom-left-radius: 4px;
+        }}
         .chat-bubble.tool .bubble-content {{
             background-color: #14221f;
             color: #e1e8ed;
             border-bottom-left-radius: 4px;
             width: 100%;
             box-sizing: border-box;
+        }}
+        .chat-bubble.tool-call .bubble-content {{
+            background-color: #1b2836;
+            color: #e1e8ed;
+            border-left: 4px solid #f59e0b;
+            border-bottom-left-radius: 4px;
+            box-sizing: border-box;
+            width: 100%;
         }}
         .tool-call-block {{
             background-color: #1e2732;

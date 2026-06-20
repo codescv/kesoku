@@ -46,6 +46,15 @@ def test_render_to_temp_file() -> None:
             sender="user",
             role="user",
             content="Hello",
+        ),
+        Message(
+            session_id="session_abc123",
+            chatbot_id="cli",
+            channel_id="cli_channel",
+            sender="assistant",
+            role="assistant",
+            type="thought",
+            content="Old thought to be stripped",
         )
     ]
 
@@ -65,9 +74,28 @@ def test_render_to_temp_file() -> None:
             session_id="session_abc123",
             chatbot_id="cli",
             channel_id="cli_channel",
+            sender="user",
+            role="user",
+            content="Start of last turn",
+        ),
+        Message(
+            session_id="session_abc123",
+            chatbot_id="cli",
+            channel_id="cli_channel",
             sender="assistant",
             role="assistant",
-            content="Hi there!",
+            type="thought",
+            content="Latest active thought to keep",
+        ),
+        Message(
+            session_id="session_abc123",
+            chatbot_id="cli",
+            channel_id="cli_channel",
+            sender="assistant",
+            role="tool",
+            type="tool_call",
+            content="Calling git status",
+            metadata={"tool_name": "git_status", "tool_arguments": {"cwd": "."}},
         ),
         Message(
             session_id="session_abc123",
@@ -75,8 +103,18 @@ def test_render_to_temp_file() -> None:
             channel_id="cli_channel",
             sender="run_shell_command",
             role="tool",
+            type="tool_result",
             content="Command stdout results",
             metadata={"tool_name": "run_shell_command"},
+        ),
+        Message(
+            session_id="session_abc123",
+            chatbot_id="cli",
+            channel_id="cli_channel",
+            sender="assistant",
+            role="assistant",
+            type="text",
+            content="Hi there!",
         ),
     ]
 
@@ -112,6 +150,13 @@ def test_render_to_temp_file() -> None:
         assert "Active Buffer" in content
         assert "Actual LLM Context (Last Turn)" in content
         assert "78K active + 138K cached" in content
+        # Check thought stripping & keeping
+        assert "Old thought to be stripped" not in content
+        assert "Latest active thought to keep" in content
+        # Check tool call bubble formatting
+        assert "Tool Call" in content
+        assert "Called Tool" in content
+        assert "git_status" in content
     finally:
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
