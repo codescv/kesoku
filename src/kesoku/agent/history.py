@@ -188,6 +188,13 @@ def messages_to_openlcm_dicts(history: list[Message]) -> list[dict[str, Any]]:
     num_turns = len(turns)
     for idx, turn in enumerate(turns):
         is_latest = idx == num_turns - 1
+        # A turn is completed if it already contains a final assistant text response
+        has_text_response = any(
+            m.role == MessageRole.ASSISTANT and m.type == MessageType.TEXT
+            for m in turn
+        )
+        # We only preserve thoughts if the turn is both the latest and currently in-progress
+        is_active_turn = is_latest and not has_text_response
 
         # Separate tool calls and results to allow sorting/alignment
         tool_calls = []
@@ -204,7 +211,7 @@ def messages_to_openlcm_dicts(history: list[Message]) -> list[dict[str, Any]]:
 
         for i, m in enumerate(turn):
             if m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT:
-                if not is_latest or i != last_thought_idx:
+                if not is_active_turn or i != last_thought_idx:
                     continue
                 others_before.append(m)
             elif m.role == MessageRole.TOOL and m.type == MessageType.TOOL_CALL:

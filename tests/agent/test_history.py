@@ -191,7 +191,7 @@ def test_messages_to_openlcm_dicts_thought_text_merging() -> None:
     assert len(dicts) == 1
     assert dicts[0] == {
         "role": "assistant",
-        "content": "<thought>My thought process here.</thought>\n\nHello, user!",
+        "content": "Hello, user!",
     }
 
 
@@ -324,12 +324,11 @@ def test_messages_to_openlcm_dicts_strips_historical_thoughts() -> None:
     ]
 
     dicts = messages_to_openlcm_dicts(history)
-
     # We should have:
     # 1. user: "Hello"
     # 2. assistant: "Hi there" (without "Historical thought")
     # 3. user: "How are you?"
-    # 4. assistant: "<thought>Active thought</thought>\n\nI am good"
+    # 4. assistant: "I am good" (without "Active thought", since turn is completed with TEXT response)
     assert len(dicts) == 4
     assert dicts[0]["role"] == "user"
     assert dicts[0]["content"] == "Hello"
@@ -338,7 +337,7 @@ def test_messages_to_openlcm_dicts_strips_historical_thoughts() -> None:
     assert dicts[2]["role"] == "user"
     assert dicts[2]["content"] == "How are you?"
     assert dicts[3]["role"] == "assistant"
-    assert dicts[3]["content"] == "<thought>Active thought</thought>\n\nI am good"
+    assert dicts[3]["content"] == "I am good"
 
 
 def test_path_sanitization_and_restoration() -> None:
@@ -461,6 +460,69 @@ def test_messages_to_openlcm_dicts_tool_sorting() -> None:
     assert dicts[2]["role"] == "tool"
     assert dicts[2]["tool_call_id"] == "tc_2"
     assert dicts[2]["content"] == "r2"
+
+
+def test_messages_to_openlcm_dicts_active_in_progress_turn_preserves_thought() -> None:
+    """Verify that thoughts are preserved for the latest turn if it is in-progress (no TEXT response)."""
+    history = [
+        Message(
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="User",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="Hello",
+        ),
+        # Active Turn (In-progress)
+        Message(
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.THOUGHT,
+            content="Running a tool now",
+        ),
+        Message(
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="call_1",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_CALL,
+            content="Calling tool...",
+            id="call_1",
+            metadata={"tool_name": "tool_1", "tool_arguments": {}},
+        ),
+        Message(
+            session_id="sess1",
+            chatbot_id="cli",
+            channel_id="chan1",
+            sender="tool_1",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content="Result 1",
+            parent_id="call_1",
+            metadata={"tool_name": "tool_1", "tool_result": "r1", "tool_call_id": "tc_1"},
+        ),
+    ]
+
+    dicts = messages_to_openlcm_dicts(history)
+
+    # We should have:
+    # 1. user: "Hello"
+    # 2. assistant: "Running a tool now" with tool_calls
+    # 3. tool: "r1"
+    assert len(dicts) == 3
+    assert dicts[0]["role"] == "user"
+    assert dicts[1]["role"] == "assistant"
+    # The thought content must be preserved as the content of the assistant message containing the tool calls
+    assert dicts[1]["content"] == "Running a tool now"
+    assert len(dicts[1]["tool_calls"]) == 1
+    assert dicts[2]["role"] == "tool"
+    assert dicts[2]["content"] == "r1"
+
 
 
 
