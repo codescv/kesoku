@@ -717,11 +717,12 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     await gw.post(msg1)
     content1 = await run_turn(msg1)
 
-    # MUST contain Consolidated Sync Guidelines (including Timeline, User Preferences, LCM), and Time Context
+    # MUST contain Consolidated Sync Guidelines (including Timeline, User Preferences,
+    # Lossless Chat History), and Time Context
     assert '<background_context type="sync_guidelines">' in content1
     assert "Timeline Sync:" in content1
     assert "User Preferences:" in content1
-    assert "Lossless Chat History (LCM):" in content1
+    assert "Lossless Chat History:" in content1
     assert 'from="u1"' in content1
     assert 'timezone="' in content1
     assert "CRITICAL: The time and timezone in the following <current_message>" in content1
@@ -752,7 +753,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     assert '<background_context type="sync_guidelines">' not in content2
     assert "Timeline Sync:" not in content2
     assert "User Preferences:" not in content2
-    assert "Lossless Chat History (LCM):" not in content2
+    assert "Lossless Chat History:" not in content2
     assert 'from="u1"' in content2
     assert 'timezone="' in content2
     assert "CRITICAL: The time and timezone in the following <current_message>" in content2
@@ -782,7 +783,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     assert '<background_context type="sync_guidelines">' in content3
     assert "Timeline Sync:" in content3
     assert "User Preferences:" in content3
-    assert "Lossless Chat History (LCM):" in content3
+    assert "Lossless Chat History:" in content3
     assert 'from="u1"' in content3
     assert 'timezone="' in content3
     assert "CRITICAL: The time and timezone in the following <current_message>" in content3

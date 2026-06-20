@@ -37,7 +37,7 @@ which is still SERIAL.
 MEMORY_AND_HISTORY_INSTRUCTIONS = """
 # Memory and Chat History Systems
 You have two distinct, complementary memory systems: Active Memory System (AMS) and Passive
-Chat History (LCM).
+Chat History.
 
 ## 1. Active Memory System (AMS)
 This is your **active memory**. You actively initiate storing, reading, or pruning structured
@@ -59,10 +59,10 @@ Rules for managing active memory:
 - Preventing Overwrites: ALWAYS use `view_memory` to read the current content before updating
   an existing key.
 
-## 2. Passive Chat History (Local Context Memory - LCM)
+## 2. Passive Chat History
 This is your **passive memory**. All chat history is automatically recorded. When conversations
-grow long, older messages are compacted into nodes in a hierarchical DAG.
-Use LCM tools to search and browse chat history across sessions.
+grow long, older messages are compacted into tree-like summaries.
+Use memory tools to search and browse chat history across sessions.
 
 ## 3. Complementary Usage (When to Use Which)
 - Use `view_memory` to recall facts and progresses that you actively recorded in Active Memory.
@@ -71,7 +71,7 @@ Use LCM tools to search and browse chat history across sessions.
 - Use `memory_grep` to search active memories and past messages by keyword/regex, or to retrieve recent
   messages using wildcard query (* or empty) with optional time range filters (start_time, end_time).
 - Use `memory_search` to perform semantic (conceptual) search across past messages and memories.
-- Use `lcm_expand` to view details of a raw message or a compacted summary node.
+- Use `view_message` to retrieve the complete content of any historical message by its ID.
 """
 
 

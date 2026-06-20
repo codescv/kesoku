@@ -462,7 +462,7 @@ class TurnExecutor:
             )
 
             # 3. Invoke LLM
-            llm = self.context.get_llm(use_lcm=True)
+            llm = self.context.get_llm(use_context_compression=True)
             res = await llm.generate(
                 system_prompt="You are an expert background memory consolidator.",
                 prompt=prompt,
@@ -535,7 +535,8 @@ class TurnExecutor:
             role=active_role,
         )
 
-        # 3. Prepend Consolidated Passive Synchronization, Preferences, and LCM Guidelines (if Bootstrap)
+        # 3. Prepend Consolidated Passive Synchronization, Preferences, and Context Compression Guidelines
+        # (if Bootstrap)
         full_prefix = ""
         if is_bootstrap:
             lines = [
@@ -551,8 +552,8 @@ class TurnExecutor:
                     "You MUST USE `view_memory` (category='user_preferences') to retrieve them."
                 )
             lines.append(
-                "- 💡 Lossless Chat History (LCM): Older raw messages across long conversations are compacted into "
-                "a hierarchical DAG. You have access to `lcm_expand` to inspect historical discussions when needed. "
+                "- 💡 Lossless Chat History: Older raw messages across long conversations are compacted into "
+                "a hierarchical DAG. You have access to `view_message` to inspect historical discussions when needed. "
                 "To search past messages and memories, use `memory_search` (for conceptual/semantic matching) "
                 "or `memory_grep` (for keywords or retrieving recent messages using wildcard '*' and time filters)."
             )

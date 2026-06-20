@@ -519,7 +519,7 @@ async def memory_grep(
                 time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m.timestamp))
                 sender_str = f"**{m.sender}** ({m.role})"
                 content_snippet = extract_grep_snippet(m.content, query if not is_wildcard else "", window=70)
-                lines.append(f"- [{time_str}] {sender_str} in session `{m.session_id}`:")
+                lines.append(f"- [{time_str}] {sender_str} (ID: `{m.id}`) in session `{m.session_id}`:")
                 lines.append(f"  > {content_snippet}")
 
         return "\n".join(lines)
@@ -615,10 +615,53 @@ async def memory_search(
                 time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m.timestamp))
                 sender_str = f"**{m.sender}** ({m.role})"
                 content_snippet = extract_grep_snippet(m.content, query, window=70)
-                lines.append(f"- [{time_str}] {sender_str} in session `{m.session_id}` (score: {score:.2f}):")
+                lines.append(
+                    f"- [{time_str}] {sender_str} (ID: `{m.id}`) in session `{m.session_id}` (score: {score:.2f}):"
+                )
                 lines.append(f"  > {content_snippet}")
 
         return "\n".join(lines)
     except Exception as e:
         logger.error(f"Failed to execute memory_search: {e}", exc_info=True)
         return f"Error executing memory_search: {e}"
+
+
+@default_registry.register
+async def view_message(
+    message_id: str,
+    context: ToolContext | None = None,
+) -> str:
+    """Retrieve the complete content of a specific historical chat message by its database ID.
+
+    Args:
+        message_id: The unique database ID of the message.
+        context: Injected tool execution context.
+
+    Returns:
+        Full text and metadata of the requested message.
+    """
+    if not context or not context.gateway:
+        return "Error: ToolContext is missing."
+
+    try:
+        db = context.gateway.db
+        msg = await db.get_message(message_id)
+        if not msg:
+            return f"Message with ID '{message_id}' not found."
+
+        time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(msg.timestamp))
+        return (
+            f"💬 **Message Details**\n"
+            f"- **ID**: `{msg.id}`\n"
+            f"- **Session ID**: `{msg.session_id}`\n"
+            f"- **Timestamp**: {time_str}\n"
+            f"- **Sender**: {msg.sender} ({msg.role})\n"
+            f"- **Type**: {msg.type}\n"
+            f"- **Content**:\n"
+            f"```\n"
+            f"{msg.content}\n"
+            f"```"
+        )
+    except Exception as e:
+        logger.error(f"Failed to view message {message_id}: {e}", exc_info=True)
+        return f"Error retrieving message details: {e}"

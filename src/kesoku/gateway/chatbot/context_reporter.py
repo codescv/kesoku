@@ -1,4 +1,4 @@
-"""LCM Active Context HTML reporter utility for Kesoku AI Agent."""
+"""Active Context HTML reporter utility for Kesoku AI Agent."""
 
 import html
 import json
@@ -30,8 +30,8 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
-class LcmHtmlReporter:
-    """Utility class to render LCM Active Context into a beautiful interactive HTML page."""
+class ContextHtmlReporter:
+    """Utility class to render Active Prompt Context into a beautiful interactive HTML page."""
 
     @staticmethod
     def _render_messages_to_html(msgs: list[Message]) -> str:
@@ -172,32 +172,32 @@ class LcmHtmlReporter:
         for m in protected_head:
             m_copy = m.model_copy()
             m_copy.metadata = dict(m_copy.metadata) if m_copy.metadata else {}
-            m_copy.metadata["_lcm_group"] = "head"
+            m_copy.metadata["_context_group"] = "head"
             tagged_messages.append(m_copy)
 
         for m in buffer:
             m_copy = m.model_copy()
             m_copy.metadata = dict(m_copy.metadata) if m_copy.metadata else {}
-            m_copy.metadata["_lcm_group"] = "buffer"
+            m_copy.metadata["_context_group"] = "buffer"
             tagged_messages.append(m_copy)
 
         for m in protected_tail:
             m_copy = m.model_copy()
             m_copy.metadata = dict(m_copy.metadata) if m_copy.metadata else {}
-            m_copy.metadata["_lcm_group"] = "tail"
+            m_copy.metadata["_context_group"] = "tail"
             tagged_messages.append(m_copy)
 
         cleaned = prepare_history_for_llm(tagged_messages)
 
-        protected_head = [m for m in cleaned if m.metadata.get("_lcm_group") == "head"]
-        buffer = [m for m in cleaned if m.metadata.get("_lcm_group") == "buffer"]
-        protected_tail = [m for m in cleaned if m.metadata.get("_lcm_group") == "tail"]
+        protected_head = [m for m in cleaned if m.metadata.get("_context_group") == "head"]
+        buffer = [m for m in cleaned if m.metadata.get("_context_group") == "buffer"]
+        protected_tail = [m for m in cleaned if m.metadata.get("_context_group") == "tail"]
 
-        # Clean up temporary LCM group tracking metadata
+        # Clean up temporary context group tracking metadata
         for segment in (protected_head, buffer, protected_tail):
             for m in segment:
                 if m.metadata:
-                    m.metadata.pop("_lcm_group", None)
+                    m.metadata.pop("_context_group", None)
 
         # Estimate active context tokens
         total_tokens = (
@@ -240,13 +240,13 @@ class LcmHtmlReporter:
 
         # Build message HTML segments
         head_html_str = (
-            LcmHtmlReporter._render_messages_to_html(protected_head) or "<p>*(Protected head is empty)*</p>"
+            ContextHtmlReporter._render_messages_to_html(protected_head) or "<p>*(Protected head is empty)*</p>"
         )
         buffer_html_str = (
-            LcmHtmlReporter._render_messages_to_html(buffer) or "<p>*(No middle buffer messages)*</p>"
+            ContextHtmlReporter._render_messages_to_html(buffer) or "<p>*(No middle buffer messages)*</p>"
         )
         fresh_tail_html_str = (
-            LcmHtmlReporter._render_messages_to_html(protected_tail) or "<p>*(Fresh tail is empty)*</p>"
+            ContextHtmlReporter._render_messages_to_html(protected_tail) or "<p>*(Fresh tail is empty)*</p>"
         )
 
         # Build actual LLM metrics card if available
@@ -272,7 +272,7 @@ class LcmHtmlReporter:
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>LCM Active Context - Session {session.id}</title>
+    <title>Active Prompt Context - Session {session.id}</title>
     <style>
         body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -489,7 +489,7 @@ class LcmHtmlReporter:
 <body>
     <div class="container">
         <header>
-            <h1>📖 Lossless Context Management (LCM) Active Context</h1>
+            <h1>📖 Active Prompt Context</h1>
             <p style="margin:0;color:#8899a6;">Session: <strong>{session.id}</strong></p>
             <div class="stats-grid">
                 <div class="stat-card">
@@ -550,11 +550,11 @@ class LcmHtmlReporter:
 
         try:
             temp_file = tempfile.NamedTemporaryFile(
-                suffix="_lcm_context.html", delete=False, mode="w", encoding="utf-8"
+                suffix="_active_context.html", delete=False, mode="w", encoding="utf-8"
             )
             temp_file.write(html_template)
             temp_file.close()
             return temp_file.name
         except Exception as e:
-            logger.error(f"Failed to write LCM context HTML: {e}")
+            logger.error(f"Failed to write Active Context HTML: {e}")
             raise

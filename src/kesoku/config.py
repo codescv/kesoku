@@ -85,13 +85,13 @@ class AgentConfig(BaseModel):
         default=0.8,
         description="Threshold for automatic in-place history compaction (if >1 raw tokens, if <1 window ratio)",
     )
-    lcm_llm: str | None = Field(
+    context_llm: str | None = Field(
         default=None,
-        description="LLM provider identifier for LCM and background memory (if None, defaults to llm)",
+        description="LLM provider identifier for context compression and background memory (if None, defaults to llm)",
     )
     embedding_model: str = Field(
-        default_factory=lambda: os.getenv("LCM_EMBEDDING_MODEL", "vertex_ai/text-multilingual-embedding-002"),
-        description="Model name to use for OpenLCM vector embedding generation",
+        default_factory=lambda: os.getenv("CONTEXT_EMBEDDING_MODEL", "vertex_ai/text-multilingual-embedding-002"),
+        description="Model name to use for context compression vector embedding generation",
     )
     search_threshold: float = Field(
         default=0.35,
@@ -113,7 +113,7 @@ class AgentConfig(BaseModel):
         default=4,
         description="Number of turns x grouped to form a Level-0 node",
     )
-    lcm_consolidation_k: int = Field(
+    context_consolidation_k: int = Field(
         default=4,
         description="Branching factor K to merge K Level-n nodes into Level-n+1",
     )
@@ -124,9 +124,9 @@ class GeminiConfig(BaseModel):
     """Google GenAI / Gemini LLM configuration settings."""
 
     model_name: str = Field(default="gemini-3.1-flash", description="Gemini model identifier")
-    lcm_model_name: str | None = Field(
+    context_model_name: str | None = Field(
         default=None,
-        description="Model name override to use for LCM and background memory",
+        description="Model name override to use for context compression and background memory",
     )
     auth_mode: Literal["api_key", "vertex"] = Field(default="vertex", description="Authentication mode")
     api_key: str | None = Field(default=None, description="API key (if auth_mode='api_key')")
@@ -159,9 +159,9 @@ class ClaudeConfig(BaseModel):
     """Anthropic / Claude LLM configuration settings on Vertex AI."""
 
     model_name: str = Field(default="claude-3-5-sonnet@20241022", description="Claude model identifier")
-    lcm_model_name: str | None = Field(
+    context_model_name: str | None = Field(
         default=None,
-        description="Model name override to use for LCM and background memory",
+        description="Model name override to use for context compression and background memory",
     )
     project_id: str | None = Field(default="gtech-ads-localizer-external", description="GCP Project ID (for Vertex AI)")
     location: str | None = Field(default="us-east5", description="GCP Region/Location (for Vertex AI)")

@@ -139,7 +139,7 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
 
                     async def reply_func(text: str, file_path: str | None = None) -> None:
                         if file_path:
-                            file = discord.File(file_path, filename="lcm_context.html")
+                            file = discord.File(file_path, filename="active_context.html")
                             await interaction.followup.send(content=text, file=file)
                         else:
                             from kesoku.utils.text import split_text_into_chunks
@@ -154,7 +154,6 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
                             "reset",
                             "status",
                             "compact",
-                            "lcm",
                             "context",
                             "debug",
                         }:

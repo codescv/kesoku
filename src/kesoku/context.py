@@ -39,7 +39,7 @@ class KesokuContext:
         self.active_jobs = ActiveJobsRegistry()
 
         # Resolve SQLite DB path for embeddings relative to kesoku.db directory
-        self.embedding_db_path = os.path.join(os.path.dirname(self.config.workspace.db_path), "lcm.db")
+        self.embedding_db_path = os.path.join(os.path.dirname(self.config.workspace.db_path), "context_embeddings.db")
 
         # Initialize global EmbeddingStore for general indexing
         self.embedding_store = EmbeddingStore(
@@ -100,12 +100,12 @@ class KesokuContext:
             return self._config
         return get_config()
 
-    def get_llm(self, provider: str | None = None, use_lcm: bool = False) -> BaseLLM:
+    def get_llm(self, provider: str | None = None, use_context_compression: bool = False) -> BaseLLM:
         """Dynamically resolve and build an LLM provider instance at execution time.
 
         Args:
             provider: Optional provider name (e.g. 'gemini', 'claude'). If None, resolves from config.
-            use_lcm: Whether to resolve using LCM settings.
+            use_context_compression: Whether to resolve using context compression settings.
 
         Returns:
             An instance of BaseLLM.
@@ -114,6 +114,8 @@ class KesokuContext:
             return self._llm
 
         target_provider = provider or (
-            self.config.agent.lcm_llm if use_lcm and self.config.agent.lcm_llm else self.config.agent.llm
+            self.config.agent.context_llm
+            if use_context_compression and self.config.agent.context_llm
+            else self.config.agent.llm
         )
-        return get_llm(provider=target_provider, config=self.config, use_lcm=use_lcm)
+        return get_llm(provider=target_provider, config=self.config, use_context_compression=use_context_compression)

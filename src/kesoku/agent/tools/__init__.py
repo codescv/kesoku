@@ -15,6 +15,7 @@ from kesoku.agent.tools.memory import (
     validate_key,
     view_chat_history_summary,
     view_memory,
+    view_message,
 )
 from kesoku.agent.tools.registry import (
     ToolContext,
@@ -50,6 +51,7 @@ __all__ = [
     "view_chat_history_summary",
     "memory_grep",
     "memory_search",
+    "view_message",
     "sanitize_key",
     "validate_key",
     "MAX_MEMORY_CONTENT_LENGTH",

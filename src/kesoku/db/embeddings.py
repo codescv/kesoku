@@ -43,7 +43,7 @@ class EmbeddingStore:
             with self._conn:
                 self._conn.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS lcm_embeddings (
+                    CREATE TABLE IF NOT EXISTS context_embeddings (
                         content_type TEXT NOT NULL,
                         content_id TEXT NOT NULL,
                         embedding BLOB NOT NULL,
@@ -92,7 +92,7 @@ class EmbeddingStore:
             with self._conn:
                 self._conn.execute(
                     """
-                    INSERT OR REPLACE INTO lcm_embeddings (content_type, content_id, embedding)
+                    INSERT OR REPLACE INTO context_embeddings (content_type, content_id, embedding)
                     VALUES (?, ?, ?)
                     """,
                     (content_type, content_id, vec_blob),
@@ -107,7 +107,7 @@ class EmbeddingStore:
         try:
             with self._conn:
                 self._conn.execute(
-                    "DELETE FROM lcm_embeddings WHERE content_type = ? AND content_id = ?",
+                    "DELETE FROM context_embeddings WHERE content_type = ? AND content_id = ?",
                     (content_type, content_id),
                 )
         except Exception as exc:
@@ -140,7 +140,7 @@ class EmbeddingStore:
                 f"""
                 SELECT content_type, content_id,
                        vec_distance_cosine(embedding, ?) AS distance
-                FROM lcm_embeddings
+                FROM context_embeddings
                 WHERE 1=1 {where}
                 ORDER BY distance ASC
                 LIMIT ?

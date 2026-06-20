@@ -1,13 +1,13 @@
-"""Unit tests for the LcmHtmlReporter utility."""
+"""Unit tests for the ContextHtmlReporter utility."""
 
 import os
 
 from kesoku.db import Message, Session, SummaryNode
-from kesoku.gateway.chatbot.lcm_reporter import LcmHtmlReporter
+from kesoku.gateway.chatbot.context_reporter import ContextHtmlReporter
 
 
 def test_render_to_temp_file() -> None:
-    """Test that LcmHtmlReporter renders the context successfully into an HTML file."""
+    """Test that ContextHtmlReporter renders the context successfully into an HTML file."""
     session = Session(id="session_abc123", title="Test Session")
 
     # Summary Nodes
@@ -120,7 +120,7 @@ def test_render_to_temp_file() -> None:
 
     sys_msg = "You are a helpful assistant."
 
-    temp_file_path = LcmHtmlReporter.render_to_temp_file(
+    temp_file_path = ContextHtmlReporter.render_to_temp_file(
         session=session,
         root_summaries=root_summaries,
         all_summaries=all_summaries,
@@ -133,12 +133,12 @@ def test_render_to_temp_file() -> None:
 
     try:
         assert os.path.exists(temp_file_path)
-        assert temp_file_path.endswith("_lcm_context.html")
+        assert temp_file_path.endswith("_active_context.html")
 
         with open(temp_file_path, encoding="utf-8") as f:
             content = f.read()
 
-        assert "LCM Active Context" in content
+        assert "Active Prompt Context" in content
         assert "session_abc123" in content
         assert "Summary of node 1" in content
         assert "Summary of node 2" in content

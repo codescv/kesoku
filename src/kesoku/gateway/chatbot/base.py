@@ -19,7 +19,7 @@ from kesoku.agent.tools.registry import ToolContext
 from kesoku.config import get_config
 from kesoku.constants import SYSTEM_START_TIME, MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
-from kesoku.gateway.chatbot.lcm_reporter import LcmHtmlReporter
+from kesoku.gateway.chatbot.context_reporter import ContextHtmlReporter
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 from kesoku.utils.async_fs import async_exists, async_realpath
@@ -228,11 +228,11 @@ class Chatbot(ABC):
             status_msg = await self.update_role_by_channel(channel_id, role_name)
             await reply_func(status_msg)
 
-        async def handle_lcm(reply_func: Callable[..., Awaitable[None]], channel_id: str) -> None:
-            res = await self.get_session_lcm_context_by_channel(channel_id)
+        async def handle_context(reply_func: Callable[..., Awaitable[None]], channel_id: str) -> None:
+            res = await self.get_session_active_context_by_channel(channel_id)
             if await async_exists(res):
                 await reply_func(
-                    "📖 Here is your beautifully formatted LCM Active Context HTML download:", file_path=res
+                    "📖 Here is your beautifully formatted Active Context HTML download:", file_path=res
                 )
             else:
                 await reply_func(res)
@@ -248,14 +248,9 @@ class Chatbot(ABC):
             handle_role,
         )
         self.commands.register(
-            "lcm",
-            "View the currently active Lossless Context Management (LCM) context.",
-            handle_lcm,
-        )
-        self.commands.register(
             "context",
-            "View the currently active Lossless Context Management (LCM) context.",
-            handle_lcm,
+            "View the currently active prompt context (what the LLM sees).",
+            handle_context,
         )
 
         async def handle_grep(
@@ -600,8 +595,8 @@ class Chatbot(ABC):
             f"  - Time: {turn_time:.1f}s"
         )
 
-    async def get_session_lcm_context_by_channel(self, channel_id: str) -> str:
-        """Get the currently active assembled LCM context (what the LLM sees) for the channel."""
+    async def get_session_active_context_by_channel(self, channel_id: str) -> str:
+        """Get the currently active assembled prompt context (what the LLM sees) for the channel."""
         session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
         if not session:
             return "⚠️ No active session found for this chat."
@@ -654,7 +649,7 @@ class Chatbot(ABC):
                     last_metrics = m.metadata.get("turn_metrics")
                     break
 
-            return LcmHtmlReporter.render_to_temp_file(
+            return ContextHtmlReporter.render_to_temp_file(
                 session=session,
                 root_summaries=root_summaries,
                 all_summaries=all_summaries,
@@ -665,8 +660,8 @@ class Chatbot(ABC):
                 last_metrics=last_metrics,
             )
         except Exception as e:
-            logger.error(f"Failed to get LCM context by channel: {e}")
-            return f"⚠️ Failed to retrieve LCM context: {e}"
+            logger.error(f"Failed to get active context by channel: {e}")
+            return f"⚠️ Failed to retrieve active context: {e}"
 
     async def trigger_cronjob_message(
         self,

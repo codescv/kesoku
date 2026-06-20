@@ -103,10 +103,10 @@ class MessageHeaderView(discord.ui.View):
     @discord.ui.button(
         style=discord.ButtonStyle.secondary,
         emoji="📖",
-        custom_id="btn_view_lcm_context",
+        custom_id="btn_view_active_context",
     )
-    async def view_lcm_context(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        """Callback triggered when 'View LCM Context' button is clicked."""
+    async def view_active_context(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        """Callback triggered when 'View Active Context' button is clicked."""
         await interaction.response.defer(ephemeral=True)
 
         try:
@@ -117,11 +117,11 @@ class MessageHeaderView(discord.ui.View):
                 )
                 return
 
-            res = await self.chatbot.get_session_lcm_context_by_channel(str(interaction.channel_id))
+            res = await self.chatbot.get_session_active_context_by_channel(str(interaction.channel_id))
             if await async_exists(res):
-                discord_file = discord.File(res, filename="lcm_active_context.html")
+                discord_file = discord.File(res, filename="active_context.html")
                 await interaction.followup.send(
-                    content="📖 Here is the complete lossless active context (what the Agent currently sees):",
+                    content="📖 Here is the complete active context (what the Agent currently sees):",
                     file=discord_file,
                     ephemeral=True,
                 )
@@ -131,9 +131,12 @@ class MessageHeaderView(discord.ui.View):
                     ephemeral=True,
                 )
         except Exception as e:
-            logger.error(f"Failed to retrieve LCM context via button for session {self.session_id}: {e}", exc_info=True)
+            logger.error(
+                f"Failed to retrieve active context via button for session {self.session_id}: {e}",
+                exc_info=True,
+            )
             await interaction.followup.send(
-                content=f"⚠️ Failed to retrieve LCM context: {e}",
+                content=f"⚠️ Failed to retrieve active context: {e}",
                 ephemeral=True,
             )
 

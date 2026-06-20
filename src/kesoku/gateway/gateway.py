@@ -118,13 +118,13 @@ class Gateway:
             await self.db.set_active_session_for_channel(chatbot_id, channel_id, sess.id)
 
         # Record session role in embeddings database for historical cross-session grep reference
-        lcm_db_path = self.context.embedding_db_path
+        context_db_path = self.context.embedding_db_path
         try:
             db_sess = await self.db.get_session(sess.id)
             resolved_role = db_sess.role_name if db_sess else (role or "default")
 
             def _sync_write_session_role():
-                conn = sqlite3.connect(lcm_db_path, timeout=10.0)
+                conn = sqlite3.connect(context_db_path, timeout=10.0)
                 try:
                     conn.execute(
                         """
@@ -144,7 +144,7 @@ class Gateway:
 
             await asyncio.to_thread(_sync_write_session_role)
         except Exception as e:
-            logger.warning(f"Failed to record session role mapping to lcm.db: {e}")
+            logger.warning(f"Failed to record session role mapping to context database: {e}")
 
         return sess
 

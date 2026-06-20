@@ -15,11 +15,11 @@ from kesoku.context import KesokuContext
 from kesoku.db import DatabaseManager
 from kesoku.gateway.gateway import Gateway
 
-lcm_app = typer.Typer(help="Inspect, audit, and manage context compression forest states.")
+context_app = typer.Typer(help="Inspect, audit, and manage context compression forest states.")
 
 
-@lcm_app.command("status")
-def lcm_status(
+@context_app.command("status")
+def context_status(
     session_id: Annotated[
         str | None, typer.Argument(help="Session ID to inspect. Omit to use the latest session.")
     ] = None,
@@ -90,8 +90,8 @@ def lcm_status(
         sys.exit(1)
 
 
-@lcm_app.command("view")
-def lcm_view(
+@context_app.command("view")
+def context_view(
     session_id: Annotated[
         str | None, typer.Argument(help="Session ID to view. Omit to use the latest session.")
     ] = None,
@@ -229,8 +229,8 @@ def lcm_view(
         sys.exit(1)
 
 
-@lcm_app.command("compact")
-def lcm_compact(
+@context_app.command("compact")
+def context_compact(
     session_id: Annotated[
         str | None, typer.Argument(help="Session ID to compact. Omit to use the latest session.")
     ] = None,

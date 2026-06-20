@@ -104,7 +104,7 @@ class HistoryCompressor:
         protect_tail = config.agent.protect_tail_turns
         min_tokens = config.agent.base_node_min_tokens
         base_turns = config.agent.base_node_turns
-        K = config.agent.lcm_consolidation_k
+        K = config.agent.context_consolidation_k
 
         if len(turns) <= protect_front + protect_tail:
             return False

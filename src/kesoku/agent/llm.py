@@ -1050,14 +1050,14 @@ class MockLLM(BaseLLM):
 def get_llm(
     provider: str | None = None,
     config: KesokuConfig | None = None,
-    use_lcm: bool = False,
+    use_context_compression: bool = False,
 ) -> BaseLLM:
     """Get an LLM instance based on config or specified provider.
 
     Args:
         provider: Optional provider name ('gemini', 'claude', or 'mock'). If None, uses agent.llm from config.
         config: Optional configuration container. If None, uses get_config().
-        use_lcm: Whether to resolve using LCM settings.
+        use_context_compression: Whether to resolve using context compression settings.
 
     Returns:
         An instance of BaseLLM (GeminiLLM, ClaudeLLM, or MockLLM).
@@ -1068,18 +1068,19 @@ def get_llm(
     if config is None:
         config = get_config()
     if provider is None:
-        provider = config.agent.lcm_llm if use_lcm and config.agent.lcm_llm else config.agent.llm
+        has_ctx_llm = use_context_compression and config.agent.context_llm
+        provider = config.agent.context_llm if has_ctx_llm else config.agent.llm
 
     provider_lower = provider.lower()
     if provider_lower == "gemini":
         gemini_cfg = config.gemini
-        if use_lcm and gemini_cfg.lcm_model_name:
-            gemini_cfg = gemini_cfg.model_copy(update={"model_name": gemini_cfg.lcm_model_name})
+        if use_context_compression and gemini_cfg.context_model_name:
+            gemini_cfg = gemini_cfg.model_copy(update={"model_name": gemini_cfg.context_model_name})
         return GeminiLLM(config=gemini_cfg)
     elif provider_lower == "claude":
         claude_cfg = config.claude
-        if use_lcm and claude_cfg.lcm_model_name:
-            claude_cfg = claude_cfg.model_copy(update={"model_name": claude_cfg.lcm_model_name})
+        if use_context_compression and claude_cfg.context_model_name:
+            claude_cfg = claude_cfg.model_copy(update={"model_name": claude_cfg.context_model_name})
         return ClaudeLLM(config=claude_cfg)
     elif provider_lower == "mock":
         return MockLLM()

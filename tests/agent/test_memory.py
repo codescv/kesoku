@@ -12,6 +12,7 @@ from kesoku.agent.tools import (
     memory_grep,
     update_memory,
     view_memory,
+    view_message,
 )
 from kesoku.config import KesokuConfig, WorkspaceConfig
 from kesoku.constants import MessageRole, MessageStatus, MessageType
@@ -859,3 +860,52 @@ async def test_memory_grep_tool_wildcard_and_filters(tmp_path) -> None:
     assert "Third message on Tuesday" in res_limit
     assert "Second message on Monday" in res_limit
     assert "First message on Monday" not in res_limit
+
+
+@pytest.mark.asyncio
+async def test_view_message_tool(tmp_path) -> None:
+    """Test that view_message retrieves full message details successfully."""
+    from kesoku.gateway.gateway import Gateway
+
+    temp_db = str(tmp_path / "test_view_msg.db")
+    db = DatabaseManager(temp_db)
+    db.init_tables()
+
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    session1 = Session(id="sess_abc", title="Sess ABC", created_at=time.time(), updated_at=time.time())
+    await gw.db.create_session(session1)
+
+    msg = Message(
+        id="unique_msg_999",
+        session_id="sess_abc",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="Asuka",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="This is a secret long content.",
+        status=MessageStatus.RESPONDED,
+    )
+    await gw.post(msg)
+
+    ctx = ToolContext(
+        session_id="sess_abc",
+        session_workspace="test_ws",
+        original_msg_id="unique_msg_999",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        gateway=gw,
+    )
+
+    # Test retrieval
+    res = await view_message("unique_msg_999", context=ctx)
+    assert "Message Details" in res
+    assert "unique_msg_999" in res
+    assert "Asuka (assistant)" in res
+    assert "This is a secret long content." in res
+
+    # Test non-existent retrieval
+    res_fail = await view_message("non_existent_id", context=ctx)
+    assert "not found" in res_fail

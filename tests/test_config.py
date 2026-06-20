@@ -205,8 +205,8 @@ account_id = "wechat-acc"
     assert w_cfg.account_id == "wechat-acc"
 
 
-def test_lcm_custom_config(tmp_path: Any) -> None:
-    """Verify custom LCM settings (lcm_llm and lcm_model_name) are parsed from TOML."""
+def test_context_custom_config(tmp_path: Any) -> None:
+    """Verify custom context compression settings (context_llm and context_model_name) are parsed from TOML."""
     config_path = tmp_path / "config.toml"
     toml_content = """
 [workspace]
@@ -214,25 +214,25 @@ db_path = "kesoku.db"
 
 [agent]
 llm = "gemini"
-lcm_llm = "claude"
+context_llm = "claude"
 
 [gemini]
 model_name = "gemini-3.5-pro"
-lcm_model_name = "gemini-2.0-flash-lite"
+context_model_name = "gemini-2.0-flash-lite"
 
 [claude]
 model_name = "claude-3-5-sonnet"
-lcm_model_name = "claude-3-5-haiku"
+context_model_name = "claude-3-5-haiku"
 """
     with open(config_path, "w") as f:
         f.write(toml_content)
 
     cfg = load_config(str(config_path))
     assert cfg.agent.llm == "gemini"
-    assert cfg.agent.lcm_llm == "claude"
+    assert cfg.agent.context_llm == "claude"
     assert cfg.gemini.model_name == "gemini-3.5-pro"
-    assert cfg.gemini.lcm_model_name == "gemini-2.0-flash-lite"
+    assert cfg.gemini.context_model_name == "gemini-2.0-flash-lite"
     assert cfg.claude.model_name == "claude-3-5-sonnet"
-    assert cfg.claude.lcm_model_name == "claude-3-5-haiku"
+    assert cfg.claude.context_model_name == "claude-3-5-haiku"
 
 
