@@ -641,13 +641,28 @@ class Chatbot(ABC):
 
             assembled = lcm_engine._assemble_context(system_message, remaining_messages)
 
-            # Map store_ids from database to populate _lcm_store_id on remaining_messages
+            # Map store_ids from database using heuristic matching to support thoughts/omissions
             try:
-                tail_rows = lcm_engine._store.get_session_tail(session.id, limit=len(remaining_messages))
-                for i, row in enumerate(tail_rows):
-                    idx = len(remaining_messages) - len(tail_rows) + i
-                    if 0 <= idx < len(remaining_messages):
-                        remaining_messages[idx]["_lcm_store_id"] = row.get("store_id")
+                tail_rows = lcm_engine._store.get_session_tail(
+                    session.id, limit=len(remaining_messages) * 3 + 20
+                )
+                used_store_ids = set()
+                for msg in remaining_messages:
+                    role_val = msg.get("role", "")
+                    content_val = msg.get("content") or ""
+                    content_norm = content_val.strip()
+                    for row in tail_rows:
+                        row_sid = row.get("store_id")
+                        if row_sid and row_sid not in used_store_ids and row.get("role") == role_val:
+                            row_content = (row.get("content") or "").strip()
+                            if (
+                                row_content == content_norm
+                                or row_content.startswith(content_norm[:80])
+                                or content_norm.startswith(row_content[:80])
+                            ):
+                                msg["_lcm_store_id"] = row_sid
+                                used_store_ids.add(row_sid)
+                                break
             except Exception as e:
                 logger.debug("Failed to map store_ids for reporter: %s", e)
 

@@ -196,9 +196,15 @@ def messages_to_openlcm_dicts(history: list[Message]) -> list[dict[str, Any]]:
         others_after = []
         has_seen_tool_result = False
 
-        for m in turn:
+        # Find the index of the last thought message in the turn
+        last_thought_idx = -1
+        for i, m in enumerate(turn):
             if m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT:
-                if not is_latest:
+                last_thought_idx = i
+
+        for i, m in enumerate(turn):
+            if m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT:
+                if not is_latest or i != last_thought_idx:
                     continue
                 others_before.append(m)
             elif m.role == MessageRole.TOOL and m.type == MessageType.TOOL_CALL:
