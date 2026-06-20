@@ -188,49 +188,77 @@ def messages_to_openlcm_dicts(history: list[Message]) -> list[dict[str, Any]]:
     num_turns = len(turns)
     for idx, turn in enumerate(turns):
         is_latest = idx == num_turns - 1
-        # A turn is completed if it already contains a final assistant text response
-        has_text_response = any(
-            m.role == MessageRole.ASSISTANT and m.type == MessageType.TEXT
-            for m in turn
-        )
-        # We only preserve thoughts if the turn is both the latest and currently in-progress
-        is_active_turn = is_latest and not has_text_response
 
-        # Separate tool calls and results to allow sorting/alignment
-        tool_calls = []
-        tool_results = []
-        others_before = []
-        others_after = []
-        has_seen_tool_result = False
-
-        # Find the index of the last thought message in the turn
-        last_thought_idx = -1
-        for i, m in enumerate(turn):
-            if m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT:
-                last_thought_idx = i
-
-        for i, m in enumerate(turn):
-            if m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT:
-                if not is_active_turn or i != last_thought_idx:
-                    continue
-                others_before.append(m)
+        # Group messages inside this turn chronologically into individual steps
+        steps = []
+        current_step = {
+            "leading": [],
+            "thought": None,
+            "tool_calls": [],
+            "tool_results": [],
+            "text": None,
+            "others": [],
+        }
+        for m in turn:
+            if m.role in (MessageRole.USER, MessageRole.SYSTEM):
+                current_step["leading"].append(m)
+            elif m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT:
+                if (
+                    current_step["thought"]
+                    or current_step["tool_calls"]
+                    or current_step["tool_results"]
+                    or current_step["text"]
+                ):
+                    steps.append(current_step)
+                    current_step = {
+                        "leading": [],
+                        "thought": None,
+                        "tool_calls": [],
+                        "tool_results": [],
+                        "text": None,
+                        "others": [],
+                    }
+                current_step["thought"] = m
             elif m.role == MessageRole.TOOL and m.type == MessageType.TOOL_CALL:
-                tool_calls.append(m)
+                current_step["tool_calls"].append(m)
             elif m.role == MessageRole.TOOL and m.type == MessageType.TOOL_RESULT:
-                tool_results.append(m)
-                has_seen_tool_result = True
+                current_step["tool_results"].append(m)
+            elif m.role == MessageRole.ASSISTANT and m.type == MessageType.TEXT:
+                current_step["text"] = m
             else:
-                if has_seen_tool_result:
-                    others_after.append(m)
-                else:
-                    others_before.append(m)
+                current_step["others"].append(m)
 
-        # Sort tool results to match the order of their corresponding tool calls (by message ID)
-        call_id_to_index = {call.id: i for i, call in enumerate(tool_calls)}
-        tool_results.sort(key=lambda r: call_id_to_index.get(r.parent_id, len(tool_calls)))
+        if (
+            current_step["leading"]
+            or current_step["thought"]
+            or current_step["tool_calls"]
+            or current_step["tool_results"]
+            or current_step["text"]
+            or current_step["others"]
+        ):
+            steps.append(current_step)
 
-        # Reconstruct the sorted turn list
-        cleaned_history.extend(others_before + tool_calls + tool_results + others_after)
+        # For each step, sort tool results and extend cleaned_history
+        for step in steps:
+            # Sort tool results to match their corresponding tool calls in this step
+            tc_ids = {call.id: i for i, call in enumerate(step["tool_calls"])}
+            step["tool_results"].sort(
+                key=lambda r: tc_ids.get(r.parent_id, len(step["tool_calls"]))
+            )
+
+            # Reconstruct sorted step messages
+            step_msgs = []
+            step_msgs.extend(step["leading"])
+            # Keep thoughts only if it's the latest turn (in-progress or completed)
+            if step["thought"] and is_latest:
+                step_msgs.append(step["thought"])
+            step_msgs.extend(step["tool_calls"])
+            step_msgs.extend(step["tool_results"])
+            if step["text"]:
+                step_msgs.append(step["text"])
+            step_msgs.extend(step["others"])
+
+            cleaned_history.extend(step_msgs)
 
     # 2. Sanitize paths and process messages (Question 4)
     lcm_msgs = []

@@ -191,7 +191,7 @@ def test_messages_to_openlcm_dicts_thought_text_merging() -> None:
     assert len(dicts) == 1
     assert dicts[0] == {
         "role": "assistant",
-        "content": "Hello, user!",
+        "content": "<thought>My thought process here.</thought>\n\nHello, user!",
     }
 
 
@@ -328,7 +328,7 @@ def test_messages_to_openlcm_dicts_strips_historical_thoughts() -> None:
     # 1. user: "Hello"
     # 2. assistant: "Hi there" (without "Historical thought")
     # 3. user: "How are you?"
-    # 4. assistant: "I am good" (without "Active thought", since turn is completed with TEXT response)
+    # 4. assistant: "<thought>Active thought</thought>\n\nI am good"
     assert len(dicts) == 4
     assert dicts[0]["role"] == "user"
     assert dicts[0]["content"] == "Hello"
@@ -337,7 +337,7 @@ def test_messages_to_openlcm_dicts_strips_historical_thoughts() -> None:
     assert dicts[2]["role"] == "user"
     assert dicts[2]["content"] == "How are you?"
     assert dicts[3]["role"] == "assistant"
-    assert dicts[3]["content"] == "I am good"
+    assert dicts[3]["content"] == "<thought>Active thought</thought>\n\nI am good"
 
 
 def test_path_sanitization_and_restoration() -> None:
