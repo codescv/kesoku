@@ -127,6 +127,13 @@ async def test_resolve_outbound_path(tmp_path) -> None:
     flat_file = staging_dir / "result.png"
     flat_file.write_text("flat result")
 
+    # Create AWD test files
+    awd_dir = tmp_path / "awd"
+    awd_sessions_dir = awd_dir / "sessions" / "xxx"
+    awd_sessions_dir.mkdir(parents=True)
+    awd_file = awd_sessions_dir / "yyy"
+    awd_file.write_text("awd yyy")
+
     mock_gateway = MagicMock(spec=Gateway)
     chatbot = MockChatbot(chatbot_id="mock_bot", gateway=mock_gateway)
 
@@ -137,7 +144,10 @@ async def test_resolve_outbound_path(tmp_path) -> None:
         agent_working_dir=str(tmp_path / "awd"),
     )
 
-    with patch("kesoku.gateway.chatbot.base.get_config", return_value=mock_cfg):
+    with (
+        patch("kesoku.gateway.chatbot.base.get_config", return_value=mock_cfg),
+        patch("kesoku.utils.path.get_config", return_value=mock_cfg),
+    ):
         # Mock session retrieval and staging dir resolution
         mock_session = Session(id="session123", title="Test Session", workspace_name="test_ws")
         mock_gateway.db = AsyncMock()
@@ -189,6 +199,10 @@ async def test_resolve_outbound_path(tmp_path) -> None:
         # 8. Fuzzy match of a nested relative path under staging_dir (outtput/results.png -> output/result.png)
         resolved = await chatbot.resolve_outbound_path("outtput/results.png", "session123")
         assert resolved == str(nested_file.resolve())
+
+        # 9. Exact match of a relative path under AWD
+        resolved = await chatbot.resolve_outbound_path("sessions/xxx/yyy", "session123")
+        assert resolved == str(awd_file.resolve())
 
 
 @pytest.mark.asyncio

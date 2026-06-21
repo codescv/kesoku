@@ -762,6 +762,12 @@ class Chatbot(ABC):
         if os.path.isabs(cleaned_path) and await async_exists(cleaned_path):
             return await async_realpath(cleaned_path)
 
+        # Try to resolve relative to AWD (Agent Working Directory)
+        if not os.path.isabs(cleaned_path):
+            candidate_path = PathResolver.resolve(cleaned_path)
+            if await async_exists(candidate_path):
+                return await async_realpath(candidate_path)
+
         # 2. Get session staging directory
         staging_dir = None
         session = await self.gateway.db.get_session(session_id)
