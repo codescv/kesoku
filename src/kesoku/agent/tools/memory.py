@@ -389,50 +389,6 @@ async def delete_memory(
         return f"Error deleting memory: {e}"
 
 
-@default_registry.register
-async def view_chat_history_summary(context: ToolContext) -> str:
-    """Retrieve the consolidated chat history summary and recent active messages for the current role persona.
-
-    Use this tool to read global context and synchronize knowledge about external conversations,
-    stories, and milestones that occurred across all channels/threads.
-
-    Args:
-        context: Injected tool execution context (automatically resolved).
-
-    Returns:
-        A formatted Markdown string containing the consolidated summary and recent active messages.
-    """
-    if not context or not context.gateway:
-        return "Error: ToolContext or Gateway is missing."
-
-    # 1. Resolve active role using helper
-    active_role = await _resolve_memory_role(category="user_preferences", role_param=None, context=context)
-
-    try:
-        # 2. Query consolidated timeline and recent messages from Gateway
-        stored_ctx, new_messages = await context.gateway.db.get_cross_session_memory_updates(
-            role=active_role,
-            exclude_session_id=context.session_id,
-        )
-        timeline_content = stored_ctx.content if stored_ctx else ""
-
-        lines = [f"=== Consolidated Chat History Summary (Role: {active_role}) ==="]
-        if timeline_content.strip():
-            lines.append(timeline_content.strip())
-        else:
-            lines.append("No consolidated history recorded yet.")
-
-        if new_messages:
-            lines.append("\n=== Recent Active Messages ===")
-            for m in new_messages:
-                time_str = time.strftime("%m-%d %H:%M", time.localtime(m.timestamp))
-                lines.append(f"- [{time_str}] {m.sender}: {m.content}")
-
-        return "\n".join(lines)
-    except Exception as e:
-        logger.error(f"Failed to retrieve chat history summary: {e}", exc_info=True)
-        return f"Error retrieving chat history summary: {e}"
-
 
 @default_registry.register
 async def memory_grep(

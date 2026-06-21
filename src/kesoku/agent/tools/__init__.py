@@ -13,7 +13,6 @@ from kesoku.agent.tools.memory import (
     update_memory,
     use_skill,
     validate_key,
-    view_chat_history_summary,
     view_memory,
     view_message,
 )
@@ -48,7 +47,6 @@ __all__ = [
     "view_memory",
     "update_memory",
     "delete_memory",
-    "view_chat_history_summary",
     "memory_grep",
     "memory_search",
     "view_message",
