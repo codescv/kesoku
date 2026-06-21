@@ -150,6 +150,12 @@ def test_render_to_temp_file() -> None:
         assert "Active Buffer" in content
         assert "Actual LLM Context (Last Turn)" in content
         assert "78K active + 138K cached" in content
+        # Check that percentages and character counts are rendered in details headers
+        assert "🛠️ System Message Instructions (" in content
+        assert "🛡️ Protected Front Head (First Turn) (" in content
+        assert "📦 Compacted Summary Scaffold (Hierarchy Forest) (" in content
+        assert "⏳ Active Buffer (Pending Compaction) (" in content
+        assert "🧵 Active Fresh Tail (Chronological Messages) (" in content
         # Check thought stripping & keeping
         assert "Old thought to be stripped" not in content
         assert "Latest active thought to keep" in content

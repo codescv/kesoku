@@ -208,6 +208,27 @@ class ContextHtmlReporter:
             + sum(estimate_tokens(m.content) for m in protected_tail)
         )
 
+        # Calculate character lengths for estimating percentage of each context component
+        len_sys = len(sys_msg or "")
+        len_head = sum(len(m.content or "") for m in protected_head)
+        len_summary = sum(len(n.summary or "") for n in root_summaries)
+        len_buffer = sum(len(m.content or "") for m in buffer)
+        len_tail = sum(len(m.content or "") for m in protected_tail)
+
+        total_chars = len_sys + len_head + len_summary + len_buffer + len_tail
+
+        def format_pct(part_len: int) -> str:
+            if total_chars == 0:
+                return "0.0% - 0 chars"
+            pct = (part_len / total_chars) * 100
+            return f"{pct:.1f}% - {part_len:,} chars"
+
+        pct_sys = format_pct(len_sys)
+        pct_head = format_pct(len_head)
+        pct_summary = format_pct(len_summary)
+        pct_buffer = format_pct(len_buffer)
+        pct_tail = format_pct(len_tail)
+
         # Build summary nodes HTML
         summary_nodes_html = []
         # Sort all summaries by level descending, then start_timestamp ascending
@@ -513,33 +534,33 @@ class ContextHtmlReporter:
         </header>
 
         <details>
-            <summary>🛠️ System Message Instructions</summary>
+            <summary>🛠️ System Message Instructions ({pct_sys})</summary>
             <pre>{html.escape(sys_msg)}</pre>
         </details>
 
         <details>
-            <summary>🛡️ Protected Front Head (First Turn)</summary>
+            <summary>🛡️ Protected Front Head (First Turn) ({pct_head})</summary>
             <div style="margin-top: 15px; display: flex; flex-direction: column;">
                 {head_html_str}
             </div>
         </details>
 
         <details open>
-            <summary>📦 Compacted Summary Scaffold (Hierarchy Forest)</summary>
+            <summary>📦 Compacted Summary Scaffold (Hierarchy Forest) ({pct_summary})</summary>
             <div style="margin-top: 15px;">
                 {summary_nodes_html_str}
             </div>
         </details>
 
         <details open>
-            <summary>⏳ Active Buffer (Pending Compaction)</summary>
+            <summary>⏳ Active Buffer (Pending Compaction) ({pct_buffer})</summary>
             <div style="margin-top: 15px; display: flex; flex-direction: column;">
                 {buffer_html_str}
             </div>
         </details>
 
         <details open>
-            <summary>🧵 Active Fresh Tail (Chronological Messages)</summary>
+            <summary>🧵 Active Fresh Tail (Chronological Messages) ({pct_tail})</summary>
             <div style="margin-top: 15px; display: flex; flex-direction: column;">
                 {fresh_tail_html_str}
             </div>
