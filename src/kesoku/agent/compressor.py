@@ -15,12 +15,13 @@ logger = logging.getLogger(__name__)
 SUMMARIZE_TURN_PROMPT = """You are an advanced agent context compiler.
 Your task is to summarize the following segment of a conversation turn history into
 a highly dense, factual, and chronologically accurate narrative summary.
+Keep the summary structured and concise (< 1000 chars).
 
-Guidelines:
-1. Summarize key decisions, lessons learned / pitfalls encountered, and any files
-   created or modified **outside** the session's `$STAGING_DIR` (omit if none).
-2. Do not omit any crucial context, but do not include conversational fluff.
-3. Keep the summary structured and concise (< 1000 chars).
+It should contain the following sections:
+- Timeline events: when, where, who, what
+- Key Decisions and changes: User decides to use XXX / The plan was A but changed to B.
+- Pitfalls: Agent made a mistake A and fixed it using B.
+- Files: The **root directories** containing the files generated or changed.
 
 Conversation Segment to Summarize:
 {segment}
@@ -30,12 +31,13 @@ Summary:"""
 CONSOLIDATE_SUMMARIES_PROMPT = """You are an advanced agent context compiler.
 Your task is to merge and consolidate the following chronological sequence of summaries
 into a single, cohesive, higher-level summary.
+Maintain high density and clear structure (< 1000 chars).
 
 Guidelines:
-1. Resolve any overlapping narrative threads to ensure a smooth, logical progression.
+1. Merge Timeline events chronologically.
 2. If there are conflicting decisions or changes in approach, prioritize the latest decision
    and resolve contradictions in favor of the most recent events.
-3. Maintain high density and clear structure (< 1000 chars).
+3. Summarize pitfalls and files.
 
 Summaries to Merge (in chronological order):
 {summaries}
