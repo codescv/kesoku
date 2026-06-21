@@ -95,12 +95,20 @@ def prepare_history_for_llm(history: list[Message]) -> list[Message]:
             # Keep all thoughts and details in the latest/active turn
             cleaned_turns.append(turn)
         else:
-            # Completed turn: strip thoughts and clean historical user attachments
+            # Completed turn: strip thoughts, signatures, and clean historical user attachments
             clean_turn = []
             for m in turn:
                 # Drop assistant thoughts in completed turns
                 if m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT:
                     continue
+
+                # Drop thought signature from historical tool call messages to optimize context size
+                if m.role == MessageRole.TOOL and m.type == MessageType.TOOL_CALL:
+                    if m.metadata and "thought_signature" in m.metadata:
+                        # Copy to avoid mutating shared state in-memory
+                        m = m.model_copy()
+                        m.metadata = dict(m.metadata)
+                        m.metadata.pop("thought_signature", None)
 
                 # Strip attachments from historical user messages to optimize context size
                 if m.role == MessageRole.USER:

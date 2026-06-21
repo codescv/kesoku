@@ -583,7 +583,7 @@ async def test_priority_based_dropping_and_atomic_batches_turn_based(temp_db: st
         content="Calling tool",
         status="responded",
         parent_id=user1.id,
-        metadata={"tool_name": "dummy"},
+        metadata={"tool_name": "dummy", "thought_signature": "sig1"},
     )
     await gw.post(tc1)
 
@@ -646,7 +646,7 @@ async def test_priority_based_dropping_and_atomic_batches_turn_based(temp_db: st
         content="Calling tool 2",
         status="responded",
         parent_id=user2.id,
-        metadata={"tool_name": "dummy"},
+        metadata={"tool_name": "dummy", "thought_signature": "sig2"},
     )
     await gw.post(tc2)
 
@@ -693,6 +693,9 @@ async def test_priority_based_dropping_and_atomic_batches_turn_based(temp_db: st
     # - tc1 and tr1 must NOT be dropped
     assert tc1.id in history_ids
     assert tr1.id in history_ids
+    # - tc1 signature must be dropped (completed turn)
+    tc1_filtered = next(m for m in llm_history if m.id == tc1.id)
+    assert "thought_signature" not in (tc1_filtered.metadata or {})
 
     # Turn 2 checks:
     # - All kept (thought2, tc2, tr2, resp2) since Turn 2 is the latest active turn
@@ -700,6 +703,9 @@ async def test_priority_based_dropping_and_atomic_batches_turn_based(temp_db: st
     assert tc2.id in history_ids
     assert tr2.id in history_ids
     assert resp2.id in history_ids
+    # - tc2 signature must be kept (active turn)
+    tc2_filtered = next(m for m in llm_history if m.id == tc2.id)
+    assert (tc2_filtered.metadata or {}).get("thought_signature") == "sig2"
 
 
 @pytest.mark.asyncio
