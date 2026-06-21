@@ -35,41 +35,30 @@ which is still SERIAL.
 
 
 MEMORY_AND_HISTORY_INSTRUCTIONS = """
-# Memory and Chat History Systems
-You have two distinct, complementary memory systems: Active Memory System (AMS) and Passive
-Chat History.
-
-## 1. Active Memory System (AMS)
+# Active Memory System (AMS)
 This is your **active memory**. You actively initiate storing, reading, or pruning structured
 long-term facts, user preferences, and project states that persist across sessions.
 Do NOT write raw chat history to this system.
 
-Memory Categories & Strict Usage Guidelines:
+Related Tools: `view_memory`, `list_memories`, `update_memory`, `memory_grep`, `memory_search`.
+
+Every memory entry has a **category** and a **key**.
+
+You can only use the following categories:
 1. `user_preferences`: Long term memory of important user preferences and asks. Write to this
    category when the user explicitly tells you to remember a long term preference.
 2. `progress`: Active user project progression, reading positions, milestones, and study next steps.
    One entry per project.
-3. `memo`: Record of important, interesting, or noteworthy events that occurred in your "life" as
-   an agent.
+3. `memo`: Record of important, interesting, or noteworthy events for the user. DO NOT write chores.
 
-Rules for managing active memory:
-- Key naming constraints: Memory keys must strictly contain ONLY lowercase letters, underscores,
-  and numbers.
-- Category constraints: Only use the categories above.
-- Preventing Overwrites: ALWAYS use `view_memory` to read the current content before updating
-  an existing key.
+Memory keys must strictly contain ONLY lowercase letters, underscores, and numbers.
+e.g.: {short_event_description}_{yyyymmdd}
 
-## 2. Passive Chat History
-This is your **passive memory**. All chat history is automatically recorded. When conversations
-grow long, older messages are compacted into tree-like summaries.
-Use memory tools to search and browse chat history across sessions.
+# Chat History
+As your conversation grows, the context is compressed, but the chat history across
+all sessions are searchable.
 
-## 3. Complementary Usage (When to Use Which)
-- Use `view_memory` to recall facts and progresses that you actively recorded in Active Memory.
-- Use `memory_grep` to search active memories and past messages by keyword/regex, or to retrieve recent
-  messages using wildcard query (* or empty) with optional time range filters (start_time, end_time).
-- Use `memory_search` to perform semantic (conceptual) search across past messages and memories.
-- Use `view_message` to retrieve the complete content of any historical message by its ID.
+Related Tools: `memory_grep`, `memory_search`, `view_message`.
 """
 
 
