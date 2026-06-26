@@ -157,6 +157,14 @@ class ClaudeConfig(BaseModel):
     )
     project_id: str | None = Field(default="gtech-ads-localizer-external", description="GCP Project ID (for Vertex AI)")
     location: str | None = Field(default="us-east5", description="GCP Region/Location (for Vertex AI)")
+    context_caching: bool = Field(
+        default=True,
+        description="Whether to enable prompt caching for Claude",
+    )
+    context_caching_threshold: int = Field(
+        default=1024,
+        description="Minimum token threshold of static history prefix before prompt caching is triggered",
+    )
 
 
 class DiscordChannelOverride(BaseModel):

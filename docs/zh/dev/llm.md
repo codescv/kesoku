@@ -68,7 +68,8 @@ class BaseLLM(ABC):
 
 ### 2. `ClaudeLLM` (Anthropic Vertex API)
 *   **消息交替对齐**：Anthropic 接口强硬要求 `user` 和 `assistant` 的 Turn 必须严格交替出现。转译器会自动合并数据库中连续的用户文本和工具执行结果为一个 `user` 回合，以及合并连续的模型思维与工具调用为一个 `assistant` 回合。
-*   **工具转换器**：解析 Python 的 Docstrings 注释和参数类型定义，动态编译为符合 Anthropic 规范的 JSON tools 结构。
+*   **工具转换器**：解析 Python 的 Docstrings 注释和参数类型定义，动态编译为符合 Anthropic 规范 the JSON tools 结构。
+*   **提示词缓存 (Prompt Caching)**：当估算的输入 tokens 长度超过 `context_caching_threshold` 阈值（默认 1024 tokens）时，会自动在 system prompt、tools 以及最后的 message 上注入 `"cache_control": {"type": "ephemeral"}` 标记，从而利用 Anthropic 的原生 Ephemeral Cache 机制降低后续交互的延迟与成本。
 
 ---
 

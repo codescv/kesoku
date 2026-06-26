@@ -66,6 +66,7 @@ Before sending history to a model, Kesoku converts database `Message` records in
 ### 2. `ClaudeLLM` (Anthropic Vertex API)
 *   **Alternating Turns Alignment**: Anthropic requires strict user/assistant alternation. The translator automatically merges consecutive user text and tool outcomes into a single user turn, and consecutive assistant thoughts/tool calls into a single assistant turn.
 *   **Tool Converter**: Parses Python docstrings and type annotations and compiles them into Anthropic-spec tool schemas.
+*   **Prompt Caching**: If the estimated input token count exceeds `context_caching_threshold` (default: 1024 tokens), it automatically annotates the system prompt, tools, and the final message turn with `"cache_control": {"type": "ephemeral"}` to utilize Anthropic's native Ephemeral Caching, reducing costs and latency for subsequent turns.
 
 ---
 

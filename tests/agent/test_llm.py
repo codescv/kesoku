@@ -13,6 +13,7 @@ from kesoku.agent.llm import (
     get_llm,
     history_to_turns,
 )
+from kesoku.config import ClaudeConfig
 from kesoku.constants import MessageRole, MessageType
 from kesoku.db import Message
 
@@ -855,6 +856,114 @@ def test_gemini_llm_count_tokens_thought_signature() -> None:
         # Total tokens = 50 (from API) + 50 (extra) = 100
         assert tokens == 100
         mock_client.models.count_tokens.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_claude_llm_prompt_caching() -> None:
+    """Verify ClaudeLLM sets cache_control headers when prompt exceeds threshold."""
+    mock_client = MagicMock()
+    mock_res = MagicMock()
+    mock_res.content = [MagicMock(type="text", text="Hello.")]
+    mock_res.usage.input_tokens = 20
+    mock_res.usage.output_tokens = 5
+    mock_res.usage.cache_read_input_tokens = 100
+    mock_client.messages.create.return_value = mock_res
+
+    # Use a config where context_caching is enabled and threshold is small
+    config = ClaudeConfig(
+        context_caching=True,
+        context_caching_threshold=10,  # low threshold to trigger caching
+    )
+
+    with patch("kesoku.agent.llm.AnthropicVertex", return_value=mock_client):
+        claude = ClaudeLLM(config=config)
+
+        # A long prompt to trigger caching (approx 60 chars -> ~15 tokens, threshold is 10 tokens)
+        long_prompt = "A" * 60
+        system_prompt = "S" * 60
+
+        def dummy_tool(x: int) -> int:
+            """Dummy tool description.
+
+            Args:
+                x: parameter
+            """
+            return x
+
+        response = await claude.generate(
+            prompt=long_prompt,
+            system_prompt=system_prompt,
+            tools=[dummy_tool],
+        )
+
+        assert response.cached_tokens == 100
+        assert response.prompt_tokens == 120  # input_tokens (20) + cached_tokens (100)
+
+        mock_client.messages.create.assert_called_once()
+        called_kwargs = mock_client.messages.create.call_args[1]
+
+        # Verify system prompt has cache_control
+        assert isinstance(called_kwargs["system"], list)
+        assert called_kwargs["system"][0]["text"] == system_prompt
+        assert called_kwargs["system"][0]["cache_control"] == {"type": "ephemeral"}
+
+        # Verify tools has cache_control on the last tool
+        tools = called_kwargs["tools"]
+        assert len(tools) == 1
+        assert tools[0]["cache_control"] == {"type": "ephemeral"}
+
+        # Verify messages list has cache_control on the last message block
+        messages = called_kwargs["messages"]
+        assert len(messages) == 1
+        assert messages[0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+
+
+@pytest.mark.asyncio
+async def test_claude_llm_prompt_caching_disabled() -> None:
+    """Verify ClaudeLLM does not set cache_control when caching is disabled or below threshold."""
+    mock_client = MagicMock()
+    mock_res = MagicMock()
+    mock_res.content = [MagicMock(type="text", text="Hello.")]
+    mock_res.usage.input_tokens = 20
+    mock_res.usage.output_tokens = 5
+    mock_res.usage.cache_read_input_tokens = None
+    mock_client.messages.create.return_value = mock_res
+
+    # Use a config where context_caching is disabled
+    config_disabled = ClaudeConfig(
+        context_caching=False,
+        context_caching_threshold=10,
+    )
+
+    with patch("kesoku.agent.llm.AnthropicVertex", return_value=mock_client):
+        # Test 1: Caching disabled
+        claude = ClaudeLLM(config=config_disabled)
+        await claude.generate(
+            prompt="A" * 60,
+            system_prompt="S" * 60,
+        )
+        called_kwargs = mock_client.messages.create.call_args[1]
+        assert called_kwargs["system"] == "S" * 60
+        assert "cache_control" not in called_kwargs["messages"][0]["content"][-1]
+
+    mock_client.reset_mock()
+
+    # Use a config where caching threshold is very high (e.g. 1000 tokens)
+    config_high_threshold = ClaudeConfig(
+        context_caching=True,
+        context_caching_threshold=1000,
+    )
+
+    with patch("kesoku.agent.llm.AnthropicVertex", return_value=mock_client):
+        # Test 2: Prompt size is below threshold
+        claude = ClaudeLLM(config=config_high_threshold)
+        await claude.generate(
+            prompt="A" * 60,
+            system_prompt="S" * 60,
+        )
+        called_kwargs = mock_client.messages.create.call_args[1]
+        assert called_kwargs["system"] == "S" * 60
+        assert "cache_control" not in called_kwargs["messages"][0]["content"][-1]
 
 
 

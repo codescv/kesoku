@@ -85,6 +85,12 @@ project_id = "your-gcp-project"
 # GCP Region/Location.
 location = "us-east5"
 
+# Whether to enable prompt caching for Claude.
+context_caching = true
+
+# Minimum token threshold of static history prefix before prompt caching is triggered.
+context_caching_threshold = 1024
+
 
 [discord]
 # Set to true to launch the Discord chatbot adapter daemon.

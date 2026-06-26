@@ -959,15 +959,63 @@ class ClaudeLLM(BaseLLM):
             else:
                 final_messages.append(m)
 
+        # Estimate total input tokens to check against caching threshold
+        total_chars = 0
+        if system_prompt:
+            total_chars += len(system_prompt)
+        if tools:
+            total_chars += len(tools) * 500
+        for turn in turns:
+            for block in turn.blocks:
+                if isinstance(block, TextBlock):
+                    total_chars += len(block.text)
+                elif isinstance(block, ThoughtBlock):
+                    total_chars += len(block.text)
+                elif isinstance(block, (ImageBlock, DocumentBlock, MediaBlock)):
+                    if block.data:
+                        total_chars += len(block.data) * 4
+        estimated_tokens = total_chars // 4
+
+        use_caching = (
+            self.config.context_caching
+            and estimated_tokens >= self.config.context_caching_threshold
+        )
+
+        if use_caching:
+            logger.info(
+                f"Estimated prompt size ({estimated_tokens} tokens) exceeds "
+                f"threshold ({self.config.context_caching_threshold}). "
+                f"Applying Claude prompt caching breakpoints."
+            )
+
         kwargs = {
             "model": self.model_name,
             "messages": final_messages,
             "max_tokens": 4096,
         }
+
         if system_prompt:
-            kwargs["system"] = system_prompt
+            if use_caching:
+                kwargs["system"] = [
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+            else:
+                kwargs["system"] = system_prompt
+
         if anthropic_tools:
+            if use_caching:
+                anthropic_tools[-1]["cache_control"] = {"type": "ephemeral"}
             kwargs["tools"] = anthropic_tools
+
+        if final_messages and use_caching:
+            try:
+                final_messages[-1]["content"][-1]["cache_control"] = {"type": "ephemeral"}
+            except (KeyError, IndexError) as e:
+                logger.warning(f"Failed to set cache_control on final_messages: {e}")
 
         return kwargs
 
