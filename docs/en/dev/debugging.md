@@ -71,7 +71,7 @@ When debugging complex multi-turn trajectories, developers can review an interac
 *   **Source File**: `src/kesoku/gateway/chatbot/lcm_reporter.py`
 *   **Mechanism**: The reporter reads the session messages database, formats them into a dark-mode styled HTML page, and saves it inside the session's workspace.
 *   **Trigger**:
-    *   In the CLI: Generate the trace URL path by running `/lcm` or `/context` command commands.
+    *   In the CLI: Generate the trace URL path by running the `/context` command.
     *   In Discord: Click the `📜` (View Trajectory) button on the message header to stream the generated HTML file directly.
 
 ---

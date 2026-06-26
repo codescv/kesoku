@@ -18,7 +18,7 @@ Kesoku chatbot adapters support standard slash commands (e.g. on Discord) or tex
     *   Recursively deletes the session's workspace staging folder on disk (cleaning up downloaded files/attachments).
     *   Removes active views and button elements.
 *   **`/compact`**: Manually forces context compaction on the active history of this channel immediately, replacing old turns with scaffold summary nodes to free up context window space.
-*   **`/lcm`** (Alias: **`/context`**): Generates and returns a download link to an interactive dark-mode HTML trace file (`lcm_context.html`) detailing the exact LLM thinking trajectory, prompt logs, and tools executed in the current turn.
+*   **`/context`**: Generates and returns a download link to an interactive dark-mode HTML trace file (`lcm_context.html`) detailing the exact LLM thinking trajectory, prompt logs, and tools executed in the current turn.
 *   **`/grep {query}`** (Alias: **`/memory-grep`**): Searches active memories and past chat messages for the current channel's role persona matching the query (keyword match or wildcard `*`).
 *   **`/search {query}`** (Alias: **`/memory-search`**): Performs semantic (vector) search against active memories and past chat messages for the current channel's role persona.
 

@@ -17,7 +17,7 @@
 *   **`status`**：收集并输出运行指标：会话轮数、Token 消耗、当前上下文 K-tokens 大小以及最新回合的响应速度。
 *   **`compact`**：手动强制触发上下文压缩流程，无需等待系统自动达到 Token 阈值。
 *   **`role`**：更新 SQLite 中当前通道与人设角色的绑定关系（例如切换为 `coder`），并动态重构系统提示词。
-*   **`lcm`**（别名：`context`）：调用 `LcmHtmlReporter` 生成推理轨迹 HTML 报告并返回文件路径。
+*   **`context`**：调用 `LcmHtmlReporter` 生成推理轨迹 HTML 报告并返回文件路径。
 *   **`grep`**（别名：`memory-grep`）：从当前频道所绑定的角色人设下检索历史消息和主动记忆。
 *   **`search`**（别名：`memory-search`）：利用向量嵌入对当前频道所绑定的角色人设下的历史消息和主动记忆进行语义搜索。
 *   **`debug`**：开启/关闭调试模式，控制是否将 LLM 原始 JSON 输出到终端并暴露 AWD Staging 暂存区路径。
