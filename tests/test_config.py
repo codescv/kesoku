@@ -236,3 +236,57 @@ context_model_name = "claude-3-5-haiku"
     assert cfg.claude.context_model_name == "claude-3-5-haiku"
 
 
+def test_config_chatbot_shadowing(tmp_path: Any) -> None:
+    """Verify that chatbots in the list with the default chatbot_id take precedence over the root default config."""
+    config_path = tmp_path / "config.toml"
+    toml_content = """
+[workspace]
+db_path = "kesoku.db"
+
+[[chatbots.discord]]
+enabled = true
+chatbot_id = "discord"
+bot_token = "my-special-token"
+
+[[chatbots.discord.channels]]
+channels = ["claude"]
+llm = "claude"
+
+[[chatbots.google_chat]]
+enabled = true
+chatbot_id = "google_chat"
+project_id = "my-gchat-project"
+
+[[chatbots.wechat]]
+enabled = true
+chatbot_id = "wechat"
+account_id = "my-wechat-account"
+"""
+    with open(config_path, "w") as f:
+        f.write(toml_content)
+
+    cfg = load_config(str(config_path))
+
+    # Test Discord
+    d_cfg = cfg.get_discord_config("discord")
+    assert d_cfg is not None
+    assert d_cfg.enabled is True
+    assert d_cfg.bot_token == "my-special-token"
+    assert len(d_cfg.channels) == 1
+    assert d_cfg.channels[0].channels == ["claude"]
+    assert d_cfg.channels[0].llm == "claude"
+
+    # Test Google Chat
+    g_cfg = cfg.get_google_chat_config("google_chat")
+    assert g_cfg is not None
+    assert g_cfg.enabled is True
+    assert g_cfg.project_id == "my-gchat-project"
+
+    # Test WeChat
+    w_cfg = cfg.get_wechat_config("wechat")
+    assert w_cfg is not None
+    assert w_cfg.enabled is True
+    assert w_cfg.account_id == "my-wechat-account"
+
+
+

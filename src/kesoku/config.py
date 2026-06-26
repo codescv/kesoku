@@ -303,29 +303,29 @@ class KesokuConfig(BaseModel):
 
     def get_discord_config(self, chatbot_id: str) -> DiscordConfig | None:
         """Find DiscordConfig with matching chatbot_id."""
-        if self.discord.chatbot_id == chatbot_id:
-            return self.discord
         for d_cfg in self.chatbots.discord:
             if d_cfg.chatbot_id == chatbot_id:
                 return d_cfg
+        if self.discord.chatbot_id == chatbot_id:
+            return self.discord
         return None
 
     def get_google_chat_config(self, chatbot_id: str) -> GoogleChatConfig | None:
         """Find GoogleChatConfig with matching chatbot_id."""
-        if self.google_chat.chatbot_id == chatbot_id:
-            return self.google_chat
         for g_cfg in self.chatbots.google_chat:
             if g_cfg.chatbot_id == chatbot_id:
                 return g_cfg
+        if self.google_chat.chatbot_id == chatbot_id:
+            return self.google_chat
         return None
 
     def get_wechat_config(self, chatbot_id: str) -> WechatConfig | None:
         """Find WechatConfig with matching chatbot_id."""
-        if self.wechat.chatbot_id == chatbot_id:
-            return self.wechat
         for w_cfg in self.chatbots.wechat:
             if w_cfg.chatbot_id == chatbot_id:
                 return w_cfg
+        if self.wechat.chatbot_id == chatbot_id:
+            return self.wechat
         return None
 
     def resolve_paths(self, config_file_path: str) -> None:
