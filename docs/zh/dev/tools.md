@@ -77,3 +77,11 @@ if is_interrupted and is_interrupted():
 *   **类型 (Type)**：`MessageType.TOOL_RESULT` (`"tool_result"`)
 *   **状态 (Status)**：`MessageStatus.RESPONDED`
 *   **父链绑定**：设置 `parent_id` 指向触发它的 `tool_call` 消息 ID，保持完整的会话回合链。
+
+---
+
+## 📸 多模态工具 (`analyze_media`)
+
+Kesoku 内置了利用大模型多模态能力分析本地多媒体文件（图片、音频、视频）的工具：
+
+*   **`analyze_media(path, prompt)`**：解析媒体文件路径（绝对路径或相对于 AWD/Staging 的相对路径），自动检测其 MIME 类型，并将其作为原生多模态数据块（`ImageBlock`、`DocumentBlock` 或 `MediaBlock`）附加到推理请求中，对该文件执行问答分析。

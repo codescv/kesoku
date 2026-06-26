@@ -15,9 +15,11 @@ Every chatbot adapter inherits a standard `CommandRegistry` (defined in `src/kes
 #### Core Registered Commands:
 *   **`clear`** (Alias: `reset`): Shuts down active session worker tasks, purges SQLite history, and clears the session's workspace staging folder.
 *   **`status`**: Collects and returns runtime metrics: turns processed, token usage, context window K-tokens, and response speeds.
-*   **`compact`**: Manually triggers pre-flight compaction via `OpenLCM` without waiting for natural token exhaustion.
+*   **`compact`**: Manually triggers context compaction without waiting for natural token exhaustion.
 *   **`role`**: Updates the SQLite channel-role mappings, binding a new persona (e.g. `coder`) to the channel, and rebuilds the active system prompt.
 *   **`lcm`** (Alias: `context`): Spawns trajectory HTML logging via `LcmHtmlReporter` and returns the file path.
+*   **`grep`** (Alias: `memory-grep`): Searches active memories and past messages for the current bound role.
+*   **`search`** (Alias: `memory-search`): Performs semantic search against active memories and past messages for the current bound role.
 *   **`debug`**: Toggles verbose logging and displays raw prompt logs in the AWD staging paths.
 *   **`restart`**: Triggers a non-blocking process reload.
 

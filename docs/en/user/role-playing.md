@@ -65,9 +65,9 @@ kesoku init -c config.toml --overwrite-roles
 
 ## 🔄 Dynamic Role Switching
 
-In Kesoku, role switching is fully dynamic and can be managed by slash commands or by the agent itself.
+In Kesoku, role switching is fully dynamic and managed by chatbot commands.
 
-### 1. Using Slash Commands
+### Using Chatbot Commands
 On chat platforms (such as Discord or WeChat), you can manage personas instantly:
 *   `/role`: List all active and available personas in the workspace.
 *   `/role {name}`: Switch the current channel or thread to the specified persona (e.g., `/role coder`).
@@ -75,13 +75,8 @@ On chat platforms (such as Discord or WeChat), you can manage personas instantly
 > [!TIP]
 > **Discord Thread Inheritance**: In Discord, active threads inherit the parent channel's persona by default, but you can run `/role {name}` inside the thread to bind a distinct persona.
 
-### 2. Triggering via Chat Dialog
-You can also ask the agent to change its persona in plain conversational text:
-*   *"Please switch to the coder persona"*
-*   *"Play helper"*
-*   *"Go back to your default role"*
-
-Behind the scenes, the agent detects the intent, calls `play_role(role="coder")`, binds the new role in SQLite, and dynamically rebuilds the system prompt.
+> [!NOTE]
+> Asking the agent in plain text to change its persona (e.g., "play helper") is not supported directly. Always use the `/role` command to switch personas cleanly.
 
 ---
 

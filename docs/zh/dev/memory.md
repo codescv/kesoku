@@ -76,37 +76,24 @@ CREATE TABLE IF NOT EXISTS agent_memories (
 
 ---
 
-## 4. 无损上下文管理 (LCM) 系统
+## 4. 上下文压缩与会话历史管理
 
-长对话历史如果以原始文本一直堆积，会极快耗尽上下文窗口。Kesoku 深度集成了 `OpenLCM` 引擎，实现历史压缩与无损找回的完美平衡。
+长对话历史如果以原始文本一直堆积，会极快耗尽上下文窗口。Kesoku 采用自定义的分层回合历史压缩器，实现历史压缩与无损找回的平衡。
 
-```mermaid
-graph TD
-    DB[("SQLite 数据库")]
-    DB -->|结构化 KV| KV["agent_memories"]
-    DB -->|事件时间轴| Sync["cross_session_ctx"]
-    
-    KV -->|Bootstrap 阶段 Push 注入| Boot["第一回合 / 长空闲激活 (Sync Guidelines)"]
-    Sync -->|大模型按需主动 Pull 拉取| Tool["Tool: view_chat_history_summary"]
-    
-    Boot --> LLM["LLM 运行上下文 (高度聚焦当前的研发任务)"]
-    Tool --> LLM
-```
+### 4.1 分层回合历史压缩 (`HistoryCompressor`)
+1. 在每次发起 LLM 推理前，系统会自动评估当前的历史消息 Token 长度。
+2. 当除去受保护的头部回合（protected head turns）和尾部回合（protected tail turns）之后的中间回合累积了足够的未压缩 Token 数与回合数时，会触发自动压缩流程。
+3. 压缩管理器把需要压缩的中间回合打包，调用 LLM 生成结构化、高密度的 0 级**摘要节点（Level-0 Summary Node）**。摘要中包含时间轴事件、关键决策与变更、遇到的坑（Pitfalls）以及变更的根目录/文件等字段。
+4. 在 SQLite 数据库中更新原消息记录，将其 `summary_node_id` 字段指向新创建 of 0 级摘要节点。
+5. 当 L 级摘要节点累积到 $2 \times K$ 个时，最老的 $K$ 个节点会被进一步合并并巩固为 Level-L+1 级的更高阶摘要节点（其中 $K$ 为配置的 `context_consolidation_k`）。
+6. 系统会动态拼装活跃历史上下文，拼装顺序为：受保护的头部回合 -> 指向各个摘要节点的骨架指示文本 -> 系统/助手层面的骨架确认应答消息 -> 剩余的未压缩中间回合缓冲区 -> 受保护的尾部回合。
 
-### 4.1 回合前置自动历史压缩 (Preflight Compaction)
-1. 在每次发起 LLM 推理前，智能体运行环境会自动评估当前的历史消息总 Token 长度。
-2. 当长度超出预警阈值时，自动触发 `lcm_engine.compress()` 压缩流。
-3. `OpenLCM` 会自动合并最老的回合，利用大模型生成树状的**分层摘要节点（Summary Nodes）**，并建立无损总结的有向无环图 (DAG)。
-4. 智能体将长历史切断，替换为指向这些摘要节点的轻量骨架指针列表，极大地释放了 Token 空间。
+### 4.2 检索与还原工具
+如果大模型在推理过程中需要查阅已被压缩的细节或在当前角色下检索历史对话，它可以主动调用以下工具：
+*   **`memory_grep(query, start_time, end_time, limit)`**：从当前角色的所有会话及记忆中，通过关键字或通配符 `*` 检索历史消息和主动记忆，并支持时间范围过滤。
+*   **`memory_search(query)`**：利用向量嵌入对当前角色的历史消息和主动记忆进行语义搜索（Semantic Search）。
+*   **`view_message(message_id)`**：输入指定的消息 ID，还原并读取数据库中完整的原始对话内容。
 
-### 4.2 无损检索与还原工具
-如果大模型在推理过程中需要查阅已被压缩的细节，它可以主动调用以下 LCM 工具：
-*   **`lcm_grep`**：从当前角色的所有会话中，通过关键词、角色、时间范围检索历史消息和摘要。
-*   **`lcm_expand`**：输入指定的 `node_id` 或 `store_id`，还原并读取被压缩的完整原始对话。
-*   **`lcm_expand_query`**：对压缩历史进行自然语言问答（例如“先前讨论过的方案 A 有哪些缺陷？”），LCM 会自动搜索、关联并返回整合答案。
-*   **`lcm_describe`**：查看当前摘要 DAG 的拓扑层次结构。
-*   **`lcm_status`**：查询当前的压缩状态与 DAG 树高度。
-
-### 4.3 互补 coexistence
-*   `agent_memories` 负责保存长期的、高度固化的结构化事实与规则。
-*   `OpenLCM` 负责以极低 Token 损耗且无损的方式，维持单条长对话线程的全部历史轨迹。
+### 4.3 记忆系统的互补共存
+*   **主动记忆系统 (AMS)**（`agent_memories` 表）：负责保存长期的、高度固化的结构化事实与规则，分为 `user_preferences`、`progress` 和 `memo` 三大类。
+*   **分层压缩管理系统**（`summary_nodes` 表）：负责以极低 Token 损耗且分层归并的方式，维持长对话线程的全部历史轨迹。

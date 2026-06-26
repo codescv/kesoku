@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS channel_roles (
 );
 ```
 
-Whenever a user requests a role switch or the agent executes the `play_role` tool:
+Whenever a user requests a role switch via the `/role` chatbot command:
 
 1.  The mapping is upserted into `channel_roles`:
     ```sql
@@ -73,22 +73,23 @@ If no channel or parent channel is bound, the executor falls back to `"default"`
 
 ## 🔄 System Prompt Rebuilding Sequence
 
-When the agent executes the `play_role(role="coder")` tool call mid-session:
+When a user executes the `/role {name}` chatbot command to switch personas mid-session:
 
-1.  The database helper updates the channel role binding:
+1.  The chatbot adapter updates the channel role binding in SQLite:
     ```python
-    await db.set_channel_role(chatbot_id, channel_id, "coder")
+    await db.set_channel_role(chatbot_id, channel_id, role_name)
     ```
-2.  The tool triggers a prompt rebuild for the active session:
+2.  It stops any active session worker and background jobs associated with the old session:
     ```python
-    # Rebuild system prompt dynamically
+    await agent.stop_session_worker(old_session.id, immediate=True)
+    await context.active_jobs.stop_all_for_session(old_session.id)
+    ```
+3.  It retrieves or creates the session for the new role, sets it as the active session, rebuilds the system prompt, and updates it in SQLite:
+    ```python
     new_sys_prompt = build_sys_prompt(session=session)
+    await db.update_session_system_prompt(session.id, new_sys_prompt)
     ```
-3.  The compiled system prompt is saved back into the `sessions` table in SQLite:
-    ```python
-    await db.update_session_system_prompt(session_id, new_sys_prompt)
-    ```
-4.  The LLM backend loads the updated system prompt from the session database on its next inference cycle.
+4.  The chatbot/worker initializes the session with the new system prompt.
 
 ---
 

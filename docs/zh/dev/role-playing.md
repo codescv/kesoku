@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS channel_roles (
 );
 ```
 
-当用户要求切换角色，或者 Agent 在回合中执行了 `play_role` 工具调用时：
+当用户通过 `/role` 机器人指令请求切换角色时：
 
 1. 系统会通过 upsert 写入关系映射：
     ```sql
@@ -73,22 +73,23 @@ CREATE TABLE IF NOT EXISTS channel_roles (
 
 ## 🔄 系统提示词动态重构时序
 
-当 Agent 在会话运行期间执行了 `play_role(role="coder")` 工具：
+当用户在会话运行期间执行了 `/role {name}` 机器人命令切换角色时：
 
-1.  工具模块更新数据库的通道角色映射关系：
+1.  聊天平台适配器更新 SQLite 中的通道角色绑定关系：
     ```python
-    await db.set_channel_role(chatbot_id, channel_id, "coder")
+    await db.set_channel_role(chatbot_id, channel_id, role_name)
     ```
-2.  工具指令立即向网关触发该活动会话系统提示词的重新拼装编译：
+2.  系统停止旧会话关联的任何活跃的 SessionWorker 以及后台任务：
     ```python
-    # 动态重构提示词
+    await agent.stop_session_worker(old_session.id, immediate=True)
+    await context.active_jobs.stop_all_for_session(old_session.id)
+    ```
+3.  系统获取或为新角色创建会话，将其设为活动会话，重新拼装编译系统提示词，并覆盖写入 SQLite 数据库的 `sessions` 表：
+    ```python
     new_sys_prompt = build_sys_prompt(session=session)
+    await db.update_session_system_prompt(session.id, new_sys_prompt)
     ```
-3.  编译得到的完整提示词字符串被更新并覆盖写入 SQLite 数据库的 `sessions` 表：
-    ```python
-    await db.update_session_system_prompt(session_id, new_sys_prompt)
-    ```
-4.  在下一个推理步骤中，LLM 客户端会从会话记录中重新读取更新后的 `system_prompt` 字段，并代入到推理上下文中。
+4.  聊天机器人/工作协程会使用新编译的系统提示词来初始化会话。
 
 ---
 

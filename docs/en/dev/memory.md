@@ -76,37 +76,24 @@ To maximize focus, Kesoku prepends operational memory and preferences to the **l
 
 ---
 
-## 4. Lossless Context Management (LCM) System
+## 4. Context Compaction & Session History Management
 
-Long conversational threads cannot be kept in their raw transcripts without hitting context limits or causing attention drift. Kesoku integrates the `OpenLCM` engine to compress history while retaining lossless retrieval capabilities.
+Long conversational threads cannot be kept in their raw transcripts without hitting context limits or causing attention drift. Kesoku uses a custom hierarchical turn-based compaction manager to compress history while retaining searchable retrieval capabilities.
 
-```mermaid
-graph TD
-    DB[("SQLite Database")]
-    DB -->|Structured KV| KV["agent_memories"]
-    DB -->|Event Timeline| Sync["cross_session_ctx"]
-    
-    KV -->|Passive Push| Boot["Bootstrap Injection (Only on New/Resume)"]
-    Sync -->|Active Pull| Tool["Tool API Call: view_chat_history_summary"]
-    
-    Boot --> LLM["LLM Context (Clean & Focused Execution)"]
-    Tool --> LLM
-```
+### 4.1 Hierarchical Turn-Based Compaction (`HistoryCompressor`)
+1. Before every LLM inference step, the agent checks if the history length exceeds thresholds.
+2. Compaction is triggered when the middle turns (excluding the protected head and tail turns) accumulate enough uncompressed tokens and turns.
+3. The compressor groups the uncompressed turns and generates a structured, high-density Level-0 **Summary Node** using the LLM. The summary node contains timeline events, key decisions, pitfalls, and directories/files modified.
+4. In SQLite, the source messages are updated to link to the new Level-0 summary node.
+5. If Level-L summary nodes accumulate to $2 \times K$ nodes, the oldest $K$ nodes are consolidated and merged into a Level-L+1 summary node (where $K$ is the configured `context_consolidation_k`).
+6. The active history context is assembled dynamically, containing the protected head turns, a scaffold header detailing the summary forest nodes, a system/assistant scaffold acknowledgment message, the remaining uncompacted turns buffer, and the protected tail turns.
 
-### 4.1 In-Place Preflight Compaction
-1. Before every LLM inference step, the agent checks if the history length exceeds preflight thresholds.
-2. If compaction is triggered, the agent converts its message log to standard OpenAI/Anthropic dictionaries and invokes `lcm_engine.compress()`.
-3. `OpenLCM` recursively groups oldest turns, summarizes them into hierarchical **Summary Nodes**, and produces a Compacted Summary Timeline DAG.
-4. The agent replaces the history with the scaffold summary pointer list, dramatically reducing token counts.
-
-### 4.2 Lossless Retrieval Tools
-If the LLM needs to recall details of a compacted section, it can call the following LCM Tools:
-*   **`lcm_grep`**: Search raw messages/summaries with keywords and filters (source, role, timestamps) across all sessions of the current role.
-*   **`lcm_expand`**: Retrieve the full uncompacted text of a specific summary node or message.
-*   **`lcm_expand_query`**: Run natural language queries against compacted history, returning a synthesized answer.
-*   **`lcm_describe`**: Inspect the hierarchical topology of the memory DAG.
-*   **`lcm_status`**: Get current compaction stats and DAG height.
+### 4.2 Search & Retrieval Tools
+To recall specific details of compacted sections or search across the history of the active role persona, the agent can call the following tools:
+*   **`memory_grep(query, start_time, end_time, limit)`**: Search active memories and past chat messages for the current role matching the query (keyword match or wildcard `*`). Supports optional time-range filtering.
+*   **`memory_search(query)`**: Perform semantic (vector) search against active memories and past chat messages for the current role.
+*   **`view_message(message_id)`**: Retrieve the complete content of a specific historical chat message by its database ID.
 
 ### 4.3 Complementary Coexistence
-*   `agent_memories` stores long-term, structured, semantic knowledge and constraints.
-*   `OpenLCM` manages short-term, operational conversational history in a token-efficient, lossless manner.
+*   **Active Memory System (AMS)** (`agent_memories` table): Stores long-term, structured, semantic knowledge and constraints across categories: `user_preferences`, `progress`, and `memo`.
+*   **Hierarchical Compaction System** (`summary_nodes` table): Manages short-term, operational conversational history in a token-efficient, hierarchically consolidated manner.
