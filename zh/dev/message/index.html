@@ -1,0 +1,2474 @@
+
+<!doctype html>
+<html lang="zh" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://codescv.github.io/kesoku/zh/dev/message/">
+      
+      
+        <link rel="prev" href="../agent-cycle/">
+      
+      
+        <link rel="next" href="../sys-prompt/">
+      
+      
+        
+          <link rel="alternate" href="../../../dev/message/" hreflang="en">
+        
+          <link rel="alternate" href="./" hreflang="zh">
+        
+      
+      
+      <link rel="icon" href="../../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>消息数据模型 - Kesoku Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="purple">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#_1" class="md-skip">
+          跳转至
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="页眉">
+    <a href="../../" title="Kesoku Docs" class="md-header__button md-logo" aria-label="Kesoku Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Kesoku Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              消息数据模型
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="purple"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="purple"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+      <div class="md-header__option">
+  <div class="md-select">
+    
+    <button class="md-header__button md-icon" aria-label="选择当前语言">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m12.87 15.07-2.54-2.51.03-.03A17.5 17.5 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2zm-2.62 7 1.62-4.33L19.12 17z"/></svg>
+    </button>
+    <div class="md-select__inner">
+      <ul class="md-select__list">
+        
+          <li class="md-select__item">
+            <a href="../../../dev/message/" hreflang="en" class="md-select__link">
+              English
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="./" hreflang="zh" class="md-select__link">
+              简体中文
+            </a>
+          </li>
+        
+      </ul>
+    </div>
+  </div>
+</div>
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="搜索" placeholder="搜索" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="查找">
+        
+        <button type="reset" class="md-search__icon md-icon" title="清空当前内容" aria-label="清空当前内容" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            正在初始化搜索引擎
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/codescv/kesoku" title="前往仓库" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="标签" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../" class="md-tabs__link">
+        
+  
+  
+    
+  
+  首页
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../user/installation/" class="md-tabs__link">
+          
+  
+  
+  用户手册
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../architecture/" class="md-tabs__link">
+          
+  
+  
+  开发者指南
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="导航栏" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../../" title="Kesoku Docs" class="md-nav__button md-logo" aria-label="Kesoku Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Kesoku Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/codescv/kesoku" title="前往仓库" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    首页
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    用户手册
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    用户手册
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    安装指南
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    配置指南
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/role-playing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    角色扮演
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    记忆与会话
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    技能与自定义工具
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/safety/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    安全策略
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/commands/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    系统命令与斜杠指令
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_8" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_8" id="__nav_2_8_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    平台配置
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    平台配置
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/platforms/discord/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Discord
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/platforms/gchat/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Google Chat
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/platforms/wechat/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    微信 (WeChat)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/service/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    系统服务管理
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    故障排除
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    开发者指南
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    开发者指南
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    架构与并发设计
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agent-cycle/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    智能体生命周期
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    消息数据模型
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    消息数据模型
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="目录">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      目录
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. 核心架构概述
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. 消息属性矩阵 (核心三轴)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. 消息属性矩阵 (核心三轴)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#21-role" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.1 角色 (role)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#22-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.2 类型 (type)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#23-status" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.3 状态 (status)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. 消息字段配置详解
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. 核心状态流转与生命周期
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="4. 核心状态流转与生命周期">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#41" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 用户输入消息生命周期
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#42" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.2 智能体出站回复生命周期
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#43" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.3 中间步骤消息生命周期 (思维/工具)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#44" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.4 僵死/卡死消息自愈自恢复
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. 会话历史保存与模型输入剥离规范
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. 会话历史保存与模型输入剥离规范">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#51-get_session_history" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.1 数据库持久化历史 (get_session_history)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#52-prompt-build_clean_history" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.2 大模型实际 Prompt 历史 (build_clean_history)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#53" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.3 用户通道可见性矩阵
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#54-transpilation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.4 高级角色映射规则 (Transpilation)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. 端到端执行轨迹示例
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. 端到端执行轨迹示例">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#61-discord" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        示例 6.1：带有工具调用的常规对话回合 (Discord)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sys-prompt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    提示词生成
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    工具与执行
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    记忆与数据库
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../role-playing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    角色扮演原理
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    自治技能原理
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../llm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    大模型提供商扩展
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../chatbot-interface/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    聊天机器人基类
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+          
+          
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_11" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_11" id="__nav_3_11_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    平台配置
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_11_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_11">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    平台配置
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../platforms/discord/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Discord 适配器
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../platforms/gchat/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Google Chat 适配器
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../platforms/wechat/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    微信适配器
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../debugging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    测试与调试
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="目录">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      目录
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. 核心架构概述
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. 消息属性矩阵 (核心三轴)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. 消息属性矩阵 (核心三轴)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#21-role" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.1 角色 (role)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#22-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.2 类型 (type)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#23-status" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.3 状态 (status)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. 消息字段配置详解
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. 核心状态流转与生命周期
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="4. 核心状态流转与生命周期">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#41" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 用户输入消息生命周期
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#42" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.2 智能体出站回复生命周期
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#43" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.3 中间步骤消息生命周期 (思维/工具)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#44" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.4 僵死/卡死消息自愈自恢复
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. 会话历史保存与模型输入剥离规范
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. 会话历史保存与模型输入剥离规范">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#51-get_session_history" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.1 数据库持久化历史 (get_session_history)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#52-prompt-build_clean_history" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.2 大模型实际 Prompt 历史 (build_clean_history)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#53" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.3 用户通道可见性矩阵
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#54-transpilation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.4 高级角色映射规则 (Transpilation)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. 端到端执行轨迹示例
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. 端到端执行轨迹示例">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#61-discord" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        示例 6.1：带有工具调用的常规对话回合 (Discord)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="_1">消息模型与生命周期规范</h1>
+<p>本技术文档提供了 <code>Message</code> 数据模型的完整规范，包含字段配置矩阵、系统全局生命周期状态机、会话历史保存机制、用户可见性行为以及端到端对话流执行轨迹的详细定义。</p>
+<hr />
+<h2 id="1">1. 核心架构概述</h2>
+<p>Kesoku 基于一个高度解耦的异步<strong>纯代理总线架构（Pure Broker Architecture）</strong>运行。该架构以 <code>Message</code> 数据库实体模型（定义于 <code>src/kesoku/db/models.py</code>）为中心，通过代理网关 <code>Gateway</code>（定义于 <code>src/kesoku/gateway/gateway.py</code>）将数据持久化写入本地 SQLite，并实时广播给内存中的各个订阅协程。</p>
+<p>这套解耦机制使得第三方机器人平台适配器（CLI, Discord, Google Chat, WeChat 等）与后端的智能体推理工作协程之间，能够完全通过状态驱动的消息进行协同交互。</p>
+<hr />
+<h2 id="2">2. 消息属性矩阵 (核心三轴)</h2>
+<p>Kesoku 中的每条消息记录都围绕以下三个核心属性维度构建：<strong>角色 (Role)</strong>、<strong>类型 (Type)</strong> 和 <strong>状态 (Status)</strong>。</p>
+<pre class="mermaid"><code>graph TD
+    A[Message] --&gt; B[MessageRole]
+    A --&gt; C[MessageType]
+    A --&gt; D[MessageStatus]
+
+    B --&gt; B1(user)
+    B --&gt; B2(assistant)
+    B --&gt; B3(tool)
+    B --&gt; B4(system)
+
+    C --&gt; C1(text)
+    C --&gt; C2(thought)
+    C --&gt; C3(tool_call)
+    C --&gt; C4(tool_result)
+
+    D --&gt; D1[用户消息状态]
+    D --&gt; D2[助手/工具状态]
+
+    D1 --&gt; D1_pending_agent(pending_agent)
+    D1 --&gt; D1_processing(processing)
+    D1 --&gt; D1_processed(processed)
+    D1 --&gt; D1_interrupted(interrupted)
+    D1 --&gt; D1_error(error)
+
+    D2 --&gt; D2_pending(pending)
+    D2 --&gt; D2_delivered(delivered)
+    D2 --&gt; D2_responded(responded)</code></pre>
+<h3 id="21-role">2.1 角色 (<code>role</code>)</h3>
+<p>定义了消息是由哪一类功能实体生成或主导的：</p>
+<ul>
+<li><code>user</code>：外部真实用户、后台定时任务触发器（Cronjob）或模拟调度事件。</li>
+<li><code>assistant</code>：Kesoku 智能体本身生成的回复（包括中间思维链、文本响应、通知消息等）。</li>
+<li><code>tool</code>：外设工具，包含工具调用请求或工具执行的返回值输出。</li>
+<li><code>system</code>：系统内部调度通知、异常跟踪提示等。</li>
+</ul>
+<h3 id="22-type">2.2 类型 (<code>type</code>)</h3>
+<p>定义了消息正文的结构化格式与运行语义：</p>
+<ul>
+<li><code>text</code>：常规文本，用于大模型消费或最终呈递给用户。</li>
+<li><code>thought</code>：大模型在发出工具调用指令<strong>之前</strong>输出的推理思维链（Chain-of-thought）。</li>
+<li><code>tool_call</code>：大模型发出的结构化工具调用请求，包含工具名称和执行参数。</li>
+<li><code>tool_result</code>：宿主机工具执行完毕后返回的标准输出流或报错异常栈。</li>
+</ul>
+<h3 id="23-status">2.3 状态 (<code>status</code>)</h3>
+<p>在流水线中实时追踪消息的流转阶段：</p>
+<ul>
+<li><code>pending_agent</code>：新接收的用户提问已写入数据库，等待 Agent 分发 Worker 接管。</li>
+<li><code>processing</code>：Worker 协程正在调度大模型对该用户消息进行推理处理。</li>
+<li><code>processed</code>：用户提问的回合推理已全部结束，并成功产生助手回复。</li>
+<li><code>interrupted</code>：推理被抢占终止（例如由于用户中途插话，导致当前回合及排队中的工具被废弃）。</li>
+<li><code>error</code>：在处理回合中遭遇无法挽回的崩溃或上下文解析错误。</li>
+<li><code>pending</code>：Agent 生成的出站文本回复已入队，等待对应的 Chatbot 适配器抓取发送。</li>
+<li><code>delivered</code>：消息已被适配器物理发送、打印或渲染至外部目标聊天平台上。</li>
+<li><code>responded</code>：内部消息（思维链、工具调用、工具结果）在后台已正确处理，不需再行投递。</li>
+</ul>
+<hr />
+<h2 id="3">3. 消息字段配置详解</h2>
+<p>下表记录了系统各模块根据消息源及目标，动态填充各字段的明细规范：</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">消息分类</th>
+<th style="text-align: left;">语义说明</th>
+<th style="text-align: left;"><code>role</code></th>
+<th style="text-align: left;"><code>type</code></th>
+<th style="text-align: left;"><code>chatbot_id</code></th>
+<th style="text-align: left;"><code>channel_id</code></th>
+<th style="text-align: left;"><code>sender</code></th>
+<th style="text-align: left;">初始 <code>status</code></th>
+<th style="text-align: left;">终态 <code>status</code></th>
+<th style="text-align: left;">用户可见性</th>
+<th style="text-align: left;">大模型 (当前回合)</th>
+<th style="text-align: left;">大模型 (历史上下文)</th>
+<th style="text-align: left;"><code>metadata</code> 附加内容</th>
+<th style="text-align: left;">消息正文样例</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>标准用户提问</strong></td>
+<td style="text-align: left;">真实用户从聊天界面输入的文字或附件</td>
+<td style="text-align: left;"><code>user</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">当前聊天平台 (<code>"cli"</code>, <code>"discord"</code> 等)</td>
+<td style="text-align: left;">平台频道/线程 ID</td>
+<td style="text-align: left;">用户名或代号</td>
+<td style="text-align: left;"><code>pending_agent</code></td>
+<td style="text-align: left;"><code>processed</code> / <code>interrupted</code> / <code>error</code></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><strong>可见</strong> (完整内容)</td>
+<td style="text-align: left;"><strong>可见</strong> <em>(图片附件被剥离)</em></td>
+<td style="text-align: left;"><code>{"discord_message_id": str, "attachments": [...]}</code></td>
+<td style="text-align: left;"><code>"请帮我查询东京天气。"</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>定时任务消息</strong></td>
+<td style="text-align: left;">后台 Cronjob 触发器自动生成的 Prompt</td>
+<td style="text-align: left;"><code>user</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">当前聊天平台</td>
+<td style="text-align: left;">目标频道 ID</td>
+<td style="text-align: left;"><code>"Cronjob"</code></td>
+<td style="text-align: left;"><code>pending_agent</code></td>
+<td style="text-align: left;"><code>processed</code></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><code>{"is_cronjob": True}</code></td>
+<td style="text-align: left;"><code>"Run status diagnostics"</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>手动压缩提问</strong></td>
+<td style="text-align: left;">用户发送 <code>/compact</code> 时，系统生成的虚拟提问</td>
+<td style="text-align: left;"><code>user</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">平台 ID</td>
+<td style="text-align: left;">当前频道 ID</td>
+<td style="text-align: left;"><code>"System"</code></td>
+<td style="text-align: left;"><code>pending_agent</code></td>
+<td style="text-align: left;"><code>processed</code></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><code>{"is_compaction": True}</code></td>
+<td style="text-align: left;"><code>"[System Notification] The user manually requested compaction..."</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>智能体思维链</strong></td>
+<td style="text-align: left;">Agent 内部生成的思维推理流</td>
+<td style="text-align: left;"><code>assistant</code></td>
+<td style="text-align: left;"><code>thought</code></td>
+<td style="text-align: left;">平台 ID</td>
+<td style="text-align: left;">当前频道 ID</td>
+<td style="text-align: left;"><code>"Kesoku"</code></td>
+<td style="text-align: left;"><code>responded</code></td>
+<td style="text-align: left;"><code>responded</code> <em>(UI版启动时为 <code>delivered</code>)</em></td>
+<td style="text-align: left;"><strong>折叠可见 / CLI可见</strong> <em>(微信静默过滤)</em></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><strong>剥离</strong> <em>(已结束回合被滤除)</em></td>
+<td style="text-align: left;"><code>None</code></td>
+<td style="text-align: left;"><code>"我需要调用 run_shell_command 执行测试用例。"</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>智能体最终回复</strong></td>
+<td style="text-align: left;">呈现给用户的最终回复文本</td>
+<td style="text-align: left;"><code>assistant</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">平台 ID</td>
+<td style="text-align: left;">当前频道 ID</td>
+<td style="text-align: left;"><code>"Kesoku"</code></td>
+<td style="text-align: left;"><code>pending</code></td>
+<td style="text-align: left;"><code>delivered</code></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><code>{"turn_metrics": {...}}</code></td>
+<td style="text-align: left;"><code>"东京当前天气晴朗，温度24°C。"</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>工具调用指令</strong></td>
+<td style="text-align: left;">模型生成的结构化工具调用请求</td>
+<td style="text-align: left;"><code>tool</code></td>
+<td style="text-align: left;"><code>tool_call</code></td>
+<td style="text-align: left;">平台 ID</td>
+<td style="text-align: left;">当前频道 ID</td>
+<td style="text-align: left;"><code>"Kesoku"</code></td>
+<td style="text-align: left;"><code>responded</code></td>
+<td style="text-align: left;"><code>responded</code> <em>(UI版启动时为 <code>delivered</code>)</em></td>
+<td style="text-align: left;"><strong>折叠可见 / CLI可见</strong> <em>(微信静默过滤)</em></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><code>{"tool_name": str, "tool_arguments": dict}</code></td>
+<td style="text-align: left;"><code>"Calling tool run_shell_command with args: ..."</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>工具执行输出</strong></td>
+<td style="text-align: left;">宿主机工具返回的标准输出或错误异常</td>
+<td style="text-align: left;"><code>tool</code></td>
+<td style="text-align: left;"><code>tool_result</code></td>
+<td style="text-align: left;">平台 ID</td>
+<td style="text-align: left;">当前频道 ID</td>
+<td style="text-align: left;">执行的工具名</td>
+<td style="text-align: left;"><code>responded</code></td>
+<td style="text-align: left;"><code>responded</code> <em>(UI版启动时为 <code>delivered</code>)</em></td>
+<td style="text-align: left;"><strong>折叠可见 / CLI可见</strong> <em>(微信静默过滤)</em></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><code>{"tool_name": str, "tool_result": str}</code></td>
+<td style="text-align: left;"><code>"[STDOUT] tests passed in 0.42s"</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>系统提示词</strong></td>
+<td style="text-align: left;">框架规则和设定引导 (Virtual 记录)</td>
+<td style="text-align: left;"><code>system</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;"><code>"system"</code></td>
+<td style="text-align: left;"><code>"system"</code></td>
+<td style="text-align: left;"><code>"System"</code></td>
+<td style="text-align: left;"><code>responded</code></td>
+<td style="text-align: left;"><code>responded</code></td>
+<td style="text-align: left;"><strong>仅在命令行/调试可见</strong></td>
+<td style="text-align: left;"><strong>作为 System Instruction 注入</strong></td>
+<td style="text-align: left;"><strong>作为 System Instruction 注入</strong></td>
+<td style="text-align: left;"><code>None</code></td>
+<td style="text-align: left;"><code>"# System Instructions\nYou are Kesoku..."</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>后台唤醒警报</strong></td>
+<td style="text-align: left;">后台工具命令执行完成后，系统自动生成的唤醒消息</td>
+<td style="text-align: left;"><code>system</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">平台 ID</td>
+<td style="text-align: left;">当前频道 ID</td>
+<td style="text-align: left;"><code>"System"</code></td>
+<td style="text-align: left;"><code>pending_agent</code></td>
+<td style="text-align: left;"><code>processed</code></td>
+<td style="text-align: left;"><strong>不可见</strong> <em>(后台静默唤醒)</em></td>
+<td style="text-align: left;"><strong>可见</strong> <em>(转译为 USER 回合)</em></td>
+<td style="text-align: left;"><strong>可见</strong> <em>(转译为 USER 回合)</em></td>
+<td style="text-align: left;"><code>None</code></td>
+<td style="text-align: left;"><code>"[System Alert] Background Job job_123 finished..."</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>模型防空催化剂</strong></td>
+<td style="text-align: left;">LLM 异常返回空响应时注入的自愈消息</td>
+<td style="text-align: left;"><code>system</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">平台 ID</td>
+<td style="text-align: left;">当前频道 ID</td>
+<td style="text-align: left;"><code>"System"</code></td>
+<td style="text-align: left;"><code>responded</code></td>
+<td style="text-align: left;"><code>responded</code></td>
+<td style="text-align: left;"><strong>不可见</strong> <em>(后台静默自愈)</em></td>
+<td style="text-align: left;"><strong>可见</strong> <em>(转译为 USER 回合)</em></td>
+<td style="text-align: left;"><strong>可见</strong> <em>(转译为 USER 回合)</em></td>
+<td style="text-align: left;"><code>None</code></td>
+<td style="text-align: left;"><code>"Your previous response had empty content..."</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>轻量系统通知</strong></td>
+<td style="text-align: left;">界面弹出的轻量提示（如自动压缩完成等）</td>
+<td style="text-align: left;"><code>assistant</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">平台 ID</td>
+<td style="text-align: left;">当前频道 ID</td>
+<td style="text-align: left;"><code>"Notification"</code></td>
+<td style="text-align: left;"><code>pending</code></td>
+<td style="text-align: left;"><code>delivered</code></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><strong>过滤</strong></td>
+<td style="text-align: left;"><strong>过滤</strong></td>
+<td style="text-align: left;"><code>None</code></td>
+<td style="text-align: left;"><code>"🔄 聊天历史已自动压缩。"</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>崩溃报错通知</strong></td>
+<td style="text-align: left;">系统异常终止时呈递给用户的中文报错</td>
+<td style="text-align: left;"><code>assistant</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">平台 ID</td>
+<td style="text-align: left;">当前频道 ID</td>
+<td style="text-align: left;"><code>"Kesoku"</code></td>
+<td style="text-align: left;"><code>pending</code></td>
+<td style="text-align: left;"><code>delivered</code></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><strong>可见</strong></td>
+<td style="text-align: left;"><code>None</code></td>
+<td style="text-align: left;"><code>"⚠️ 处理您的请求时发生异常: ..."</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="4">4. 核心状态流转与生命周期</h2>
+<div class="highlight"><pre><span></span><code>                       [用户消息 / Cron 触发 / 自动压缩触发]
+                                         │
+                                         ▼
+                               (status: pending_agent)
+                                         │
+                                         ▼  [Worker 线程认领回合]
+                                (status: processing)
+                                         │
+        ┌───────────────────────────────┼───────────────────────────────┐
+        ▼ (中间状态：思维链/工具执行)     ▼ (抢占式强行中断)              ▼ (正常推理结束)
+     (status: responded)              (status: interrupted)            (status: processed)
+        │                                                               │
+        ▼ [Chatbot 渲染中间状态]                                        ▼ [推送最终回复]
+     (status: delivered)                                              (status: pending)
+                                                                        │
+                                                                        ▼ [Chatbot 发送出站完毕]
+                                                                     (status: delivered)
+</code></pre></div>
+<h3 id="41">4.1 用户输入消息生命周期</h3>
+<ol>
+<li><strong>接收</strong>：Chatbot 适配器抓取用户输入，解密并将媒体图片下载到 Staging 工作目录，实例化 <code>Message</code> 模型并将状态标记为 <code>pending_agent</code> 写入数据库。</li>
+<li><strong>处理</strong>：调度器监听检测到 <code>pending_agent</code>。在分配给 SessionWorker 后，通过 CAS 操作更新数据库中对应的用户消息状态为 <code>processing</code>，并开始执行推理回合。</li>
+<li><strong>结果</strong>：<ul>
+<li><strong>正常结束</strong>：模型推理完成并发送最终文本，用户提问状态变更为 <code>processed</code>。</li>
+<li><strong>强行中断</strong>：新提问在推理过程中到达，Worker 任务被 Cancel，处理中的提问状态以及未回复的 tool 状态均更新为 <code>interrupted</code>。</li>
+<li><strong>执行异常</strong>：回合遭遇致命崩溃，更新状态为 <code>error</code>。</li>
+</ul>
+</li>
+</ol>
+<h3 id="42">4.2 智能体出站回复生命周期</h3>
+<ol>
+<li><strong>生成</strong>：Worker 完成计算，向网关发布最终文本，状态设置为 <code>pending</code>。</li>
+<li><strong>发送</strong>：Chatbot 适配器检测到 <code>pending</code>，对正文切分并调用平台 API 发送，完毕后将数据库中的状态更新为 <code>delivered</code>。</li>
+<li><strong>收尾</strong>：Chatbot 激活 <code>on_message_delivered</code> 钩子，消除输入状态，计算响应时间。</li>
+</ol>
+<h3 id="43">4.3 中间步骤消息生命周期 (思维/工具)</h3>
+<ol>
+<li><strong>生成</strong>：智能体进行 Thought 或发起 Tool Call 时，向网关发布状态为 <code>responded</code> 的消息。</li>
+<li><strong>渲染</strong>：<ul>
+<li><strong>可视化终端 (Discord, Google Chat)</strong>：适配器捕获 <code>responded</code> 消息并在聊天室中 live-render 思维过程或工具状态条（如带有 ⏳ 状态），更新状态为 <code>delivered</code> 防止二次重复发送。当收到对应的 <code>tool_result</code> 时，适配器在原地将状态编辑为 ✅ 或 ❌ 标志。</li>
+<li><strong>无状态终端 (WeChat)</strong>：微信适配器不支持原地编辑，所以在收到这类消息时，会在后台静默将其标记为 <code>delivered</code>，但不投递到微信群里。</li>
+<li><strong>CLI</strong>：立即使用 Panels 将思维（青色）、工具调用（黄色）、工具输出（品红色）打印到控制台，并标记为 <code>delivered</code>。</li>
+</ul>
+</li>
+</ol>
+<h3 id="44">4.4 僵死/卡死消息自愈自恢复</h3>
+<ul>
+<li><strong>Worker 重启恢复</strong>：如果系统意外崩溃或重启，处于 <code>processing</code> 状态的消息将无限期卡死。网关在启动时运行 <code>recover_orphaned_processing_messages()</code>，排查所有创建时间超过 300 秒且状态依然为 <code>processing</code> 的用户消息，并将其强制重置回 <code>pending_agent</code> 重新排队处理。</li>
+<li><strong>工具悬空恢复</strong>：系统在生成历史时，会检查是否有 <code>tool_call</code> 缺失对应的 <code>tool_result</code> 回应（表示工具运行中途遭遇断电或重启）。若存在，系统会在内存中自动补齐一条合成的中断报错 Message，防止 LLM 读取历史时发生上下文逻辑断层。</li>
+</ul>
+<hr />
+<h2 id="5">5. 会话历史保存与模型输入剥离规范</h2>
+<p>为了平衡用户审计的透明度与大模型的上下文 token 限制，Kesoku 对数据库历史和 LLM 实际读取历史进行了分流设计。</p>
+<h3 id="51-get_session_history">5.1 数据库持久化历史 (<code>get_session_history</code>)</h3>
+<ul>
+<li><strong>完整保存</strong>：数据库保留每一次对话的全部消息，包括被隐藏的思维流和工具调用栈。</li>
+<li><strong>多阶段排序算法 (Phased Sorting)</strong>：因为异步工具运行会产生时间戳重叠，数据库查询时采用多阶段排序，将每个 Turn 内的消息按生命周期先后归位：Thought (阶段 0) -&gt; Tool Call (阶段 1) -&gt; Tool Result (阶段 2) -&gt; Final Text (阶段 3)。</li>
+</ul>
+<h3 id="52-prompt-build_clean_history">5.2 大模型实际 Prompt 历史 (<code>build_clean_history</code>)</h3>
+<p>在将历史输入给大模型时，会运行优化裁剪链：</p>
+<ul>
+<li><strong>系统排除</strong>：剔除所有轻量的系统级临时通知（如 <code>sender="Notification"</code> 的提示语）。</li>
+<li><strong>剥离思维链 (Thought Stripping)</strong>：<strong>所有历史回合中的 assistant thoughts (<code>type=thought</code>) 都会被彻底清除</strong>，只保留当前最活跃一轮的思维以指导当下行动。这极大地节约了 Token 空间，并避免模型受到历史垃圾思维的干扰。</li>
+<li><strong>剥离附件 (Attachment Stripping)</strong>：从历史 user 消息的元数据中剥离庞大的文件字节或图片，并在正文末尾加上占位符（例如 <code>[Attachments stripped from history: data.csv]</code>），让模型知道文件存在，但不重复载入数据。</li>
+<li><strong>保留工具流</strong>：完整的工具调用和输出会被保留，让模型对已经执行过的系统操作保持清晰认知。</li>
+</ul>
+<h3 id="53">5.3 用户通道可见性矩阵</h3>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">消息类型</th>
+<th style="text-align: left;">命令行 (CLI)</th>
+<th style="text-align: left;">Discord</th>
+<th style="text-align: left;">Google Chat</th>
+<th style="text-align: left;">微信 (WeChat)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>用户提问</strong></td>
+<td style="text-align: left;">可见</td>
+<td style="text-align: left;">可见</td>
+<td style="text-align: left;">可见</td>
+<td style="text-align: left;">可见</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>智能体最终文本/文件</strong></td>
+<td style="text-align: left;">可见 (Rich 渲染)</td>
+<td style="text-align: left;">可见 (直接回复)</td>
+<td style="text-align: left;">可见 (卡片排版)</td>
+<td style="text-align: left;">可见 (常规分块文本)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>智能体思维链</strong></td>
+<td style="text-align: left;">可见 (青色面板)</td>
+<td style="text-align: left;">可见 (Live 状态条)</td>
+<td style="text-align: left;">可见 (折叠中间卡片)</td>
+<td style="text-align: left;"><strong>隐藏</strong> (后台静默)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>工具调用</strong></td>
+<td style="text-align: left;">可见 (黄色面板)</td>
+<td style="text-align: left;">可见 (Live 状态条)</td>
+<td style="text-align: left;">可见 (折叠中间卡片)</td>
+<td style="text-align: left;"><strong>隐藏</strong> (后台静默)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>工具执行输出</strong></td>
+<td style="text-align: left;">可见 (品红面板)</td>
+<td style="text-align: left;">可见 (状态 emoji 变更)</td>
+<td style="text-align: left;">可见 (状态 emoji 变更)</td>
+<td style="text-align: left;"><strong>隐藏</strong> (后台静默)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>系统交互日志</strong></td>
+<td style="text-align: left;">可见 (终端输出)</td>
+<td style="text-align: left;">可见 (Live 状态条)</td>
+<td style="text-align: left;">可见 (折叠中间卡片)</td>
+<td style="text-align: left;"><strong>隐藏</strong> (后台静默)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="54-transpilation">5.4 高级角色映射规则 (Transpilation)</h3>
+<p>为了规避主流聊天大模型接口（如 Gemini API、OpenAI API）所强制要求的 alternating roles 角色交替验证规则，适配器在生成 IR 结构时（<code>history_to_turns</code> 方法）会执行逻辑转译：</p>
+<ul>
+<li><strong>自愈消息 (Nudge)</strong>：原本在数据库中为 <code>role=system</code>，转译器会将其转译为 <code>role=user</code> 并前置提示语 <code>[System Notification]\n</code>，使得模型可以正常接收自愈警报，且不触犯厂商交替校验规则。</li>
+<li><strong>定时任务 / 后台警报</strong>：一律在转译层包装为标准的 <code>user</code> 或 <code>tool_result</code> 回合提交，在用户侧完全不可见，但大模型可流畅解读。</li>
+</ul>
+<hr />
+<h2 id="6">6. 端到端执行轨迹示例</h2>
+<p>以下展示了三种典型回合场景下，数据库 <code>Message</code> 记录的完整序列痕迹。</p>
+<h3 id="61-discord">示例 6.1：带有工具调用的常规对话回合 (Discord)</h3>
+<p>用户提问：<code>"运行 agent 历史模块的单元测试"</code>。</p>
+<ol>
+<li>
+<p><strong>用户消息写入</strong> (<code>pending_agent</code>)：
+    <div class="highlight"><pre><span></span><code><span class="p">[</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_user_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sess_agent_history&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;chatbot_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;discord&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;channel_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1234567890123&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;sender&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Chii&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;user&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;text&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;`Chii` &lt;@112233&gt; at `2026-05-27 20:50:00 SGT`:\n运行 agent 历史模块的单元测试&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;pending_agent&quot;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">]</span>
+</code></pre></div>
+    <em>(Worker 认领该消息，<code>msg_user_001</code> 的状态转换为 <code>processing</code>)</em></p>
+</li>
+<li>
+<p><strong>智能体进行思考并下达工具执行请求</strong> (<code>responded</code>)：
+    <div class="highlight"><pre><span></span><code><span class="p">[</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_thought_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sess_agent_history&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;parent_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_user_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;chatbot_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;discord&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;channel_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1234567890123&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;sender&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Kesoku&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;assistant&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;thought&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;我需要使用 uv pytest 来运行 history 模块的单元测试，我应该直接执行 run_shell_command 工具。&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;responded&quot;</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_call_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sess_agent_history&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;parent_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_user_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;chatbot_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;discord&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;channel_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1234567890123&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;sender&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Kesoku&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tool&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tool_call&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Calling tool `run_shell_command` with arguments:\n```json\n{\n  \&quot;command\&quot;: \&quot;uv run pytest tests/test_history.py\&quot;\n}\n```&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;responded&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;metadata&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;tool_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;run_shell_command&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;tool_arguments&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;command&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;uv run pytest tests/test_history.py&quot;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">]</span>
+</code></pre></div>
+    <em>(Discord 机器人获取这两条消息，在界面上输出 💭 思考和 🛠️ 执行提示，并更新它们在数据库中的状态为 <code>delivered</code>)</em></p>
+</li>
+<li>
+<p><strong>工具执行完毕返回结果</strong> (<code>responded</code>)：
+    <div class="highlight"><pre><span></span><code><span class="p">[</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_result_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sess_agent_history&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;parent_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_call_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;chatbot_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;discord&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;channel_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1234567890123&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;sender&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;run_shell_command&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tool&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tool_result&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;=== STDOUT ===\n============================= test session starts =============================\ncollected 5 items\n\ntests/test_history.py .....                                              [100%]\n============================== 5 passed in 0.42s ===============================\n=== STDERR ===\n&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;responded&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;metadata&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;tool_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;run_shell_command&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;tool_result&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;5 passed in 0.42s&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">]</span>
+</code></pre></div>
+    <em>(Discord 机器人在界面上将 ⏳ 状态图标原地编辑修改为 ✅，并将 <code>msg_result_001</code> 的数据库状态更改为 <code>delivered</code>)</em></p>
+</li>
+<li>
+<p><strong>智能体输出最终答复</strong> (<code>pending</code>)：
+    <div class="highlight"><pre><span></span><code><span class="p">[</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_reply_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sess_agent_history&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;parent_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_user_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;chatbot_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;discord&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;channel_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1234567890123&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;sender&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Kesoku&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;assistant&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;text&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;我已经成功运行了 history 模块的单元测试，全部 5 个测试用例均已顺利通过（耗时 0.42 秒）。&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;pending&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;metadata&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;turn_metrics&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;session_turns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;context_tokens&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">8421</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;turn_tool_calls&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;turn_tokens&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1042</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;turn_time&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">2.1</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">]</span>
+</code></pre></div>
+    <em>(Discord 机器人投递文本，在消息卡片头部标注性能指标，注销输入状态，并将该回复的状态更新为 <code>delivered</code>。同时，提问消息 <code>msg_user_001</code> 归档为 <code>processed</code>)</em></p>
+</li>
+</ol>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["navigation.tabs", "navigation.sections", "search.suggest", "search.highlight", "content.code.copy"], "search": "../../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "\u5df2\u590d\u5236", "clipboard.copy": "\u590d\u5236", "search.result.more.one": "\u5728\u8be5\u9875\u4e0a\u8fd8\u6709 1 \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.more.other": "\u5728\u8be5\u9875\u4e0a\u8fd8\u6709 # \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.none": "\u6ca1\u6709\u627e\u5230\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.one": "\u627e\u5230 1 \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.other": "# \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.placeholder": "\u952e\u5165\u4ee5\u5f00\u59cb\u641c\u7d22", "search.result.term.missing": "\u7f3a\u5c11", "select.version": "\u9009\u62e9\u5f53\u524d\u7248\u672c"}, "version": null}</script>
+    
+    
+      <script src="../../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

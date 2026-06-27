@@ -1,0 +1,381 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">
+    <url>
+        <loc>https://codescv.github.io/kesoku/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/dev/agent-cycle/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/agent-cycle/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/agent-cycle/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/dev/architecture/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/architecture/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/architecture/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/dev/chatbot-interface/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/chatbot-interface/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/chatbot-interface/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/dev/debugging/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/debugging/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/debugging/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/dev/llm/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/llm/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/llm/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/dev/memory/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/memory/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/memory/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/dev/message/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/message/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/message/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/dev/role-playing/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/role-playing/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/role-playing/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/dev/skills/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/skills/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/skills/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/dev/sys-prompt/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/sys-prompt/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/sys-prompt/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/dev/tools/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/tools/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/tools/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/dev/platforms/discord/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/platforms/discord/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/platforms/discord/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/dev/platforms/gchat/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/platforms/gchat/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/platforms/gchat/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/dev/platforms/wechat/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/platforms/wechat/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/platforms/wechat/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/user/commands/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/commands/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/commands/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/user/configuration/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/configuration/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/configuration/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/user/installation/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/installation/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/installation/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/user/memory/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/memory/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/memory/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/user/role-playing/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/role-playing/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/role-playing/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/user/safety/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/safety/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/safety/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/user/service/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/service/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/service/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/user/skills/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/skills/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/skills/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/user/troubleshooting/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/troubleshooting/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/troubleshooting/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/user/platforms/discord/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/platforms/discord/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/platforms/discord/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/user/platforms/gchat/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/platforms/gchat/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/platforms/gchat/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/user/platforms/wechat/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/platforms/wechat/"/>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/platforms/wechat/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/dev/agent-cycle/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/agent-cycle/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/agent-cycle/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/dev/architecture/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/architecture/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/architecture/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/dev/chatbot-interface/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/chatbot-interface/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/chatbot-interface/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/dev/debugging/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/debugging/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/debugging/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/dev/llm/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/llm/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/llm/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/dev/memory/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/memory/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/memory/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/dev/message/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/message/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/message/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/dev/role-playing/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/role-playing/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/role-playing/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/dev/skills/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/skills/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/skills/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/dev/sys-prompt/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/sys-prompt/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/sys-prompt/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/dev/tools/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/tools/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/tools/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/dev/platforms/discord/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/platforms/discord/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/platforms/discord/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/dev/platforms/gchat/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/platforms/gchat/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/platforms/gchat/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/dev/platforms/wechat/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/dev/platforms/wechat/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/dev/platforms/wechat/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/user/commands/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/commands/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/commands/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/user/configuration/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/configuration/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/configuration/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/user/installation/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/installation/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/installation/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/user/memory/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/memory/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/memory/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/user/role-playing/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/role-playing/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/role-playing/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/user/safety/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/safety/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/safety/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/user/service/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/service/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/service/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/user/skills/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/skills/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/skills/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/user/troubleshooting/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/troubleshooting/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/troubleshooting/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/user/platforms/discord/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/platforms/discord/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/platforms/discord/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/user/platforms/gchat/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/platforms/gchat/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/platforms/gchat/"/>
+    </url>
+    <url>
+        <loc>https://codescv.github.io/kesoku/zh/user/platforms/wechat/</loc>
+        <lastmod>2026-06-27</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="zh" href="https://codescv.github.io/kesoku/zh/user/platforms/wechat/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="https://codescv.github.io/kesoku/user/platforms/wechat/"/>
+    </url>
+</urlset>
