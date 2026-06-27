@@ -10,13 +10,15 @@ from typing import TYPE_CHECKING
 
 import tzlocal
 
+from kesoku.agent.compressor import HistoryCompressor
 from kesoku.agent.history import (
     build_history,
     prepare_history_for_llm,
 )
-from kesoku.agent.llm import BaseLLM
+from kesoku.agent.llm import BaseLLM, LLMResponse
 from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.turn_logger import TurnLogger
+from kesoku.config import KesokuConfig
 from kesoku.context import KesokuContext
 from kesoku.utils.async_fs import async_write_text_file
 from kesoku.utils.text import truncate_middle
@@ -159,6 +161,7 @@ class TurnExecutor:
                         f"Pivoted from message {prev_msg_id} to {current_msg.id} during turn loop. "
                         f"Resetting turn metrics and nudge flag."
                     )
+                    self.tool_runner.tool_context.original_msg_id = current_msg.id
                     nudged = False
                     turn_tool_calls = 0
                     turn_tokens = 0
@@ -175,6 +178,7 @@ class TurnExecutor:
                         active_cache_name = None
                         cached_messages_len = 0
                         worker.active_cache_name = None
+                        worker.active_cache_llm = None
                         worker.cached_messages_len = 0
 
                 # Resolve LLM dynamically for the current message
@@ -212,6 +216,7 @@ class TurnExecutor:
                     active_cache_name = None
                     cached_messages_len = 0
                     worker.active_cache_name = None
+                    worker.active_cache_llm = None
                     worker.cached_messages_len = 0
 
                 await self._inject_context_and_trigger_consolidation(history, current_msg, llm)
@@ -248,6 +253,7 @@ class TurnExecutor:
                             if active_cache_name:
                                 cached_messages_len = len(prefix_messages)
                                 worker.active_cache_name = active_cache_name
+                                worker.active_cache_llm = llm
                                 worker.cached_messages_len = cached_messages_len
 
                 # If the prepared history length is somehow less than cached_messages_len, the cache is obsolete.
@@ -260,6 +266,7 @@ class TurnExecutor:
                     active_cache_name = None
                     cached_messages_len = 0
                     worker.active_cache_name = None
+                    worker.active_cache_llm = None
                     worker.cached_messages_len = 0
 
                 # Partition history if using context cache
@@ -295,6 +302,7 @@ class TurnExecutor:
                         active_cache_name = None
                         cached_messages_len = 0
                         worker.active_cache_name = None
+                        worker.active_cache_llm = None
                         worker.cached_messages_len = 0
                         generate_history = llm_history
                         generate_system_prompt = system_prompt
@@ -496,7 +504,7 @@ class TurnExecutor:
         system_prompt: str | None,
         tools_list: list,
         llm: BaseLLM,
-        cfg,
+        cfg: KesokuConfig,
         current_msg: Message,
     ) -> tuple[list[Message], bool]:
         """Check context window usage and automatically compact history using custom turn-based compressor.
@@ -506,8 +514,6 @@ class TurnExecutor:
         """
         if not history:
             return history, False
-
-        from kesoku.agent.compressor import HistoryCompressor
 
         compressor = HistoryCompressor(self.context.db)
 
@@ -601,7 +607,7 @@ class TurnExecutor:
 
     async def _execute_tool_calls(
         self,
-        res,
+        res: LLMResponse,
         current_msg: Message,
         worker: "SessionWorker",
     ) -> bool:
@@ -695,7 +701,7 @@ class TurnExecutor:
 
     async def _handle_final_response(
         self,
-        res,
+        res: LLMResponse,
         current_msg: Message,
         last_context_tokens: int,
         last_cached_tokens: int,

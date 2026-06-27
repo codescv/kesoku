@@ -3,7 +3,7 @@
 import os
 
 from kesoku.config import get_config
-from kesoku.db import Session
+from kesoku.db import DatabaseManager, Session
 from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -92,8 +92,6 @@ def build_sys_prompt(
     if role is None:
         role = "default"
         if session:
-            from kesoku.db import DatabaseManager
-
             db = DatabaseManager(cfg.workspace.db_path)
             try:
                 mapping = db.get_channel_by_session(session.id)

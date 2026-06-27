@@ -8,6 +8,7 @@ anti-stall mechanisms.
 import asyncio
 import os
 
+from kesoku.agent.llm import BaseLLM
 from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.tools import ToolContext
 from kesoku.agent.turn_executor import TurnExecutor
@@ -50,6 +51,7 @@ class SessionWorker:
         self._processing_turn = False
         self._turn_finished_event = asyncio.Event()
         self.active_cache_name: str | None = None
+        self.active_cache_llm: BaseLLM | None = None
         self.cached_messages_len: int = 0
 
     @property
@@ -96,14 +98,14 @@ class SessionWorker:
             if not self.task.done():
                 self.task.cancel()
 
-        if self.active_cache_name:
+        if self.active_cache_name and self.active_cache_llm:
             logger.info("Cleaning up session context cache on worker stop...")
             try:
-                llm = self.context.get_llm()
-                await llm.delete_cache(self.active_cache_name)
+                await self.active_cache_llm.delete_cache(self.active_cache_name)
             except Exception as e:
                 logger.warning(f"Failed to delete context cache on worker stop: {e}")
             self.active_cache_name = None
+            self.active_cache_llm = None
             self.cached_messages_len = 0
 
     def queue_empty(self) -> bool:

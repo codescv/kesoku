@@ -60,17 +60,16 @@ async def build_history(
     return raw_history
 
 
-def prepare_history_for_llm(history: list[Message]) -> list[Message]:
-    """Clean up and format the conversational history specifically for the LLM.
+def segment_logical_turns(history: list[Message]) -> list[list[Message]]:
+    """Segment messages into logical turns starting with a USER or SYSTEM message.
 
-    Groups messages into complete logical turns, strips thoughts from all completed
-    turns, strips attachments from historical user prompts, adds headers to user
-    messages, and returns the simplified history.
+    Internal notification assistant messages are excluded.
     """
-    # 1. Groups messages into complete logical turns (User/System prompt -> ... -> before next user/system prompt).
     turns: list[list[Message]] = []
     current_turn: list[Message] = []
     for m in history:
+        if m.role == MessageRole.ASSISTANT and m.sender == "Notification":
+            continue
         if m.role in (MessageRole.USER, MessageRole.SYSTEM):
             if current_turn:
                 turns.append(current_turn)
@@ -82,6 +81,18 @@ def prepare_history_for_llm(history: list[Message]) -> list[Message]:
                 current_turn = [m]
     if current_turn:
         turns.append(current_turn)
+    return turns
+
+
+def prepare_history_for_llm(history: list[Message]) -> list[Message]:
+    """Clean up and format the conversational history specifically for the LLM.
+
+    Groups messages into complete logical turns, strips thoughts from all completed
+    turns, strips attachments from historical user prompts, adds headers to user
+    messages, and returns the simplified history.
+    """
+    # 1. Groups messages into complete logical turns (User/System prompt -> ... -> before next user/system prompt).
+    turns = segment_logical_turns(history)
 
     # 2. Clean each turn logically based on its completion status.
     # The very last turn in the list is the active turn, which is kept in full detail.

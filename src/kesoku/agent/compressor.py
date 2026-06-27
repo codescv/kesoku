@@ -4,9 +4,10 @@ import logging
 import time
 import uuid
 
+from kesoku.agent.history import segment_logical_turns
 from kesoku.agent.llm import BaseLLM
 from kesoku.config import KesokuConfig
-from kesoku.constants import MessageRole, MessageType
+from kesoku.constants import MessageType
 from kesoku.db import Message, SummaryNode
 from kesoku.db.manager import AsyncDatabaseManager
 
@@ -57,24 +58,7 @@ class HistoryCompressor:
 
         Internal notifications are excluded from turns.
         """
-        turns: list[list[Message]] = []
-        current_turn: list[Message] = []
-        for m in messages:
-            if m.role == MessageRole.ASSISTANT and m.sender == "Notification":
-                continue
-            if m.role in (MessageRole.USER, MessageRole.SYSTEM) and current_turn:
-                turns.append(current_turn)
-                current_turn = []
-            current_turn.append(m)
-        if current_turn:
-            turns.append(current_turn)
-        return turns
-
-    def estimate_tokens(self, text: str) -> int:
-        """Estimate token count based on character length fallback (approx 4 chars/token)."""
-        if not text:
-            return 0
-        return len(text) // 4
+        return segment_logical_turns(messages)
 
     def format_turn_for_summary(self, turn: list[Message]) -> str:
         """Format a single turn into text for summarization, stripping thoughts."""
@@ -132,7 +116,7 @@ class HistoryCompressor:
 
         for turn in uncompressed_turns:
             current_chunk.append(turn)
-            current_tokens += sum(self.estimate_tokens(msg.content) for msg in turn)
+            current_tokens += sum(llm.estimate_tokens_fallback(prompt=msg.content) for msg in turn)
 
             if len(current_chunk) >= base_turns and current_tokens >= min_tokens:
                 logger.info(
@@ -158,7 +142,7 @@ class HistoryCompressor:
                     summary=summary_content,
                     start_timestamp=start_ts,
                     end_timestamp=end_ts,
-                    token_count=self.estimate_tokens(summary_content),
+                    token_count=llm.estimate_tokens_fallback(prompt=summary_content),
                     source_token_count=current_tokens,
                     parent_id=None,
                     created_at=time.time(),
@@ -227,7 +211,7 @@ class HistoryCompressor:
                     summary=merged_summary,
                     start_timestamp=min(nd.start_timestamp for nd in chunk),
                     end_timestamp=max(nd.end_timestamp for nd in chunk),
-                    token_count=self.estimate_tokens(merged_summary),
+                    token_count=llm.estimate_tokens_fallback(prompt=merged_summary),
                     source_token_count=sum(nd.token_count for nd in chunk),
                     parent_id=None,
                     created_at=time.time(),
