@@ -412,9 +412,7 @@ class DatabaseManager:
                 return self._row_to_session(row)
             return None
 
-    def get_last_session_by_channel_and_role(
-        self, chatbot_id: str, channel_id: str, role: str
-    ) -> Session | None:
+    def get_last_session_by_channel_and_role(self, chatbot_id: str, channel_id: str, role: str) -> Session | None:
         """Retrieve the most recent session for a chatbot channel under a specific role.
 
         Args:
@@ -900,7 +898,7 @@ class DatabaseManager:
     def get_agent_memories(self, category: str | None = None, role: str | None = None) -> list[dict[str, Any]]:
         """Retrieve agent memories, optionally filtered by category and/or role.
 
-        If role is provided, retrieves both default memories and role-specific memories.
+        If role is provided, retrieves memories specifically associated with that role.
         """
         with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
@@ -1549,9 +1547,7 @@ class AsyncDatabaseManager:
         """
         return await asyncio.to_thread(self.sync_db.get_session_by_channel, chatbot_id, channel_id)
 
-    async def get_last_session_by_channel_and_role(
-        self, chatbot_id: str, channel_id: str, role: str
-    ) -> Session | None:
+    async def get_last_session_by_channel_and_role(self, chatbot_id: str, channel_id: str, role: str) -> Session | None:
         """Retrieve the most recent session for a chatbot channel under a specific role.
 
         Args:
@@ -1562,9 +1558,7 @@ class AsyncDatabaseManager:
         Returns:
             The Session object if found, None otherwise.
         """
-        return await asyncio.to_thread(
-            self.sync_db.get_last_session_by_channel_and_role, chatbot_id, channel_id, role
-        )
+        return await asyncio.to_thread(self.sync_db.get_last_session_by_channel_and_role, chatbot_id, channel_id, role)
 
     async def set_active_session_for_channel(self, chatbot_id: str, channel_id: str, session_id: str) -> None:
         """Set the active session for a given chatbot and channel.

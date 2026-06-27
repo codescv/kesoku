@@ -9,6 +9,20 @@ import kesoku.config
 
 
 @pytest.fixture(autouse=True)
+def mock_litellm_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mock litellm.aembedding to prevent real network calls and unawaited coroutines in tests."""
+
+    class MockEmbeddingResponse:
+        def __init__(self, embedding: list[float]) -> None:
+            self.data = [{"embedding": embedding}]
+
+    async def mock_aembedding(*args: Any, **kwargs: Any) -> MockEmbeddingResponse:
+        return MockEmbeddingResponse([0.0] * 768)
+
+    monkeypatch.setattr("litellm.aembedding", mock_aembedding)
+
+
+@pytest.fixture(autouse=True)
 def setup_test_config(tmp_path: Any) -> Generator[None, None, None]:
     """Automatically load a default mock configuration with safe temporary paths before every test.
 

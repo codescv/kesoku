@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS agent_memories (
 ```
 
 ### 2.1 Category Descriptions & Scoping
-*   **`progress`**: Used for tracking project work and development milestones. These are **globally shared** across all personas and use the `"default"` role scope.
+*   **`progress`**: Used for tracking project work and development milestones. These are **persona-isolated** and bound to the active channel persona.
 *   **`user_preferences`**: Stores user details, speech/TTS pronunciation guidelines, personality background, and style preferences. These are **persona-isolated** and bound to the active channel persona.
 *   **`memo`**: Custom user-defined notes or memories. These are **persona-isolated**.
 
