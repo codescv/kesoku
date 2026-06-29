@@ -209,11 +209,7 @@ class GoogleChatChatbot(Chatbot):
                 emojis_map = {}
                 next_page_token = None
                 while True:
-                    res = (
-                        temp_chat_service.customEmojis()
-                        .list(pageSize=1000, pageToken=next_page_token)
-                        .execute()
-                    )
+                    res = temp_chat_service.customEmojis().list(pageSize=1000, pageToken=next_page_token).execute()
                     emojis = res.get("customEmojis", [])
                     for item in emojis:
                         if "emojiName" in item and "name" in item:

@@ -67,6 +67,7 @@ def test_get_llm_providers() -> None:
 def test_get_llm_with_context_override() -> None:
     """Verify get_llm applies use_context_compression overrides for provider and model configuration."""
     from kesoku.config import KesokuConfig
+
     cfg = KesokuConfig()
     cfg.agent.llm = "gemini"
     cfg.agent.context_llm = "claude"
@@ -96,7 +97,6 @@ def test_get_llm_with_context_override() -> None:
         mock_gemini.assert_called_once()
         called_config = mock_gemini.call_args[1]["config"]
         assert called_config.model_name == "gemini-2.0-flash-lite"
-
 
 
 @pytest.mark.asyncio
@@ -845,7 +845,7 @@ def test_gemini_llm_count_tokens_thought_signature() -> None:
             "tool_name": "calc",
             "tool_arguments": {},
             "thought_signature": ts_hex,
-        }
+        },
     )
 
     with patch("google.genai.Client", return_value=mock_client):
@@ -964,9 +964,3 @@ async def test_claude_llm_prompt_caching_disabled() -> None:
         called_kwargs = mock_client.messages.create.call_args[1]
         assert called_kwargs["system"] == "S" * 60
         assert "cache_control" not in called_kwargs["messages"][0]["content"][-1]
-
-
-
-
-
-

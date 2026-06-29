@@ -38,9 +38,7 @@ async def analyze_media(
     if await async_exists(abs_path):
         resolved_path = abs_path
     elif context.session_workspace:
-        staging_path = os.path.join(
-            PathResolver.get_session_staging_dir(context.session_workspace), path
-        )
+        staging_path = os.path.join(PathResolver.get_session_staging_dir(context.session_workspace), path)
         if await async_exists(staging_path):
             resolved_path = staging_path
 

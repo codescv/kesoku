@@ -70,6 +70,7 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
 
                 async def reply_func(text: str) -> None:
                     from kesoku.utils.text import split_text_into_chunks
+
                     chunks = split_text_into_chunks(text, 2000)
                     for chunk in chunks:
                         if chunk.strip():
@@ -143,6 +144,7 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
                             await interaction.followup.send(content=text, file=file)
                         else:
                             from kesoku.utils.text import split_text_into_chunks
+
                             chunks = split_text_into_chunks(text, 2000)
                             for chunk in chunks:
                                 if chunk.strip():

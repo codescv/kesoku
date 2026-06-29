@@ -184,9 +184,7 @@ def install_cmd(
     if is_mac:
         env_dict_plist = "".join(f"        <key>{k}</key>\n        <string>{v}</string>\n" for k, v in env_dict.items())
         log_path = (
-            os.path.expanduser(f"~/Library/Logs/Kesoku/{service_name}.log")
-            if user
-            else f"/var/log/{service_name}.log"
+            os.path.expanduser(f"~/Library/Logs/Kesoku/{service_name}.log") if user else f"/var/log/{service_name}.log"
         )
         unit_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -284,9 +282,7 @@ WantedBy={wanted_by}
             logger.info("Service loaded successfully.")
         except subprocess.CalledProcessError as e:
             logger.warning(f"Could not load service automatically: {e.stderr.strip() or e}")
-            console.print(
-                f"[bold yellow]Warning: Please load the service manually: {' '.join(load_cmd)}[/bold yellow]"
-            )
+            console.print(f"[bold yellow]Warning: Please load the service manually: {' '.join(load_cmd)}[/bold yellow]")
     else:
         # Reload the systemd daemon configurations
         logger.info(f"Reloading systemd daemon via: {' '.join(reload_cmd)}...")
@@ -434,9 +430,7 @@ def _run_service_action(action: str, user: bool, name: str | None, console: Cons
                 console.print(f"[bold green]Successfully executed service restart for {service_name}![/bold green]")
             except subprocess.CalledProcessError as e:
                 err_msg = e.stderr.strip() or e
-                console.print(
-                    f"[bold red]Error executing service restart for {service_name}: {err_msg}[/bold red]"
-                )
+                console.print(f"[bold red]Error executing service restart for {service_name}: {err_msg}[/bold red]")
                 raise typer.Exit(code=1)
         else:
             cmd_list = ["launchctl", action, service_name]
@@ -572,9 +566,7 @@ def logs_cmd(
 
     if sys.platform == "darwin":
         log_path = (
-            os.path.expanduser(f"~/Library/Logs/Kesoku/{service_name}.log")
-            if user
-            else f"/var/log/{service_name}.log"
+            os.path.expanduser(f"~/Library/Logs/Kesoku/{service_name}.log") if user else f"/var/log/{service_name}.log"
         )
         if not os.path.exists(log_path):
             console.print(

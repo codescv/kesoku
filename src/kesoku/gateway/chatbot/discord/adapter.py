@@ -34,7 +34,6 @@ from .voice import send_voice_message
 logger = setup_logger(__name__)
 
 
-
 DISCORD_MAX_CONTENT_LENGTH = 2000
 
 
@@ -221,7 +220,6 @@ class DiscordChatbot(Chatbot):
         return clean_latex(formatted)
 
     async def _keep_typing(
-
         self, channel: discord.Thread | discord.DMChannel | discord.GroupChannel | discord.TextChannel
     ) -> None:
         """Keep sending typing status to Discord channel/thread in a loop.
@@ -342,6 +340,7 @@ class DiscordChatbot(Chatbot):
         attachments_metadata = []
         if message.attachments:
             for attachment in message.attachments:
+
                 async def save_cb(target_path: str, att=attachment) -> None:
                     await att.save(target_path)
 
@@ -470,8 +469,6 @@ class DiscordChatbot(Chatbot):
 
         discord_msg_content = message.content
 
-
-
         # Construct metadata with parent/thread identifiers
         channel_name = getattr(target_channel, "name", "") or ""
         parent_channel_id = ""
@@ -487,7 +484,6 @@ class DiscordChatbot(Chatbot):
             "discord_author_id": str(message.author.id),
             "channel_name": channel_name,
             "sender_name": f"{message.author.display_name} (ID: {message.author.id})",
-
         }
 
         if parent_channel_id:
@@ -529,10 +525,7 @@ class DiscordChatbot(Chatbot):
                 logger.debug(f"Failed to fetch channel {target_id} by ID: {e}")
 
         if not channel and metadata:
-            recipient_id_str = (
-                metadata.get("discord_author_id")
-                or metadata.get("dm_recipient_id")
-            )
+            recipient_id_str = metadata.get("discord_author_id") or metadata.get("dm_recipient_id")
             if recipient_id_str:
                 try:
                     user_id = int(recipient_id_str)
@@ -579,8 +572,7 @@ class DiscordChatbot(Chatbot):
             worker = agent.workers.get(session_id)
             if worker and not worker.queue_empty():
                 logger.info(
-                    f"Skipping intermediate message rendering for session {session_id} "
-                    "due to pending interruption."
+                    f"Skipping intermediate message rendering for session {session_id} due to pending interruption."
                 )
                 return
 
@@ -820,10 +812,7 @@ class DiscordChatbot(Chatbot):
                 color=discord.Color.blurple(),
             )
             if question_view.use_short_labels:
-                description_lines = [
-                    f"**{chr(ord('A') + idx)}.** {choice}"
-                    for idx, choice in enumerate(choices)
-                ]
+                description_lines = [f"**{chr(ord('A') + idx)}.** {choice}" for idx, choice in enumerate(choices)]
                 embed.description = "\n".join(description_lines)
             await channel.send(embed=embed, view=question_view)
         except Exception as qe:

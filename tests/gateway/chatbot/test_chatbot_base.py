@@ -138,6 +138,7 @@ async def test_resolve_outbound_path(tmp_path) -> None:
     chatbot = MockChatbot(chatbot_id="mock_bot", gateway=mock_gateway)
 
     from kesoku.config import AgentConfig, KesokuConfig, WorkspaceConfig
+
     mock_cfg = KesokuConfig(
         workspace=WorkspaceConfig(sessions_dir=str(tmp_path / "sessions"), db_path=":memory:"),
         agent=AgentConfig(user_prompts=[]),
@@ -226,9 +227,10 @@ async def test_resolve_or_create_session_updates_prompt(tmp_path) -> None:
         agent_working_dir=str(tmp_path / "awd"),
     )
 
-    with patch("kesoku.gateway.chatbot.base.get_config", return_value=mock_cfg), \
-         patch("kesoku.agent.prompt.get_config", return_value=mock_cfg):
-
+    with (
+        patch("kesoku.gateway.chatbot.base.get_config", return_value=mock_cfg),
+        patch("kesoku.agent.prompt.get_config", return_value=mock_cfg),
+    ):
         mock_gateway = Gateway(context=KesokuContext(config=mock_cfg, db=db_mgr))
         chatbot = MockChatbot(chatbot_id="mock_bot", gateway=mock_gateway)
 
@@ -316,18 +318,15 @@ async def test_role_switching_session_isolation(tmp_path) -> None:
     (roles_dir / "asuka" / "intro.md").write_text("Asuka role description")
 
     mock_cfg = KesokuConfig(
-        workspace=WorkspaceConfig(
-            sessions_dir=str(tmp_path / "sessions"),
-            db_path=temp_db,
-            roles_dir=str(roles_dir)
-        ),
+        workspace=WorkspaceConfig(sessions_dir=str(tmp_path / "sessions"), db_path=temp_db, roles_dir=str(roles_dir)),
         agent=AgentConfig(user_prompts=[]),
         agent_working_dir=str(tmp_path),
     )
 
-    with patch("kesoku.gateway.chatbot.base.get_config", return_value=mock_cfg), \
-         patch("kesoku.agent.prompt.get_config", return_value=mock_cfg):
-
+    with (
+        patch("kesoku.gateway.chatbot.base.get_config", return_value=mock_cfg),
+        patch("kesoku.agent.prompt.get_config", return_value=mock_cfg),
+    ):
         mock_gateway = Gateway(context=KesokuContext(config=mock_cfg, db=db_mgr))
         chatbot = MockChatbot(chatbot_id="mock_bot", gateway=mock_gateway)
 
@@ -467,6 +466,3 @@ async def test_cronjob_session_role_inheritance(tmp_path) -> None:
         session = db_mgr.get_session(msg.session_id)
         assert session is not None
         assert session.role_name == "asuka"
-
-
-

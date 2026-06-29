@@ -255,10 +255,7 @@ class CronManager:
                 state = self.job_states.get(job_key)
 
                 if not state:
-                    state = {
-                        "current_p": base_prob,
-                        "last_reset_date": today
-                    }
+                    state = {"current_p": base_prob, "last_reset_date": today}
                     self.job_states[job_key] = state
                 elif state["last_reset_date"] != today:
                     # New day, reset p

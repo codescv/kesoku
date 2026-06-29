@@ -233,10 +233,7 @@ async def test_context_command_success(mock_chatbot: MagicMock) -> None:
 
     # Mock get_session_active_context_by_channel response
     mock_context_msg = (
-        "### 📖 Active Processed Context\n"
-        "⚡ **DAG Summaries**: 2 nodes\n"
-        "- **[User]**: hello\n"
-        "- **[Assistant]**: hi"
+        "### 📖 Active Processed Context\n⚡ **DAG Summaries**: 2 nodes\n- **[User]**: hello\n- **[Assistant]**: hi"
     )
     mock_chatbot.get_session_active_context_by_channel = AsyncMock(return_value=mock_context_msg)
 
@@ -303,6 +300,7 @@ async def test_context_command_file_attachment(mock_chatbot: MagicMock) -> None:
 
     # Create a temporary mock HTML file on disk to simulate the output
     import tempfile
+
     with tempfile.NamedTemporaryFile(suffix="_test.html", delete=False) as tmp:
         tmp.write(b"<html>Mock Context</html>")
         tmp_path = tmp.name
@@ -321,6 +319,7 @@ async def test_context_command_file_attachment(mock_chatbot: MagicMock) -> None:
     finally:
         # Clean up
         import os
+
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
@@ -355,11 +354,4 @@ async def test_grep_command_success(mock_chatbot: MagicMock) -> None:
     await grep_cmd.callback(interaction, query="test_query")
 
     # Assert commands.execute was called with correct parameters
-    mock_chatbot.commands.execute.assert_called_once_with(
-        "grep",
-        ANY,
-        channel_id="987654321",
-        query="test_query"
-    )
-
-
+    mock_chatbot.commands.execute.assert_called_once_with("grep", ANY, channel_id="987654321", query="test_query")

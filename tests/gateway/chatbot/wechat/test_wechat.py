@@ -456,7 +456,6 @@ async def test_wechat_chatbot_trigger_cronjob(
         assert "@12345" in posted.content
 
 
-
 def test_context_token_store_get_all_channels() -> None:
     """Test that ContextTokenStore.get_all_channels returns only channels for the given account."""
     from kesoku.gateway.chatbot.wechat.adapter import ContextTokenStore

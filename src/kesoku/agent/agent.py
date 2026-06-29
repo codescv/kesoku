@@ -163,40 +163,49 @@ class SessionWorker:
                 await asyncio.sleep(1.0)
 
     async def _process_turn(self, current_msg: Message) -> None:
-        session = await self.context.db.get_session(self.session_id)
-        if not session:
-            logger.error(f"Session {self.session_id} not found in database. Aborting message processing.")
-            await self.context.db.update_message_status(current_msg.id, MessageStatus.ERROR)
-            return
+        try:
+            session = await self.context.db.get_session(self.session_id)
+            if not session:
+                logger.error(f"Session {self.session_id} not found in database. Aborting message processing.")
+                await self.context.db.update_message_status(current_msg.id, MessageStatus.ERROR)
+                return
 
-        folder_name = session.workspace_name
-        tool_context = ToolContext(
-            session_id=self.session_id,
-            session_workspace=folder_name,
-            original_msg_id=current_msg.id,
-            active_jobs=self.context.active_jobs,
-            gateway=self.gateway,
-        )
+            folder_name = session.workspace_name
+            tool_context = ToolContext(
+                session_id=self.session_id,
+                session_workspace=folder_name,
+                original_msg_id=current_msg.id,
+                active_jobs=self.context.active_jobs,
+                gateway=self.gateway,
+            )
 
-        cfg = self.context.config
-        session_staging_dir = await async_realpath(os.path.join(cfg.workspace.sessions_dir, folder_name))
-        await async_makedirs(session_staging_dir)
+            cfg = self.context.config
+            session_staging_dir = await async_realpath(os.path.join(cfg.workspace.sessions_dir, folder_name))
+            await async_makedirs(session_staging_dir)
 
-        tool_runner = ToolRunner(self.context.tool_registry, tool_context)
-        turn_logger = TurnLogger(self.session_id, session_staging_dir)
-        turn_executor = TurnExecutor(
-            session_id=self.session_id,
-            gateway=self.gateway,
-            tool_runner=tool_runner,
-            turn_logger=turn_logger,
-            context=self.context,
-        )
+            tool_runner = ToolRunner(self.context.tool_registry, tool_context)
+            turn_logger = TurnLogger(self.session_id, session_staging_dir)
+            turn_executor = TurnExecutor(
+                session_id=self.session_id,
+                gateway=self.gateway,
+                tool_runner=tool_runner,
+                turn_logger=turn_logger,
+                context=self.context,
+            )
 
-        await turn_executor.process_turn(
-            current_msg=current_msg,
-            worker=self,
-            session_staging_dir=session_staging_dir,
-        )
+            await turn_executor.process_turn(
+                current_msg=current_msg,
+                worker=self,
+                session_staging_dir=session_staging_dir,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Unhandled error in _process_turn for session {self.session_id}: {e}", exc_info=True)
+            try:
+                await self.context.db.update_message_status(current_msg.id, MessageStatus.ERROR)
+            except Exception as db_err:
+                logger.error(f"Failed to update message status to ERROR: {db_err}")
 
 
 class Agent:

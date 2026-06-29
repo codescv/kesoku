@@ -520,4 +520,3 @@ def test_thread_session_role_inheritance(db_manager):
     retrieved = db_manager.get_session("sess_thread_asuka")
     assert retrieved is not None
     assert retrieved.role_name == "asuka"
-

@@ -457,8 +457,6 @@ class TurnExecutor:
         if is_bootstrap:
             lines = [
                 '<background_context type="sync_guidelines">',
-                "- Use `memory_grep(*)` with time filters to retrieve recent messages",
-                "- Use `memory_grep(keyword)` and `memory_search(query)` to search messages",
                 "- Use `view_message(message_id)` to inspect full historical messages when needed.",
                 "</background_context>",
             ]
@@ -551,7 +549,7 @@ class TurnExecutor:
         # Assemble Buffer (uncompacted turns in the middle)
         buffer = []
         if len(turns) > protect_front + protect_tail:
-            middle_turns = turns[protect_front : -protect_tail]
+            middle_turns = turns[protect_front:-protect_tail]
             for t in middle_turns:
                 if not any(msg.summary_node_id is not None for msg in t):
                     buffer.extend(t)
@@ -564,10 +562,7 @@ class TurnExecutor:
         ]
         for node in root_summaries:
             depth_label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(node.level, f"Level-{node.level}")
-            scaffold_parts.append(
-                f"\n[{depth_label} Summary (Level {node.level}, node {node.id})]"
-                f"\n{node.summary}"
-            )
+            scaffold_parts.append(f"\n[{depth_label} Summary (Level {node.level}, node {node.id})]\n{node.summary}")
         scaffold_content = "\n".join(scaffold_parts)
 
         # Build assembled messages in memory

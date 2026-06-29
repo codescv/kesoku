@@ -231,9 +231,7 @@ class Chatbot(ABC):
         async def handle_context(reply_func: Callable[..., Awaitable[None]], channel_id: str) -> None:
             res = await self.get_session_active_context_by_channel(channel_id)
             if await async_exists(res):
-                await reply_func(
-                    "📖 Here is your beautifully formatted Active Context HTML download:", file_path=res
-                )
+                await reply_func("📖 Here is your beautifully formatted Active Context HTML download:", file_path=res)
             else:
                 await reply_func(res)
 
@@ -296,48 +294,6 @@ class Chatbot(ABC):
             handle_grep,
         )
 
-        async def handle_search(
-            reply_func: Callable[..., Awaitable[None]],
-            channel_id: str,
-            query: str = "",
-        ) -> None:
-            if not query:
-                await reply_func("⚠️ Please provide search query (e.g., /search keyword).")
-                return
-
-            session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
-            if not session:
-                session = await self.gateway.create_session(
-                    session_id=None,
-                    title=f"Search {channel_id}",
-                    chatbot_id=self.chatbot_id,
-                    channel_id=channel_id,
-                )
-
-            from kesoku.agent.tools.memory import memory_search
-
-            ctx = ToolContext(
-                session_id=session.id,
-                session_workspace=session.workspace_name,
-                gateway=self.gateway,
-            )
-            try:
-                res = await memory_search(query=query, context=ctx)
-                await reply_func(res)
-            except Exception as e:
-                logger.error(f"Failed search execution: {e}")
-                await reply_func(f"⚠️ Failed to execute search: {e}")
-
-        self.commands.register(
-            "search",
-            "Semantic search active memories and past messages for the current bound role.",
-            handle_search,
-        )
-        self.commands.register(
-            "memory-search",
-            "Semantic search active memories and past messages for the current bound role.",
-            handle_search,
-        )
 
         async def handle_debug(
             reply_func: Callable[[str], Awaitable[None]],
@@ -466,12 +422,7 @@ class Chatbot(ABC):
                     return
                 query = " ".join(parts[1:]) if len(parts) > 1 else ""
                 await self.commands.execute("grep", reply_func, channel_id=channel_id, query=query)
-            elif command in {"search", "memory-search", "memory_search"}:
-                if not channel_id:
-                    await reply_func("⚠️ Channel ID is required for this command.")
-                    return
-                query = " ".join(parts[1:]) if len(parts) > 1 else ""
-                await self.commands.execute("search", reply_func, channel_id=channel_id, query=query)
+
             elif command == "cronjob":
                 tag = " ".join(parts[1:]) if len(parts) > 1 else ""
                 await self.commands.execute("cronjob", reply_func, tag=tag)
@@ -538,10 +489,7 @@ class Chatbot(ABC):
                 config=cfg,
             )
             if compacted:
-                return (
-                    "🔄 Context Compaction completed successfully! "
-                    "Old turns have been compacted into summary nodes."
-                )
+                return "🔄 Context Compaction completed successfully! Old turns have been compacted into summary nodes."
             else:
                 return "ℹ️ Context compaction is not needed right now: turns do not meet threshold limits."
         except Exception as e:
@@ -631,7 +579,7 @@ class Chatbot(ABC):
             # Assemble Buffer
             buffer = []
             if len(turns) > protect_front + protect_tail:
-                middle_turns = turns[protect_front : -protect_tail]
+                middle_turns = turns[protect_front:-protect_tail]
                 for t in middle_turns:
                     if not any(msg.summary_node_id is not None for msg in t):
                         buffer.extend(t)
@@ -1255,9 +1203,7 @@ class Chatbot(ABC):
             except Exception as e:
                 logger.warning(f"Failed to clean up background jobs when switching role: {e}")
 
-        session = await self.gateway.db.get_last_session_by_channel_and_role(
-            self.chatbot_id, channel_id, role_name
-        )
+        session = await self.gateway.db.get_last_session_by_channel_and_role(self.chatbot_id, channel_id, role_name)
         if session:
             await self.gateway.db.set_active_session_for_channel(self.chatbot_id, channel_id, session.id)
             new_sys_prompt = build_sys_prompt(session=session)

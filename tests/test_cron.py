@@ -290,6 +290,7 @@ async def test_cron_manager_accumulating_probability():
         # Tick 1: random.random() is 0.2 (> 0.1) -> should skip.
         # p should increase to 0.1 * 1.1 = 0.11
         from unittest.mock import patch
+
         with patch("random.random", return_value=0.2):
             await manager._check_and_trigger_jobs([job])
             await asyncio.sleep(0.1)
@@ -346,14 +347,12 @@ async def test_cron_manager_probability_daily_reset():
 
         # Manually set state with increased p and yesterday's date
         yesterday = datetime.date.today() - datetime.timedelta(days=1)
-        manager.job_states[job_key] = {
-            "current_p": 0.5,
-            "last_reset_date": yesterday
-        }
+        manager.job_states[job_key] = {"current_p": 0.5, "last_reset_date": yesterday}
 
         # Tick: should reset p to 0.1 because of new day
         # random.random() is 0.2 (> 0.1) -> should skip
         from unittest.mock import patch
+
         with patch("random.random", return_value=0.2):
             await manager._check_and_trigger_jobs([job])
             await asyncio.sleep(0.1)

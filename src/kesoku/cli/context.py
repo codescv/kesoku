@@ -130,6 +130,7 @@ def context_view(
         from kesoku.agent.llm import get_llm
         from kesoku.constants import MessageRole, MessageStatus, MessageType
         from kesoku.db import Message
+
         llm = get_llm(provider=cfg.agent.llm, config=cfg)
 
         mock_msg = Message(
@@ -147,6 +148,7 @@ def context_view(
         async def assemble():
             # Trigger assembly
             from kesoku.agent.turn_executor import TurnExecutor
+
             executor = TurnExecutor(gateway=gateway, session_id=session_id)
             assembled_history, _ = await executor._check_and_auto_compact_history(
                 history=history,
@@ -266,9 +268,11 @@ def context_compact(
             sys.exit(1)
 
         from kesoku.agent.llm import get_llm
+
         llm = get_llm(provider=cfg.agent.llm, config=cfg)
 
         from kesoku.agent.compressor import HistoryCompressor
+
         compressor = HistoryCompressor(context.db)
 
         # Run compression

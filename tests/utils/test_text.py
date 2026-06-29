@@ -79,7 +79,6 @@ def test_clean_latex() -> None:
     # Test inline math with braces and subscripts
     assert clean_latex(r"We have $x_{i} = y_{j+1}$.") == "We have xᵢ = yⱼ₊₁."
 
-
     # Test fractions
     assert clean_latex(r"Ratio is $\frac{a}{b}$.") == "Ratio is (a)/(b)."
 
@@ -145,6 +144,3 @@ def test_extract_grep_snippet() -> None:
     query = "keyword"
     res = extract_grep_snippet(text, query, window=5)
     assert res == "...ains KEYWORD here"
-
-
-

@@ -49,9 +49,7 @@ class AttachmentManager:
             Dict containing path and sanitized filename.
         """
         sessions_dir = self._get_sessions_dir()
-        session_staging_dir = await async_realpath(
-            os.path.join(sessions_dir, workspace_name)
-        )
+        session_staging_dir = await async_realpath(os.path.join(sessions_dir, workspace_name))
         os.makedirs(session_staging_dir, exist_ok=True)
 
         # Sanitize filename to prevent path traversal

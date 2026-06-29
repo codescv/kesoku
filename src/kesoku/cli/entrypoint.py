@@ -47,9 +47,7 @@ app.add_typer(context_app, name="context")
 
 @memory_app.command("list")
 def cli_memory_list(
-    category: Annotated[
-        str | None, typer.Argument(help="Memory category (e.g., progress, user_preferences)")
-    ] = None,
+    category: Annotated[str | None, typer.Argument(help="Memory category (e.g., progress, user_preferences)")] = None,
     role: Annotated[str, typer.Option("-r", "--role", help="Optional roleplay persona scope")] = "default",
     config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
 ) -> None:
@@ -311,8 +309,7 @@ def cli_memory_import(
         for category, keys in categories.items():
             if not isinstance(keys, dict):
                 console.print(
-                    f"[bold red]Error: Category '{category}' under role '{role}' "
-                    "must map to a key table.[/bold red]"
+                    f"[bold red]Error: Category '{category}' under role '{role}' must map to a key table.[/bold red]"
                 )
                 sys.exit(1)
 
@@ -356,13 +353,15 @@ def cli_memory_import(
 
                 sanitized = sanitize_key(key)
 
-                valid_records.append({
-                    "role": role,
-                    "category": category,
-                    "key": sanitized,
-                    "title": record["title"],
-                    "content": record["content"],
-                })
+                valid_records.append(
+                    {
+                        "role": role,
+                        "category": category,
+                        "key": sanitized,
+                        "title": record["title"],
+                        "content": record["content"],
+                    }
+                )
 
     try:
         for rec in valid_records:
@@ -480,11 +479,10 @@ def wechat_show_channels(
         channels = []
         for k in tokens.keys():
             if k.startswith(prefix):
-                channels.append(k[len(prefix):])
+                channels.append(k[len(prefix) :])
 
         console.print(
-            f"\n[bold green]=== Active WeChat Channels for {w_cfg.chatbot_id} "
-            f"({account_id}) ===[/bold green]"
+            f"\n[bold green]=== Active WeChat Channels for {w_cfg.chatbot_id} ({account_id}) ===[/bold green]"
         )
         if not channels:
             console.print("  [yellow]No active channels found for this account.[/yellow]")
@@ -493,7 +491,6 @@ def wechat_show_channels(
         for chan in channels:
             chan_type = "Group" if chan.endswith("@chatroom") else "DM/User"
             console.print(f"  - ID: [cyan]{chan}[/cyan] | Type: [yellow]{chan_type}[/yellow]")
-
 
 
 @app.command("init")
@@ -763,9 +760,7 @@ def cli_index(
 
         await asyncio.gather(*tasks)
 
-        console.print(
-            f"[bold green]Indexing completed![/bold green] Processed: {processed}, Failed: {failed}"
-        )
+        console.print(f"[bold green]Indexing completed![/bold green] Processed: {processed}, Failed: {failed}")
 
     asyncio.run(_run_indexing())
 

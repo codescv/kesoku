@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 try:
     import tiktoken
+
     _tokenizer = tiktoken.get_encoding("cl100k_base")
 except ImportError:
     _tokenizer = None
@@ -263,9 +264,7 @@ class ContextHtmlReporter:
         head_html_str = (
             ContextHtmlReporter._render_messages_to_html(protected_head) or "<p>*(Protected head is empty)*</p>"
         )
-        buffer_html_str = (
-            ContextHtmlReporter._render_messages_to_html(buffer) or "<p>*(No middle buffer messages)*</p>"
-        )
+        buffer_html_str = ContextHtmlReporter._render_messages_to_html(buffer) or "<p>*(No middle buffer messages)*</p>"
         fresh_tail_html_str = (
             ContextHtmlReporter._render_messages_to_html(protected_tail) or "<p>*(Fresh tail is empty)*</p>"
         )

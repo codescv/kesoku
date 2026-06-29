@@ -68,11 +68,7 @@ class EmbeddingStore:
             if self.embedding_model.startswith("vertex_ai/"):
                 kwargs["task_type"] = actual_task_type
 
-            resp = await litellm.aembedding(
-                model=self.embedding_model,
-                input=[text[:8000]],
-                **kwargs
-            )
+            resp = await litellm.aembedding(model=self.embedding_model, input=[text[:8000]], **kwargs)
             vec = resp.data[0]["embedding"]
             return vec
         except Exception as exc:

@@ -322,5 +322,3 @@ async def test_get_role_messages_since_thread_inheritance(tmp_path) -> None:
     res_def = db.get_role_messages_since("default", since_timestamp=50.0)
     # Thread message should NOT be treated as 'default'
     assert len(res_def) == 0
-
-

@@ -111,7 +111,6 @@ class AgentConfig(BaseModel):
     )
 
 
-
 class GeminiConfig(BaseModel):
     """Google GenAI / Gemini LLM configuration settings."""
 
@@ -144,7 +143,6 @@ class GeminiConfig(BaseModel):
         default=3600,
         description="Time-to-Live (TTL) in seconds for the explicit context cache",
     )
-
 
 
 class ClaudeConfig(BaseModel):

@@ -78,6 +78,7 @@ async def test_init_with_env_token() -> None:
         bot = DiscordChatbot(chatbot_id="discord", gateway=gw)
         assert bot.bot_token == "env_token_value"
 
+
 @pytest.mark.asyncio
 async def test_init_with_proxy() -> None:
     """Test initialization detects and sets HTTP/HTTPS proxies from environment."""
@@ -130,7 +131,6 @@ async def test_init_with_proxy() -> None:
     ):
         bot = DiscordChatbot(chatbot_id="discord", gateway=gw)
         assert bot.bot.http.proxy == "http://proxy-https.local:8080"
-
 
 
 @pytest.mark.asyncio
@@ -492,8 +492,6 @@ async def test_on_message_timestamp_formatting(mock_config: KesokuConfig, mock_g
 
             expected_content = "Hello test"
             assert posted_msg.content == expected_content
-
-
 
 
 def test_build_discord_custom_prompt_dm() -> None:
@@ -1451,8 +1449,8 @@ async def test_on_message_resolves_and_passes_role(mock_config: KesokuConfig, mo
             msg.created_at = datetime.datetime.now(datetime.UTC)
 
             # Case 1: Direct lookup of thread has no role, but parent channel is bound to "asuka"
-            mock_gateway.db.get_channel_role.side_effect = (
-                lambda cb_id, chan_id: "asuka" if chan_id == "98765" else None
+            mock_gateway.db.get_channel_role.side_effect = lambda cb_id, chan_id: (
+                "asuka" if chan_id == "98765" else None
             )
 
             await bot.on_message(msg)
@@ -1718,4 +1716,3 @@ async def test_send_question_segment_long_choices(mock_config: KesokuConfig, moc
             assert len(view.children) == 2
             assert view.children[0].label == "A"
             assert view.children[1].label == "B"
-

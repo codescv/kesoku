@@ -40,7 +40,7 @@ This is your **active memory**. You actively initiate storing, reading, or pruni
 long-term facts, user preferences, and project states that persist across sessions.
 Do NOT write raw chat history to this system.
 
-Related Tools: `view_memory`, `list_memories`, `update_memory`, `memory_grep`, `memory_search`.
+Related Tools: `view_memory`, `list_memories`, `update_memory`.
 
 Every memory entry has a **category** and a **key**.
 
@@ -53,12 +53,6 @@ You can only use the following categories:
 
 Memory keys must strictly contain ONLY lowercase letters, underscores, and numbers.
 e.g.: {short_event_description}_{yyyymmdd}
-
-# Chat History
-As your conversation grows, the context is compressed, but the chat history across
-all sessions are searchable.
-
-Related Tools: `memory_grep`, `memory_search`, `view_message`.
 """
 
 

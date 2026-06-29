@@ -464,9 +464,3 @@ async def test_grep_slash_command(tmp_path) -> None:
     assert reply_msg is not None
     assert "Search Results for 'keyword'" in reply_msg
     assert "Testing grep keyword match." in reply_msg
-
-
-
-
-
-

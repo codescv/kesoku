@@ -287,6 +287,3 @@ account_id = "my-wechat-account"
     assert w_cfg is not None
     assert w_cfg.enabled is True
     assert w_cfg.account_id == "my-wechat-account"
-
-
-

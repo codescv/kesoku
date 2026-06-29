@@ -96,7 +96,7 @@ class HistoryCompressor:
             return False
 
         # Candidates for compression are the middle turns
-        candidates = turns[protect_front : -protect_tail]
+        candidates = turns[protect_front:-protect_tail]
 
         # Filter to only turns that have not yet been compressed
         uncompressed_turns = []
@@ -185,7 +185,7 @@ class HistoryCompressor:
 
             logger.info(
                 f"Consolidating Level-{level} root summary nodes for session {session_id} "
-                f"({len(roots)} roots found, merging oldest {K} into Level-{level+1})."
+                f"({len(roots)} roots found, merging oldest {K} into Level-{level + 1})."
             )
 
             # Merge the oldest K roots
@@ -195,7 +195,7 @@ class HistoryCompressor:
                 summaries_text = ""
                 for idx, nd in enumerate(chunk):
                     summaries_text += (
-                        f"--- Summary {idx+1} (from ts {nd.start_timestamp} to {nd.end_timestamp}) ---\n"
+                        f"--- Summary {idx + 1} (from ts {nd.start_timestamp} to {nd.end_timestamp}) ---\n"
                         f"{nd.summary}\n\n"
                     )
 

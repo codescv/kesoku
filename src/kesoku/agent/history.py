@@ -161,12 +161,11 @@ def prepare_history_for_llm(history: list[Message]) -> list[Message]:
 
                     m_copy.content = (
                         f'<history_message from="{sender_name}" time="{time_str}" timezone="{tz_name}">\n'
-                        f'{m_copy.content}\n'
-                        '</history_message>'
+                        f"{m_copy.content}\n"
+                        "</history_message>"
                     )
                     final_history.append(m_copy)
             else:
                 final_history.append(m)
 
     return final_history
-

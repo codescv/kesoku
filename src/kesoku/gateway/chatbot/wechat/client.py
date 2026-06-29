@@ -102,17 +102,14 @@ class ILinkClient:
         body = _json_dumps({**payload, "base_info": _base_info()})
         url = f"{self.base_url}/{endpoint}"
         timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000)
-        async with self.session.post(
-            url, data=body, headers=_headers(self.token, body), timeout=timeout
-        ) as response:
+        async with self.session.post(url, data=body, headers=_headers(self.token, body), timeout=timeout) as response:
             raw = await response.text()
             if not response.ok:
                 raise RuntimeError(f"iLink POST {endpoint} HTTP {response.status}: {raw[:200]}")
             res_data = json.loads(raw)
             if isinstance(res_data, dict) and res_data.get("ret", 0) != 0:
                 raise RuntimeError(
-                    f"iLink POST {endpoint} failed: ret={res_data['ret']}, "
-                    f"errmsg={res_data.get('errmsg', 'unknown')}"
+                    f"iLink POST {endpoint} failed: ret={res_data['ret']}, errmsg={res_data.get('errmsg', 'unknown')}"
                 )
             return res_data
 

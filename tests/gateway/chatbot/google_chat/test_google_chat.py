@@ -444,7 +444,7 @@ async def test_load_user_credentials_adc(
                 "https://www.googleapis.com/auth/chat.messages.reactions.create",
                 "https://www.googleapis.com/auth/chat.messages",
             ],
-            quota_project_id="test-project"
+            quota_project_id="test-project",
         )
 
 
@@ -636,7 +636,6 @@ async def test_add_reaction_no_toggle_deletion(
         assert bot._used_reactions[message_name]["👀"] == "spaces/AAA/messages/msg123/reactions/XYZ123"
 
 
-
 @pytest.mark.asyncio
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
@@ -668,13 +667,11 @@ async def test_add_reaction_custom_emoji(
 
         await bot._add_reaction(message_name, ":temu:")
         mock_create.assert_called_once_with(
-            parent=message_name,
-            body={"emoji": {"customEmoji": {"name": "customEmojis/:temu:"}}}
+            parent=message_name, body={"emoji": {"customEmoji": {"name": "customEmojis/:temu:"}}}
         )
 
 
 @pytest.mark.asyncio
-
 @patch("google.auth.default")
 @patch("google.cloud.pubsub_v1.SubscriberClient")
 @patch("kesoku.gateway.chatbot.google_chat.adapter.build")
@@ -740,7 +737,6 @@ def test_parse_emoji_sequence() -> None:
     # Case 7: Mix of standard and custom emoji
     assert parse_emoji_sequence("👀 :temu: 🚀") == ["👀", ":temu:", "🚀"]
     assert parse_emoji_sequence("👀,:temu:,🚀") == ["👀", ":temu:", "🚀"]
-
 
 
 @pytest.mark.asyncio
@@ -1090,5 +1086,3 @@ def test_google_chat_card_builder_truncation() -> None:
     # We keep first 3 + 1 placeholder + last 8 = 12 widgets
     assert len(widgets) == 12
     assert "intermediate tools and thoughts hidden" in widgets[3]["textParagraph"]["text"]
-
-

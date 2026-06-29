@@ -441,7 +441,6 @@ class BaseLLM(ABC):
 
     context_window_limit: int = 1048576  # Default context window limit (1M tokens)
 
-
     async def generate(
         self,
         prompt: str | None = None,
@@ -519,7 +518,6 @@ class BaseLLM(ABC):
             cache_name: Resource identifier name of the cache to delete.
         """
         pass
-
 
     def count_tokens(
         self,
@@ -706,7 +704,7 @@ class GeminiLLM(BaseLLM):
                     system_instruction=resolved_system_prompt,
                     tools=native_tools,
                     ttl=f"{ttl_seconds}s",
-                )
+                ),
             )
 
         try:
@@ -723,6 +721,7 @@ class GeminiLLM(BaseLLM):
         Args:
             cache_name: Resource identifier name of the cache to delete.
         """
+
         def _delete() -> None:
             self.client.caches.delete(name=cache_name)
 
@@ -731,7 +730,6 @@ class GeminiLLM(BaseLLM):
             logger.info(f"Deleted Gemini context cache: {cache_name}")
         except Exception as e:
             logger.warning(f"Failed to delete Gemini context cache {cache_name}: {e}")
-
 
     def _parse_native_response(self, raw_response: Any) -> LLMResponse:
         tool_calls = []
@@ -910,8 +908,7 @@ class ClaudeLLM(BaseLLM):
                             {
                                 "type": "text",
                                 "text": (
-                                    f"[Multimedia Attachment: {block.media_type} "
-                                    "(not directly supported by Claude)]"
+                                    f"[Multimedia Attachment: {block.media_type} (not directly supported by Claude)]"
                                 ),
                             }
                         )
@@ -976,10 +973,7 @@ class ClaudeLLM(BaseLLM):
                         total_chars += len(block.data) * 4
         estimated_tokens = total_chars // 4
 
-        use_caching = (
-            self.config.context_caching
-            and estimated_tokens >= self.config.context_caching_threshold
-        )
+        use_caching = self.config.context_caching and estimated_tokens >= self.config.context_caching_threshold
 
         if use_caching:
             logger.info(
@@ -1119,8 +1113,7 @@ class MockLLM(BaseLLM):
     ) -> LLMResponse:
         """Return canned mock response."""
         logger.debug(
-            f"MockLLM received prompt: {prompt}, history count: {len(history or [])}, "
-            f"cached_content: {cached_content}"
+            f"MockLLM received prompt: {prompt}, history count: {len(history or [])}, cached_content: {cached_content}"
         )
         if self.responses is not None:
             if self._current_response_idx < len(self.responses):

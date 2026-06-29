@@ -356,20 +356,59 @@ LATEX_SYMBOL_MAP = {
 }
 
 SUPERSCRIPT_MAP = {
-    "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
-    "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
-    "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾",
-    "n": "ⁿ", "i": "ⁱ", "x": "ˣ",
+    "0": "⁰",
+    "1": "¹",
+    "2": "²",
+    "3": "³",
+    "4": "⁴",
+    "5": "⁵",
+    "6": "⁶",
+    "7": "⁷",
+    "8": "⁸",
+    "9": "⁹",
+    "+": "⁺",
+    "-": "⁻",
+    "=": "⁼",
+    "(": "⁽",
+    ")": "⁾",
+    "n": "ⁿ",
+    "i": "ⁱ",
+    "x": "ˣ",
 }
 
 SUBSCRIPT_MAP = {
-    "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄",
-    "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
-    "+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎",
-    "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ",
-    "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ",
-    "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ",
-    "v": "ᵥ", "x": "ₓ",
+    "0": "₀",
+    "1": "₁",
+    "2": "₂",
+    "3": "₃",
+    "4": "₄",
+    "5": "₅",
+    "6": "₆",
+    "7": "₇",
+    "8": "₈",
+    "9": "₉",
+    "+": "₊",
+    "-": "₋",
+    "=": "₌",
+    "(": "₍",
+    ")": "₎",
+    "a": "ₐ",
+    "e": "ₑ",
+    "h": "ₕ",
+    "i": "ᵢ",
+    "j": "ⱼ",
+    "k": "ₖ",
+    "l": "ₗ",
+    "m": "ₘ",
+    "n": "ₙ",
+    "o": "ₒ",
+    "p": "ₚ",
+    "r": "ᵣ",
+    "s": "ₛ",
+    "t": "ₜ",
+    "u": "ᵤ",
+    "v": "ᵥ",
+    "x": "ₓ",
 }
 
 
@@ -402,38 +441,38 @@ def _clean_latex_expression(expr: str) -> str:
     prev = ""
     while prev != expr:
         prev = expr
-        expr = re.sub(r'\\frac\s*{(.*?)}\s*{(.*?)}', r'(\1)/(\2)', expr)
+        expr = re.sub(r"\\frac\s*{(.*?)}\s*{(.*?)}", r"(\1)/(\2)", expr)
 
     # 2. Square roots: \sqrt{expr} -> √(expr), \sqrt[n]{expr} -> ⁿ√(expr)
     prev = ""
     while prev != expr:
         prev = expr
         expr = re.sub(
-            r'\\sqrt\s*\[(.*?)\]\s*{(.*?)}',
+            r"\\sqrt\s*\[(.*?)\]\s*{(.*?)}",
             lambda m: f"{_to_superscript(m.group(1)) or f'({m.group(1)})'}√({m.group(2)})",
             expr,
         )
-        expr = re.sub(r'\\sqrt\s*{(.*?)}', r'√(\1)', expr)
+        expr = re.sub(r"\\sqrt\s*{(.*?)}", r"√(\1)", expr)
 
     # 3. Superscripts and Subscripts
     expr = re.sub(
-        r'\^{(.*?)}',
+        r"\^{(.*?)}",
         lambda m: _to_superscript(content := m.group(1)) or f"^({content})",
         expr,
     )
     expr = re.sub(
-        r'_{(.*?)}',
+        r"_{(.*?)}",
         lambda m: _to_subscript(content := m.group(1)) or f"_({content})",
         expr,
     )
 
     expr = re.sub(
-        r'\^([a-zA-Z0-9+-=])',
+        r"\^([a-zA-Z0-9+-=])",
         lambda m: _to_superscript(m.group(1)) or f"^({m.group(1)})",
         expr,
     )
     expr = re.sub(
-        r'_([a-zA-Z0-9+-=])',
+        r"_([a-zA-Z0-9+-=])",
         lambda m: _to_subscript(m.group(1)) or f"_({m.group(1)})",
         expr,
     )
@@ -444,21 +483,21 @@ def _clean_latex_expression(expr: str) -> str:
         expr = expr.replace(sym, LATEX_SYMBOL_MAP[sym])
 
     # 5. Remove common LaTeX formatting commands
-    expr = re.sub(r'\\mathbf\s*{(.*?)}', r'**\1**', expr)
-    expr = re.sub(r'\\mathit\s*{(.*?)}', r'*\1*', expr)
-    expr = re.sub(r'\\mathrm\s*{(.*?)}', r'\1', expr)
-    expr = re.sub(r'\\text\s*{(.*?)}', r'\1', expr)
-    expr = re.sub(r'\\label\s*{(.*?)}', '', expr)
+    expr = re.sub(r"\\mathbf\s*{(.*?)}", r"**\1**", expr)
+    expr = re.sub(r"\\mathit\s*{(.*?)}", r"*\1*", expr)
+    expr = re.sub(r"\\mathrm\s*{(.*?)}", r"\1", expr)
+    expr = re.sub(r"\\text\s*{(.*?)}", r"\1", expr)
+    expr = re.sub(r"\\label\s*{(.*?)}", "", expr)
 
     # 6. Clean up remaining backslashes
-    expr = re.sub(r'\\([\,>\s])', r'\1', expr)
-    expr = re.sub(r'\\([{}])', r'\1', expr)
+    expr = re.sub(r"\\([\,>\s])", r"\1", expr)
+    expr = re.sub(r"\\([{}])", r"\1", expr)
 
     # Remove environments
-    expr = re.sub(r'\\begin{[a-zA-Z]*?}', '', expr)
-    expr = re.sub(r'\\end{[a-zA-Z]*?}', '', expr)
+    expr = re.sub(r"\\begin{[a-zA-Z]*?}", "", expr)
+    expr = re.sub(r"\\end{[a-zA-Z]*?}", "", expr)
 
-    expr = re.sub(r'\s+', ' ', expr)
+    expr = re.sub(r"\s+", " ", expr)
 
     return expr.strip()
 
@@ -469,11 +508,7 @@ def _clean_latex_inline(expr: str) -> str:
 
 def _clean_latex_block(expr: str) -> str:
     cleaned = _clean_latex_expression(expr)
-    lines = [
-        f"> {line.strip()}"
-        for line in cleaned.splitlines()
-        if line.strip()
-    ]
+    lines = [f"> {line.strip()}" for line in cleaned.splitlines() if line.strip()]
     if not lines:
         return ""
     return "\n" + "\n".join(lines) + "\n"
@@ -482,7 +517,7 @@ def _clean_latex_block(expr: str) -> str:
 def _clean_latex_outside_code_block(text: str) -> str:
     # Replace block math \[...\]
     text = re.sub(
-        r'\\\[(.*?)\\\]',
+        r"\\\[(.*?)\\\]",
         lambda m: _clean_latex_block(m.group(1)),
         text,
         flags=re.DOTALL,
@@ -490,7 +525,7 @@ def _clean_latex_outside_code_block(text: str) -> str:
 
     # Replace block math $$...$$
     text = re.sub(
-        r'\$\$(.*?)\$\$',
+        r"\$\$(.*?)\$\$",
         lambda m: _clean_latex_block(m.group(1)),
         text,
         flags=re.DOTALL,
@@ -498,14 +533,14 @@ def _clean_latex_outside_code_block(text: str) -> str:
 
     # Replace inline math \(...\)
     text = re.sub(
-        r'\\\((.*?)\\\)',
+        r"\\\((.*?)\\\)",
         lambda m: _clean_latex_inline(m.group(1)),
         text,
     )
 
     # Replace inline math $...$
     text = re.sub(
-        r'\$(?!\s)(.*?)(?<!\s)\$',
+        r"\$(?!\s)(.*?)(?<!\s)\$",
         lambda m: _clean_latex_inline(m.group(1)),
         text,
     )
@@ -548,7 +583,7 @@ def extract_grep_snippet(text: str, query: str, window: int = 70) -> str:
     if idx == -1:
         # Fallback to start if not found
         if len(text) > window * 2:
-            return text[:window * 2].strip().replace("\n", " ") + "..."
+            return text[: window * 2].strip().replace("\n", " ") + "..."
         return text.strip().replace("\n", " ")
 
     start = max(0, idx - window)

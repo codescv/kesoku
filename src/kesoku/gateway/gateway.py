@@ -276,4 +276,3 @@ class Gateway:
             # Delete the SQLite database records
             await self.db.delete_session(session_id)
             logger.info(f"Successfully deleted session {session_id} from database.")
-

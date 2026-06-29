@@ -159,7 +159,7 @@ async def list_memories(
             lines.append(
                 f"\n💡 Note: There are {total_count - (offset + len(paginated))} more memories in this category. "
                 f"You can view them by adjusting the `offset` parameter (e.g., offset={offset + limit}), "
-                f"or search for specific memories using `memory_grep` or `memory_search` tools."
+                f"or search for specific memories using the `memory_grep` tool."
             )
         return "\n".join(lines)
     except Exception as e:
@@ -238,7 +238,7 @@ async def view_memory(
                 f"\n---\n"
                 f"💡 Note: There are {total_count - (offset + len(paginated))} more memories in this category. "
                 f"Use `offset` parameter (e.g., offset={offset + limit}) to view next page, "
-                f"or search for specific entries using `memory_grep` or `memory_search`."
+                f"or search for specific entries using the `memory_grep` tool."
             )
         return "\n".join(lines)
     except Exception as e:
@@ -389,7 +389,6 @@ async def delete_memory(
         return f"Error deleting memory: {e}"
 
 
-
 @default_registry.register
 async def memory_grep(
     query: str,
@@ -484,102 +483,7 @@ async def memory_grep(
         return f"Error executing memory_grep: {e}"
 
 
-@default_registry.register
-async def memory_search(
-    query: str,
-    context: ToolContext | None = None,
-) -> str:
-    """Semantic search active memories and past chat messages for the current role matching the query.
 
-    Args:
-        query: Text or question to search for semantically.
-        context: Injected tool execution context.
-
-    Returns:
-        Formatted markdown summary of semantically matching memories and messages.
-    """
-    if not context or not context.gateway:
-        return "Error: ToolContext is missing."
-
-    active_role = await _resolve_memory_role(category="user_preferences", role_param=None, context=context)
-    if not active_role:
-        active_role = "default"
-
-    embedding_store = context.gateway.context.embedding_store
-    if not embedding_store or not embedding_store.enabled:
-        return "⚠️ Semantic search is currently disabled (embedding model not configured or sqlite-vec not available)."
-
-    db = context.gateway.db
-    threshold = context.gateway.context.config.agent.search_threshold
-
-    try:
-        # Search messages for the active role
-        msg_results = await embedding_store.search(query, content_type=f"kesoku_message:{active_role}", limit=50)
-        # Search memories only for the active role
-        mem_role_results = await embedding_store.search(query, content_type=f"kesoku_memory:{active_role}", limit=50)
-
-        matched_messages = []
-        for r in msg_results:
-            if r["score"] < threshold:
-                continue
-            msg = await db.get_message(r["content_id"])
-            if msg:
-                matched_messages.append((msg, r["score"]))
-
-        combined_mems = mem_role_results
-        # Sort combined list by score descending
-        combined_mems.sort(key=lambda x: x["score"], reverse=True)
-
-        matched_memories = []
-        for r in combined_mems:
-            if r["score"] < threshold:
-                continue
-            try:
-                category, key = r["content_id"].split(":", 1)
-            except ValueError:
-                continue
-            try:
-                mem_role = r["content_type"].split(":", 1)[1]
-            except IndexError:
-                mem_role = "default"
-
-            mem = await db.get_agent_memory(category, key, mem_role)
-            if mem:
-                matched_memories.append((mem, r["score"]))
-
-        matched_memories = matched_memories[:10]
-        matched_messages = matched_messages[:10]
-
-        if not matched_memories and not matched_messages:
-            return f"No semantic matches found for '{query}' under role '{active_role}'."
-
-        lines = [f"🔍 **Semantic Search Results for '{query}' (Role: {active_role})**"]
-
-        if matched_memories:
-            lines.append("\n### 🧠 Matching Memories")
-            for m, score in matched_memories:
-                updated_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m["updated_at"]))
-                lines.append(
-                    f'- **[{m["category"]}]** `{m["key"]}`: "{m["title"]}" (updated: {updated_str}, score: {score:.2f})'
-                )
-                content_snippet = extract_grep_snippet(m["content"], query, window=70)
-                lines.append(f"  > {content_snippet}")
-
-        if matched_messages:
-            lines.append("\n### 💬 Matching Messages")
-            for m, score in matched_messages:
-                time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m.timestamp))
-                sender_str = f"**{m.sender}** ({m.role})"
-                content_snippet = extract_grep_snippet(m.content, query, window=70)
-                lines.append(
-                    f"- [{time_str}] {sender_str} (ID: `{m.id}`) in session `{m.session_id}` (score: {score:.2f}):"
-                )
-                lines.append(f"  > {content_snippet}")
-
-        return "\n".join(lines)
-    except Exception as e:
-        logger.error(f"Failed to execute memory_search: {e}", exc_info=True)
-        return f"Error executing memory_search: {e}"
 
 
 @default_registry.register

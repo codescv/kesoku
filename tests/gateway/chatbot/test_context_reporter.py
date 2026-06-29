@@ -55,7 +55,7 @@ def test_render_to_temp_file() -> None:
             role="assistant",
             type="thought",
             content="Old thought to be stripped",
-        )
+        ),
     ]
 
     buffer = [

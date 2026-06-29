@@ -6,9 +6,7 @@ from kesoku.constants import MessageRole, MessageType
 from kesoku.db.models import Message
 
 
-def sort_session_messages(
-    all_msgs: list[Message], order: Literal["phased", "grouped"]
-) -> list[Message]:
+def sort_session_messages(all_msgs: list[Message], order: Literal["phased", "grouped"]) -> list[Message]:
     """Sort historical messages for a specific session ordered logically.
 
     Args:

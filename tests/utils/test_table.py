@@ -5,14 +5,7 @@ from kesoku.utils.table import parse_markdown_tables, render_table_to_image
 
 def test_parse_single_markdown_table() -> None:
     """Test parsing a single simple markdown table."""
-    text = (
-        "Here is a table:\n"
-        "| Col 1 | Col 2 |\n"
-        "| :--- | ---: |\n"
-        "| Val A | Val B |\n"
-        "| Val C | Val D |\n"
-        "Done."
-    )
+    text = "Here is a table:\n| Col 1 | Col 2 |\n| :--- | ---: |\n| Val A | Val B |\n| Val C | Val D |\nDone."
     tables = parse_markdown_tables(text)
     assert len(tables) == 1
 
@@ -26,11 +19,7 @@ def test_parse_single_markdown_table() -> None:
 
 def test_parse_escaped_pipes() -> None:
     """Test parsing a table with escaped pipes in cells."""
-    text = (
-        "| Header 1 | Header 2 |\n"
-        "|---|---|\n"
-        "| Escaped \\| pipe | Normal |\n"
-    )
+    text = "| Header 1 | Header 2 |\n|---|---|\n| Escaped \\| pipe | Normal |\n"
     tables = parse_markdown_tables(text)
     assert len(tables) == 1
     assert tables[0].rows[0] == ["Escaped | pipe", "Normal"]

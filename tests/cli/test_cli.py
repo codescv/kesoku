@@ -330,7 +330,6 @@ def test_cli_service_start_stop_restart_macos() -> None:
         )
 
 
-
 def test_cli_service_dry_run() -> None:
     """Verify service command dry-run generated systemd unit content."""
     with (
@@ -846,9 +845,7 @@ content = "Melon pan"
     assert row["title"] == "Japanese Study Progress"
     assert row["content"] == "Studying N3 grammar."
 
-    cursor.execute(
-        "SELECT * FROM agent_memories WHERE role = 'asuka' AND category = 'memo' AND key = 'favorite_food'"
-    )
+    cursor.execute("SELECT * FROM agent_memories WHERE role = 'asuka' AND category = 'memo' AND key = 'favorite_food'")
     row = cursor.fetchone()
     assert row is not None
     assert row["title"] == "Favorite Food"
@@ -908,4 +905,3 @@ content = "Capital letters not allowed"
     result = runner.invoke(app, ["memory", "import", "-c", str(config_path), str(import_path)])
     assert result.exit_code == 1
     assert "Invalid Key 'INVALID_KEY'" in strip_ansi(result.stdout)
-

@@ -383,9 +383,6 @@ async def test_turn_executor_pivot_resets_nudged(temp_db: str) -> None:
     assert final_replies[0].parent_id == msg2.id
 
 
-
-
-
 @pytest.mark.asyncio
 async def test_turn_executor_user_preferences_injection(temp_db: str) -> None:
     """Verify that TurnExecutor injects user preferences into the latest user message."""
@@ -461,10 +458,6 @@ async def test_turn_executor_user_preferences_injection(temp_db: str) -> None:
     assert content.index("Run task!") > content.index("<background_context")
 
 
-
-
-
-
 @pytest.mark.asyncio
 async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_db: str) -> None:
     """Verify dynamic injection rules: Sync Guidelines are Bootstrap-only, while Preferences are unconditional."""
@@ -510,8 +503,10 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
         executor = TurnExecutor("sess_dynamic", gw, tool_runner, turn_logger, context=context)
         worker = MagicMock()
         type(worker).running = PropertyMock(side_effect=[True, False])
+
         async def mock_pivot(m: Message) -> Message:
             return m
+
         worker.drain_queue_and_pivot.side_effect = mock_pivot
         worker.queue_empty.return_value = True
 
@@ -543,7 +538,6 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     # MUST contain Consolidated Sync Guidelines (including Timeline, Lossless Chat History),
     # but not User Preferences in sync guidelines (injected via pinned_instruction), and Time Context
     assert '<background_context type="sync_guidelines">' in content1
-    assert "memory_grep(*)" in content1
     assert "view_message(message_id)" in content1
     assert "User Preferences:" not in content1
     assert "<pinned_instruction>\nPython\n</pinned_instruction>" in content1
@@ -551,7 +545,6 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     assert 'timezone="' in content1
     assert "CRITICAL: The time" not in content1
     assert "First message" in content1
-
 
     # --- TURN 2: Normal Turn (Not Bootstrap) ---
     # Mark previous assistant message as responded to ensure it's in history
@@ -575,7 +568,6 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
 
     # MUST NOT contain Consolidated Sync Guidelines, but MUST still contain pinned instruction
     assert '<background_context type="sync_guidelines">' not in content2
-    assert "memory_grep(*)" not in content2
     assert "view_message(message_id)" not in content2
     assert "User Preferences:" not in content2
     assert "<pinned_instruction>\nPython\n</pinned_instruction>" in content2
@@ -583,7 +575,6 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     assert 'timezone="' in content2
     assert "CRITICAL: The time" not in content2
     assert "Second message" in content2
-
 
     # --- TURN 3: Bootstrap Turn (Idle resumption) ---
     history = await gw.db.get_session_history("sess_dynamic")
@@ -607,7 +598,6 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     # MUST contain Consolidated Sync Guidelines again due to idle resumption,
     # but not User Preferences in sync guidelines, and Time Context
     assert '<background_context type="sync_guidelines">' in content3
-    assert "memory_grep(*)" in content3
     assert "view_message(message_id)" in content3
     assert "User Preferences:" not in content3
     assert "<pinned_instruction>\nPython\n</pinned_instruction>" in content3
@@ -615,7 +605,6 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     assert 'timezone="' in content3
     assert "CRITICAL: The time" not in content3
     assert "Third message" in content3
-
 
 
 def test_truncate_context_middle() -> None:
@@ -667,7 +656,6 @@ async def test_turn_executor_user_context_injection(temp_db: str) -> None:
             "discord_author_id": "123456",
             "sender_name": "Tifa Lockhart (ID: 123456)",
         },
-
     )
 
     await gw.post(discord_msg)
@@ -733,7 +721,6 @@ async def test_turn_executor_user_context_injection(temp_db: str) -> None:
             "google_chat_sender_email": "cloud@shinra.com",
             "sender_name": "Cloud Strife (Email: cloud@shinra.com)",
         },
-
     )
 
     await gw.post(gchat_msg)
@@ -756,6 +743,7 @@ async def test_turn_executor_user_context_injection(temp_db: str) -> None:
 async def test_turn_executor_auto_compaction(temp_db: str) -> None:
     """Verify that TurnExecutor automatically triggers in-place history compaction when threshold is exceeded."""
     from kesoku.constants import MessageRole
+
     DatabaseManager(temp_db).init_tables()
     cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
     gw = Gateway(context=KesokuContext(config=cfg))
@@ -821,7 +809,6 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
     )
     await gw.post(active_msg)
 
-
     # Mock LLM
     class CompactLLM(BaseLLM):
         context_window_limit: int = 1000
@@ -873,14 +860,17 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
 
     async def mock_pivot(m: Message) -> Message:
         return m
+
     worker.drain_queue_and_pivot.side_effect = mock_pivot
     worker.queue_empty.return_value = True
 
-    with patch("kesoku.context.get_config", return_value=cfg), \
-         patch(
-             "kesoku.agent.compressor.HistoryCompressor.auto_compact_session",
-             side_effect=mock_auto_compact,
-         ) as mock_compact:
+    with (
+        patch("kesoku.context.get_config", return_value=cfg),
+        patch(
+            "kesoku.agent.compressor.HistoryCompressor.auto_compact_session",
+            side_effect=mock_auto_compact,
+        ) as mock_compact,
+    ):
         await executor.process_turn(
             current_msg=active_msg,
             worker=worker,
@@ -926,16 +916,18 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
 async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> None:
     """Verify context cache deletion and correct generate request when compaction occurs."""
     from kesoku.constants import MessageRole
+
     DatabaseManager(temp_db).init_tables()
 
     # Configure Gemini and Context Caching
     from kesoku.config import GeminiConfig
+
     cfg = KesokuConfig(
         workspace=WorkspaceConfig(db_path=temp_db),
         gemini=GeminiConfig(
             context_caching=True,
             context_caching_threshold=100,  # small threshold to trigger caching
-        )
+        ),
     )
 
     gw = Gateway(context=KesokuContext(config=cfg))
@@ -1011,12 +1003,14 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
             ttl_seconds: int = 300,
         ) -> str | None:
             cache_name = f"mock_cache_{len(self.created_caches)}"
-            self.created_caches.append({
-                "name": cache_name,
-                "contents": contents,
-                "system_prompt": system_prompt,
-                "tools": tools,
-            })
+            self.created_caches.append(
+                {
+                    "name": cache_name,
+                    "contents": contents,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                }
+            )
             return cache_name
 
         async def delete_cache(self, cache_name: str) -> None:
@@ -1031,13 +1025,15 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
             cached_content: str | None = None,
             **kwargs: Any,
         ) -> LLMResponse:
-            self.captured_generates.append({
-                "prompt": prompt,
-                "system_prompt": system_prompt,
-                "history": history,
-                "tools": tools,
-                "cached_content": cached_content,
-            })
+            self.captured_generates.append(
+                {
+                    "prompt": prompt,
+                    "system_prompt": system_prompt,
+                    "history": history,
+                    "tools": tools,
+                    "cached_content": cached_content,
+                }
+            )
 
             # 1st call (during 1st iteration): return tool call
             if len(self.captured_generates) == 1:
@@ -1074,6 +1070,7 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
             status="responded",
             parent_id=tc_msg.id,
         )
+
     tool_runner.execute_tool.side_effect = mock_execute_tool
     tool_runner.tool_context = MagicMock()
     tool_runner.tool_context.transitioned_to_session = None
@@ -1134,6 +1131,7 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
 
     async def mock_pivot(m: Message) -> Message:
         return m
+
     worker.drain_queue_and_pivot.side_effect = mock_pivot
     worker.queue_empty.return_value = True
 
@@ -1142,11 +1140,13 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
     # Run the turn! It will run 2 iterations because the first iteration returns a tool call
     # which tells process_turn to "continue" the loop. The second iteration returns a final text,
     # which breaks the loop, exiting process_turn.
-    with patch("kesoku.context.get_config", return_value=cfg), \
-         patch(
-             "kesoku.agent.compressor.HistoryCompressor.auto_compact_session",
-             side_effect=mock_auto_compact,
-         ) as mock_compact:
+    with (
+        patch("kesoku.context.get_config", return_value=cfg),
+        patch(
+            "kesoku.agent.compressor.HistoryCompressor.auto_compact_session",
+            side_effect=mock_auto_compact,
+        ) as mock_compact,
+    ):
         await executor.process_turn(
             current_msg=active_msg,
             worker=worker,
@@ -1167,7 +1167,7 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
     # - No new cache was created (since token_count returned 50 < 100).
     assert len(llm.deleted_caches) == 1
     assert llm.deleted_caches[0] == "mock_cache_0"
-    assert len(llm.created_caches) == 1 # still only 1 cache from turn 1
+    assert len(llm.created_caches) == 1  # still only 1 cache from turn 1
 
     # 3. Captured generates checks:
     assert len(llm.captured_generates) == 2
@@ -1203,6 +1203,7 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
 async def test_turn_executor_error_handling_truncation(temp_db: str, tmp_path: Any) -> None:
     """Verify that TurnExecutor catches exceptions, writes traceback to staging, and truncates chatbot error msg."""
     import os
+
     DatabaseManager(temp_db).init_tables()
     cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
     gw = Gateway(context=KesokuContext(config=cfg))
@@ -1268,6 +1269,7 @@ async def test_turn_executor_error_handling_truncation(temp_db: str, tmp_path: A
 
     # 2. Check length of error message is <= MAX_CHATBOT_ERROR_MESSAGE_LENGTH
     from kesoku.agent.turn_executor import MAX_CHATBOT_ERROR_MESSAGE_LENGTH
+
     assert len(err_content) <= MAX_CHATBOT_ERROR_MESSAGE_LENGTH
     # 3. Check error message ends with the hint
     assert "Full error log saved to staging directory: error_user_msg_123.txt" in err_content
@@ -1341,12 +1343,14 @@ async def test_turn_executor_cache_expiration_retry(temp_db: str) -> None:
         ) -> str | None:
             self.cache_ttl_passed = ttl_seconds
             cache_name = f"mock_cache_{len(self.created_caches)}"
-            self.created_caches.append({
-                "name": cache_name,
-                "contents": contents,
-                "system_prompt": system_prompt,
-                "tools": tools,
-            })
+            self.created_caches.append(
+                {
+                    "name": cache_name,
+                    "contents": contents,
+                    "system_prompt": system_prompt,
+                    "tools": tools,
+                }
+            )
             return cache_name
 
         async def delete_cache(self, cache_name: str) -> None:
@@ -1361,13 +1365,15 @@ async def test_turn_executor_cache_expiration_retry(temp_db: str) -> None:
             cached_content: str | None = None,
             **kwargs: Any,
         ) -> LLMResponse:
-            self.captured_generates.append({
-                "prompt": prompt,
-                "system_prompt": system_prompt,
-                "history": history,
-                "tools": tools,
-                "cached_content": cached_content,
-            })
+            self.captured_generates.append(
+                {
+                    "prompt": prompt,
+                    "system_prompt": system_prompt,
+                    "history": history,
+                    "tools": tools,
+                    "cached_content": cached_content,
+                }
+            )
 
             if len(self.captured_generates) == 1:
                 assert cached_content == "mock_cache_0"
@@ -1419,6 +1425,7 @@ async def test_turn_executor_cache_expiration_retry(temp_db: str) -> None:
 async def test_turn_executor_auto_compaction_buffer_exclusion(temp_db: str) -> None:
     """Verify that compacted middle turns are correctly excluded from buffer in LLM history."""
     from kesoku.constants import MessageRole
+
     DatabaseManager(temp_db).init_tables()
     cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
     gw = Gateway(context=KesokuContext(config=cfg))
@@ -1503,6 +1510,7 @@ async def test_turn_executor_auto_compaction_buffer_exclusion(temp_db: str) -> N
 
     # Mock auto compact to compress Turn 2 (middle turn) only!
     from kesoku.db import SummaryNode
+
     async def mock_auto_compact(session_id, history, llm, config):
         node = SummaryNode(
             id="node-2-uuid",
@@ -1535,16 +1543,20 @@ async def test_turn_executor_auto_compaction_buffer_exclusion(temp_db: str) -> N
 
     worker = MagicMock()
     type(worker).running = PropertyMock(side_effect=[True, False])
+
     async def mock_pivot(m: Message) -> Message:
         return m
+
     worker.drain_queue_and_pivot.side_effect = mock_pivot
     worker.queue_empty.return_value = True
 
-    with patch("kesoku.context.get_config", return_value=cfg), \
-         patch(
-             "kesoku.agent.compressor.HistoryCompressor.auto_compact_session",
-             side_effect=mock_auto_compact,
-         ) as mock_compact:
+    with (
+        patch("kesoku.context.get_config", return_value=cfg),
+        patch(
+            "kesoku.agent.compressor.HistoryCompressor.auto_compact_session",
+            side_effect=mock_auto_compact,
+        ) as mock_compact,
+    ):
         await executor.process_turn(
             current_msg=active_msg,
             worker=worker,
@@ -1582,6 +1594,7 @@ async def test_history_compressor_in_place_update(temp_db: str) -> None:
     """Verify that real HistoryCompressor.auto_compact_session updates Message objects in-place in memory."""
     from kesoku.agent.compressor import HistoryCompressor
     from kesoku.constants import MessageRole
+
     DatabaseManager(temp_db).init_tables()
 
     cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
@@ -1682,10 +1695,3 @@ async def test_history_compressor_in_place_update(temp_db: str) -> None:
     db_msg2 = await gw.db.get_message(msg2.id)
     assert db_msg1.summary_node_id == mem_msg1.summary_node_id
     assert db_msg2.summary_node_id == mem_msg2.summary_node_id
-
-
-
-
-
-
-
