@@ -37,7 +37,7 @@ which is still SERIAL.
 MEMORY_AND_HISTORY_INSTRUCTIONS = """
 # Active Memory System (AMS)
 This is your **active memory**. You actively initiate storing, reading, or pruning structured
-long-term facts, user preferences, and project states that persist across sessions.
+long-term facts and project states that persist across sessions.
 Do NOT write raw chat history to this system.
 
 Related Tools: `view_memory`, `list_memories`, `update_memory`.
@@ -45,11 +45,9 @@ Related Tools: `view_memory`, `list_memories`, `update_memory`.
 Every memory entry has a **category** and a **key**.
 
 You can only use the following categories:
-1. `user_preferences`: Long term memory of important user preferences and asks. Write to this
-   category when the user explicitly tells you to remember a long term preference.
-2. `progress`: Active user project progression, reading positions, milestones, and study next steps.
+1. `progress`: Active user project progression, reading positions, milestones, and study next steps.
    One entry per project.
-3. `memo`: Record of important, interesting, or noteworthy events for the user. DO NOT write chores.
+2. `memo`: Record of important, interesting, or noteworthy events for the user. DO NOT write chores.
 
 Memory keys must strictly contain ONLY lowercase letters, underscores, and numbers.
 e.g.: {short_event_description}_{yyyymmdd}

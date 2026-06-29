@@ -47,7 +47,7 @@ app.add_typer(context_app, name="context")
 
 @memory_app.command("list")
 def cli_memory_list(
-    category: Annotated[str | None, typer.Argument(help="Memory category (e.g., progress, user_preferences)")] = None,
+    category: Annotated[str | None, typer.Argument(help="Memory category (e.g., progress, memo)")] = None,
     role: Annotated[str, typer.Option("-r", "--role", help="Optional roleplay persona scope")] = "default",
     config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
 ) -> None:
@@ -88,7 +88,7 @@ def cli_memory_list(
 
 @memory_app.command("view")
 def cli_memory_view(
-    category: Annotated[str, typer.Argument(help="Memory category (e.g., progress, user_preferences)")],
+    category: Annotated[str, typer.Argument(help="Memory category (e.g., progress, memo)")],
     key: Annotated[str | None, typer.Argument(help="Unique memory key. Omit to view all category entries.")] = None,
     role: Annotated[str, typer.Option("-r", "--role", help="Optional roleplay persona scope")] = "default",
     config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
@@ -133,7 +133,7 @@ def cli_memory_view(
 
 @memory_app.command("update")
 def cli_memory_update(
-    category: Annotated[str, typer.Argument(help="Memory category (e.g., progress, user_preferences)")],
+    category: Annotated[str, typer.Argument(help="Memory category (e.g., progress, memo)")],
     key: Annotated[str, typer.Argument(help="Unique memory key")],
     title: Annotated[str, typer.Argument(help="Human-readable title or label")],
     content: Annotated[str, typer.Argument(help="Markdown or JSON content payload")],
@@ -181,7 +181,7 @@ def cli_memory_update(
 
 @memory_app.command("delete")
 def cli_memory_delete(
-    category: Annotated[str, typer.Argument(help="Memory category (e.g., progress, user_preferences)")],
+    category: Annotated[str, typer.Argument(help="Memory category (e.g., progress, memo)")],
     key: Annotated[str, typer.Argument(help="Unique memory key")],
     role: Annotated[str, typer.Option("-r", "--role", help="Optional roleplay persona scope")] = "default",
     config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",

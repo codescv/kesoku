@@ -9,7 +9,7 @@ from kesoku.agent.skills import SkillManager
 from kesoku.agent.tools.registry import ToolContext, default_registry
 from kesoku.utils.text import extract_grep_snippet
 
-MemoryCategory = Literal["progress", "user_preferences", "memo"]
+MemoryCategory = Literal["progress", "memo"]
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +71,8 @@ async def _resolve_memory_role(category: str, role_param: str | None, context: T
     """Resolve the correct role scope based on the memory category and context rules."""
     category = category.strip().lower()
 
-    # Make all active memory categories (progress, user_preferences, memo) role-based
-    if category in {"progress", "user_preferences", "memo"}:
+    # Make all active memory categories (progress, memo) role-based
+    if category in {"progress", "memo"}:
         if context and context.gateway:
             db = context.gateway.db
             if context.session_id:
@@ -119,7 +119,7 @@ async def list_memories(
     """List all active memory keys and titles under the specified category.
 
     Args:
-        category: The memory category (e.g., 'progress', 'learnings', 'user_preferences').
+        category: The memory category (e.g., 'progress', 'memo').
         limit: Max number of entries to show (default: 10).
         offset: Number of entries to skip (default: 0).
         role: Optional roleplay persona scope (defaults to None for implicit channel/default persona).
@@ -183,7 +183,7 @@ async def view_memory(
     correct role/default scope and formats them into a beautiful, readable Markdown block.
 
     Args:
-        category: The memory category (e.g., 'progress', 'learnings', 'user_preferences').
+        category: The memory category (e.g., 'progress', 'memo').
         key: Optional unique snake_case key. If omitted, renders all entries.
         limit: Max number of entries to aggregate when key is None (default: 10).
         offset: Number of entries to skip when key is None (default: 0).
@@ -265,7 +265,7 @@ async def update_memory(
     exact current content in `old_content`.
 
     Args:
-        category: The memory category (e.g., 'progress', 'learnings', 'user_preferences', 'memo').
+        category: The memory category (e.g., 'progress', 'memo').
         key: The unique snake_case key.
         title: Human-readable label or title for the entry.
         content: Detailed markdown or JSON content payload (must be <= 200 characters).
@@ -354,7 +354,7 @@ async def delete_memory(
     """Atomically delete a specific memory entry under a category and implicit correct role scope.
 
     Args:
-        category: The memory category (e.g., 'progress', 'learnings', 'user_preferences').
+        category: The memory category (e.g., 'progress', 'memo').
         key: The unique snake_case key to delete.
         role: Optional roleplay persona scope (defaults to None for implicit channel/default persona).
         context: Injected tool execution context.
@@ -415,7 +415,7 @@ async def memory_grep(
     if not context or not context.gateway:
         return "Error: ToolContext is missing."
 
-    active_role = await _resolve_memory_role(category="user_preferences", role_param=None, context=context)
+    active_role = await _resolve_memory_role(category="memo", role_param=None, context=context)
     db = context.gateway.db
 
     from kesoku.utils.time_utils import parse_time_to_timestamp

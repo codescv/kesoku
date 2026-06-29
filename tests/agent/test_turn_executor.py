@@ -384,22 +384,20 @@ async def test_turn_executor_pivot_resets_nudged(temp_db: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_turn_executor_user_preferences_injection(temp_db: str) -> None:
-    """Verify that TurnExecutor injects user preferences into the latest user message."""
+async def test_turn_executor_user_preferences_injection(temp_db: str, tmp_path: Any) -> None:
+    """Verify that TurnExecutor injects role preferences from preferences.md during bootstrap turn."""
     DatabaseManager(temp_db).init_tables()
-    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    roles_dir = tmp_path / "roles"
+    tifa_role_dir = roles_dir / "tifa"
+    tifa_role_dir.mkdir(parents=True, exist_ok=True)
+    (tifa_role_dir / "preferences.md").write_text("Avoid Markdown", encoding="utf-8")
+
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db, roles_dir=str(roles_dir)))
     gw = Gateway(context=KesokuContext(config=cfg))
     await gw.create_session("sess_pref_inject", title="Preferences Session")
 
-    # Add user preferences to database under active role 'tifa'
+    # Add active role 'tifa'
     await gw.db.set_channel_role("cli", "ch_pref", "tifa")
-    await gw.db.upsert_agent_memory(
-        category="user_preferences",
-        key="rule_one",
-        title="No Codeblocks",
-        content="Avoid Markdown",
-        role="tifa",
-    )
 
     user_msg = Message(
         session_id="sess_pref_inject",
@@ -448,34 +446,31 @@ async def test_turn_executor_user_preferences_injection(temp_db: str) -> None:
             session_staging_dir="/tmp/sess_pref_inject",
         )
 
-    # Assert that the user preferences were injected as a pinned instruction block inside current_message
+    # Assert that the user preferences were injected as a <instructions> block inside the wrapped user message
     assert len(llm.captured_history) == 1
     content = llm.captured_history[0].content
     assert "Run task!" in content
     assert '<background_context type="sync_guidelines">' in content
     assert "User Preferences:" not in content
-    assert "<pinned_instruction>\nAvoid Markdown\n</pinned_instruction>" in content
-    assert content.index("Run task!") > content.index("<background_context")
+    assert "<instructions>\nAvoid Markdown\n</instructions>" in content
 
 
 @pytest.mark.asyncio
-async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_db: str) -> None:
-    """Verify dynamic injection rules: Sync Guidelines are Bootstrap-only, while Preferences are unconditional."""
+async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_db: str, tmp_path: Any) -> None:
+    """Verify dynamic injection rules: Sync Guidelines and Preferences are Bootstrap-only."""
     DatabaseManager(temp_db).init_tables()
-    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    roles_dir = tmp_path / "roles"
+    tifa_role_dir = roles_dir / "tifa"
+    tifa_role_dir.mkdir(parents=True, exist_ok=True)
+    (tifa_role_dir / "preferences.md").write_text("Python", encoding="utf-8")
+
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db, roles_dir=str(roles_dir)))
     gw = Gateway(context=KesokuContext(config=cfg))
     await gw.create_session("sess_dynamic", title="Dynamic Injection Session")
 
-    # 1. Set role and user preferences
+    # 1. Set role
     role = "tifa"
     await gw.db.set_channel_role("cli", "ch_dyn", role)
-    await gw.db.upsert_agent_memory(
-        category="user_preferences",
-        key="pref_lang",
-        title="Lang",
-        content="Python",
-        role=role,
-    )
 
     class CaptureLLM(BaseLLM):
         def __init__(self) -> None:
@@ -535,19 +530,17 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     await gw.post(msg1)
     content1 = await run_turn(msg1)
 
-    # MUST contain Consolidated Sync Guidelines (including Timeline, Lossless Chat History),
-    # but not User Preferences in sync guidelines (injected via pinned_instruction), and Time Context
+    # MUST contain Consolidated Sync Guidelines and Preferences
     assert '<background_context type="sync_guidelines">' in content1
     assert "view_message(message_id)" in content1
     assert "User Preferences:" not in content1
-    assert "<pinned_instruction>\nPython\n</pinned_instruction>" in content1
+    assert "<instructions>\nPython\n</instructions>" in content1
     assert 'from="u1"' in content1
     assert 'timezone="' in content1
     assert "CRITICAL: The time" not in content1
     assert "First message" in content1
 
     # --- TURN 2: Normal Turn (Not Bootstrap) ---
-    # Mark previous assistant message as responded to ensure it's in history
     history = await gw.db.get_session_history("sess_dynamic")
     for m in history:
         if m.role == "assistant" and m.status == "pending":
@@ -561,16 +554,16 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
         role="user",
         content="Second message",
         status="pending_agent",
-        timestamp=now + 10,  # Only 10 seconds later (well below 30-min idle threshold)
+        timestamp=now + 10,  # Only 10 seconds later
     )
     await gw.post(msg2)
     content2 = await run_turn(msg2)
 
-    # MUST NOT contain Consolidated Sync Guidelines, but MUST still contain pinned instruction
+    # MUST NOT contain Sync Guidelines or Preferences
     assert '<background_context type="sync_guidelines">' not in content2
     assert "view_message(message_id)" not in content2
     assert "User Preferences:" not in content2
-    assert "<pinned_instruction>\nPython\n</pinned_instruction>" in content2
+    assert "<instructions>" not in content2
     assert 'from="u1"' in content2
     assert 'timezone="' in content2
     assert "CRITICAL: The time" not in content2
@@ -590,17 +583,16 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
         role="user",
         content="Third message",
         status="pending_agent",
-        timestamp=now + 10 + 2000,  # 2000 seconds later (> 1800 seconds / 30 min idle threshold)
+        timestamp=now + 10 + 2000,  # 2000 seconds later (> 30 min idle threshold)
     )
     await gw.post(msg3)
     content3 = await run_turn(msg3)
 
-    # MUST contain Consolidated Sync Guidelines again due to idle resumption,
-    # but not User Preferences in sync guidelines, and Time Context
+    # MUST contain Consolidated Sync Guidelines and Preferences again due to idle resumption
     assert '<background_context type="sync_guidelines">' in content3
     assert "view_message(message_id)" in content3
     assert "User Preferences:" not in content3
-    assert "<pinned_instruction>\nPython\n</pinned_instruction>" in content3
+    assert "<instructions>\nPython\n</instructions>" in content3
     assert 'from="u1"' in content3
     assert 'timezone="' in content3
     assert "CRITICAL: The time" not in content3

@@ -12,6 +12,7 @@ metadata:
 Kesoku 中的每个自定义角色都存放在全局角色目录 `${AWD}/roles/{character_name}/` 下的独立子目录中。
 一个完整的角色包含以下内容(参考: `${SKILL_DIR}/template/`)：
 * **intro.md**：Markdown 格式的简介，包含性格特征、习惯癖好、指令提示词以及生成脚本指南。
+* **preferences.md**：Markdown 格式的用户偏好/个性化指令，在 bootstrap turn 时会作为 <instructions> 注入到提示词中。
 * **images/**：（可选）包含一张参考肖像图（例如 `character.jpg` 或 `{name}.png`），用以保证视觉输出的一致性。
 * **audio/**：（可选）包含一段清晰的参考语音片段（通常为 WAV PCM 格式），用以保证 TTS 声音克隆输出的一致性。
 * **scripts/**：可执行脚本（`{name}-tts.sh` 和 `{name}-image.sh`），它们预配置了参考资产，并调用现有的 AIGC 技能（`qwen-tts`、`ai-image`）。
@@ -40,6 +41,7 @@ Kesoku 中的每个自定义角色都存放在全局角色目录 `${AWD}/roles/{
 ```
 {SKILL_DIR}/template/
 ├── intro.md
+├── preferences.md
 ├── images/
 │   └── {name}.png
 ├── audio/

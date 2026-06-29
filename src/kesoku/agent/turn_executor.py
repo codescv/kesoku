@@ -20,7 +20,7 @@ from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.turn_logger import TurnLogger
 from kesoku.config import KesokuConfig
 from kesoku.context import KesokuContext
-from kesoku.utils.async_fs import async_write_text_file
+from kesoku.utils.async_fs import async_exists, async_read_text_file, async_write_text_file
 from kesoku.utils.text import truncate_middle
 
 if TYPE_CHECKING:
@@ -445,11 +445,21 @@ class TurnExecutor:
         # 1. Calculate if this is a Bootstrap Turn (first turn of session or idle > 30 mins)
         is_bootstrap = await self._is_bootstrap_turn(history, current_msg)
 
-        # 2. Query user preferences ALWAYS (unconditional)
-        user_prefs = await self.context.db.get_agent_memories(
-            category="user_preferences",
-            role=active_role,
-        )
+        # 2. Read role-based preferences.md if in bootstrap turn
+        instructions_prefix = ""
+        if is_bootstrap and active_role:
+            roles_dir = self.context.config.workspace.roles_dir
+            if not os.path.isabs(roles_dir) and self.context.config.agent_working_dir:
+                roles_dir = os.path.join(self.context.config.agent_working_dir, roles_dir)
+            pref_path = os.path.join(roles_dir, active_role, "preferences.md")
+            if await async_exists(pref_path):
+                try:
+                    role_prefs_content = await async_read_text_file(pref_path)
+                    role_prefs_content = role_prefs_content.strip()
+                    if role_prefs_content:
+                        instructions_prefix = f"<instructions>\n{role_prefs_content}\n</instructions>\n"
+                except Exception as e:
+                    logger.warning(f"Failed to read preferences.md for role '{active_role}': {e}")
 
         # 3. Prepend Consolidated Passive Synchronization, Preferences, and Context Compression Guidelines
         # (if Bootstrap)
@@ -474,15 +484,10 @@ class TurnExecutor:
         except Exception:
             tz_name = msg_time.tzname() or "UTC"
 
-        pinned_instruction = ""
-        if user_prefs:
-            prefs_str = "\n".join(pref["content"] for pref in user_prefs)
-            pinned_instruction = f"<pinned_instruction>\n{prefs_str}\n</pinned_instruction>\n"
-
         copied_msg.content = (
+            f"{instructions_prefix}"
             f"{full_prefix}"
             f'<current_message from="{sender_name}" time="{time_str}" timezone="{tz_name}">\n'
-            f"{pinned_instruction}"
             f"{copied_msg.content}\n"
             "</current_message>"
         )
