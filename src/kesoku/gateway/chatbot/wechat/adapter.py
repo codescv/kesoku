@@ -805,6 +805,7 @@ You are interacting with the user via WeChat (Weixin).
             msg_content = f"@{mention_user_id} {msg_content}"
 
         tag = kwargs.get("tag")
+        role = kwargs.get("role")
         await self.trigger_cronjob_message(
             channel_id=channel_id,
             prompt_content=msg_content,
@@ -813,6 +814,7 @@ You are interacting with the user via WeChat (Weixin).
             metadata={"wechat_cronjob": True},
             title=f"WeChat Scheduled Job {channel_id}",
             tag=tag,
+            role=role,
         )
 
         # Start typing indicator

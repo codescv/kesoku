@@ -21,6 +21,10 @@ channel_id = "123456789012345678"
 # 5. [Optional] Discord User ID to mention / notify when the job triggers.
 mention_user_id = "987654321098765432"
 
+# 5a. [Optional] Role to execute the cronjob with.
+# If set, the agent will execute the job using this role's personality/instructions.
+role = "analyst"
+
 # 6. [Optional] Trigger probability (float between 0.0 and 1.0, default: 1.0).
 # If set to 0.05, the job has a 5% chance of executing on any matching scheduled tick.
 # If skipped, the probability increases by 10% (* 1.1) on each subsequent tick, resetting on trigger or new day.

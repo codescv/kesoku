@@ -5,6 +5,7 @@ Provides a pure-Python cron expression parser/matcher and background CronManager
 
 import asyncio
 import datetime
+import hashlib
 import os
 import random
 import tomllib
@@ -104,6 +105,21 @@ def cron_matches(schedule: str, dt: datetime.datetime) -> bool:
         and _field_matches(fields[3], month, 1, 12)
         and _field_matches(fields[4], day_of_week, 0, 6)
     )
+def _get_silent_channel_id(job: dict[str, Any]) -> str:
+    """Generate a stable, unique channel ID for a silent cronjob.
+
+    Args:
+        job: The job configuration dictionary.
+
+    Returns:
+        A stable channel ID string.
+    """
+    prompt = job.get("prompt", "")
+    schedule = job.get("schedule", "")
+    role = job.get("role", "")
+    hasher = hashlib.sha256()
+    hasher.update(f"{prompt}_{schedule}_{role}".encode())
+    return f"cronjob_silent_{hasher.hexdigest()[:8]}"
 
 
 def load_cronjobs(toml_path: str) -> list[dict[str, Any]]:
@@ -203,7 +219,7 @@ class CronManager:
 
                 # Normalize channel_id for virtual chatbot
                 if chatbot_id == "cronjob" and not channel_id:
-                    channel_id = f"silent_{idx}"
+                    channel_id = _get_silent_channel_id(job)
 
                 if not channel_id:
                     logger.warning(f"Skipping Job {idx}: Missing channel_id.")
@@ -304,7 +320,7 @@ class CronManager:
             return
 
         if chatbot_id == "cronjob" and not channel_id:
-            channel_id = f"silent_{job_idx}"
+            channel_id = _get_silent_channel_id(job)
 
         if not prompt_path:
             logger.warning(f"Cronjob {job_idx} is missing prompt field.")
@@ -352,6 +368,7 @@ class CronManager:
                     prompt_content=prompt_content,
                     mention_user_id=str(mention_user_id) if mention_user_id else None,
                     tag=job.get("tag"),
+                    role=job.get("role"),
                 )
             else:
                 logger.error(f"Chatbot '{chatbot_id}' does not support trigger_cronjob.")

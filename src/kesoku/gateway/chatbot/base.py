@@ -620,6 +620,7 @@ class Chatbot(ABC):
         metadata: dict[str, Any] | None = None,
         title: str | None = None,
         tag: str | None = None,
+        role: str | None = None,
     ) -> Message:
         """Unified helper to create a session (if not exists) and post a scheduled cronjob message to the gateway.
 
@@ -634,15 +635,17 @@ class Chatbot(ABC):
                 session_title = title or f"{self.chatbot_id.capitalize()} Scheduled Job {channel_id}"
 
             # Resolve role with parent inheritance support
-            role = "default"
-            db_role = await self.gateway.db.get_channel_role(self.chatbot_id, channel_id)
-            if isinstance(db_role, str):
-                role = db_role
-            elif metadata and "parent_channel_id" in metadata:
-                parent_id = metadata["parent_channel_id"]
-                parent_role = await self.gateway.db.get_channel_role(self.chatbot_id, str(parent_id))
-                if isinstance(parent_role, str):
-                    role = parent_role
+            if not role:
+                db_role = await self.gateway.db.get_channel_role(self.chatbot_id, channel_id)
+                if isinstance(db_role, str):
+                    role = db_role
+                elif metadata and "parent_channel_id" in metadata:
+                    parent_id = metadata["parent_channel_id"]
+                    parent_role = await self.gateway.db.get_channel_role(self.chatbot_id, str(parent_id))
+                    if isinstance(parent_role, str):
+                        role = parent_role
+            if not role:
+                role = "default"
 
             session = await self.gateway.create_session(
                 session_id=None,

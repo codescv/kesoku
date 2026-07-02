@@ -130,6 +130,7 @@ async def test_cron_manager_duplicates_and_trigger():
                 prompt_content="Hello from cron!",
                 mention_user_id="111",
                 tag=None,
+                role=None,
             )
 
             # Second execution within same minute: matches but skipped (prevent duplicates)
@@ -221,6 +222,7 @@ async def test_cron_manager_min_idle_time():
             prompt_content="Hello!",
             mention_user_id=None,
             tag=None,
+            role=None,
         )
 
 
@@ -264,6 +266,7 @@ async def test_cron_manager_max_messages():
             prompt_content="Hello!",
             mention_user_id=None,
             tag=None,
+            role=None,
         )
 
 

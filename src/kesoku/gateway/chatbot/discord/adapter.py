@@ -999,6 +999,7 @@ class DiscordChatbot(Chatbot):
             msg_metadata["parent_channel_name"] = parent_channel_name
 
         tag = kwargs.get("tag")
+        role = kwargs.get("role")
         await self.trigger_cronjob_message(
             channel_id=target_channel_id_str,
             prompt_content=prompt_content,
@@ -1006,6 +1007,7 @@ class DiscordChatbot(Chatbot):
             custom_prompt=custom_prompt,
             metadata=msg_metadata,
             tag=tag,
+            role=role,
         )
 
         # Trigger typing status for the thread/channel while agent is thinking

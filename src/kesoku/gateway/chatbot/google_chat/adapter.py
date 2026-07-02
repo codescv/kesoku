@@ -752,6 +752,7 @@ class GoogleChatChatbot(Chatbot):
             msg_content = f"<users/{mention_user_id}> {msg_content}"
 
         tag = kwargs.get("tag")
+        role = kwargs.get("role")
         await self.trigger_cronjob_message(
             channel_id=channel_id,
             prompt_content=msg_content,
@@ -760,4 +761,5 @@ class GoogleChatChatbot(Chatbot):
             metadata={"is_cronjob": True},
             title=f"Google Chat Scheduled Job {channel_id.split('/')[-1]}",
             tag=tag,
+            role=role,
         )

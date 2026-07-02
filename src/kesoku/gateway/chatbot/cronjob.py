@@ -52,6 +52,7 @@ class CronjobChatbot(Chatbot):
             **kwargs: Additional optional arguments.
         """
         tag = kwargs.get("tag")
+        role = kwargs.get("role")
         await self.trigger_cronjob_message(
             channel_id=channel_id,
             prompt_content=prompt_content,
@@ -59,4 +60,5 @@ class CronjobChatbot(Chatbot):
             custom_prompt=None,
             metadata={"is_cronjob": True, "is_silent": True},
             tag=tag,
+            role=role,
         )
