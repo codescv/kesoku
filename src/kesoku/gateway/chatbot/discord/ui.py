@@ -9,8 +9,6 @@ import html
 import io
 from typing import Any
 
-import tzlocal
-
 import discord
 from kesoku.agent.history import build_history
 from kesoku.constants import MessageRole, MessageStatus, MessageType
@@ -581,13 +579,6 @@ rel="stylesheet">
 </html>"""
 
 
-def _get_local_timezone_name() -> str:
-    """Retrieve the local system timezone name (e.g., 'Asia/Shanghai')."""
-    try:
-        return tzlocal.get_localzone().key or "UTC"
-    except Exception:
-        return datetime.datetime.now().astimezone().tzname() or "UTC"
-
 
 class QuestionView(discord.ui.View):
     """Dynamic Discord View representing a multiple-choice question.
@@ -663,12 +654,7 @@ class QuestionView(discord.ui.View):
             response_msg = await interaction.channel.send(f"<@{interaction.user.id}> selected: **{choice}**")
 
             # Construct and post the user message to the Gateway
-            tz_name = _get_local_timezone_name()
-            discord_msg_content = (
-                f"`{interaction.user.display_name}` <@{interaction.user.id}> "
-                f"at `{response_msg.created_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')} {tz_name}`:\n"
-                f"{choice}"
-            )
+            discord_msg_content = choice
             msg = Message(
                 session_id=self.session_id,
                 chatbot_id=self.chatbot.chatbot_id,
