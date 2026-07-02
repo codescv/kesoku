@@ -445,9 +445,11 @@ class TurnExecutor:
         # 1. Calculate if this is a Bootstrap Turn (first turn of session or idle > 30 mins)
         is_bootstrap = await self._is_bootstrap_turn(history, current_msg)
 
-        # 2. Read role-based preferences.md if in bootstrap turn
+        # 2. Read role-based preferences.md if needed (bootstrap turn or every 4 turns)
+        turn_count = await self._get_session_turns_count()
+        inject_preferences = is_bootstrap or (turn_count > 0 and turn_count % 4 == 1)
         instructions_prefix = ""
-        if is_bootstrap and active_role:
+        if inject_preferences and active_role:
             roles_dir = self.context.config.workspace.roles_dir
             if not os.path.isabs(roles_dir) and self.context.config.agent_working_dir:
                 roles_dir = os.path.join(self.context.config.agent_working_dir, roles_dir)
@@ -467,10 +469,13 @@ class TurnExecutor:
         if is_bootstrap:
             lines = [
                 '<background_context type="sync_guidelines">',
+                "- Use `memory_grep(query)` to search active memories and past chat messages for this role.",
                 "- Use `view_message(message_id)` to inspect full historical messages when needed.",
                 "</background_context>",
             ]
             full_prefix = "\n".join(lines)
+
+
 
         msg_idx = history.index(latest_user_msg)
         copied_msg = latest_user_msg.model_copy()

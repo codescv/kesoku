@@ -533,6 +533,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     # MUST contain Consolidated Sync Guidelines and Preferences
     assert '<background_context type="sync_guidelines">' in content1
     assert "view_message(message_id)" in content1
+    assert "memory_grep(query)" in content1
     assert "User Preferences:" not in content1
     assert "<instructions>\nPython\n</instructions>" in content1
     assert 'from="u1"' in content1
@@ -591,12 +592,60 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     # MUST contain Consolidated Sync Guidelines and Preferences again due to idle resumption
     assert '<background_context type="sync_guidelines">' in content3
     assert "view_message(message_id)" in content3
+    assert "memory_grep(query)" in content3
     assert "User Preferences:" not in content3
     assert "<instructions>\nPython\n</instructions>" in content3
     assert 'from="u1"' in content3
     assert 'timezone="' in content3
     assert "CRITICAL: The time" not in content3
     assert "Third message" in content3
+
+    # --- TURN 4: Normal Turn (Not Bootstrap, turn_count=4) ---
+    history = await gw.db.get_session_history("sess_dynamic")
+    for m in history:
+        if m.role == "assistant" and m.status == "pending":
+            await gw.db.update_message_status(m.id, "responded")
+
+    msg4 = Message(
+        session_id="sess_dynamic",
+        chatbot_id="cli",
+        channel_id="ch_dyn",
+        sender="u1",
+        role="user",
+        content="Fourth message",
+        status="pending_agent",
+        timestamp=now + 10 + 2000 + 10,
+    )
+    await gw.post(msg4)
+    content4 = await run_turn(msg4)
+
+    # MUST NOT contain Sync Guidelines or Preferences
+    assert '<background_context type="sync_guidelines">' not in content4
+    assert "<instructions>" not in content4
+
+    # --- TURN 5: Modulo-4 Preferences Injection Turn (turn_count=5) ---
+    history = await gw.db.get_session_history("sess_dynamic")
+    for m in history:
+        if m.role == "assistant" and m.status == "pending":
+            await gw.db.update_message_status(m.id, "responded")
+
+    msg5 = Message(
+        session_id="sess_dynamic",
+        chatbot_id="cli",
+        channel_id="ch_dyn",
+        sender="u1",
+        role="user",
+        content="Fifth message",
+        status="pending_agent",
+        timestamp=now + 10 + 2000 + 20,
+    )
+    await gw.post(msg5)
+    content5 = await run_turn(msg5)
+
+    # MUST contain Preferences (turn_count=5, 5%4==1), but NOT Sync Guidelines (not a bootstrap turn)
+    assert '<background_context type="sync_guidelines">' not in content5
+    assert "<instructions>\nPython\n</instructions>" in content5
+
 
 
 def test_truncate_context_middle() -> None:
