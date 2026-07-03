@@ -770,6 +770,7 @@ class GeminiLLM(BaseLLM):
             candidates_tokens=candidates_tokens,
             total_tokens=total_tokens,
             cached_tokens=cached_tokens,
+            raw_response=repr(raw_response),
         )
 
     def count_tokens(
