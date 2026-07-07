@@ -355,3 +355,37 @@ async def test_grep_command_success(mock_chatbot: MagicMock) -> None:
 
     # Assert commands.execute was called with correct parameters
     mock_chatbot.commands.execute.assert_called_once_with("grep", ANY, channel_id="987654321", query="test_query")
+
+
+@pytest.mark.asyncio
+async def test_search_command_success(mock_chatbot: MagicMock) -> None:
+    """Test that the /search slash command executes successfully and replies."""
+    setup_discord_commands(mock_chatbot)
+
+    commands = mock_chatbot.tree.get_commands()
+    search_cmd = next((cmd for cmd in commands if cmd.name == "search"), None)
+    assert search_cmd is not None
+
+    # Verify command has 'query' parameter
+    assert len(search_cmd.parameters) == 1
+    assert search_cmd.parameters[0].name == "query"
+
+    # Mock interaction
+    interaction = AsyncMock(spec=discord.Interaction)
+    interaction.user = MagicMock(spec=discord.User)
+    interaction.user.name = "test_user"
+    interaction.user.id = 123456789
+    interaction.channel_id = 987654321
+
+    interaction.response = AsyncMock()
+    interaction.followup = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    # Mock chatbot.commands.execute
+    mock_chatbot.commands.execute = AsyncMock()
+
+    await search_cmd.callback(interaction, query="test_search")
+
+    # Assert commands.execute was called with correct parameters
+    mock_chatbot.commands.execute.assert_called_once_with("search", ANY, channel_id="987654321", query="test_search")
+
