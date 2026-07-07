@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS agent_memories (
     content TEXT NOT NULL,          -- Markdown 或 JSON 内容 (最大 500 字符)
     updated_at REAL NOT NULL,       -- UNIX 时间戳浮点数
     role TEXT NOT NULL DEFAULT 'default', -- 绑定的角色人设范围
+    embedding BLOB,                 -- 向量嵌入数据
     UNIQUE(category, key, role)     -- 安全更新 and 排重约束
 );
 ```
@@ -91,7 +92,7 @@ CREATE TABLE IF NOT EXISTS agent_memories (
 ### 4.2 检索与还原工具
 如果大模型在推理过程中需要查阅已被压缩的细节或在当前角色下检索历史对话，它可以主动调用以下工具：
 *   **`memory_grep(query, start_time, end_time, limit)`**：从当前角色的所有会话及记忆中，通过关键字或通配符 `*` 检索历史消息和主动记忆，并支持时间范围过滤。
-*   **`memory_search(query)`**：利用向量嵌入对当前角色的历史消息和主动记忆进行语义搜索（Semantic Search）。
+*   **`memory_search(query)`**：利用向量嵌入对当前角色的主动记忆进行语义搜索（Semantic Search）。
 *   **`view_message(message_id)`**：输入指定的消息 ID，还原并读取数据库中完整的原始对话内容。
 
 ### 4.3 记忆系统的互补共存

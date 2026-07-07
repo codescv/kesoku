@@ -40,7 +40,7 @@ This is your **active memory**. You actively initiate storing, reading, or pruni
 long-term facts and project states that persist across sessions.
 Do NOT write raw chat history to this system.
 
-Related Tools: `view_memory`, `list_memories`, `update_memory`.
+Related Tools: `view_memory`, `list_memories`, `update_memory`, `memory_grep`, `memory_search`.
 
 Every memory entry has a **category** and a **key**.
 

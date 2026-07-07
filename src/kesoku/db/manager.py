@@ -49,6 +49,7 @@ class DatabaseManager:
             status=row["status"],
             parent_id=row["parent_id"],
             summary_node_id=row["summary_node_id"] if "summary_node_id" in row.keys() else None,
+            embedding=row["embedding"] if "embedding" in row.keys() else None,
         )
 
     def _row_to_session(self, row: sqlite3.Row) -> Session:
@@ -75,6 +76,8 @@ class DatabaseManager:
                     conn.execute("ALTER TABLE messages ADD COLUMN type TEXT NOT NULL DEFAULT 'text'")
                 if "parent_id" not in columns:
                     conn.execute("ALTER TABLE messages ADD COLUMN parent_id TEXT")
+                if "embedding" not in columns:
+                    conn.execute("ALTER TABLE messages ADD COLUMN embedding BLOB")
                 cursor.execute("PRAGMA table_info(sessions)")
                 sess_columns = [row["name"] for row in cursor.fetchall()]
                 if "role_name" not in sess_columns:
@@ -115,6 +118,7 @@ class DatabaseManager:
                         content TEXT NOT NULL,
                         updated_at REAL NOT NULL,
                         role TEXT NOT NULL DEFAULT 'default',
+                        embedding BLOB,
                         UNIQUE(category, key, role)
                     );
                     """
@@ -135,6 +139,30 @@ class DatabaseManager:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_agent_memories_category_role ON agent_memories(category, role);"
                 )
+
+                # Check for embedding column and add it if missing
+                cursor.execute("PRAGMA table_info(agent_memories)")
+                mem_columns = [row["name"] for row in cursor.fetchall()]
+                if "embedding" not in mem_columns:
+                    conn.execute("ALTER TABLE agent_memories ADD COLUMN embedding BLOB")
+
+                # Backfill embedding for memories where it is null
+                cursor.execute("SELECT id, title, content FROM agent_memories WHERE embedding IS NULL")
+                rows_to_backfill = cursor.fetchall()
+                if rows_to_backfill:
+                    logger.info(f"Backfilling embeddings for {len(rows_to_backfill)} memories...")
+                    try:
+                        from kesoku.utils.embedding import get_embeddings, vector_to_bytes
+                        texts = [f"{r['title']}\n{r['content']}" for r in rows_to_backfill]
+                        embs = get_embeddings(texts)
+                        for r, emb in zip(rows_to_backfill, embs):
+                            conn.execute(
+                                "UPDATE agent_memories SET embedding = ? WHERE id = ?",
+                                (vector_to_bytes(emb), r["id"]),
+                            )
+                        logger.info("Backfill completed successfully.")
+                    except Exception as ex:
+                        logger.error(f"Failed to backfill embeddings: {ex}", exc_info=True)
                 # Ensure summary_nodes table exists
                 conn.execute(
                     """
@@ -244,6 +272,7 @@ class DatabaseManager:
                             status TEXT NOT NULL,
                             parent_id TEXT,
                             summary_node_id TEXT,
+                            embedding BLOB,
                             FOREIGN KEY (summary_node_id) REFERENCES summary_nodes(id) ON DELETE SET NULL
                         );
                         """
@@ -556,14 +585,24 @@ class DatabaseManager:
         Args:
             msg: The Message object to store.
         """
+        emb_bytes = None
+        if msg.role in ("user", "assistant") and msg.type == "text":
+            try:
+                from kesoku.utils.embedding import get_embedding, vector_to_bytes
+
+                emb = get_embedding(msg.content)
+                emb_bytes = vector_to_bytes(emb)
+            except Exception as e:
+                logger.error(f"Failed to generate embedding for message {msg.id}: {e}", exc_info=True)
+
         with self.connection_provider.connection() as conn:
             with conn:
                 conn.execute(
                     """
                     INSERT INTO messages
                     (id, session_id, chatbot_id, channel_id, sender, role, type,
-                     content, metadata, timestamp, status, parent_id, summary_node_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     content, metadata, timestamp, status, parent_id, summary_node_id, embedding)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         msg.id,
@@ -579,6 +618,7 @@ class DatabaseManager:
                         msg.status,
                         msg.parent_id,
                         msg.summary_node_id,
+                        emb_bytes,
                     ),
                 )
 
@@ -871,15 +911,25 @@ class DatabaseManager:
     # Agent Memory CRUD
     def upsert_agent_memory(self, category: str, key: str, title: str, content: str, role: str = "default") -> None:
         """Atomically insert or replace an agent memory record."""
+        # Calculate embedding
+        from kesoku.utils.embedding import get_embedding, vector_to_bytes
+        text = f"{title}\n{content}"
+        try:
+            emb = get_embedding(text)
+            emb_bytes = vector_to_bytes(emb)
+        except Exception as e:
+            logger.error(f"Failed to generate embedding for memory {category}/{key}: {e}", exc_info=True)
+            emb_bytes = None
+
         with self.connection_provider.connection() as conn:
             with conn:
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO agent_memories
-                    (category, key, title, content, updated_at, role)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    (category, key, title, content, updated_at, role, embedding)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (category, key, title, content, time.time(), role),
+                    (category, key, title, content, time.time(), role, emb_bytes),
                 )
 
     def get_agent_memory(self, category: str, key: str, role: str = "default") -> dict[str, Any] | None:
@@ -973,6 +1023,47 @@ class DatabaseManager:
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
 
+    def search_role_memories_semantic(
+        self,
+        role: str,
+        query_text: str,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Search agent memories for a role using semantic similarity of embeddings."""
+        from kesoku.utils.embedding import bytes_to_vector, cosine_similarity, get_embedding
+
+        try:
+            query_emb = get_embedding(query_text)
+        except Exception as e:
+            logger.error(f"Failed to generate embedding for query: {e}", exc_info=True)
+            # Fallback to normal text search
+            return self.search_role_memories(role, query_text, limit=limit)
+
+        with self.connection_provider.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM agent_memories WHERE role = ? AND embedding IS NOT NULL",
+                (role,),
+            )
+            rows = cursor.fetchall()
+
+        results = []
+        for row in rows:
+            row_dict = dict(row)
+            try:
+                emb_bytes = row_dict["embedding"]
+                if emb_bytes:
+                    emb = bytes_to_vector(emb_bytes)
+                    score = cosine_similarity(query_emb, emb)
+                    row_dict["similarity_score"] = score
+                    results.append(row_dict)
+            except Exception as e:
+                logger.error(f"Error calculating similarity for key {row_dict['key']}: {e}", exc_info=True)
+
+        results.sort(key=lambda x: x.get("similarity_score", 0.0), reverse=True)
+        return results[:limit]
+
+
     def search_role_messages(
         self,
         role: str,
@@ -1014,6 +1105,96 @@ class DatabaseManager:
             cursor.execute(sql, tuple(args))
             rows = cursor.fetchall()
             return [self._row_to_message(row) for row in rows]
+
+    def search_role_messages_semantic(
+        self,
+        role: str,
+        query_text: str,
+        limit: int = 50,
+    ) -> list[Message]:
+        """Search user/assistant text messages for a role using semantic similarity of embeddings."""
+        from kesoku.utils.embedding import bytes_to_vector, cosine_similarity, get_embedding
+
+        try:
+            query_emb = get_embedding(query_text)
+        except Exception as e:
+            logger.error(f"Failed to generate embedding for query: {e}", exc_info=True)
+            fallback_msgs = self.search_role_messages(role, query_text, limit=limit)
+            for m in fallback_msgs:
+                m.metadata["similarity_score"] = 0.0
+            return fallback_msgs
+
+        with self.connection_provider.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT m.* FROM messages m
+                JOIN sessions s ON m.session_id = s.id
+                WHERE COALESCE(s.role_name, 'default') = ?
+                  AND m.role IN ('user', 'assistant')
+                  AND m.type = 'text'
+                  AND m.embedding IS NOT NULL
+                """,
+                (role,),
+            )
+            rows = cursor.fetchall()
+
+        results = []
+        for row in rows:
+            msg = self._row_to_message(row)
+            try:
+                emb_bytes = row["embedding"]
+                if emb_bytes:
+                    emb = bytes_to_vector(emb_bytes)
+                    score = cosine_similarity(query_emb, emb)
+                    msg.metadata["similarity_score"] = score
+                    results.append(msg)
+            except Exception as e:
+                logger.error(f"Error calculating similarity for message {msg.id}: {e}", exc_info=True)
+
+        results.sort(key=lambda x: x.metadata.get("similarity_score", 0.0), reverse=True)
+        return results[:limit]
+
+    def get_unindexed_memories(self) -> list[dict[str, Any]]:
+        """Retrieve all memories that do not have an embedding computed yet."""
+        with self.connection_provider.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, title, content FROM agent_memories WHERE embedding IS NULL")
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    def get_unindexed_messages(self) -> list[dict[str, Any]]:
+        """Retrieve all user/assistant text messages that do not have an embedding computed yet."""
+        with self.connection_provider.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, content FROM messages
+                WHERE role IN ('user', 'assistant')
+                  AND type = 'text'
+                  AND embedding IS NULL
+                """
+            )
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    def update_memory_embedding(self, memory_id: int, embedding: bytes) -> None:
+        """Update the embedding BLOB of an agent memory."""
+        with self.connection_provider.connection() as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE agent_memories SET embedding = ? WHERE id = ?",
+                    (embedding, memory_id),
+                )
+
+    def update_message_embedding(self, message_id: str, embedding: bytes) -> None:
+        """Update the embedding BLOB of a message."""
+        with self.connection_provider.connection() as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE messages SET embedding = ? WHERE id = ?",
+                    (embedding, message_id),
+                )
 
     def get_allowed_memory_categories(self) -> set[str]:
         """Retrieves the set of all currently permitted or existing memory categories."""
@@ -1852,6 +2033,50 @@ class AsyncDatabaseManager:
             end_time,
             limit,
         )
+
+    async def search_role_memories_semantic(
+        self,
+        role: str,
+        query_text: str,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Search agent memories for a role using semantic similarity of embeddings."""
+        return await asyncio.to_thread(
+            self.sync_db.search_role_memories_semantic,
+            role,
+            query_text,
+            limit,
+        )
+
+    async def search_role_messages_semantic(
+        self,
+        role: str,
+        query_text: str,
+        limit: int = 50,
+    ) -> list[Message]:
+        """Search user/assistant text messages for a role using semantic similarity of embeddings."""
+        return await asyncio.to_thread(
+            self.sync_db.search_role_messages_semantic,
+            role,
+            query_text,
+            limit,
+        )
+
+    async def get_unindexed_memories(self) -> list[dict[str, Any]]:
+        """Retrieve all memories that do not have an embedding computed yet."""
+        return await asyncio.to_thread(self.sync_db.get_unindexed_memories)
+
+    async def get_unindexed_messages(self) -> list[dict[str, Any]]:
+        """Retrieve all user/assistant text messages that do not have an embedding computed yet."""
+        return await asyncio.to_thread(self.sync_db.get_unindexed_messages)
+
+    async def update_memory_embedding(self, memory_id: int, embedding: bytes) -> None:
+        """Update the embedding BLOB of an agent memory."""
+        await asyncio.to_thread(self.sync_db.update_memory_embedding, memory_id, embedding)
+
+    async def update_message_embedding(self, message_id: str, embedding: bytes) -> None:
+        """Update the embedding BLOB of a message."""
+        await asyncio.to_thread(self.sync_db.update_message_embedding, message_id, embedding)
 
     async def search_role_messages(
         self,

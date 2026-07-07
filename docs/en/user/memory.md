@@ -84,3 +84,23 @@ To backup all memories across all roles, or migrate them to another database:
     ```bash
     kesoku memory import -i memories_backup.json
     ```
+
+---
+
+### 6. Semantic Search & Vector Index Rebuilding (`rebuild-index`)
+
+Kesoku supports multilingual semantic search utilizing a lightweight, local Embedding model.
+
+*   **Automatic Indexing**:
+    *   During active chat conversations, all **explicitly saved Memories** and standard chat dialogue (**textual User queries & Assistant responses**) are automatically vectorized and stored (via the `embedding` column) on SQLite write.
+    *   To keep the index clean, internal Assistant Thoughts and external Tool calls/results are excluded from vector indexing.
+*   **Manual Index Rebuilding**:
+    *   If you import historical data or want to reset/update vector coordinates, you can run the `rebuild-index` command to incrementally or fully regenerate embeddings for all records:
+    ```bash
+    # Index all memories and messages that lack an embedding
+    kesoku memory rebuild-index -c config.toml
+
+    # Force clear all current embeddings and fully rebuild the index
+    kesoku memory rebuild-index -c config.toml --force
+    ```
+

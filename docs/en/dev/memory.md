@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS agent_memories (
     content TEXT NOT NULL,          -- Markdown or JSON content (max 500 chars)
     updated_at REAL NOT NULL,       -- UNIX timestamp float
     role TEXT NOT NULL DEFAULT 'default', -- active persona scope
+    embedding BLOB,                 -- binary vector embedding
     UNIQUE(category, key, role)     -- safe upsert/integrity constraint
 );
 ```
@@ -91,7 +92,7 @@ Long conversational threads cannot be kept in their raw transcripts without hitt
 ### 4.2 Search & Retrieval Tools
 To recall specific details of compacted sections or search across the history of the active role persona, the agent can call the following tools:
 *   **`memory_grep(query, start_time, end_time, limit)`**: Search active memories and past chat messages for the current role matching the query (keyword match or wildcard `*`). Supports optional time-range filtering.
-*   **`memory_search(query)`**: Perform semantic (vector) search against active memories and past chat messages for the current role.
+*   **`memory_search(query)`**: Perform semantic (vector) search against active memories for the current role.
 *   **`view_message(message_id)`**: Retrieve the complete content of a specific historical chat message by its database ID.
 
 ### 4.3 Complementary Coexistence

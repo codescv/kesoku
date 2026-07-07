@@ -483,6 +483,72 @@ async def memory_grep(
         return f"Error executing memory_grep: {e}"
 
 
+@default_registry.register
+async def memory_search(
+    query: str,
+    limit: int = 20,
+    context: ToolContext | None = None,
+) -> str:
+    """Perform semantic (embedding-based RAG) search over the active memories and history messages for the current role.
+
+    Args:
+        query: Semantic query text.
+        limit: Max number of matching memories/messages to retrieve (default: 20).
+        context: Injected tool execution context.
+
+    Returns:
+        Formatted markdown summary of matching memories and messages ordered by similarity.
+    """
+    if not context or not context.gateway:
+        return "Error: ToolContext is missing."
+
+    active_role = await _resolve_memory_role(category="memo", role_param=None, context=context)
+    db = context.gateway.db
+
+    try:
+        memories = await db.search_role_memories_semantic(
+            active_role,
+            query,
+            limit=limit,
+        )
+        messages = await db.search_role_messages_semantic(
+            active_role,
+            query,
+            limit=limit,
+        )
+
+        if not memories and not messages:
+            return f"No semantically matching memories or messages found for query '{query}' and role '{active_role}'."
+
+        lines = [f"🔍 **Semantic Search Results for '{query}' (Role: {active_role})**"]
+
+        if memories:
+            lines.append("\n### 🧠 Semantically Matching Memories")
+            for m in memories:
+                updated_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m["updated_at"]))
+                score_str = f"(score: {m['similarity_score']:.4f})" if "similarity_score" in m else ""
+                lines.append(
+                    f'- **[{m["category"]}]** `{m["key"]}`: "{m["title"]}" '
+                    f'{score_str} (updated: {updated_str})'
+                )
+                lines.append(f'  > {m["content"]}')
+
+        if messages:
+            lines.append("\n### 💬 Semantically Matching Messages")
+            for m in messages:
+                time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m.timestamp))
+                sender_str = f"**{m.sender}** ({m.role})"
+                score_str = f"(score: {m.metadata['similarity_score']:.4f})" if "similarity_score" in m.metadata else ""
+                lines.append(f"- [{time_str}] {sender_str} {score_str} (ID: `{m.id}`) in session `{m.session_id}`:")
+                lines.append(f"  > {m.content}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"Failed to execute memory_search: {e}", exc_info=True)
+        return f"Error executing memory_search: {e}"
+
+
+
 
 
 

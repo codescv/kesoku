@@ -138,10 +138,33 @@ def test_message_crud(db_manager):
         timestamp=time.time() + 1,
         status=MessageStatus.PROCESSING,
     )
+    msg_thought = Message(
+        id="msg_thought",
+        session_id="sess_msg_test",
+        chatbot_id="cli",
+        channel_id="terminal",
+        sender="assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.THOUGHT,
+        content="Thinking process...",
+        timestamp=time.time() + 2,
+        status=MessageStatus.PROCESSING,
+    )
 
     # Save
     db_manager.save_message(msg1)
     db_manager.save_message(msg2)
+    db_manager.save_message(msg_thought)
+
+    # Verify embeddings are populated correctly
+    saved_msg1 = db_manager.get_messages_by_filters(filters={"id": "msg_1"})[0]
+    assert saved_msg1.embedding is not None
+
+    saved_msg2 = db_manager.get_messages_by_filters(filters={"id": "msg_2"})[0]
+    assert saved_msg2.embedding is not None
+
+    saved_thought = db_manager.get_messages_by_filters(filters={"id": "msg_thought"})[0]
+    assert saved_thought.embedding is None
 
     # Turn count (counting only User messages)
     assert db_manager.get_session_turns_count("sess_msg_test") == 1
@@ -520,3 +543,46 @@ def test_thread_session_role_inheritance(db_manager):
     retrieved = db_manager.get_session("sess_thread_asuka")
     assert retrieved is not None
     assert retrieved.role_name == "asuka"
+
+
+def test_agent_memory_semantic_search(db_manager, monkeypatch):
+    """Tests semantic search on agent memories by mocking embeddings."""
+    embeddings_map = {
+        "Python Tip\nPython is great": [1.0, 0.0],
+        "Java Tip\nJava is verbose": [0.0, 1.0],
+        "Weather Tip\nIt is raining today": [0.5, 0.5],
+        "Find python tips": [0.9, 0.1],
+    }
+
+    def pad_vector(v):
+        return v + [0.0] * (384 - len(v))
+
+    padded_map = {k: pad_vector(v) for k, v in embeddings_map.items()}
+
+    def mock_get_embedding(text: str) -> list[float]:
+        for key_text, vec in padded_map.items():
+            if text in key_text or key_text in text:
+                return vec
+        return pad_vector([0.0, 0.0])
+
+    def mock_get_embeddings(texts: list[str]) -> list[list[float]]:
+        return [mock_get_embedding(t) for t in texts]
+
+    monkeypatch.setattr("kesoku.utils.embedding.get_embedding", mock_get_embedding)
+    monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", mock_get_embeddings)
+
+    db_manager.upsert_agent_memory("memo", "mem_py", "Python Tip", "Python is great", "coder")
+    db_manager.upsert_agent_memory("memo", "mem_java", "Java Tip", "Java is verbose", "coder")
+    db_manager.upsert_agent_memory("memo", "mem_weather", "Weather Tip", "It is raining today", "coder")
+
+    results = db_manager.search_role_memories_semantic(role="coder", query_text="Find python tips", limit=10)
+
+    assert len(results) == 3
+    assert results[0]["key"] == "mem_py"
+    assert results[1]["key"] == "mem_weather"
+    assert results[2]["key"] == "mem_java"
+
+    assert "similarity_score" in results[0]
+    assert results[0]["similarity_score"] > results[1]["similarity_score"]
+    assert results[1]["similarity_score"] > results[2]["similarity_score"]
+

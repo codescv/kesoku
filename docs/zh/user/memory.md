@@ -84,3 +84,23 @@ kesoku memory delete --category user_preference --key user_timezone --role defau
     ```bash
     kesoku memory import -i memories_backup.json
     ```
+
+---
+
+### 6. 语义搜索与向量索引重建 (`rebuild-index`)
+
+Kesoku 支持通过本地轻量级 Embedding 模型进行多语言语义搜索。
+
+*   **自动索引**：
+    *   在日常对话中，所有**主动保存的记忆（Memory）**以及收到的**用户提问、助理回复（TEXT 类型的消息）**会在写入 SQLite 时自动在后台进行向量化编码（生成 Embedding 存入 `embedding` 字段）。
+    *   为了保持清洁，Agent 的思考链路（Thoughts）和 Tool 执行结果（Tool Calls/Results）不会被向量化索引。
+*   **手动重建/全量索引**：
+    *   如果你导入了旧数据，或者清空了向量字段，你可以运行 `rebuild-index` 来对数据库中所有未索引的文本进行增量/全量向量重构：
+    ```bash
+    # 增量计算数据库中所有没有 Embedding 字段的记录
+    kesoku memory rebuild-index -c config.toml
+
+    # 强制清除所有已有向量，并重新为整张表计算 Embedding 索引
+    kesoku memory rebuild-index -c config.toml --force
+    ```
+

@@ -10,6 +10,7 @@ from kesoku.agent.tools import (
     delete_memory,
     list_memories,
     memory_grep,
+    memory_search,
     update_memory,
     view_memory,
     view_message,
@@ -722,3 +723,86 @@ async def test_view_message_tool(tmp_path) -> None:
     # Test non-existent retrieval
     res_fail = await view_message("non_existent_id", context=ctx)
     assert "not found" in res_fail
+
+
+@pytest.mark.asyncio
+async def test_memory_search_tool(tmp_path, monkeypatch) -> None:
+    """Test memory_search tool semantically finds matching memories for the active role."""
+    from kesoku.gateway.gateway import Gateway
+
+    temp_db = str(tmp_path / "test_search_tool.db")
+    db = DatabaseManager(temp_db)
+    db.init_tables()
+
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    # Set up role 'coder' on channel 'chan_1'
+    await gw.db.set_channel_role("discord", "chan_1", "coder")
+    session1 = Session(id="sess_1", title="Sess 1", created_at=time.time(), updated_at=time.time())
+    await gw.db.create_session(session1)
+    await gw.db.set_active_session_for_channel("discord", "chan_1", "sess_1")
+
+    # Create a mock user message to simulate active channel context
+    msg_context = Message(
+        id="msg_ctx",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="User",
+        role=MessageRole.USER,
+        content="Context message",
+        status=MessageStatus.RESPONDED,
+    )
+    await gw.post(msg_context)
+
+    ctx = ToolContext(
+        session_id="sess_1",
+        session_workspace="test_ws",
+        original_msg_id="msg_ctx",
+        gateway=gw,
+    )
+
+    # Setup mocked embeddings
+    embeddings_map = {
+        "Python Tip\nPython is great": [1.0, 0.0],
+        "Java Tip\nJava is verbose": [0.0, 1.0],
+        "Find python tips": [0.9, 0.1],
+    }
+
+    def pad_vector(v):
+        return v + [0.0] * (384 - len(v))
+
+    padded_map = {k: pad_vector(v) for k, v in embeddings_map.items()}
+
+    def mock_get_embedding(text: str) -> list[float]:
+        for key_text, vec in padded_map.items():
+            if text in key_text or key_text in text:
+                return vec
+        return pad_vector([0.0, 0.0])
+
+    def mock_get_embeddings(texts: list[str]) -> list[list[float]]:
+        return [mock_get_embedding(t) for t in texts]
+
+    monkeypatch.setattr("kesoku.utils.embedding.get_embedding", mock_get_embedding)
+    monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", mock_get_embeddings)
+
+    # Insert memories (will compute and store embeddings)
+    await gw.db.upsert_agent_memory("memo", "mem1", "Python Tip", "Python is great", "coder")
+    await gw.db.upsert_agent_memory("memo", "mem2", "Java Tip", "Java is verbose", "coder")
+
+    # Run memory_search
+    res = await memory_search(query="Find python tips", context=ctx)
+
+    # Assertions
+    assert "Semantic Search Results for 'Find python tips' (Role: coder)" in res
+    assert "Semantically Matching Memories" in res
+    assert "mem1" in res
+    assert "mem2" in res
+
+    pos_mem1 = res.index("mem1")
+    pos_mem2 = res.index("mem2")
+    assert pos_mem1 < pos_mem2
+    assert "score: 0.9939" in res
+    assert "score: 0.1104" in res
+

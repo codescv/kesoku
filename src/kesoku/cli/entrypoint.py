@@ -15,6 +15,7 @@ from typing import Annotated
 import tomli_w
 import typer
 from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 
 from kesoku.agent.agent import Agent
 from kesoku.agent.tools import sanitize_key, validate_key
@@ -27,6 +28,7 @@ from kesoku.db import DatabaseManager
 from kesoku.gateway.chatbot.cronjob import CronjobChatbot
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import configure_logging, setup_logger
+from kesoku.utils import embedding
 
 # Setup global colored logging configuration
 configure_logging(logging.INFO)
@@ -379,6 +381,77 @@ def cli_memory_import(
     except Exception as e:
         console.print(f"[bold red]Error importing memories: {e}[/bold red]")
         sys.exit(1)
+
+
+@memory_app.command("rebuild-index")
+def cli_memory_rebuild_index(
+    config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
+    force: Annotated[
+        bool, typer.Option("--force", help="Force rebuild of all embeddings, not just missing ones")
+    ] = False,
+) -> None:
+    """Generate and store embeddings for all unindexed memories and messages."""
+    console = Console()
+    cfg = load_config(config)
+    db = DatabaseManager(cfg.workspace.db_path)
+    db.verify_db()
+
+    try:
+        if force:
+            console.print("[bold yellow]Force mode enabled. Clearing all existing embeddings...[/bold yellow]")
+            with db.connection_provider.connection() as conn:
+                with conn:
+                    conn.execute("UPDATE agent_memories SET embedding = NULL")
+                    conn.execute("UPDATE messages SET embedding = NULL")
+            console.print("[bold green]Existing embeddings cleared.[/bold green]")
+
+        unindexed_memories = db.get_unindexed_memories()
+        unindexed_messages = db.get_unindexed_messages()
+
+        total_mem = len(unindexed_memories)
+        total_msg = len(unindexed_messages)
+
+        if total_mem == 0 and total_msg == 0:
+            console.print("[bold green]All memories and messages are already fully indexed![/bold green]")
+            return
+
+        console.print(
+            f"Found [bold]{total_mem}[/bold] unindexed memories and [bold]{total_msg}[/bold] unindexed messages."
+        )
+        console.print("Initializing local embedding model (fastembed)...")
+        embedding.get_embedding_model()
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TextColumn("({task.completed}/{task.total})"),
+        ) as progress:
+            if total_mem > 0:
+                task_mem = progress.add_task("[cyan]Indexing memories...", total=total_mem)
+                mem_texts = [f"{m['title']}\n{m['content']}" for m in unindexed_memories]
+                embs = embedding.get_embeddings(mem_texts)
+                for m, emb in zip(unindexed_memories, embs):
+                    db.update_memory_embedding(m["id"], embedding.vector_to_bytes(emb))
+                    progress.advance(task_mem)
+
+            if total_msg > 0:
+                task_msg = progress.add_task("[green]Indexing messages...", total=total_msg)
+                batch_size = 64
+                for i in range(0, total_msg, batch_size):
+                    batch = unindexed_messages[i : i + batch_size]
+                    batch_texts = [m["content"] for m in batch]
+                    embs = embedding.get_embeddings(batch_texts)
+                    for m, emb in zip(batch, embs):
+                        db.update_message_embedding(m["id"], embedding.vector_to_bytes(emb))
+                        progress.advance(task_msg)
+
+        console.print("[bold green]✓ Index rebuilding completed successfully![/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Error rebuilding index: {e}[/bold red]")
+        sys.exit(1)
+
 
 
 @wechat_app.command("pair")

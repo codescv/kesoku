@@ -901,7 +901,54 @@ content = "Just content, no title"
 title = "Invalid key"
 content = "Capital letters not allowed"
 """
+    path_str = str(import_path)
+    # Target path_str is writeable
     import_path.write_text(invalid_key_toml, encoding="utf-8")
-    result = runner.invoke(app, ["memory", "import", "-c", str(config_path), str(import_path)])
+    result = runner.invoke(app, ["memory", "import", "-c", str(config_path), path_str])
     assert result.exit_code == 1
     assert "Invalid Key 'INVALID_KEY'" in strip_ansi(result.stdout)
+
+
+def test_cli_memory_rebuild_index(tmp_path: Any) -> None:
+    """Test 'kesoku memory rebuild-index' CLI command."""
+    from kesoku.db import DatabaseManager
+    runner.invoke(app, ["init", "-w", str(tmp_path)])
+    config_path = tmp_path / "config.toml"
+    db_path = tmp_path / "kesoku.db"
+
+    db = DatabaseManager(str(db_path))
+
+    with db.connection_provider.connection() as conn:
+        with conn:
+            conn.execute(
+                "INSERT INTO agent_memories (category, key, title, content, updated_at, role, embedding) "
+                "VALUES ('memo', 'key_null', 'Null Title', 'Null Content', 1.0, 'default', NULL)"
+            )
+            conn.execute(
+                "INSERT INTO sessions (id, title, created_at, updated_at, role_name) "
+                "VALUES ('s_null', 'Sess Null', 1.0, 1.0, 'default')"
+            )
+            conn.execute(
+                "INSERT INTO messages "
+                "(id, session_id, chatbot_id, channel_id, sender, role, type, "
+                "content, metadata, timestamp, status, embedding) "
+                "VALUES ('m_null', 's_null', 'cli', 'chan1', 'user', "
+                "'user', 'text', 'hello null', '{}', 1.0, 'processed', NULL)"
+            )
+
+    assert len(db.get_unindexed_memories()) == 1
+    assert len(db.get_unindexed_messages()) == 1
+
+    result = runner.invoke(app, ["memory", "rebuild-index", "-c", str(config_path)])
+    assert result.exit_code == 0
+    assert "Found 0 unindexed memories and 1 unindexed messages" in strip_ansi(result.stdout)
+    assert "Index rebuilding completed successfully" in strip_ansi(result.stdout)
+
+    assert len(db.get_unindexed_memories()) == 0
+    assert len(db.get_unindexed_messages()) == 0
+
+    result_force = runner.invoke(app, ["memory", "rebuild-index", "-c", str(config_path), "--force"])
+    assert result_force.exit_code == 0
+    assert "Force mode enabled" in strip_ansi(result_force.stdout)
+    assert "Found 1 unindexed memories and 1 unindexed messages" in strip_ansi(result_force.stdout)
+

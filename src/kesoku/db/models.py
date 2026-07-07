@@ -31,6 +31,7 @@ class Message(BaseModel):
         default=None,
         description="Reference to Level-0 summary node this message is compressed in",
     )
+    embedding: bytes | None = Field(default=None, description="Optional raw binary embedding representation")
 
 
 class Session(BaseModel):
@@ -66,6 +67,7 @@ class AgentMemory(BaseModel):
     content: str = Field(..., description="Markdown text or structured content payload")
     updated_at: float = Field(default_factory=time.time, description="Unix timestamp of last update")
     role: str = Field(default="default", description="Optional roleplay-specific character persona binding")
+    embedding: bytes | None = Field(default=None, description="Optional raw binary embedding representation")
 
 
 class CrossSessionContext(BaseModel):

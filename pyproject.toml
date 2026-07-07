@@ -18,6 +18,7 @@ dependencies = [
     "qrcode>=8.2",
     "pillow>=12.2.0",
     "pyopenssl>=26.3.0",
+    "fastembed>=0.8.0",
 ]
 
 [project.scripts]
