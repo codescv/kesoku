@@ -7,7 +7,7 @@ from typing import Literal
 
 from kesoku.agent.skills import SkillManager
 from kesoku.agent.tools.registry import ToolContext, default_registry
-from kesoku.utils.text import extract_grep_snippet
+from kesoku.utils.text import extract_grep_snippet, truncate_middle
 
 MemoryCategory = Literal["progress", "memo"]
 
@@ -540,7 +540,9 @@ async def memory_search(
                 sender_str = f"**{m.sender}** ({m.role})"
                 score_str = f"(score: {m.metadata['similarity_score']:.4f})" if "similarity_score" in m.metadata else ""
                 lines.append(f"- [{time_str}] {sender_str} {score_str} (ID: `{m.id}`) in session `{m.session_id}`:")
-                lines.append(f"  > {m.content}")
+                truncated_content = truncate_middle(m.content, 500)
+                content_indented = "\n".join(f"  > {line}" for line in truncated_content.splitlines())
+                lines.append(content_indented)
 
         return "\n".join(lines)
     except Exception as e:

@@ -806,3 +806,97 @@ async def test_memory_search_tool(tmp_path, monkeypatch) -> None:
     assert "score: 0.9939" in res
     assert "score: 0.1104" in res
 
+
+@pytest.mark.asyncio
+async def test_memory_search_hybrid_and_boosting(tmp_path, monkeypatch) -> None:
+    """Test memory_search hybrid exact matching and score boosting + text truncation."""
+    import array
+
+    from kesoku.gateway.gateway import Gateway
+
+    temp_db = str(tmp_path / "test_search_hybrid.db")
+    db = DatabaseManager(temp_db)
+    db.init_tables()
+
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    await gw.db.set_channel_role("discord", "chan_1", "coder")
+    session1 = Session(id="sess_1", title="Sess 1", created_at=time.time(), updated_at=time.time())
+    await gw.db.create_session(session1)
+    await gw.db.set_active_session_for_channel("discord", "chan_1", "sess_1")
+
+    embeddings_map = {
+        "Game Console Joystick": [1.0, 0.0],
+        "Hello controller world": [0.0, 1.0],
+        "How controller is built": [0.5, 0.5],
+    }
+
+    def pad_vector(v):
+        return v + [0.0] * (384 - len(v))
+
+    padded_map = {k: pad_vector(v) for k, v in embeddings_map.items()}
+
+    def mock_get_embedding(text: str) -> list[float]:
+        if text == "controller":
+            return pad_vector([0.2, 0.8])
+        for key_text, vec in padded_map.items():
+            if text == key_text or key_text in text:
+                return vec
+        return pad_vector([0.0, 0.0])
+
+    monkeypatch.setattr("kesoku.utils.embedding.get_embedding", mock_get_embedding)
+    monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", lambda texts: [mock_get_embedding(t) for t in texts])
+
+    with db.connection_provider.connection() as conn:
+        with conn:
+            sql = (
+                "INSERT INTO messages ("
+                "  id, session_id, chatbot_id, channel_id, sender, role, type, "
+                "  content, metadata, timestamp, status, embedding"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+            conn.execute(sql, (
+                "m_sem", "sess_1", "discord", "chan_1", "user", "user", "text",
+                "Game Console Joystick", "{}", 1.0, "processed",
+                array.array("f", pad_vector([1.0, 0.0])).tobytes()
+            ))
+            conn.execute(sql, (
+                "m_exact", "sess_1", "discord", "chan_1", "user", "user", "text",
+                "Hello controller world", "{}", 2.0, "processed", None
+            ))
+            conn.execute(sql, (
+                "m_both", "sess_1", "discord", "chan_1", "user", "user", "text",
+                "How controller is built", "{}", 3.0, "processed",
+                array.array("f", pad_vector([0.5, 0.5])).tobytes()
+            ))
+            long_content = "controller " + "a" * 600
+            conn.execute(sql, (
+                "m_long", "sess_1", "discord", "chan_1", "user", "user", "text",
+                long_content, "{}", 4.0, "processed", None
+            ))
+
+    ctx = ToolContext(
+        session_id="sess_1",
+        session_workspace="test_ws",
+        gateway=gw,
+    )
+
+    res = await memory_search(query="controller", limit=10, context=ctx)
+
+    assert "m_both" in res
+    assert "m_exact" in res
+    assert "m_sem" in res
+    assert "m_long" in res
+
+    pos_both = res.index("m_both")
+    pos_exact = res.index("m_exact")
+    pos_sem = res.index("m_sem")
+
+    assert pos_both < pos_exact
+    assert pos_exact < pos_sem
+
+    assert "Truncated for Brevity" in res
+    assert len(res) < 1500
+
+

@@ -1027,38 +1027,46 @@ class DatabaseManager:
         self,
         role: str,
         query_text: str,
-        limit: int = 50,
+        limit: int = 20,
     ) -> list[dict[str, Any]]:
-        """Search agent memories for a role using semantic similarity of embeddings."""
+        """Search agent memories for a role using semantic similarity and keyword boosting."""
         from kesoku.utils.embedding import bytes_to_vector, cosine_similarity, get_embedding
 
+        query_emb = None
         try:
             query_emb = get_embedding(query_text)
         except Exception as e:
             logger.error(f"Failed to generate embedding for query: {e}", exc_info=True)
-            # Fallback to normal text search
-            return self.search_role_memories(role, query_text, limit=limit)
 
         with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT * FROM agent_memories WHERE role = ? AND embedding IS NOT NULL",
-                (role,),
+                """
+                SELECT * FROM agent_memories
+                WHERE role = ?
+                  AND (embedding IS NOT NULL OR content LIKE ? OR title LIKE ?)
+                """,
+                (role, f"%{query_text}%", f"%{query_text}%"),
             )
             rows = cursor.fetchall()
 
         results = []
         for row in rows:
             row_dict = dict(row)
-            try:
-                emb_bytes = row_dict["embedding"]
-                if emb_bytes:
-                    emb = bytes_to_vector(emb_bytes)
+            score = 0.0
+            if query_emb and row_dict["embedding"]:
+                try:
+                    emb = bytes_to_vector(row_dict["embedding"])
                     score = cosine_similarity(query_emb, emb)
-                    row_dict["similarity_score"] = score
-                    results.append(row_dict)
-            except Exception as e:
-                logger.error(f"Error calculating similarity for key {row_dict['key']}: {e}", exc_info=True)
+                except Exception as e:
+                    logger.error(f"Error calculating similarity for key {row_dict['key']}: {e}", exc_info=True)
+
+            q_lower = query_text.lower()
+            if q_lower in row_dict["title"].lower() or q_lower in row_dict["content"].lower():
+                score += 1.0
+
+            row_dict["similarity_score"] = score
+            results.append(row_dict)
 
         results.sort(key=lambda x: x.get("similarity_score", 0.0), reverse=True)
         return results[:limit]
@@ -1110,19 +1118,16 @@ class DatabaseManager:
         self,
         role: str,
         query_text: str,
-        limit: int = 50,
+        limit: int = 20,
     ) -> list[Message]:
-        """Search user/assistant text messages for a role using semantic similarity of embeddings."""
+        """Search user/assistant text messages for a role using semantic similarity and keyword boosting."""
         from kesoku.utils.embedding import bytes_to_vector, cosine_similarity, get_embedding
 
+        query_emb = None
         try:
             query_emb = get_embedding(query_text)
         except Exception as e:
             logger.error(f"Failed to generate embedding for query: {e}", exc_info=True)
-            fallback_msgs = self.search_role_messages(role, query_text, limit=limit)
-            for m in fallback_msgs:
-                m.metadata["similarity_score"] = 0.0
-            return fallback_msgs
 
         with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
@@ -1133,24 +1138,28 @@ class DatabaseManager:
                 WHERE COALESCE(s.role_name, 'default') = ?
                   AND m.role IN ('user', 'assistant')
                   AND m.type = 'text'
-                  AND m.embedding IS NOT NULL
+                  AND (m.embedding IS NOT NULL OR m.content LIKE ?)
                 """,
-                (role,),
+                (role, f"%{query_text}%"),
             )
             rows = cursor.fetchall()
 
         results = []
         for row in rows:
             msg = self._row_to_message(row)
-            try:
-                emb_bytes = row["embedding"]
-                if emb_bytes:
-                    emb = bytes_to_vector(emb_bytes)
+            score = 0.0
+            if query_emb and row["embedding"]:
+                try:
+                    emb = bytes_to_vector(row["embedding"])
                     score = cosine_similarity(query_emb, emb)
-                    msg.metadata["similarity_score"] = score
-                    results.append(msg)
-            except Exception as e:
-                logger.error(f"Error calculating similarity for message {msg.id}: {e}", exc_info=True)
+                except Exception as e:
+                    logger.error(f"Error calculating similarity for message {msg.id}: {e}", exc_info=True)
+
+            if query_text.lower() in msg.content.lower():
+                score += 1.0
+
+            msg.metadata["similarity_score"] = score
+            results.append(msg)
 
         results.sort(key=lambda x: x.metadata.get("similarity_score", 0.0), reverse=True)
         return results[:limit]
@@ -2038,7 +2047,7 @@ class AsyncDatabaseManager:
         self,
         role: str,
         query_text: str,
-        limit: int = 50,
+        limit: int = 20,
     ) -> list[dict[str, Any]]:
         """Search agent memories for a role using semantic similarity of embeddings."""
         return await asyncio.to_thread(
@@ -2052,7 +2061,7 @@ class AsyncDatabaseManager:
         self,
         role: str,
         query_text: str,
-        limit: int = 50,
+        limit: int = 20,
     ) -> list[Message]:
         """Search user/assistant text messages for a role using semantic similarity of embeddings."""
         return await asyncio.to_thread(
