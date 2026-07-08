@@ -269,7 +269,7 @@ class Chatbot(ABC):
                     channel_id=channel_id,
                 )
 
-            from kesoku.agent.tools.memory import memory_grep
+            from kesoku.agent.tools.memory import memory_search
 
             ctx = ToolContext(
                 session_id=session.id,
@@ -277,7 +277,7 @@ class Chatbot(ABC):
                 gateway=self.gateway,
             )
             try:
-                res = await memory_grep(query=query, context=ctx)
+                res = await memory_search(query=query, context=ctx)
                 await reply_func(res)
             except Exception as e:
                 logger.error(f"Failed grep execution: {e}")

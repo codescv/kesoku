@@ -6,7 +6,6 @@ from kesoku.agent.tools.memory import (
     delete_memory,
     list_memories,
     list_skills,
-    memory_grep,
     memory_search,
     sanitize_key,
     skill_manager,
@@ -47,7 +46,7 @@ __all__ = [
     "view_memory",
     "update_memory",
     "delete_memory",
-    "memory_grep",
+
     "memory_search",
     "view_message",
     "sanitize_key",

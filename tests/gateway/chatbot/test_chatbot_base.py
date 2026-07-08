@@ -295,7 +295,7 @@ async def test_resolve_or_create_session_updates_prompt(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_role_switching_session_isolation(tmp_path) -> None:
     """Test that switching roles in a channel isolates the session contexts and grep searches."""
-    from kesoku.agent.tools import memory_grep
+    from kesoku.agent.tools import memory_search
     from kesoku.agent.tools.registry import ToolContext
     from kesoku.config import AgentConfig, KesokuConfig, WorkspaceConfig
     from kesoku.constants import MessageRole, MessageStatus, MessageType
@@ -408,23 +408,23 @@ async def test_role_switching_session_isolation(tmp_path) -> None:
         assert session_back.id == session_default.id
         assert session_back.role_name == "default"
 
-        # 4. Perform memory_grep under 'default' role
+        # 4. Perform memory_search under 'default' role
         ctx_default = ToolContext(
             session_id=session_default.id,
             session_workspace="test_ws",
             gateway=mock_gateway,
         )
-        res_default = await memory_grep(query="*", context=ctx_default)
+        res_default = await memory_search(query="*", context=ctx_default)
         assert "Hello default message content" in res_default
         assert "Hello asuka message content" not in res_default  # Isolate check!
 
-        # 5. Perform memory_grep under 'asuka' role
+        # 5. Perform memory_search under 'asuka' role
         ctx_asuka = ToolContext(
             session_id=session_asuka.id,
             session_workspace="test_ws",
             gateway=mock_gateway,
         )
-        res_asuka = await memory_grep(query="*", context=ctx_asuka)
+        res_asuka = await memory_search(query="*", context=ctx_asuka)
         assert "Hello asuka message content" in res_asuka
         assert "Hello default message content" not in res_asuka  # Isolate check!
 

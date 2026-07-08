@@ -9,12 +9,12 @@ from kesoku.agent.tools import (
     ToolContext,
     delete_memory,
     list_memories,
-    memory_grep,
     memory_search,
     update_memory,
     view_memory,
     view_message,
 )
+from kesoku.agent.tools.memory import memory_grep
 from kesoku.config import KesokuConfig, WorkspaceConfig
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.context import KesokuContext

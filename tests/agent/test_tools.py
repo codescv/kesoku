@@ -406,7 +406,7 @@ async def test_analyze_media_tool_not_found() -> None:
 
 @pytest.mark.asyncio
 async def test_grep_slash_command(tmp_path) -> None:
-    """Verify that chatbot /grep command triggers memory_grep tool."""
+    """Verify that chatbot /grep command triggers memory_search tool under the hood."""
     import time
 
     from kesoku.config import KesokuConfig, WorkspaceConfig

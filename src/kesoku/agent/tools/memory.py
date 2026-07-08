@@ -160,7 +160,7 @@ async def list_memories(
             lines.append(
                 f"\n💡 Note: There are {total_count - (offset + len(paginated))} more memories in this category. "
                 f"You can view them by adjusting the `offset` parameter (e.g., offset={offset + limit}), "
-                f"or search for specific memories using the `memory_grep` tool."
+                f"or search for specific memories using the `memory_search` tool."
             )
         return "\n".join(lines)
     except Exception as e:
@@ -239,7 +239,7 @@ async def view_memory(
                 f"\n---\n"
                 f"💡 Note: There are {total_count - (offset + len(paginated))} more memories in this category. "
                 f"Use `offset` parameter (e.g., offset={offset + limit}) to view next page, "
-                f"or search for specific entries using the `memory_grep` tool."
+                f"or search for specific entries using the `memory_search` tool."
             )
         return "\n".join(lines)
     except Exception as e:
@@ -390,7 +390,6 @@ async def delete_memory(
         return f"Error deleting memory: {e}"
 
 
-@default_registry.register
 async def memory_grep(
     query: str,
     start_time: str | None = None,

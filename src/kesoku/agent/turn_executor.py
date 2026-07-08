@@ -469,7 +469,7 @@ class TurnExecutor:
         if is_bootstrap:
             lines = [
                 '<background_context type="sync_guidelines">',
-                "- Use `memory_grep(query)` to search active memories and past chat messages for this role.",
+                "- Use `memory_search(query)` to search active memories and past chat messages for this role.",
                 "- Use `view_message(message_id)` to inspect full historical messages when needed.",
                 "</background_context>",
             ]
