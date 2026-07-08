@@ -1027,26 +1027,42 @@ class DatabaseManager:
         self,
         role: str,
         query_text: str,
+        start_time: float | None = None,
+        end_time: float | None = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        """Search agent memories for a role using semantic similarity and keyword boosting."""
+        """Search agent memories for a role using semantic similarity and keyword boosting with time filters."""
         from kesoku.utils.embedding import bytes_to_vector, cosine_similarity, get_embedding
 
+        is_wildcard = not query_text or query_text == "*"
+
         query_emb = None
-        try:
-            query_emb = get_embedding(query_text)
-        except Exception as e:
-            logger.error(f"Failed to generate embedding for query: {e}", exc_info=True)
+        if not is_wildcard:
+            try:
+                query_emb = get_embedding(query_text)
+            except Exception as e:
+                logger.error(f"Failed to generate embedding for query: {e}", exc_info=True)
 
         with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
+            conditions = ["role = ?"]
+            args: list[Any] = [role]
+
+            if not is_wildcard:
+                conditions.append("(embedding IS NOT NULL OR content LIKE ? OR title LIKE ?)")
+                args.extend([f"%{query_text}%", f"%{query_text}%"])
+
+            if start_time is not None:
+                conditions.append("updated_at >= ?")
+                args.append(start_time)
+            if end_time is not None:
+                conditions.append("updated_at <= ?")
+                args.append(end_time)
+
+            where_clause = " AND ".join(conditions)
             cursor.execute(
-                """
-                SELECT * FROM agent_memories
-                WHERE role = ?
-                  AND (embedding IS NOT NULL OR content LIKE ? OR title LIKE ?)
-                """,
-                (role, f"%{query_text}%", f"%{query_text}%"),
+                f"SELECT * FROM agent_memories WHERE {where_clause}",
+                tuple(args),
             )
             rows = cursor.fetchall()
 
@@ -1054,21 +1070,25 @@ class DatabaseManager:
         for row in rows:
             row_dict = dict(row)
             score = 0.0
-            if query_emb and row_dict["embedding"]:
+            if not is_wildcard and query_emb and row_dict["embedding"]:
                 try:
                     emb = bytes_to_vector(row_dict["embedding"])
                     score = cosine_similarity(query_emb, emb)
                 except Exception as e:
                     logger.error(f"Error calculating similarity for key {row_dict['key']}: {e}", exc_info=True)
 
-            q_lower = query_text.lower()
-            if q_lower in row_dict["title"].lower() or q_lower in row_dict["content"].lower():
-                score += 1.0
+            if not is_wildcard:
+                q_lower = query_text.lower()
+                if q_lower in row_dict["title"].lower() or q_lower in row_dict["content"].lower():
+                    score += 1.0
 
             row_dict["similarity_score"] = score
             results.append(row_dict)
 
-        results.sort(key=lambda x: x.get("similarity_score", 0.0), reverse=True)
+        if is_wildcard:
+            results.sort(key=lambda x: x.get("updated_at", 0.0), reverse=True)
+        else:
+            results.sort(key=lambda x: x.get("similarity_score", 0.0), reverse=True)
         return results[:limit]
 
 
@@ -1118,29 +1138,53 @@ class DatabaseManager:
         self,
         role: str,
         query_text: str,
+        start_time: float | None = None,
+        end_time: float | None = None,
         limit: int = 20,
     ) -> list[Message]:
-        """Search user/assistant text messages for a role using semantic similarity and keyword boosting."""
+        """Search user/assistant text messages for a role.
+
+        Uses semantic similarity and keyword boosting with time filters.
+        """
         from kesoku.utils.embedding import bytes_to_vector, cosine_similarity, get_embedding
 
+        is_wildcard = not query_text or query_text == "*"
+
         query_emb = None
-        try:
-            query_emb = get_embedding(query_text)
-        except Exception as e:
-            logger.error(f"Failed to generate embedding for query: {e}", exc_info=True)
+        if not is_wildcard:
+            try:
+                query_emb = get_embedding(query_text)
+            except Exception as e:
+                logger.error(f"Failed to generate embedding for query: {e}", exc_info=True)
 
         with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
+            conditions = [
+                "COALESCE(s.role_name, 'default') = ?",
+                "m.role IN ('user', 'assistant')",
+                "m.type = 'text'"
+            ]
+            args: list[Any] = [role]
+
+            if not is_wildcard:
+                conditions.append("(m.embedding IS NOT NULL OR m.content LIKE ?)")
+                args.append(f"%{query_text}%")
+
+            if start_time is not None:
+                conditions.append("m.timestamp >= ?")
+                args.append(start_time)
+            if end_time is not None:
+                conditions.append("m.timestamp <= ?")
+                args.append(end_time)
+
+            where_clause = " AND ".join(conditions)
             cursor.execute(
-                """
+                f"""
                 SELECT m.* FROM messages m
                 JOIN sessions s ON m.session_id = s.id
-                WHERE COALESCE(s.role_name, 'default') = ?
-                  AND m.role IN ('user', 'assistant')
-                  AND m.type = 'text'
-                  AND (m.embedding IS NOT NULL OR m.content LIKE ?)
+                WHERE {where_clause}
                 """,
-                (role, f"%{query_text}%"),
+                tuple(args),
             )
             rows = cursor.fetchall()
 
@@ -1148,20 +1192,23 @@ class DatabaseManager:
         for row in rows:
             msg = self._row_to_message(row)
             score = 0.0
-            if query_emb and row["embedding"]:
+            if not is_wildcard and query_emb and row["embedding"]:
                 try:
                     emb = bytes_to_vector(row["embedding"])
                     score = cosine_similarity(query_emb, emb)
                 except Exception as e:
                     logger.error(f"Error calculating similarity for message {msg.id}: {e}", exc_info=True)
 
-            if query_text.lower() in msg.content.lower():
+            if not is_wildcard and query_text.lower() in msg.content.lower():
                 score += 1.0
 
             msg.metadata["similarity_score"] = score
             results.append(msg)
 
-        results.sort(key=lambda x: x.metadata.get("similarity_score", 0.0), reverse=True)
+        if is_wildcard:
+            results.sort(key=lambda x: x.timestamp, reverse=True)
+        else:
+            results.sort(key=lambda x: x.metadata.get("similarity_score", 0.0), reverse=True)
         return results[:limit]
 
     def get_unindexed_memories(self) -> list[dict[str, Any]]:
@@ -2047,6 +2094,8 @@ class AsyncDatabaseManager:
         self,
         role: str,
         query_text: str,
+        start_time: float | None = None,
+        end_time: float | None = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
         """Search agent memories for a role using semantic similarity of embeddings."""
@@ -2054,6 +2103,8 @@ class AsyncDatabaseManager:
             self.sync_db.search_role_memories_semantic,
             role,
             query_text,
+            start_time,
+            end_time,
             limit,
         )
 
@@ -2061,6 +2112,8 @@ class AsyncDatabaseManager:
         self,
         role: str,
         query_text: str,
+        start_time: float | None = None,
+        end_time: float | None = None,
         limit: int = 20,
     ) -> list[Message]:
         """Search user/assistant text messages for a role using semantic similarity of embeddings."""
@@ -2068,6 +2121,8 @@ class AsyncDatabaseManager:
             self.sync_db.search_role_messages_semantic,
             role,
             query_text,
+            start_time,
+            end_time,
             limit,
         )
 

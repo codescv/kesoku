@@ -8,6 +8,7 @@ from typing import Literal
 from kesoku.agent.skills import SkillManager
 from kesoku.agent.tools.registry import ToolContext, default_registry
 from kesoku.utils.text import extract_grep_snippet, truncate_middle
+from kesoku.utils.time_utils import parse_time_to_timestamp
 
 MemoryCategory = Literal["progress", "memo"]
 
@@ -418,8 +419,6 @@ async def memory_grep(
     active_role = await _resolve_memory_role(category="memo", role_param=None, context=context)
     db = context.gateway.db
 
-    from kesoku.utils.time_utils import parse_time_to_timestamp
-
     start_ts = parse_time_to_timestamp(start_time)
     end_ts = parse_time_to_timestamp(end_time)
 
@@ -486,18 +485,25 @@ async def memory_grep(
 @default_registry.register
 async def memory_search(
     query: str,
+    start_time: str | None = None,
+    end_time: str | None = None,
     limit: int = 20,
     context: ToolContext | None = None,
 ) -> str:
-    """Perform semantic (embedding-based RAG) search over the active memories and history messages for the current role.
+    """Perform hybrid semantic/keyword search over the active memories and history messages for the current role.
+
+    Supports wildcard searches (* or empty query) to retrieve the latest messages,
+    and filtering by optional time range (start_time, end_time).
 
     Args:
-        query: Semantic query text.
+        query: Query text. If empty or '*', matches all messages (wildcard).
+        start_time: Optional start ISO 8601 date/time.
+        end_time: Optional end ISO 8601 date/time.
         limit: Max number of matching memories/messages to retrieve (default: 20).
         context: Injected tool execution context.
 
     Returns:
-        Formatted markdown summary of matching memories and messages ordered by similarity.
+        Formatted markdown summary of matching memories and messages ordered by similarity or time.
     """
     if not context or not context.gateway:
         return "Error: ToolContext is missing."
@@ -505,41 +511,59 @@ async def memory_search(
     active_role = await _resolve_memory_role(category="memo", role_param=None, context=context)
     db = context.gateway.db
 
+    start_ts = parse_time_to_timestamp(start_time)
+    end_ts = parse_time_to_timestamp(end_time)
+
+    is_wildcard = not query or query.strip() == "*"
+
     try:
-        memories = await db.search_role_memories_semantic(
-            active_role,
-            query,
-            limit=limit,
-        )
+        if is_wildcard:
+            memories = []
+        else:
+            memories = await db.search_role_memories_semantic(
+                active_role,
+                query,
+                start_time=start_ts,
+                end_time=end_ts,
+                limit=limit,
+            )
         messages = await db.search_role_messages_semantic(
             active_role,
             query,
+            start_time=start_ts,
+            end_time=end_ts,
             limit=limit,
         )
 
         if not memories and not messages:
-            return f"No semantically matching memories or messages found for query '{query}' and role '{active_role}'."
+            time_filter_str = ""
+            if start_time or end_time:
+                time_filter_str = f" in time range [{start_time or ''} to {end_time or ''}]"
+            return f"No memories or messages matching '{query}' found for role '{active_role}'{time_filter_str}."
 
-        lines = [f"🔍 **Semantic Search Results for '{query}' (Role: {active_role})**"]
+        title_prefix = "Search Results" if is_wildcard else "Semantic Search Results"
+        lines = [f"🔍 **{title_prefix} for '{query}' (Role: {active_role})**"]
 
         if memories:
-            lines.append("\n### 🧠 Semantically Matching Memories")
+            lines.append("\n### 🧠 Matching Memories")
             for m in memories:
                 updated_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m["updated_at"]))
-                score_str = f"(score: {m['similarity_score']:.4f})" if "similarity_score" in m else ""
+                score_str = f" (score: {m['similarity_score']:.4f})" if "similarity_score" in m else ""
                 lines.append(
-                    f'- **[{m["category"]}]** `{m["key"]}`: "{m["title"]}" '
+                    f'- **[{m["category"]}]** `{m["key"]}`: "{m["title"]}"'
                     f'{score_str} (updated: {updated_str})'
                 )
                 lines.append(f'  > {m["content"]}')
 
         if messages:
-            lines.append("\n### 💬 Semantically Matching Messages")
+            lines.append("\n### 💬 Matching Messages")
             for m in messages:
                 time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m.timestamp))
                 sender_str = f"**{m.sender}** ({m.role})"
-                score_str = f"(score: {m.metadata['similarity_score']:.4f})" if "similarity_score" in m.metadata else ""
-                lines.append(f"- [{time_str}] {sender_str} {score_str} (ID: `{m.id}`) in session `{m.session_id}`:")
+                score_str = ""
+                if "similarity_score" in m.metadata and not is_wildcard:
+                    score_str = f" (score: {m.metadata['similarity_score']:.4f})"
+                lines.append(f"- [{time_str}] {sender_str}{score_str} (ID: `{m.id}`) in session `{m.session_id}`:")
                 truncated_content = truncate_middle(m.content, 500)
                 content_indented = "\n".join(f"  > {line}" for line in truncated_content.splitlines())
                 lines.append(content_indented)

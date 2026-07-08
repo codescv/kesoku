@@ -796,7 +796,7 @@ async def test_memory_search_tool(tmp_path, monkeypatch) -> None:
 
     # Assertions
     assert "Semantic Search Results for 'Find python tips' (Role: coder)" in res
-    assert "Semantically Matching Memories" in res
+    assert "Matching Memories" in res
     assert "mem1" in res
     assert "mem2" in res
 
@@ -898,5 +898,74 @@ async def test_memory_search_hybrid_and_boosting(tmp_path, monkeypatch) -> None:
 
     assert "Truncated for Brevity" in res
     assert len(res) < 1500
+
+
+@pytest.mark.asyncio
+async def test_memory_search_wildcard_and_time_filters(tmp_path, monkeypatch) -> None:
+    """Test memory_search supporting wildcard queries and time range filtering."""
+    from kesoku.gateway.gateway import Gateway
+
+    temp_db = str(tmp_path / "test_search_wildcard.db")
+    db = DatabaseManager(temp_db)
+    db.init_tables()
+
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    await gw.db.set_channel_role("discord", "chan_1", "coder")
+    session1 = Session(id="sess_1", title="Sess 1", created_at=time.time(), updated_at=time.time())
+    await gw.db.create_session(session1)
+    await gw.db.set_active_session_for_channel("discord", "chan_1", "sess_1")
+
+    with db.connection_provider.connection() as conn:
+        with conn:
+            sql = (
+                "INSERT INTO messages ("
+                "  id, session_id, chatbot_id, channel_id, sender, role, type, "
+                "  content, metadata, timestamp, status, embedding"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+            conn.execute(sql, (
+                "m1", "sess_1", "discord", "chan_1", "user", "user", "text",
+                "first message", "{}", 1000.0, "processed", None
+            ))
+            conn.execute(sql, (
+                "m2", "sess_1", "discord", "chan_1", "user", "user", "text",
+                "second message", "{}", 2000.0, "processed", None
+            ))
+            conn.execute(sql, (
+                "m3", "sess_1", "discord", "chan_1", "user", "user", "text",
+                "third message", "{}", 3000.0, "processed", None
+            ))
+
+    ctx = ToolContext(
+        session_id="sess_1",
+        session_workspace="test_ws",
+        gateway=gw,
+    )
+
+    res_wildcard = await memory_search(query="*", limit=10, context=ctx)
+    assert "Search Results for '*'" in res_wildcard
+    assert "m3" in res_wildcard
+    assert "m2" in res_wildcard
+    assert "m1" in res_wildcard
+
+    pos_m3 = res_wildcard.index("m3")
+    pos_m2 = res_wildcard.index("m2")
+    pos_m1 = res_wildcard.index("m1")
+    assert pos_m3 < pos_m2 < pos_m1
+    assert "score:" not in res_wildcard
+
+    res_time = await memory_search(
+        query="*",
+        start_time="1500",
+        end_time="2500",
+        limit=10,
+        context=ctx
+    )
+    assert "m2" in res_time
+    assert "m1" not in res_time
+    assert "m3" not in res_time
+
 
 
