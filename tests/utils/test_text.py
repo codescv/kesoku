@@ -144,3 +144,36 @@ def test_extract_grep_snippet() -> None:
     query = "keyword"
     res = extract_grep_snippet(text, query, window=5)
     assert res == "...ains KEYWORD here"
+
+
+def test_chunk_message_text() -> None:
+    """Test chunk_message_text helper splits conversational message text properly."""
+    from kesoku.utils.text import chunk_message_text
+
+    # Case 1: Simple text under threshold
+    text = "Hello world."
+    assert chunk_message_text(text, threshold=20) == ["Hello world."]
+
+    # Case 2: Split by sentence punctuation
+    text = "嗨，小张！今天天气真不错。你吃晚饭了吗？\n我还没吃呢，打算去吃火锅。"
+    # Atoms:
+    # 1. '嗨，小张！' (len 5)
+    # 2. '今天天气真不错。' (len 8)
+    # 3. '你吃晚饭了吗？' (len 7 after strip, len 8 with \n)
+    # 4. '我还没吃呢，打算去吃火锅。' (len 13)
+    chunks = chunk_message_text(text, threshold=15)
+    assert chunks == [
+        "嗨，小张！今天天气真不错。",
+        "你吃晚饭了吗？",
+        "我还没吃呢，打算去吃火锅。",
+    ]
+
+    # Case 3: Empty text
+    assert chunk_message_text("", threshold=10) == []
+    assert chunk_message_text(None, threshold=10) == []
+
+    # Case 4: Long single sentence exceeding threshold
+    text = "这是一个非常非常长而且没有任何标点符号的长句子直接超过了阈值。"
+    chunks = chunk_message_text(text, threshold=10)
+    assert chunks == ["这是一个非常非常长而且没有任何标点符号的长句子直接超过了阈值。"]
+

@@ -402,7 +402,7 @@ def cli_memory_rebuild_index(
             with db.connection_provider.connection() as conn:
                 with conn:
                     conn.execute("UPDATE agent_memories SET embedding = NULL")
-                    conn.execute("UPDATE messages SET embedding = NULL")
+                    conn.execute("DELETE FROM message_chunks")
             console.print("[bold green]Existing embeddings cleared.[/bold green]")
 
         unindexed_memories = db.get_unindexed_memories()
@@ -437,15 +437,30 @@ def cli_memory_rebuild_index(
                     progress.advance(task_mem)
 
             if total_msg > 0:
+                from kesoku.utils.text import chunk_message_text
+
                 task_msg = progress.add_task("[green]Indexing messages...", total=total_msg)
-                batch_size = 64
+                batch_size = 32
                 for i in range(0, total_msg, batch_size):
                     batch = unindexed_messages[i : i + batch_size]
-                    batch_texts = [m["content"] for m in batch]
-                    embs = embedding.get_embeddings(batch_texts)
-                    for m, emb in zip(batch, embs):
-                        db.update_message_embedding(m["id"], embedding.vector_to_bytes(emb))
-                        progress.advance(task_msg)
+                    chunks_to_embed = []
+                    for msg in batch:
+                        chunks = chunk_message_text(msg["content"], threshold=80)
+                        for idx, chunk_content in enumerate(chunks):
+                            chunks_to_embed.append((msg["id"], idx, chunk_content))
+
+                    if chunks_to_embed:
+                        texts = [c[2] for c in chunks_to_embed]
+                        embs = embedding.get_embeddings(texts)
+
+                        chunks_data = []
+                        for (msg_id, idx, content), emb in zip(chunks_to_embed, embs):
+                            emb_bytes = embedding.vector_to_bytes(emb)
+                            chunks_data.append((msg_id, idx, content, emb_bytes))
+
+                        db.save_message_chunks_batch(chunks_data)
+
+                    progress.advance(task_msg, advance=len(batch))
 
         console.print("[bold green]✓ Index rebuilding completed successfully![/bold green]")
     except Exception as e:

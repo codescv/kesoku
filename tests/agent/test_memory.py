@@ -810,7 +810,6 @@ async def test_memory_search_tool(tmp_path, monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_memory_search_hybrid_and_boosting(tmp_path, monkeypatch) -> None:
     """Test memory_search hybrid exact matching and score boosting + text truncation."""
-    import array
 
     from kesoku.gateway.gateway import Gateway
 
@@ -828,7 +827,6 @@ async def test_memory_search_hybrid_and_boosting(tmp_path, monkeypatch) -> None:
 
     embeddings_map = {
         "Game Console Joystick": [1.0, 0.0],
-        "Hello controller world": [0.0, 1.0],
         "How controller is built": [0.5, 0.5],
     }
 
@@ -848,33 +846,63 @@ async def test_memory_search_hybrid_and_boosting(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("kesoku.utils.embedding.get_embedding", mock_get_embedding)
     monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", lambda texts: [mock_get_embedding(t) for t in texts])
 
-    with db.connection_provider.connection() as conn:
-        with conn:
-            sql = (
-                "INSERT INTO messages ("
-                "  id, session_id, chatbot_id, channel_id, sender, role, type, "
-                "  content, metadata, timestamp, status, embedding"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            )
-            conn.execute(sql, (
-                "m_sem", "sess_1", "discord", "chan_1", "user", "user", "text",
-                "Game Console Joystick", "{}", 1.0, "processed",
-                array.array("f", pad_vector([1.0, 0.0])).tobytes()
-            ))
-            conn.execute(sql, (
-                "m_exact", "sess_1", "discord", "chan_1", "user", "user", "text",
-                "Hello controller world", "{}", 2.0, "processed", None
-            ))
-            conn.execute(sql, (
-                "m_both", "sess_1", "discord", "chan_1", "user", "user", "text",
-                "How controller is built", "{}", 3.0, "processed",
-                array.array("f", pad_vector([0.5, 0.5])).tobytes()
-            ))
-            long_content = "controller " + "a" * 600
-            conn.execute(sql, (
-                "m_long", "sess_1", "discord", "chan_1", "user", "user", "text",
-                long_content, "{}", 4.0, "processed", None
-            ))
+    from kesoku.constants import MessageRole, MessageStatus, MessageType
+    from kesoku.db import Message
+
+    msg_sem = Message(
+        id="m_sem",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Game Console Joystick",
+        timestamp=1.0,
+        status=MessageStatus.PROCESSED,
+    )
+    msg_exact = Message(
+        id="m_exact",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Hello controller world",
+        timestamp=2.0,
+        status=MessageStatus.PROCESSED,
+    )
+    msg_both = Message(
+        id="m_both",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="How controller is built",
+        timestamp=3.0,
+        status=MessageStatus.PROCESSED,
+    )
+    long_content = "controller " + "a" * 600
+    msg_long = Message(
+        id="m_long",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content=long_content,
+        timestamp=4.0,
+        status=MessageStatus.PROCESSED,
+    )
+
+    db.save_message(msg_sem)
+    db.save_message(msg_exact)
+    db.save_message(msg_both)
+    db.save_message(msg_long)
 
     ctx = ToolContext(
         session_id="sess_1",
@@ -966,6 +994,73 @@ async def test_memory_search_wildcard_and_time_filters(tmp_path, monkeypatch) ->
     assert "m2" in res_time
     assert "m1" not in res_time
     assert "m3" not in res_time
+
+
+@pytest.mark.asyncio
+async def test_memory_search_chunks_limit(tmp_path, monkeypatch) -> None:
+    """Test that memory_search limits matching chunks from the same message to at most 3 in the final ranking."""
+    from kesoku.constants import MessageRole, MessageStatus, MessageType
+    from kesoku.db import Message
+    from kesoku.gateway.gateway import Gateway
+
+    temp_db = str(tmp_path / "test_search_chunks_limit.db")
+    db = DatabaseManager(temp_db)
+    db.init_tables()
+
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    await gw.db.set_channel_role("discord", "chan_1", "coder")
+    session1 = Session(id="sess_1", title="Sess 1", created_at=time.time(), updated_at=time.time())
+    await gw.db.create_session(session1)
+    await gw.db.set_active_session_for_channel("discord", "chan_1", "sess_1")
+
+    # Mock embeddings to be neutral so exact matching (literal query match) determines the ranking
+    def mock_get_embedding(text: str) -> list[float]:
+        return [0.0] * 384
+    monkeypatch.setattr("kesoku.utils.embedding.get_embedding", mock_get_embedding)
+    monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", lambda texts: [mock_get_embedding(t) for t in texts])
+
+    # A message containing 5 distinct sentences matching the keyword "target"
+    # With threshold=15, they will be chunked into 5 separate chunks.
+    msg = Message(
+        id="m_multi",
+        session_id="sess_1",
+        chatbot_id="discord",
+        channel_id="chan_1",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content=(
+            "target sentence one which is quite long. "
+            "target sentence two which is also very long. "
+            "target sentence three which is also long. "
+            "target sentence four which is long. "
+            "target sentence five which is long."
+        ),
+        timestamp=time.time(),
+        status=MessageStatus.PROCESSED,
+    )
+    # This calls db.save_message internally which chunks it
+    await gw.post(msg)
+
+    ctx = ToolContext(
+        session_id="sess_1",
+        session_workspace="test_ws",
+        gateway=gw,
+    )
+
+    # Search for "target"
+    res = await memory_search(query="target", limit=10, context=ctx)
+
+    # All matched chunk snippets should display target, but at most 3 should show up from the same message 'm_multi'
+    # Each matching chunk is printed blockquoted, e.g. "  > target one" etc.
+    # Let's count how many times "target" appears in blockquotes
+    target_count = res.count("> target")
+    assert target_count == 3
+    # Verify that the message ID is shown but only 3 times
+    assert res.count("(ID: `m_multi`)") == 3
+
 
 
 

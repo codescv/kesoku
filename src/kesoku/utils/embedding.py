@@ -83,4 +83,8 @@ def cosine_similarity(v1: list[float], v2: list[float]) -> float:
     Returns:
         Cosine similarity score as float.
     """
-    return float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
+    norm1 = np.linalg.norm(v1)
+    norm2 = np.linalg.norm(v2)
+    if norm1 == 0.0 or norm2 == 0.0:
+        return 0.0
+    return float(np.dot(v1, v2) / (norm1 * norm2))

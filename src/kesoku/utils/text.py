@@ -595,3 +595,49 @@ def extract_grep_snippet(text: str, query: str, window: int = 70) -> str:
     suffix = "..." if end < len(text) else ""
 
     return prefix + snippet.strip().replace("\n", " ") + suffix
+
+
+def chunk_message_text(text: str, threshold: int = 80) -> list[str]:
+    """Splits conversational message text into chunks based on sentence boundaries and newlines.
+
+    Accumulates sentences/lines until the character count exceeds threshold.
+
+    Args:
+        text: Input string.
+        threshold: Character count limit to start a new chunk.
+
+    Returns:
+        List of chunks as strings.
+    """
+    if not text:
+        return []
+
+    atoms = []
+    raw_lines = text.splitlines(keepends=True)
+    for line in raw_lines:
+        if not line:
+            continue
+        splits = re.split(r"(?<=[。！？.!?;])", line)
+        for s in splits:
+            if s:
+                atoms.append(s)
+
+    chunks = []
+    current_chunk = []
+    current_len = 0
+
+    for atom in atoms:
+        atom_len = len(atom)
+        if current_len + atom_len > threshold and current_chunk:
+            chunks.append("".join(current_chunk).strip())
+            current_chunk = [atom]
+            current_len = atom_len
+        else:
+            current_chunk.append(atom)
+            current_len += atom_len
+
+    if current_chunk:
+        chunks.append("".join(current_chunk).strip())
+
+    return [c for c in chunks if c]
+

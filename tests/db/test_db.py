@@ -156,15 +156,34 @@ def test_message_crud(db_manager):
     db_manager.save_message(msg2)
     db_manager.save_message(msg_thought)
 
-    # Verify embeddings are populated correctly
+    # Verify embeddings are populated correctly in message_chunks
     saved_msg1 = db_manager.get_messages_by_filters(filters={"id": "msg_1"})[0]
-    assert saved_msg1.embedding is not None
-
     saved_msg2 = db_manager.get_messages_by_filters(filters={"id": "msg_2"})[0]
-    assert saved_msg2.embedding is not None
-
     saved_thought = db_manager.get_messages_by_filters(filters={"id": "msg_thought"})[0]
-    assert saved_thought.embedding is None
+
+    with db_manager.connection_provider.connection() as conn:
+        cursor = conn.cursor()
+        # msg1 is a user text message: should have 1 chunk and main message embedding None
+        cursor.execute("SELECT content, embedding FROM message_chunks WHERE message_id = 'msg_1'")
+        chunks1 = cursor.fetchall()
+        assert len(chunks1) == 1
+        assert chunks1[0]["content"] == "Hello AI"
+        assert chunks1[0]["embedding"] is not None
+        assert saved_msg1.embedding is None
+
+        # msg2 is an assistant text message: should have 1 chunk and main message embedding None
+        cursor.execute("SELECT content, embedding FROM message_chunks WHERE message_id = 'msg_2'")
+        chunks2 = cursor.fetchall()
+        assert len(chunks2) == 1
+        assert chunks2[0]["content"] == "Hello Human"
+        assert chunks2[0]["embedding"] is not None
+        assert saved_msg2.embedding is None
+
+        # msg_thought is a thought message: should have no chunks and main message embedding None
+        cursor.execute("SELECT content FROM message_chunks WHERE message_id = 'msg_thought'")
+        chunks_thought = cursor.fetchall()
+        assert len(chunks_thought) == 0
+        assert saved_thought.embedding is None
 
     # Turn count (counting only User messages)
     assert db_manager.get_session_turns_count("sess_msg_test") == 1

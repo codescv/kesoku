@@ -84,6 +84,22 @@ class DatabaseManager:
                     conn.execute("ALTER TABLE sessions ADD COLUMN role_name TEXT")
                 # Clean up redundant single-column session index since idx_messages_session_timestamp supersedes it
                 conn.execute("DROP INDEX IF EXISTS idx_messages_session")
+                # Ensure message_chunks table exists
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS message_chunks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        message_id TEXT NOT NULL,
+                        chunk_index INTEGER NOT NULL,
+                        content TEXT NOT NULL,
+                        embedding BLOB NOT NULL,
+                        FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+                    );
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_message_chunks_message_id ON message_chunks(message_id);"
+                )
                 # Ensure channel_sessions table exists
                 conn.execute(
                     """
@@ -276,6 +292,21 @@ class DatabaseManager:
                             FOREIGN KEY (summary_node_id) REFERENCES summary_nodes(id) ON DELETE SET NULL
                         );
                         """
+                    )
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS message_chunks (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            message_id TEXT NOT NULL,
+                            chunk_index INTEGER NOT NULL,
+                            content TEXT NOT NULL,
+                            embedding BLOB NOT NULL,
+                            FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+                        );
+                        """
+                    )
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_message_chunks_message_id ON message_chunks(message_id);"
                     )
                     conn.execute(
                         """
@@ -585,15 +616,25 @@ class DatabaseManager:
         Args:
             msg: The Message object to store.
         """
-        emb_bytes = None
-        if msg.role in ("user", "assistant") and msg.type == "text":
+        chunks_to_insert = []
+        if msg.role in ("user", "assistant") and msg.type == "text" and msg.content:
             try:
                 from kesoku.utils.embedding import get_embedding, vector_to_bytes
+                from kesoku.utils.text import chunk_message_text
 
-                emb = get_embedding(msg.content)
-                emb_bytes = vector_to_bytes(emb)
+                chunks = chunk_message_text(msg.content, threshold=80)
+                for idx, chunk_content in enumerate(chunks):
+                    try:
+                        emb = get_embedding(chunk_content)
+                        emb_bytes = vector_to_bytes(emb)
+                        chunks_to_insert.append((msg.id, idx, chunk_content, emb_bytes))
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to generate embedding for chunk {idx} of message {msg.id}: {e}",
+                            exc_info=True,
+                        )
             except Exception as e:
-                logger.error(f"Failed to generate embedding for message {msg.id}: {e}", exc_info=True)
+                logger.error(f"Failed to chunk message {msg.id}: {e}", exc_info=True)
 
         with self.connection_provider.connection() as conn:
             with conn:
@@ -602,7 +643,7 @@ class DatabaseManager:
                     INSERT INTO messages
                     (id, session_id, chatbot_id, channel_id, sender, role, type,
                      content, metadata, timestamp, status, parent_id, summary_node_id, embedding)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                     """,
                     (
                         msg.id,
@@ -618,9 +659,17 @@ class DatabaseManager:
                         msg.status,
                         msg.parent_id,
                         msg.summary_node_id,
-                        emb_bytes,
                     ),
                 )
+                if chunks_to_insert:
+                    conn.execute("DELETE FROM message_chunks WHERE message_id = ?", (msg.id,))
+                    conn.executemany(
+                        """
+                        INSERT INTO message_chunks (message_id, chunk_index, content, embedding)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        chunks_to_insert,
+                    )
 
     def update_message_status(self, message_id: str, status: str) -> None:
         """Update the operational lifecycle status of a message.
@@ -1142,20 +1191,47 @@ class DatabaseManager:
         end_time: float | None = None,
         limit: int = 20,
     ) -> list[Message]:
-        """Search user/assistant text messages for a role.
-
-        Uses semantic similarity and keyword boosting with time filters.
-        """
+        """Search user/assistant text messages for a role using chunk-based semantic search and literal matching."""
         from kesoku.utils.embedding import bytes_to_vector, cosine_similarity, get_embedding
 
         is_wildcard = not query_text or query_text == "*"
 
+        if is_wildcard:
+            with self.connection_provider.connection() as conn:
+                cursor = conn.cursor()
+                conditions = [
+                    "COALESCE(s.role_name, 'default') = ?",
+                    "m.role IN ('user', 'assistant')",
+                    "m.type = 'text'"
+                ]
+                args: list[Any] = [role]
+
+                if start_time is not None:
+                    conditions.append("m.timestamp >= ?")
+                    args.append(start_time)
+                if end_time is not None:
+                    conditions.append("m.timestamp <= ?")
+                    args.append(end_time)
+
+                where_clause = " AND ".join(conditions)
+                sql = f"""
+                    SELECT m.* FROM messages m
+                    JOIN sessions s ON m.session_id = s.id
+                    WHERE {where_clause}
+                    ORDER BY m.timestamp DESC
+                    LIMIT ?
+                """
+                args.append(limit)
+                cursor.execute(sql, tuple(args))
+                rows = cursor.fetchall()
+                return [self._row_to_message(row) for row in rows]
+
+        # Semantic chunk-based search
         query_emb = None
-        if not is_wildcard:
-            try:
-                query_emb = get_embedding(query_text)
-            except Exception as e:
-                logger.error(f"Failed to generate embedding for query: {e}", exc_info=True)
+        try:
+            query_emb = get_embedding(query_text)
+        except Exception as e:
+            logger.error(f"Failed to generate embedding for query: {e}", exc_info=True)
 
         with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
@@ -1166,9 +1242,9 @@ class DatabaseManager:
             ]
             args: list[Any] = [role]
 
-            if not is_wildcard:
-                conditions.append("(m.embedding IS NOT NULL OR m.content LIKE ?)")
-                args.append(f"%{query_text}%")
+            # Match chunks where content literally matches or embedding exists
+            conditions.append("(mc.embedding IS NOT NULL OR mc.content LIKE ?)")
+            args.append(f"%{query_text}%")
 
             if start_time is not None:
                 conditions.append("m.timestamp >= ?")
@@ -1178,38 +1254,67 @@ class DatabaseManager:
                 args.append(end_time)
 
             where_clause = " AND ".join(conditions)
-            cursor.execute(
-                f"""
-                SELECT m.* FROM messages m
+            sql = f"""
+                SELECT mc.content AS chunk_content, mc.embedding AS chunk_embedding, mc.chunk_index,
+                       m.id, m.session_id, m.chatbot_id, m.channel_id, m.sender, m.role, m.type,
+                       m.content AS original_content, m.metadata, m.timestamp, m.status, m.parent_id, m.summary_node_id
+                FROM message_chunks mc
+                JOIN messages m ON mc.message_id = m.id
                 JOIN sessions s ON m.session_id = s.id
                 WHERE {where_clause}
-                """,
-                tuple(args),
-            )
+            """
+            cursor.execute(sql, tuple(args))
             rows = cursor.fetchall()
 
         results = []
         for row in rows:
-            msg = self._row_to_message(row)
+            msg = Message(
+                id=row["id"],
+                session_id=row["session_id"],
+                chatbot_id=row["chatbot_id"],
+                channel_id=row["channel_id"],
+                sender=row["sender"],
+                role=row["role"],
+                type=row["type"],
+                content=row["chunk_content"],
+                metadata=json.loads(row["metadata"]),
+                timestamp=row["timestamp"],
+                status=row["status"],
+                parent_id=row["parent_id"],
+                summary_node_id=row["summary_node_id"],
+                embedding=row["chunk_embedding"],
+            )
+            msg.metadata["original_content"] = row["original_content"]
+            msg.metadata["chunk_index"] = row["chunk_index"]
+
             score = 0.0
-            if not is_wildcard and query_emb and row["embedding"]:
+            if query_emb and row["chunk_embedding"]:
                 try:
-                    emb = bytes_to_vector(row["embedding"])
+                    emb = bytes_to_vector(row["chunk_embedding"])
                     score = cosine_similarity(query_emb, emb)
                 except Exception as e:
-                    logger.error(f"Error calculating similarity for message {msg.id}: {e}", exc_info=True)
+                    logger.error(f"Error calculating similarity for chunk of message {msg.id}: {e}", exc_info=True)
 
-            if not is_wildcard and query_text.lower() in msg.content.lower():
+            if query_text.lower() in msg.content.lower():
                 score += 1.0
 
             msg.metadata["similarity_score"] = score
             results.append(msg)
 
-        if is_wildcard:
-            results.sort(key=lambda x: x.timestamp, reverse=True)
-        else:
-            results.sort(key=lambda x: x.metadata.get("similarity_score", 0.0), reverse=True)
-        return results[:limit]
+        # Sort candidates globally by similarity score descending
+        results.sort(key=lambda x: x.metadata.get("similarity_score", 0.0), reverse=True)
+
+        # Apply message contribution limit (max 3 chunks per message)
+        filtered_results = []
+        msg_counts = {}
+        for msg in results:
+            msg_id = msg.id
+            count = msg_counts.get(msg_id, 0)
+            if count < 3:
+                filtered_results.append(msg)
+                msg_counts[msg_id] = count + 1
+
+        return filtered_results[:limit]
 
     def get_unindexed_memories(self) -> list[dict[str, Any]]:
         """Retrieve all memories that do not have an embedding computed yet."""
@@ -1220,15 +1325,17 @@ class DatabaseManager:
             return [dict(row) for row in rows]
 
     def get_unindexed_messages(self) -> list[dict[str, Any]]:
-        """Retrieve all user/assistant text messages that do not have an embedding computed yet."""
+        """Retrieve all user/assistant text messages that do not have chunks in message_chunks yet."""
         with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT id, content FROM messages
-                WHERE role IN ('user', 'assistant')
-                  AND type = 'text'
-                  AND embedding IS NULL
+                SELECT m.id, m.content FROM messages m
+                LEFT JOIN message_chunks mc ON m.id = mc.message_id
+                WHERE m.role IN ('user', 'assistant')
+                  AND m.type = 'text'
+                  AND TRIM(m.content) != ''
+                  AND mc.message_id IS NULL
                 """
             )
             rows = cursor.fetchall()
@@ -1250,6 +1357,31 @@ class DatabaseManager:
                 conn.execute(
                     "UPDATE messages SET embedding = ? WHERE id = ?",
                     (embedding, message_id),
+                )
+
+    def save_message_chunks_batch(self, chunks: list[tuple[str, int, str, bytes]]) -> None:
+        """Saves multiple message chunks to the database in a single transaction.
+
+        Args:
+            chunks: A list of tuples containing (message_id, chunk_index, content, embedding_bytes).
+        """
+        if not chunks:
+            return
+        with self.connection_provider.connection() as conn:
+            with conn:
+                # Group by message_id and clean up existing chunks first to avoid duplicates
+                unique_message_ids = {c[0] for c in chunks}
+                placeholders = ",".join("?" for _ in unique_message_ids)
+                conn.execute(
+                    f"DELETE FROM message_chunks WHERE message_id IN ({placeholders})",
+                    tuple(unique_message_ids)
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO message_chunks (message_id, chunk_index, content, embedding)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    chunks,
                 )
 
     def get_allowed_memory_categories(self) -> set[str]:
@@ -2141,6 +2273,10 @@ class AsyncDatabaseManager:
     async def update_message_embedding(self, message_id: str, embedding: bytes) -> None:
         """Update the embedding BLOB of a message."""
         await asyncio.to_thread(self.sync_db.update_message_embedding, message_id, embedding)
+
+    async def save_message_chunks_batch(self, chunks: list[tuple[str, int, str, bytes]]) -> None:
+        """Saves multiple message chunks to the database."""
+        await asyncio.to_thread(self.sync_db.save_message_chunks_batch, chunks)
 
     async def search_role_messages(
         self,
