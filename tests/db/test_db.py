@@ -596,12 +596,10 @@ def test_agent_memory_semantic_search(db_manager, monkeypatch):
 
     results = db_manager.search_role_memories_semantic(role="coder", query_text="Find python tips", limit=10)
 
-    assert len(results) == 3
+    assert len(results) == 2
     assert results[0]["key"] == "mem_py"
     assert results[1]["key"] == "mem_weather"
-    assert results[2]["key"] == "mem_java"
 
     assert "similarity_score" in results[0]
     assert results[0]["similarity_score"] > results[1]["similarity_score"]
-    assert results[1]["similarity_score"] > results[2]["similarity_score"]
 

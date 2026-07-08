@@ -798,13 +798,9 @@ async def test_memory_search_tool(tmp_path, monkeypatch) -> None:
     assert "Semantic Search Results for 'Find python tips' (Role: coder)" in res
     assert "Matching Memories" in res
     assert "mem1" in res
-    assert "mem2" in res
-
-    pos_mem1 = res.index("mem1")
-    pos_mem2 = res.index("mem2")
-    assert pos_mem1 < pos_mem2
+    assert "mem2" not in res
     assert "score: 0.9939" in res
-    assert "score: 0.1104" in res
+    assert "score: 0.1104" not in res
 
 
 @pytest.mark.asyncio
@@ -914,15 +910,13 @@ async def test_memory_search_hybrid_and_boosting(tmp_path, monkeypatch) -> None:
 
     assert "m_both" in res
     assert "m_exact" in res
-    assert "m_sem" in res
+    assert "m_sem" not in res
     assert "m_long" in res
 
     pos_both = res.index("m_both")
     pos_exact = res.index("m_exact")
-    pos_sem = res.index("m_sem")
 
     assert pos_both < pos_exact
-    assert pos_exact < pos_sem
 
     assert "Truncated for Brevity" in res
     assert len(res) < 1500

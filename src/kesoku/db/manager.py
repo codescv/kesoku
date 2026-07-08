@@ -1137,6 +1137,7 @@ class DatabaseManager:
         if is_wildcard:
             results.sort(key=lambda x: x.get("updated_at", 0.0), reverse=True)
         else:
+            results = [r for r in results if r.get("similarity_score", 0.0) > 0.6]
             results.sort(key=lambda x: x.get("similarity_score", 0.0), reverse=True)
         return results[:limit]
 
@@ -1304,11 +1305,14 @@ class DatabaseManager:
         # Sort candidates globally by similarity score descending
         results.sort(key=lambda x: x.metadata.get("similarity_score", 0.0), reverse=True)
 
-        # Apply message contribution limit (max 3 chunks per message)
+        # Apply message contribution limit (max 3 chunks per message) and filter score > 0.6
         filtered_results = []
         msg_counts = {}
         for msg in results:
             msg_id = msg.id
+            score = msg.metadata.get("similarity_score", 0.0)
+            if score <= 0.6:
+                continue
             count = msg_counts.get(msg_id, 0)
             if count < 3:
                 filtered_results.append(msg)
