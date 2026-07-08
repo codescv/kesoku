@@ -1079,6 +1079,7 @@ class DatabaseManager:
         start_time: float | None = None,
         end_time: float | None = None,
         limit: int = 20,
+        threshold: float = 0.55,
     ) -> list[dict[str, Any]]:
         """Search agent memories for a role using semantic similarity and keyword boosting with time filters."""
         from kesoku.utils.embedding import bytes_to_vector, cosine_similarity, get_embedding
@@ -1137,7 +1138,7 @@ class DatabaseManager:
         if is_wildcard:
             results.sort(key=lambda x: x.get("updated_at", 0.0), reverse=True)
         else:
-            results = [r for r in results if r.get("similarity_score", 0.0) > 0.6]
+            results = [r for r in results if r.get("similarity_score", 0.0) > threshold]
             results.sort(key=lambda x: x.get("similarity_score", 0.0), reverse=True)
         return results[:limit]
 
@@ -1191,6 +1192,7 @@ class DatabaseManager:
         start_time: float | None = None,
         end_time: float | None = None,
         limit: int = 20,
+        threshold: float = 0.55,
     ) -> list[Message]:
         """Search user/assistant text messages for a role using chunk-based semantic search and literal matching."""
         from kesoku.utils.embedding import bytes_to_vector, cosine_similarity, get_embedding
@@ -1305,20 +1307,40 @@ class DatabaseManager:
         # Sort candidates globally by similarity score descending
         results.sort(key=lambda x: x.metadata.get("similarity_score", 0.0), reverse=True)
 
-        # Apply message contribution limit (max 3 chunks per message) and filter score > 0.6
+        # Apply message contribution limit (max 3 chunks per message) and filter score > threshold
         filtered_results = []
         msg_counts = {}
         for msg in results:
             msg_id = msg.id
             score = msg.metadata.get("similarity_score", 0.0)
-            if score <= 0.6:
+            if score <= threshold:
                 continue
             count = msg_counts.get(msg_id, 0)
             if count < 3:
                 filtered_results.append(msg)
                 msg_counts[msg_id] = count + 1
 
-        return filtered_results[:limit]
+        filtered_results = filtered_results[:limit]
+        if filtered_results:
+            msg_ids = list({m.id for m in filtered_results})
+            placeholders = ",".join("?" for _ in msg_ids)
+            with self.connection_provider.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"SELECT message_id, chunk_index, content FROM message_chunks WHERE message_id IN ({placeholders})",
+                    tuple(msg_ids),
+                )
+                all_chunks = cursor.fetchall()
+
+            chunks_map = {(row["message_id"], row["chunk_index"]): row["content"] for row in all_chunks}
+
+            for msg in filtered_results:
+                matched_idx = msg.metadata["chunk_index"]
+                msg_id = msg.id
+                msg.metadata["prev_chunk"] = chunks_map.get((msg_id, matched_idx - 1))
+                msg.metadata["post_chunk"] = chunks_map.get((msg_id, matched_idx + 1))
+
+        return filtered_results
 
     def get_unindexed_memories(self) -> list[dict[str, Any]]:
         """Retrieve all memories that do not have an embedding computed yet."""
@@ -2233,6 +2255,7 @@ class AsyncDatabaseManager:
         start_time: float | None = None,
         end_time: float | None = None,
         limit: int = 20,
+        threshold: float = 0.55,
     ) -> list[dict[str, Any]]:
         """Search agent memories for a role using semantic similarity of embeddings."""
         return await asyncio.to_thread(
@@ -2242,6 +2265,7 @@ class AsyncDatabaseManager:
             start_time,
             end_time,
             limit,
+            threshold,
         )
 
     async def search_role_messages_semantic(
@@ -2251,6 +2275,7 @@ class AsyncDatabaseManager:
         start_time: float | None = None,
         end_time: float | None = None,
         limit: int = 20,
+        threshold: float = 0.55,
     ) -> list[Message]:
         """Search user/assistant text messages for a role using semantic similarity of embeddings."""
         return await asyncio.to_thread(
@@ -2260,6 +2285,7 @@ class AsyncDatabaseManager:
             start_time,
             end_time,
             limit,
+            threshold,
         )
 
     async def get_unindexed_memories(self) -> list[dict[str, Any]]:

@@ -1047,11 +1047,6 @@ async def test_memory_search_chunks_limit(tmp_path, monkeypatch) -> None:
     # Search for "target"
     res = await memory_search(query="target", limit=10, context=ctx)
 
-    # All matched chunk snippets should display target, but at most 3 should show up from the same message 'm_multi'
-    # Each matching chunk is printed blockquoted, e.g. "  > target one" etc.
-    # Let's count how many times "target" appears in blockquotes
-    target_count = res.count("> target")
-    assert target_count == 3
     # Verify that the message ID is shown but only 3 times
     assert res.count("(ID: `m_multi`)") == 3
 

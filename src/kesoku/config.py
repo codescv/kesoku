@@ -86,7 +86,7 @@ class AgentConfig(BaseModel):
         description="Model name to use for context compression vector embedding generation",
     )
     search_threshold: float = Field(
-        default=0.35,
+        default=0.55,
         description="Minimum similarity score threshold for semantic search results (between 0.0 and 1.0)",
     )
     protect_front_turns: int = Field(

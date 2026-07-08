@@ -516,6 +516,10 @@ async def memory_search(
     is_wildcard = not query or query.strip() == "*"
 
     try:
+        threshold = 0.55
+        if context and context.gateway and context.gateway.context and context.gateway.context.config:
+            threshold = context.gateway.context.config.agent.search_threshold
+
         if is_wildcard:
             memories = []
         else:
@@ -525,6 +529,7 @@ async def memory_search(
                 start_time=start_ts,
                 end_time=end_ts,
                 limit=limit,
+                threshold=threshold,
             )
         messages = await db.search_role_messages_semantic(
             active_role,
@@ -532,6 +537,7 @@ async def memory_search(
             start_time=start_ts,
             end_time=end_ts,
             limit=limit,
+            threshold=threshold,
         )
 
         if not memories and not messages:
@@ -563,7 +569,15 @@ async def memory_search(
                 if "similarity_score" in m.metadata and not is_wildcard:
                     score_str = f" (score: {m.metadata['similarity_score']:.4f})"
                 lines.append(f"- [{time_str}] {sender_str}{score_str} (ID: `{m.id}`) in session `{m.session_id}`:")
-                truncated_content = truncate_middle(m.content, 500)
+                parts = []
+                if m.metadata.get("prev_chunk"):
+                    parts.append(f"... {m.metadata['prev_chunk']}")
+                parts.append(m.content)
+                if m.metadata.get("post_chunk"):
+                    parts.append(f"{m.metadata['post_chunk']} ...")
+
+                combined_content = " ".join(parts)
+                truncated_content = truncate_middle(combined_content, 500)
                 content_indented = "\n".join(f"  > {line}" for line in truncated_content.splitlines())
                 lines.append(content_indented)
 
