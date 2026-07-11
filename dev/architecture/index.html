@@ -1,0 +1,2086 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://codescv.github.io/kesoku/dev/architecture/">
+      
+      
+        <link rel="prev" href="../../user/troubleshooting/">
+      
+      
+        <link rel="next" href="../agent-cycle/">
+      
+      
+        
+          <link rel="alternate" href="./" hreflang="en">
+        
+          <link rel="alternate" href="../../zh/dev/architecture/" hreflang="zh">
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Architecture & Concurrency - Kesoku Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="purple">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#kesoku-system-design-document" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Kesoku Docs" class="md-header__button md-logo" aria-label="Kesoku Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Kesoku Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Architecture & Concurrency
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="purple"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="purple"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+      <div class="md-header__option">
+  <div class="md-select">
+    
+    <button class="md-header__button md-icon" aria-label="Select language">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m12.87 15.07-2.54-2.51.03-.03A17.5 17.5 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2zm-2.62 7 1.62-4.33L19.12 17z"/></svg>
+    </button>
+    <div class="md-select__inner">
+      <ul class="md-select__list">
+        
+          <li class="md-select__item">
+            <a href="./" hreflang="en" class="md-select__link">
+              English
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../zh/dev/architecture/" hreflang="zh" class="md-select__link">
+              简体中文
+            </a>
+          </li>
+        
+      </ul>
+    </div>
+  </div>
+</div>
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/codescv/kesoku" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../user/installation/" class="md-tabs__link">
+          
+  
+  
+  User Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="./" class="md-tabs__link">
+          
+  
+  
+  Developer Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Kesoku Docs" class="md-nav__button md-logo" aria-label="Kesoku Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Kesoku Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/codescv/kesoku" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/role-playing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Role Playing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory & Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Skills & Custom Tools
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/safety/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Settings (Shell)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/commands/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Slash Commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_8" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_8" id="__nav_2_8_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Platforms
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Platforms
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/platforms/discord/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Discord
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/platforms/gchat/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Google Chat
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/platforms/wechat/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WeChat
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/service/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developer Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Developer Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture & Concurrency
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture & Concurrency
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#executive-summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Executive Summary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#architectural-overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Architectural Overview
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Architectural Overview">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#concurrency-anti-stall-mechanism-thread-sorting-v4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Concurrency, Anti-Stall Mechanism &amp; Thread Sorting (V4)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#llm-turn-logging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LLM Turn Logging
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#message-data-model-native-tool-calling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Message Data Model &amp; Native Tool Calling
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#discord-chatbot-adapter-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Discord Chatbot Adapter Architecture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#google-chat-chatbot-adapter-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Google Chat Chatbot Adapter Architecture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#systemd-service-integration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Systemd Service Integration
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Systemd Service Integration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#service-subcommands-design" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Service Subcommands Design
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-schema-configtoml" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration Schema (config.toml)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Configuration Schema (config.toml)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#claude-llm-support-vertex-ai" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Claude LLM Support (Vertex AI)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#autonomous-skill-system" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Autonomous Skill System
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Autonomous Skill System">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#skill-architecture-self-contained-manifests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Skill Architecture &amp; Self-Contained Manifests
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#native-tool-integration-script-robustness" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native Tool Integration &amp; Script Robustness
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agent-cycle/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Agent Cycle
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../message/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Message Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sys-prompt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    System Prompt
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tools & Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory & Database
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../role-playing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Role Playing Principles
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Skills System
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../llm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Backends
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../chatbot-interface/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chatbot Interface
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+          
+          
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_11" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_11" id="__nav_3_11_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Platforms
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_11_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_11">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Platforms
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../platforms/discord/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Discord Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../platforms/gchat/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Google Chat Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../platforms/wechat/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WeChat Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../debugging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing & Debugging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#executive-summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Executive Summary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#architectural-overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Architectural Overview
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Architectural Overview">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#concurrency-anti-stall-mechanism-thread-sorting-v4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Concurrency, Anti-Stall Mechanism &amp; Thread Sorting (V4)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#llm-turn-logging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LLM Turn Logging
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#message-data-model-native-tool-calling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Message Data Model &amp; Native Tool Calling
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#discord-chatbot-adapter-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Discord Chatbot Adapter Architecture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#google-chat-chatbot-adapter-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Google Chat Chatbot Adapter Architecture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#systemd-service-integration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Systemd Service Integration
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Systemd Service Integration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#service-subcommands-design" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Service Subcommands Design
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-schema-configtoml" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration Schema (config.toml)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Configuration Schema (config.toml)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#claude-llm-support-vertex-ai" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Claude LLM Support (Vertex AI)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#autonomous-skill-system" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Autonomous Skill System
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Autonomous Skill System">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#skill-architecture-self-contained-manifests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Skill Architecture &amp; Self-Contained Manifests
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#native-tool-integration-script-robustness" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native Tool Integration &amp; Script Robustness
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="kesoku-system-design-document">Kesoku System Design Document</h1>
+<h2 id="executive-summary">Executive Summary</h2>
+<p>Kesoku is a lightweight, highly readable, and robust autonomous AI agent framework. Designed around a decoupled gateway architecture with a Pure Broker pub/sub pattern and structured TOML configuration, Kesoku enables asynchronous interaction between various chat interfaces (such as Discord and one-shot CLI sessions) and a powerful autonomous agent loop equipped with per-session background concurrency and tool execution capabilities.</p>
+<h2 id="architectural-overview">Architectural Overview</h2>
+<pre class="mermaid"><code>graph TD
+    Config["Configuration Layer (src/kesoku/config.py loads config.toml)"]
+    Config --&gt; Daemon["Foreground Service Mode (kesoku start) - starts listeners"]
+    Config --&gt; CLIMode["Session CLI Mode (kesoku chat) - CLIChatbot adapter"]
+
+    Daemon --&gt; Gateway["Kesoku Gateway (gateway.py) - Broker Hub"]
+    CLIMode --&gt; Gateway
+
+    Gateway &lt;--&gt; SQLite[("SQLite Persistence Layer (messages &amp; sessions)")]
+
+    Agent["Kesoku Agent Dispatcher Loop"]
+    Gateway --&gt;|Pulls role='user' messages| Agent
+
+    subgraph SessionWorker [SessionWorker Concurrency]
+        Worker["SessionWorker (agent.py)"]
+        Worker --&gt;|Executes turns| LLM["LLM Backend (llm.py)"]
+        Worker --&gt;|Executes tools| Shell["Shell command tool"]
+    end
+
+    Agent --&gt;|Dispatches worker per session| Worker</code></pre>
+<h3 id="concurrency-anti-stall-mechanism-thread-sorting-v4">Concurrency, Anti-Stall Mechanism &amp; Thread Sorting (V4)</h3>
+<p>To handle multiple users and user interruptions gracefully, Kesoku implements an advanced concurrency model:</p>
+<ol>
+<li><strong>Stateless Pub/Sub Hub</strong>: The Gateway provides <code>post(message)</code> to save messages and broadcast them to active in-memory <code>listen(**filters)</code> async generators.</li>
+<li><strong>Agent Dispatcher</strong>: The master Agent runs <code>listen(role="user")</code>. Upon receiving a message, it checks if a <code>SessionWorker</code> task exists for that <code>session_id</code>. If not, it spawns one; otherwise, it pushes the message into the worker's queue.</li>
+<li><strong>Session Worker &amp; Interruption Policy</strong>:</li>
+<li>Each worker processes its queue atomic step by atomic step (LLM inference or Tool execution).</li>
+<li><strong>Never Kill Mid-Tool</strong>: For safety, tool executions are atomic. The worker waits for the tool to complete before checking for new user input.</li>
+<li><strong>Thought Interruption</strong>: If a new user message arrives in the queue while the LLM is generating or before a tool is invoked, the worker pivots immediately to the new message, updating previous pending actions as <code>interrupted</code>.</li>
+<li><strong>Turn-Based Thread Sorting</strong>: To perfectly preserve interrupted branches and asynchronous tool outputs without temporal interleaving, session history is ordered logically by turn root timestamp: <code>(root_message_timestamp, message_timestamp)</code>.</li>
+</ol>
+<h2 id="llm-turn-logging">LLM Turn Logging</h2>
+<p>To facilitate auditing, debugging, and trajectory evaluation, Kesoku logs every raw LLM inference turn:</p>
+<ul>
+<li><strong>Session Staging Directory</strong>: Logs are saved in the session's dedicated workspace/staging directory on disk.</li>
+<li><strong>YAML Format</strong>: To be both human-readable and programmatically parseable, the logs are serialized as <code>.log.yaml</code> files.</li>
+<li><strong>Sequential Naming</strong>: Each inference turn is saved as <code>llm-turn-{idx}.log.yaml</code>, where <code>{idx}</code> is a sequential integer starting from 1. The turn index is dynamically calculated at runtime by scanning the staging directory, making it robust across service restarts.</li>
+<li><strong>Rich Contents</strong>: Each turn log captures:</li>
+<li><strong>Metadata</strong>: Unix and ISO timestamps, session ID, turn index, and active LLM provider name.</li>
+<li><strong>History</strong>: The complete, cleaned, and formatted conversational history sent to the LLM.</li>
+<li><strong>Tools</strong>: Detailed descriptions, parameter list, and types for all tools made available to the LLM.</li>
+<li><strong>Response</strong>: The LLM's raw text output, thoughts, tool calls, and token metrics.</li>
+</ul>
+<h2 id="message-data-model-native-tool-calling">Message Data Model &amp; Native Tool Calling</h2>
+<p>All message ingestion and routing is unified through <code>Gateway.post()</code>. Every message in Kesoku follows strict role, type, status, and sender conventions as detailed in <a href="../message/">Message and Lifecycle Specification</a>:</p>
+<ul>
+<li><strong>Roles</strong>: <code>user</code>, <code>assistant</code>, <code>tool</code>, <code>system</code></li>
+<li><strong>Types</strong>: <code>text</code>, <code>thought</code>, <code>tool_call</code>, <code>tool_result</code></li>
+<li><strong>Sender Rules</strong>:</li>
+<li>User input: External username or <code>User</code></li>
+<li>Assistant thought / response text: <code>Kesoku</code></li>
+<li>Tool call: <code>Kesoku</code></li>
+<li>Tool output: The specific tool name (e.g., <code>calculator</code>)</li>
+<li>System notifications: <code>System</code></li>
+<li><strong>Native Function Calling, Thought Signatures &amp; Parallel Batching</strong>: Tool requests and execution results store structured dictionaries in message <code>metadata</code> (<code>{"tool_name": ..., "tool_arguments": ..., "thought_signature": ...}</code>). To strictly comply with the Gemini API specification for parallel function calling, all <code>tool_call</code> messages for a given model turn are batched and posted before executing the tools concurrently. Their corresponding <code>tool_result</code> messages are then posted together, guaranteeing that multiple parallel calls and responses are grouped correctly into consecutive parts without interleaving.</li>
+</ul>
+<h2 id="discord-chatbot-adapter-architecture">Discord Chatbot Adapter Architecture</h2>
+<p>Kesoku includes a fully functional Discord chatbot adapter (<code>DiscordChatbot</code>) connecting external Discord servers with the internal Gateway broker:</p>
+<ul>
+<li><strong>Allowlist Filtering &amp; Token Fallback</strong>: Configured via <code>user_allowlist</code>. If populated, unlisted users only receive replies if explicitly mentioning the bot. Messages explicitly mentioning third parties are ignored. The chatbot supports fallback token lookup via the <code>DISCORD_TOKEN</code> environment variable when <code>bot_token</code> is not specified in the configuration file.</li>
+<li><strong>Thread-Based Context Separation &amp; Direct Channel Interaction</strong>: To prevent multi-user context collisions, conversations are normally isolated inside Discord threads, where the thread ID maps to Kesoku's external <code>channel_id</code>. To support direct channel interaction without thread creation, a configuration option <code>auto_thread</code> is provided inside <code>[[discord.channels]]</code> channel overrides (setting it to <code>false</code> prevents automatic thread creation in matching channels). By default, regular channels auto-thread. If a user manually starts a thread within a direct channel, the adapter detects the thread context and interacts within the thread naturally. Session creation timestamps are synchronized with initial Discord message timestamps to ensure correct chronological ordering. If multiple bots run in the same channel, thread creation race conditions (<code>discord.HTTPException</code>) are gracefully handled by discovering and joining the thread created by peer bots.</li>
+<li><strong>Special Context Prompts</strong>: Server and channel metadata, along with active member lists and Discord user IDs, are dynamically injected into the session's system prompt.</li>
+<li><strong>Newline Chunking, File-Sending Syntax &amp; Message Splitting</strong>: The bot renders all assistant responses, thoughts (<code>💭</code>), tool calls (<code>🛠️</code>), and tool results (<code>📥</code>) to Discord. Output exceeding Discord's 2000-character limit is cleanly chunked at newline boundaries. In addition, Kesoku supports a standardized file-sending syntax <code>[file: /abs/path/to/file]</code>. When the Discord chatbot encounters this syntax in any outgoing message content, it automatically splits the content around the file blocks, uploads existing files as attachments via <code>discord.File</code>, and filters out empty or whitespace-only message segments to strictly conform to Discord API constraints. If a specified file does not exist on disk, a user-friendly warning notification is gracefully dispatched to the thread.</li>
+<li><strong>Asynchronous Typing Status Indicator</strong>: While the agent is thinking, running tools, or generating responses, <code>DiscordChatbot</code> continuously displays a typing status in the corresponding thread or channel. The typing indicator starts when an incoming user message is received, and is gracefully cancelled upon successful delivery of the final assistant text response. To prevent infinite typing during an unexpected error or network drop, each typing task is guarded by a robust 10-minute safety timeout.</li>
+<li>
+<p><strong>Interactive Header View Buttons</strong>: The Discord message header includes a persistent view component (<code>MessageHeaderView</code>) containing interactive emoji-only buttons:</p>
+</li>
+<li>
+<p><strong>View Trajectory (<code>📜</code>)</strong>: Streams a custom-generated interactive dark-mode HTML trace file of the conversation turn.</p>
+</li>
+<li><strong>Stop Turn (<code>🛑</code>)</strong>: Stops/aborts the active <code>SessionWorker</code> turn task, marks the pending user prompt as <code>interrupted</code> in the database, and deletes any intermediate special messages (such as thoughts and tool calls) from the Discord UI.</li>
+<li><strong>Clear Session (<code>♻️</code>)</strong>: Deletes the session and all its messages from the SQLite database, recursively deletes the session workspace folder on disk, and deletes active UI components. This button is only visible inside regular channels and is hidden inside threads.</li>
+<li>
+<p><strong>Session and Turn Metrics</strong>: Upon completion or interruption of each logical conversational turn, the persistent header message is dynamically edited in-place with detailed session and turn execution statistics:</p>
+</li>
+<li>
+<p><strong>Total Session Turns</strong>: The total number of user turns processed in the current session.</p>
+</li>
+<li><strong>Context Window Size</strong>: The number of tokens currently in the session context window (prompt/input tokens) measured in integer K.</li>
+<li><strong>Turn Tool Calls</strong>: The total count of tools executed in the current turn.</li>
+<li><strong>Turn Token Usage</strong>: The total tokens consumed (input + output tokens) across all agent reasoning steps in the current turn, measured in integer K.</li>
+<li><strong>Turn Timing</strong>: The total elapsed time in seconds taken to execute the entire turn.</li>
+<li>Formatting varies beautifully to denote the final turn state: finished turns are labeled with a <code>⚡</code> emoji, while interrupted turns are labeled with a <code>🛑</code> emoji and the <code>(Interrupted)</code> suffix.</li>
+<li>
+<p><strong>Dynamic Question-Choice Syntax &amp; Button View</strong>: Outgoing messages containing the syntax <code>[question: &lt;question&gt; | choice1 | choice2 | ...]</code> are automatically parsed and split. The question text is sent to Discord alongside a dynamic <code>QuestionView</code> containing choice buttons. When a button is selected, all buttons are permanently disabled to prevent duplicate submission, the message is edited to show the disabled buttons, a confirmation <code>&lt;@user&gt; selected: **choice**</code> is posted, and the exact choice is posted directly to the Kesoku Gateway as a new <code>ROLE_USER</code> message (which automatically triggers the chatbot typing spinner).</p>
+</li>
+<li>
+<p><strong>Incoming Attachment Processing</strong>: When the Discord bot receives a message containing file attachments:</p>
+</li>
+<li>
+<p>It resolves or creates the corresponding chat session and staging directory path (<code>sessions/&lt;session_id&gt;</code>).</p>
+</li>
+<li>It asynchronously downloads each attachment and saves it into the session staging directory, ensuring filename safety and avoiding collision.</li>
+<li>It populates the message <code>metadata</code> with attachment information under the key <code>"attachments"</code> as a list of file descriptors: <code>[{"path": "/absolute/path/to/saved/file", "mime_type": "image/png", "filename": "photo.png"}]</code>.</li>
+<li>It appends readable references of the saved attachments at the end of the user message content for framework visibility.</li>
+<li>
+<p>During LLM inference, both the <code>GeminiLLM</code> and <code>ClaudeLLM</code> backends load these attachments from the staging directory and transmit them natively as multi-part content blocks (<code>types.Part.from_bytes</code> for Gemini, and base64-encoded source blocks for Claude) to leverage the models' native multi-modal capabilities.</p>
+</li>
+<li>
+<p><strong>Slash Commands System (<code>discord_command.py</code>)</strong>: The Discord chatbot integrates native slash commands using <code>discord.app_commands.CommandTree</code>.</p>
+</li>
+<li>
+<p><code>/restart</code>: Restarts the Kesoku background service. It sends an ephemeral confirmation message, stops active chatbot listeners cleanly, and executes a non-blocking <code>kesoku service restart</code> (supporting both <code>--user</code> and <code>--system</code> installations) to cleanly recycle the OS process. If those commands are not available or fail, it falls back to an in-place replacement via <code>os.execv</code>.</p>
+</li>
+</ul>
+<h2 id="google-chat-chatbot-adapter-architecture">Google Chat Chatbot Adapter Architecture</h2>
+<p>Kesoku includes a highly modular Google Chat chatbot adapter (<code>GoogleChatChatbot</code>) utilizing a stateless Google Cloud Pub/Sub Pull Subscription and standard GCP public APIs:</p>
+<ul>
+<li><strong>Pub/Sub Pull Subscription (Firewall-Friendly)</strong>: To operate without requiring inbound HTTP webhooks, public DNS, or SSL/TLS configurations, the adapter continuously pulls interaction events in an asynchronous, thread-safe queue listener loop.</li>
+<li><strong>Service Account Impersonation</strong>: Supports standard service account auth via key files, or secure key-less service account impersonation (via Google Application Default Credentials) to generate short-lived tokens automatically without managing static JSON files on disk.</li>
+<li><strong>Thread-Based Conversation Context &amp; Threaded Replies</strong>: Conversations are kept contextual by extracting <code>message.thread.name</code> (or <code>space.name</code> if threadless) and mapping it directly to the Kesoku <code>channel_id</code> and <code>session_id</code>. Outgoing replies automatically append thread identifiers and pass <code>messageReplyOption="REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"</code> to route replies seamlessly back into the same thread context rather than starting a new thread.</li>
+<li><strong>Foldable UI for Intermediate Thoughts and Tools</strong>: During agent reasoning steps, all intermediate special messages (thoughts, tool calls, system messages) are rendered inside a single foldable UI card featuring a collapsible <code>"Thoughts &amp; Tools"</code> section. The tool calls display dynamic argument suffixes formatted inside <code>&lt;code&gt;</code> tags.</li>
+<li><strong>Foldable UI &amp; Turn Metrics</strong>: The active foldable UI card tracks intermediate steps. Once the turn finishes successfully or gets stopped/interrupted by the user, it displays detailed turn and session metrics (total session turns, context window size, executed tool calls, turn token usage, and elapsed time), signaling the final state of the turn clearly.</li>
+<li><strong>Card V2 Response with Markdown Support</strong>: The final assistant response text is sent inside a Card V2 card with <code>textSyntax="MARKDOWN"</code> enabled on the text paragraph widget, allowing standard Markdown formatting (such as lists, bold/italic, and code blocks) to display natively and correctly.</li>
+<li><strong>Markdown Choice Question Card</strong>: Multiple-choice question blocks (<code>[question: ... | choices]</code>) are parsed and presented visually as standard markdown lists under the question text within the card (using Card V2's <code>MARKDOWN</code> syntax) rather than interactive buttons.</li>
+<li><strong>Emoji Reactions via User Credentials</strong>: A configurable <code>reaction_emoji</code> option allows the adapter to react with a specified emoji (unicode or custom) to every incoming user message. Since standard service accounts cannot perform reaction actions in Google Chat, this feature builds a separate <code>user_chat_service</code> utilizing user Application Default Credentials (ADC) to create the space reactions.</li>
+</ul>
+<h2 id="systemd-service-integration">Systemd Service Integration</h2>
+<p>To support running Kesoku as a continuous background daemon in production environments on Linux, the CLI provides a <code>service</code> command group implemented modularly inside <code>src/kesoku/cli/service.py</code>. This command group automates generating, registering, running, and removing the systemd unit file (<code>kesoku.service</code>).</p>
+<h3 id="service-subcommands-design">Service Subcommands Design</h3>
+<ul>
+<li><strong>Main Command</strong>: <code>kesoku service</code> (mounted as a sub-Typer application group)</li>
+<li><strong>Subcommands</strong>:</li>
+<li><code>install</code>: Generates and writes the systemd unit file, runs systemd <code>daemon-reload</code>, and automatically enables (<code>systemctl enable</code>) the service to configure boot-time auto-start (without starting the active service process immediately).<ul>
+<li>Options:</li>
+<li><code>-c / --config &lt;path&gt;</code>: Custom configuration file path (default: <code>config.toml</code>). Resolves to an absolute path and sets <code>WorkingDirectory</code> and <code>ExecStart</code> automatically.</li>
+<li><code>-e / --env KEY=VALUE</code>: Environment variables injected into the systemd unit definition (can be specified multiple times).</li>
+<li><code>--user / --system</code>: Configures as a user-level unit (default, target path: <code>~/.config/systemd/user/kesoku.service</code>) or system-level unit (target path: <code>/etc/systemd/system/kesoku.service</code>).</li>
+<li><code>--dry-run</code>: Prints the generated service unit file directly to stdout without writing.</li>
+<li>Environment Variable Inheritance:</li>
+<li>By default, the service installer inherits specific environment variables from the shell of execution if present: <code>PATH</code>, <code>HTTP_PROXY</code>, <code>HTTPS_PROXY</code>, <code>GOOGLE_API_KEY</code>, <code>GOOGLE_CLOUD_PROJECT</code>, <code>GOOGLE_CLOUD_LOCATION</code>, <code>GOOGLE_GENAI_USE_VERTEXAI</code>, and <code>DISCORD_TOKEN</code>. Users can override or append custom environment variables using the <code>-e</code> / <code>--env</code> options.</li>
+<li>Service Unit Optimizations:</li>
+<li><code>Restart=always</code>: Ensures the background daemon is always restarted by systemd upon clean exits, unclean crashes, or signal termination.</li>
+<li><code>RestartSec=5</code>: Introduces a safe 5-second restart delay to prevent tight crash loops.</li>
+<li><code>TimeoutStopSec=210</code>: Provides a generous 3.5-minute shutdown grace period, giving the autonomous agent ample time to complete active LLM iterations or atomic tool executions cleanly and persist its state.</li>
+<li><code>StandardOutput=journal</code> and <code>StandardError=journal</code>: Forces all stdout/stderr log streams to standard systemd <code>journald</code> infrastructure.</li>
+</ul>
+</li>
+<li><code>uninstall</code>: Stops and disables the service, removes the unit file from disk, and reloads systemd daemon.</li>
+<li><code>start</code>: Starts the background systemd service via <code>systemctl [--user] start kesoku</code>.</li>
+<li><code>stop</code>: Stops the background systemd service via <code>systemctl [--user] stop kesoku</code>.</li>
+<li><code>restart</code>: Restarts the background systemd service via <code>systemctl [--user] restart kesoku</code>.</li>
+<li><code>status</code>: Queries and displays the active runtime status of the background service via <code>systemctl [--user] status kesoku</code>.</li>
+<li><code>logs</code>: Displays or streams log output directly from <code>journald</code> using <code>journalctl</code>.<ul>
+<li>Options:</li>
+<li><code>-f / --follow</code>: Stream/follow live log output.</li>
+<li><code>-n / --lines &lt;int&gt;</code>: Show specified number of recent log lines (default: 50).</li>
+</ul>
+</li>
+</ul>
+<h2 id="configuration-schema-configtoml">Configuration Schema (<code>config.toml</code>)</h2>
+<p>Kesoku is centrally configured via a structured TOML file managed by Pydantic models in <code>src/kesoku/config.py</code>. Once loaded at CLI startup, the configuration acts as a global singleton accessible from any module via <code>get_config()</code>, avoiding the need to pass configuration objects across components.</p>
+<div class="highlight"><pre><span></span><code><span class="k">[workspace]</span>
+<span class="n">db_path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;kesoku.db&quot;</span>
+<span class="n">skills_dir</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;skills&quot;</span>
+<span class="n">sessions_dir</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;sessions&quot;</span>
+
+<span class="k">[agent]</span>
+<span class="n">llm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;gemini&quot;</span>
+
+<span class="k">[gemini]</span>
+<span class="n">model_name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;gemini-2.5-flash&quot;</span>
+<span class="n">auth_mode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;api_key&quot;</span><span class="w"> </span><span class="c1"># or &quot;vertex&quot;</span>
+<span class="n">api_key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;your-api-key&quot;</span><span class="w"> </span><span class="c1"># optional if GEMINI_API_KEY env var is set</span>
+<span class="n">project_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;gcp-project-id&quot;</span><span class="w"> </span><span class="c1"># for vertex mode</span>
+<span class="n">location</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;us-central1&quot;</span><span class="w"> </span><span class="c1"># for vertex mode</span>
+<span class="n">thinking_level</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;high&quot;</span><span class="w"> </span><span class="c1"># thinking level for reasoning (&#39;minimal&#39;, &#39;low&#39;, &#39;medium&#39;, &#39;high&#39;)</span>
+
+<span class="k">[claude]</span>
+<span class="n">model_name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;claude-3-5-sonnet@20241022&quot;</span>
+<span class="n">project_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;gcp-project-id&quot;</span><span class="w"> </span><span class="c1"># for Vertex AI</span>
+<span class="n">location</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;us-east5&quot;</span><span class="w"> </span><span class="c1"># for Vertex AI</span>
+
+<span class="k">[discord]</span>
+<span class="n">enabled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
+<span class="n">bot_token</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;discord-bot-token&quot;</span>
+<span class="n">chatbot_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;discord&quot;</span>
+<span class="n">user_allowlist</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;allowed_username&quot;</span><span class="p">]</span>
+
+<span class="c1"># Channel-specific configuration overrides</span>
+<span class="k">[[discord.channels]]</span>
+<span class="n">channels</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;channel_id_or_name&quot;</span><span class="p">]</span>
+<span class="n">llm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;claude&quot;</span>
+<span class="n">auto_thread</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
+
+<span class="k">[shell]</span>
+<span class="n">enabled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+<span class="n">use_shell</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
+<span class="n">mode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;blocklist&quot;</span>
+<span class="n">allowlist_patterns</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;^(echo|ls|pwd|cat|git|uv|grep|find|python|sed|awk)(</span><span class="se">\\</span><span class="s2">s|$)&quot;</span><span class="p">]</span>
+<span class="n">blocklist_patterns</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;(</span><span class="se">\\</span><span class="s2">b|^)(rm|sudo|shutdown|reboot|mkfs|dd|chmod|chown)(</span><span class="se">\\</span><span class="s2">b|</span><span class="se">\\</span><span class="s2">s|$)&quot;</span><span class="p">]</span>
+</code></pre></div>
+<h3 id="claude-llm-support-vertex-ai">Claude LLM Support (Vertex AI)</h3>
+<p>Kesoku supports Anthropic's Claude models hosted on Google Cloud Vertex AI. </p>
+<ul>
+<li><strong>Alternating Message Alignment</strong>: Converts and groups database historical turns to strictly comply with Anthropic's alternating user/assistant pattern.</li>
+<li><strong>Dynamic Tool Conversion</strong>: Automatically generates JSON tool schema definitions matching the Anthropic Tool Use specification from Python callables with docstrings and type annotations.</li>
+<li><strong>Parallel Multi-Tool Calls</strong>: Correlates and tracks concurrent tool calls and execution results using database message parent links as the <code>tool_use_id</code>.</li>
+</ul>
+<h2 id="autonomous-skill-system">Autonomous Skill System</h2>
+<p>Kesoku features an autonomous skill system that allows agents to dynamically discover and adopt specialized domain capabilities and prompt instructions during conversational sessions.</p>
+<h3 id="skill-architecture-self-contained-manifests">Skill Architecture &amp; Self-Contained Manifests</h3>
+<p>Skills are organized in subdirectories inside the configured <code>workspace.skills_dir</code> (default <code>skills/</code>). A skill is entirely defined by a self-contained <code>SKILL.md</code> file (or any <code>.md</code> file in the skill's root folder) containing YAML frontmatter enclosed in <code>---</code>.</p>
+<div class="highlight"><pre><span></span><code><span class="nn">---</span>
+<span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ai-image</span>
+<span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">AI image generation and editing.</span>
+<span class="nt">metadata</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">tags</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">aigc</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">gcp</span><span class="p p-Indicator">]</span>
+<span class="w">  </span><span class="nt">platforms</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">linux</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">darwin</span><span class="p p-Indicator">]</span>
+<span class="nn">---</span>
+</code></pre></div>
+<ul>
+<li><strong>Platform Filtering</strong>: If <code>platforms</code> is specified under <code>metadata</code>, <code>list_skills</code> evaluates the host OS (<code>platform.system().lower()</code>). If the current platform is not in the list, the skill is excluded. If <code>platforms</code> is omitted (<code>None</code>), the skill is treated as cross-platform and listed on all operating systems. If explicitly defined as empty (<code>[]</code>), the skill is excluded from all platforms.</li>
+</ul>
+<h3 id="native-tool-integration-script-robustness">Native Tool Integration &amp; Script Robustness</h3>
+<p>The skill manager exposes two native tools to the LLM:</p>
+<ol>
+<li><code>list_skills()</code>: Scans <code>skills_dir</code>, parses YAML frontmatter, filters by OS platform, and returns a summary of available skills.</li>
+<li><code>use_skill(skill_name: str)</code>: Returns the complete markdown instructions from the skill's <code>SKILL.md</code>. To ensure robust execution when a skill includes scripts or tools (e.g., <code>uv run scripts/script.py</code>), <code>use_skill</code> automatically prepends a prominent header with the exact absolute path to the skill directory, instructing the LLM to use absolute paths for all CLI command invocations.</li>
+</ol>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "search.suggest", "search.highlight", "content.code.copy"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>
