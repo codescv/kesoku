@@ -207,6 +207,10 @@ class ShellConfig(BaseModel):
         default_factory=lambda: [r"(\b|^)(rm|sudo|shutdown|reboot|mkfs|dd|chmod|chown)(\b|\s|$)"],
         description="Regex patterns for prohibited commands in blocklist mode",
     )
+    forbidden_patterns: dict[str, str] = Field(
+        default_factory=dict,
+        description="Mapping of regex patterns to custom error messages for forbidden commands",
+    )
     env: dict[str, str] = Field(
         default_factory=dict, description="Custom environment variables injected into subprocesses"
     )

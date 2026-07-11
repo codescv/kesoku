@@ -189,3 +189,9 @@ background_threshold_seconds = 300.0
 # Custom environment variables injected into subprocess execution environments.
 # PATH = "/usr/bin:/bin"
 
+
+[shell.forbidden_patterns]
+# Mapping of regex patterns to custom error messages.
+# If a command matches the regex, it is rejected and the custom error message is returned.
+# "ping" = "Ping is not allowed for security reasons."
+

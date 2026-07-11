@@ -56,6 +56,7 @@ Defines safety configurations for the shell command tool runner execution.
 *   **`mode`** (string, default: `"blocklist"`): Safe patterns evaluation strategy. Set to `"blocklist"` or `"allowlist"`.
 *   **`allowlist_patterns`** (list of regex, default: echo/pwd/git/uv/etc.): Regexes matching commands that are allowed to run.
 *   **`blocklist_patterns`** (list of regex, default: rm/sudo/shutdown/etc.): Regexes matching dangerous commands that will be rejected.
+*   **`forbidden_patterns`** (dictionary/table of regex to string): Regexes matching commands mapped to custom error messages. If a command matches, it is rejected and the custom error message is returned.
 
 ---
 

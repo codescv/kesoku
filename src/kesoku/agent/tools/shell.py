@@ -277,6 +277,11 @@ async def run_shell_command(
     if not config.shell.enabled:
         return "Execution denied: The shell command tool is disabled in configuration."
 
+    # Security Check: Forbidden patterns with custom error messages
+    for pattern, error_msg in config.shell.forbidden_patterns.items():
+        if re.search(pattern, command):
+            return error_msg
+
     # Security Check 1: Prohibited blocklist patterns
     for pattern in config.shell.blocklist_patterns:
         if re.search(pattern, command):

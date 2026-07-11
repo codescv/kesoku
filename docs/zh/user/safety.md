@@ -16,6 +16,10 @@ mode = "blocklist"
 allowlist_patterns = ["^(echo|ls|pwd|cat|git|uv|grep|find|python|sed|awk)(\\s|$)"]
 blocklist_patterns = ["(\\b|^)(rm|sudo|shutdown|reboot|mkfs|dd|chmod|chown)(\\b|\\s|$)"]
 background_threshold_seconds = 300.0
+
+[shell.forbidden_patterns]
+"ping" = "Ping is not allowed for security reasons."
+"curl.*evil\\.com" = "Access to evil.com is blocked."
 ```
 
 ### 参数详细说明：
@@ -35,6 +39,9 @@ background_threshold_seconds = 300.0
 5.  **`background_threshold_seconds`**（浮点数，默认：`300.0`）：
     允许命令在前台运行的最长时间（秒）。如果一条命令执行时间超过此阈值，系统会自动将其转为后台非阻塞任务，防止会话卡死。
 
+6.  **`forbidden_patterns`**（键值为正则表达式、Value 为错误信息的字典/映射表）：
+    自定义禁止命令正则及其对应的错误信息。若匹配成功，命令将被拒绝，并直接返回配置的自定义错误信息。
+
 ---
 
 ## ⚙️ 命令审查过滤流程
@@ -42,10 +49,11 @@ background_threshold_seconds = 300.0
 当 Agent 尝试运行一条 Shell 指令时：
 
 1.  系统去除命令首尾的空白字符。
-2.  **黑名单模式 (Blocklist Mode)**：
+2.  逐个用 `forbidden_patterns` 的键（正则表达式）去匹配该命令。一旦匹配成功，命令会**立即被拦截拒绝**，并直接返回对应的自定义错误信息。
+3.  **黑名单模式 (Blocklist Mode)**：
     *   逐个用 `blocklist_patterns` 里的正则去匹配该命令。
     *   一旦任一正则匹配成功（例如命令中包含 `sudo` 或试图运行 `rm` 删库），命令会**立即被拦截拒绝**，并向 Agent 返回安全警告。
-3.  **白名单模式 (Allowlist Mode)**：
+4.  **白名单模式 (Allowlist Mode)**：
     *   逐个用 `allowlist_patterns` 里的正则去匹配该命令。
     *   如果**没有任何**正则能匹配该命令，命令会**立即被拦截拒绝**。
-4.  如果命令通过安全检查，系统会在独立的子进程中执行该命令，并实时捕获其 `stdout` 与 `stderr` 流。
+5.  如果命令通过安全检查，系统会在独立的子进程中执行该命令，并实时捕获其 `stdout` 与 `stderr` 流。

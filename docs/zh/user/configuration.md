@@ -56,6 +56,7 @@ kesoku init -c config.toml
 *   **`mode`**（字符串，默认：`"blocklist"`）：指令匹配过滤策略。可选 `"blocklist"`（黑名单限制模式）或 `"allowlist"`（白名单模式）。
 *   **`allowlist_patterns`**（正则表达式列表，默认包含 echo/pwd/git/uv 等）：允许执行的命令行正则模式。
 *   **`blocklist_patterns`**（正则表达式列表，默认包含 rm/sudo/shutdown 等）：禁止执行的危险命令行正则模式。
+*   **`forbidden_patterns`**（键值为正则表达式、Value 为错误信息的字典/映射表）：匹配特定正则表达式的命令将被拒绝执行，并向 Agent 返回对应的自定义错误信息。
 
 ---
 

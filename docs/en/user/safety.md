@@ -16,6 +16,10 @@ mode = "blocklist"
 allowlist_patterns = ["^(echo|ls|pwd|cat|git|uv|grep|find|python|sed|awk)(\\s|$)"]
 blocklist_patterns = ["(\\b|^)(rm|sudo|shutdown|reboot|mkfs|dd|chmod|chown)(\\b|\\s|$)"]
 background_threshold_seconds = 300.0
+
+[shell.forbidden_patterns]
+"ping" = "Ping is not allowed for security reasons."
+"curl.*evil\\.com" = "Access to evil.com is blocked."
 ```
 
 ### Key Parameters:
@@ -35,6 +39,9 @@ background_threshold_seconds = 300.0
 5.  **`background_threshold_seconds`** (float, default: `300.0`):
     The maximum execution duration allowed for a command in the foreground. If a command runs longer than this threshold, it is automatically safely detached into a background execution job.
 
+6.  **`forbidden_patterns`** (table/dictionary of regex to string):
+    Custom mapping of regex patterns to custom error messages. Commands matching these patterns are blocked, and their mapped error message is returned to the agent.
+
 ---
 
 ## ⚙️ How Command Inspection Works
@@ -42,10 +49,11 @@ background_threshold_seconds = 300.0
 When the agent attempts to run a terminal command:
 
 1.  The command string is stripped of leading/trailing whitespaces.
-2.  In **Blocklist Mode**:
+2.  The command is evaluated against the keys of `forbidden_patterns`. If a match is found, execution is rejected immediately, and the corresponding custom error message is returned.
+3.  In **Blocklist Mode**:
     *   The command is evaluated against each pattern in `blocklist_patterns`.
     *   If any regex matches (e.g. command contains `sudo` or `rm -rf`), execution is rejected immediately, and a warning is returned to the agent.
-3.  In **Allowlist Mode**:
+4.  In **Allowlist Mode**:
     *   The command is evaluated against each pattern in `allowlist_patterns`.
     *   If **none** of the regexes match, execution is rejected immediately.
-4.  If approved, the command runs within a subprocess container, and its `stdout` and `stderr` streams are captured.
+5.  If approved, the command runs within a subprocess container, and its `stdout` and `stderr` streams are captured.
