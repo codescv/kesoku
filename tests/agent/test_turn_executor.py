@@ -560,11 +560,11 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     await gw.post(msg2)
     content2 = await run_turn(msg2)
 
-    # MUST NOT contain Sync Guidelines or Preferences
+    # MUST NOT contain Sync Guidelines, but MUST contain Preferences
     assert '<background_context type="sync_guidelines">' not in content2
     assert "view_message(message_id)" not in content2
     assert "User Preferences:" not in content2
-    assert "<instructions>" not in content2
+    assert "<instructions>\nPython\n</instructions>" in content2
     assert 'from="u1"' in content2
     assert 'timezone="' in content2
     assert "CRITICAL: The time" not in content2
@@ -619,9 +619,9 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     await gw.post(msg4)
     content4 = await run_turn(msg4)
 
-    # MUST NOT contain Sync Guidelines or Preferences
+    # MUST NOT contain Sync Guidelines, but MUST contain Preferences
     assert '<background_context type="sync_guidelines">' not in content4
-    assert "<instructions>" not in content4
+    assert "<instructions>\nPython\n</instructions>" in content4
 
     # --- TURN 5: Modulo-4 Preferences Injection Turn (turn_count=5) ---
     history = await gw.db.get_session_history("sess_dynamic")

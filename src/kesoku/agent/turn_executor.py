@@ -445,9 +445,8 @@ class TurnExecutor:
         # 1. Calculate if this is a Bootstrap Turn (first turn of session or idle > 30 mins)
         is_bootstrap = await self._is_bootstrap_turn(history, current_msg)
 
-        # 2. Read role-based preferences.md if needed (bootstrap turn or every 4 turns)
-        turn_count = await self._get_session_turns_count()
-        inject_preferences = is_bootstrap or (turn_count > 0 and turn_count % 4 == 1)
+        # 2. Read role-based preferences.md every turn
+        inject_preferences = True
         instructions_prefix = ""
         if inject_preferences and active_role:
             roles_dir = self.context.config.workspace.roles_dir
