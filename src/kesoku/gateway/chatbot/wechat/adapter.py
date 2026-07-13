@@ -987,7 +987,6 @@ You are interacting with the user via WeChat (Weixin).
                 "chat_type": chat_type,
                 "context_token": context_token,
             },
-            session_title=f"WeChat Session: {text[:30]}",
             custom_prompt=custom_prompt,
             role=role,
         )
@@ -1241,3 +1240,7 @@ You are interacting with the user via WeChat (Weixin).
             }
         )
         return last_message_id
+
+    async def is_dm_channel(self, channel_id: str) -> bool:
+        """Check if the given channel is a DM channel (not a chatroom)."""
+        return not channel_id.endswith("@chatroom")

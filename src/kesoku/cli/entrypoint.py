@@ -8,19 +8,14 @@ import json
 import logging
 import os
 import sys
-import time
-import tomllib
 from typing import Annotated
 
-import tomli_w
 import typer
 from rich.console import Console
-from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 
 from kesoku.agent.agent import Agent
-from kesoku.agent.tools import sanitize_key, validate_key
 from kesoku.cli.chat import run_cli_chat_async
-from kesoku.cli.context import context_app
+from kesoku.cli.history import history_app
 from kesoku.cli.service import service_app
 from kesoku.config import get_config, init_config, init_roles, init_skills, load_config
 from kesoku.cron import CronManager
@@ -28,7 +23,6 @@ from kesoku.db import DatabaseManager
 from kesoku.gateway.chatbot.cronjob import CronjobChatbot
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import configure_logging, setup_logger
-from kesoku.utils import embedding
 
 # Setup global colored logging configuration
 configure_logging(logging.INFO)
@@ -41,432 +35,8 @@ app.add_typer(service_app, name="service")
 wechat_app = typer.Typer(help="Manage WeChat chatbot integration.")
 app.add_typer(wechat_app, name="wechat")
 
-memory_app = typer.Typer(help="Inspect, audit, and configure agent memories.")
-app.add_typer(memory_app, name="memory")
 
-app.add_typer(context_app, name="context")
-
-
-@memory_app.command("list")
-def cli_memory_list(
-    category: Annotated[str | None, typer.Argument(help="Memory category (e.g., progress, memo)")] = None,
-    role: Annotated[str, typer.Option("-r", "--role", help="Optional roleplay persona scope")] = "default",
-    config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
-) -> None:
-    """List all active memory keys in the given category, or list all permitted categories if category is omitted."""
-    load_config(config)
-    cfg = get_config()
-    db = DatabaseManager(cfg.workspace.db_path)
-    db.verify_db()
-
-    console = Console()
-
-    if not category:
-        allowed = db.get_allowed_memory_categories()
-        console.print("\n[bold green]=== Permitted & Active Categories ===[/bold green]")
-        core = {"progress"}
-        for cat in sorted(list(allowed)):
-            if cat in core:
-                console.print(f"  - [cyan]{cat}[/cyan] [yellow](Standard)[/yellow]")
-            else:
-                console.print(f"  - [cyan]{cat}[/cyan] [magenta](Custom)[/magenta]")
-        return
-
-    memories = db.get_agent_memories(category=category, role=role)
-    if not memories:
-        typer.echo(f"No memories found in category '{category}' for role scope '{role}'.")
-        return
-
-    console.print(f"\n[bold green]=== Memories in '{category}' (scope: {role}) ===[/bold green]")
-    for m in memories:
-        updated_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m["updated_at"]))
-        console.print(
-            f"  - key: [cyan]{m['key']}[/cyan] | "
-            f'title: "[bold]{m["title"]}[/bold]" | '
-            f"scope: [yellow]{m['role']}[/yellow] | "
-            f"updated: {updated_str}"
-        )
-
-
-@memory_app.command("view")
-def cli_memory_view(
-    category: Annotated[str, typer.Argument(help="Memory category (e.g., progress, memo)")],
-    key: Annotated[str | None, typer.Argument(help="Unique memory key. Omit to view all category entries.")] = None,
-    role: Annotated[str, typer.Option("-r", "--role", help="Optional roleplay persona scope")] = "default",
-    config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
-) -> None:
-    """Retrieve the details of a specific memory key, or render all entries dynamically."""
-    load_config(config)
-    cfg = get_config()
-    db = DatabaseManager(cfg.workspace.db_path)
-    db.verify_db()
-
-    console = Console()
-
-    if key:
-        if not validate_key(key):
-            typer.echo(
-                f"Error: Invalid Key '{key}'.\n"
-                "Memory keys must strictly contain only lowercase letters, "
-                "underscores, and numbers (regex: ^[a-z0-9_]+$)."
-            )
-            sys.exit(1)
-        sanitized = sanitize_key(key)
-        mem = db.get_agent_memory(category=category, key=sanitized, role=role)
-        if not mem:
-            typer.echo(f"No memory found for category='{category}', key='{sanitized}', role='{role}'.")
-            return
-        console.print(
-            f"\n[bold green]=== Memory: {mem['title']} (key: {mem['key']}, scope: {mem['role']}) ===[/bold green]"
-        )
-        console.print(mem["content"])
-        return
-
-    memories = db.get_agent_memories(category=category, role=role)
-    if not memories:
-        typer.echo(f"No memories found in category '{category}' for role scope '{role}'.")
-        return
-
-    console.print(f"\n[bold green]# Category: {category} (scope: {role})[/bold green]")
-    for m in memories:
-        console.print(f"\n[bold cyan]## {m['title']} (key: {m['key']}, scope: {m['role']})[/bold cyan]")
-        console.print(m["content"].strip())
-
-
-@memory_app.command("update")
-def cli_memory_update(
-    category: Annotated[str, typer.Argument(help="Memory category (e.g., progress, memo)")],
-    key: Annotated[str, typer.Argument(help="Unique memory key")],
-    title: Annotated[str, typer.Argument(help="Human-readable title or label")],
-    content: Annotated[str, typer.Argument(help="Markdown or JSON content payload")],
-    role: Annotated[str, typer.Option("-r", "--role", help="Optional roleplay persona scope")] = "default",
-    create_category: Annotated[
-        bool, typer.Option("--create-category", help="Override validation to create a new category")
-    ] = False,
-    config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
-) -> None:
-    """Create or update a memory record atomically."""
-    load_config(config)
-    cfg = get_config()
-    db = DatabaseManager(cfg.workspace.db_path)
-    db.verify_db()
-
-    allowed = db.get_allowed_memory_categories()
-    if category not in allowed and not create_category:
-        typer.echo(
-            f"Error: Category '{category}' is not recognized.\n"
-            f"Permitted categories: {sorted(list(allowed))}.\n"
-            "Use '--create-category' to explicitly force creation of a new category."
-        )
-        sys.exit(1)
-
-    if not validate_key(key):
-        typer.echo(
-            f"Error: Invalid Key '{key}'.\n"
-            "Memory keys must strictly contain only lowercase letters, underscores, and numbers (regex: ^[a-z0-9_]+$)."
-        )
-        sys.exit(1)
-
-    sanitized = sanitize_key(key)
-    db.upsert_agent_memory(
-        category=category,
-        key=sanitized,
-        title=title,
-        content=content,
-        role=role,
-    )
-    Console().print(
-        f"\n[bold green]Memory successfully updated![/bold green] "
-        f"(key: [cyan]{sanitized}[/cyan], scope: [yellow]{role}[/yellow])"
-    )
-
-
-@memory_app.command("delete")
-def cli_memory_delete(
-    category: Annotated[str, typer.Argument(help="Memory category (e.g., progress, memo)")],
-    key: Annotated[str, typer.Argument(help="Unique memory key")],
-    role: Annotated[str, typer.Option("-r", "--role", help="Optional roleplay persona scope")] = "default",
-    config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
-) -> None:
-    """Delete a specific memory record."""
-    load_config(config)
-    cfg = get_config()
-    db = DatabaseManager(cfg.workspace.db_path)
-    db.verify_db()
-
-    if not validate_key(key):
-        typer.echo(
-            f"Error: Invalid Key '{key}'.\n"
-            "Memory keys must strictly contain only lowercase letters, underscores, and numbers (regex: ^[a-z0-9_]+$)."
-        )
-        sys.exit(1)
-
-    sanitized = sanitize_key(key)
-    mem = db.get_agent_memory(category=category, key=sanitized, role=role)
-    if not mem:
-        typer.echo(f"No memory entry found for category='{category}', key='{sanitized}', role='{role}'.")
-        return
-
-    db.delete_agent_memory(category=category, key=sanitized, role=role)
-    Console().print(
-        f"\n[bold green]Memory successfully deleted![/bold green] "
-        f"(category: [cyan]{category}[/cyan], "
-        f"key: [cyan]{sanitized}[/cyan], "
-        f"scope: [yellow]{role}[/yellow])"
-    )
-
-
-@memory_app.command("export")
-def cli_memory_export(
-    output_path: Annotated[str, typer.Argument(help="Target filepath to save the exported TOML file")],
-    config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
-) -> None:
-    """Export all agent memories from SQLite database into a structured TOML file."""
-    load_config(config)
-    cfg = get_config()
-    db = DatabaseManager(cfg.workspace.db_path)
-    db.verify_db()
-
-    console = Console()
-
-    try:
-        memories = db.get_agent_memories()
-        if not memories:
-            console.print("[bold yellow]No memories found in database to export.[/bold yellow]")
-            return
-
-        # Restructure into a nested dict: role -> category -> key -> data
-        export_data = {}
-        for m in memories:
-            role = m["role"]
-            cat = m["category"]
-            key = m["key"]
-
-            export_data.setdefault(role, {}).setdefault(cat, {})[key] = {
-                "title": m["title"],
-                "content": m["content"],
-                "updated_at": m["updated_at"],
-            }
-
-        # Ensure parent directories exist
-        target_path = os.path.abspath(output_path)
-        parent_dir = os.path.dirname(target_path)
-        if parent_dir:
-            os.makedirs(parent_dir, exist_ok=True)
-
-        # Serialize to TOML
-        with open(target_path, "wb") as f:
-            tomli_w.dump(export_data, f)
-
-        console.print(
-            f"\n[bold green]Successfully exported {len(memories)} memory records to TOML![/bold green]\n"
-            f"  File: [cyan]{target_path}[/cyan]"
-        )
-    except Exception as e:
-        console.print(f"[bold red]Error exporting memories: {e}[/bold red]")
-        sys.exit(1)
-
-
-@memory_app.command("import")
-def cli_memory_import(
-    input_path: Annotated[str, typer.Argument(help="Target filepath to read the imported TOML file")],
-    create_category: Annotated[
-        bool, typer.Option("--create-category", help="Override validation to create new categories if they don't exist")
-    ] = False,
-    config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
-) -> None:
-    """Import agent memories from a structured TOML file into the SQLite database."""
-    load_config(config)
-    cfg = get_config()
-    db = DatabaseManager(cfg.workspace.db_path)
-    db.verify_db()
-
-    console = Console()
-
-    if not os.path.exists(input_path):
-        console.print(f"[bold red]Error: File not found: {input_path}[/bold red]")
-        sys.exit(1)
-
-    try:
-        with open(input_path, "rb") as f:
-            import_data = tomllib.load(f)
-    except tomllib.TOMLDecodeError as e:
-        console.print(f"[bold red]Error: Invalid TOML format: {e}[/bold red]")
-        sys.exit(1)
-    except Exception as e:
-        console.print(f"[bold red]Error reading file: {e}[/bold red]")
-        sys.exit(1)
-
-    if not isinstance(import_data, dict):
-        console.print("[bold red]Error: Top-level structure of TOML must be a table.[/bold red]")
-        sys.exit(1)
-
-    allowed_categories = db.get_allowed_memory_categories()
-    valid_records = []
-
-    for role, categories in import_data.items():
-        if not isinstance(categories, dict):
-            console.print(f"[bold red]Error: Role '{role}' must map to a category table.[/bold red]")
-            sys.exit(1)
-        for category, keys in categories.items():
-            if not isinstance(keys, dict):
-                console.print(
-                    f"[bold red]Error: Category '{category}' under role '{role}' must map to a key table.[/bold red]"
-                )
-                sys.exit(1)
-
-            if category not in allowed_categories and not create_category:
-                console.print(
-                    f"[bold red]Error: Category '{category}' under role '{role}' is not recognized.[/bold red]\n"
-                    f"Permitted categories: {sorted(list(allowed_categories))}.\n"
-                    "Use '--create-category' to explicitly force importing unknown categories."
-                )
-                sys.exit(1)
-
-            for key, record in keys.items():
-                if not isinstance(record, dict):
-                    console.print(
-                        f"[bold red]Error: Key '{key}' under category '{category}' "
-                        f"and role '{role}' must map to a table.[/bold red]"
-                    )
-                    sys.exit(1)
-
-                if not validate_key(key):
-                    console.print(
-                        f"[bold red]Error: Invalid Key '{key}' under category '{category}' "
-                        f"and role '{role}'.[/bold red]\n"
-                        "Memory keys must strictly contain only lowercase letters, "
-                        "underscores, and numbers (regex: ^[a-z0-9_]+$)."
-                    )
-                    sys.exit(1)
-
-                if "title" not in record or not isinstance(record["title"], str):
-                    console.print(
-                        f"[bold red]Error: Record '{role}.{category}.{key}' "
-                        "is missing 'title' or it is not a string.[/bold red]"
-                    )
-                    sys.exit(1)
-                if "content" not in record or not isinstance(record["content"], str):
-                    console.print(
-                        f"[bold red]Error: Record '{role}.{category}.{key}' "
-                        "is missing 'content' or it is not a string.[/bold red]"
-                    )
-                    sys.exit(1)
-
-                sanitized = sanitize_key(key)
-
-                valid_records.append(
-                    {
-                        "role": role,
-                        "category": category,
-                        "key": sanitized,
-                        "title": record["title"],
-                        "content": record["content"],
-                    }
-                )
-
-    try:
-        for rec in valid_records:
-            db.upsert_agent_memory(
-                category=rec["category"],
-                key=rec["key"],
-                title=rec["title"],
-                content=rec["content"],
-                role=rec["role"],
-            )
-
-        console.print(
-            f"\n[bold green]Successfully imported {len(valid_records)} memory records from TOML![/bold green]"
-        )
-    except Exception as e:
-        console.print(f"[bold red]Error importing memories: {e}[/bold red]")
-        sys.exit(1)
-
-
-@memory_app.command("rebuild-index")
-def cli_memory_rebuild_index(
-    config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
-    force: Annotated[
-        bool, typer.Option("--force", help="Force rebuild of all embeddings, not just missing ones")
-    ] = False,
-) -> None:
-    """Generate and store embeddings for all unindexed memories and messages."""
-    console = Console()
-    cfg = load_config(config)
-    db = DatabaseManager(cfg.workspace.db_path)
-    db.verify_db()
-
-    try:
-        if force:
-            console.print("[bold yellow]Force mode enabled. Clearing all existing embeddings...[/bold yellow]")
-            with db.connection_provider.connection() as conn:
-                with conn:
-                    conn.execute("UPDATE agent_memories SET embedding = NULL")
-                    conn.execute("DELETE FROM message_chunks")
-            console.print("[bold green]Existing embeddings cleared.[/bold green]")
-
-        unindexed_memories = db.get_unindexed_memories()
-        unindexed_messages = db.get_unindexed_messages()
-
-        total_mem = len(unindexed_memories)
-        total_msg = len(unindexed_messages)
-
-        if total_mem == 0 and total_msg == 0:
-            console.print("[bold green]All memories and messages are already fully indexed![/bold green]")
-            return
-
-        console.print(
-            f"Found [bold]{total_mem}[/bold] unindexed memories and [bold]{total_msg}[/bold] unindexed messages."
-        )
-        console.print("Initializing local embedding model (fastembed)...")
-        embedding.get_embedding_model()
-
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            TextColumn("({task.completed}/{task.total})"),
-        ) as progress:
-            if total_mem > 0:
-                task_mem = progress.add_task("[cyan]Indexing memories...", total=total_mem)
-                mem_texts = [f"{m['title']}\n{m['content']}" for m in unindexed_memories]
-                embs = embedding.get_embeddings(mem_texts)
-                for m, emb in zip(unindexed_memories, embs):
-                    db.update_memory_embedding(m["id"], embedding.vector_to_bytes(emb))
-                    progress.advance(task_mem)
-
-            if total_msg > 0:
-                from kesoku.utils.text import chunk_message_text
-
-                task_msg = progress.add_task("[green]Indexing messages...", total=total_msg)
-                batch_size = 32
-                for i in range(0, total_msg, batch_size):
-                    batch = unindexed_messages[i : i + batch_size]
-                    chunks_to_embed = []
-                    for msg in batch:
-                        chunks = chunk_message_text(msg["content"], threshold=80)
-                        for idx, chunk_content in enumerate(chunks):
-                            chunks_to_embed.append((msg["id"], idx, chunk_content))
-
-                    if chunks_to_embed:
-                        texts = [c[2] for c in chunks_to_embed]
-                        embs = embedding.get_embeddings(texts)
-
-                        chunks_data = []
-                        for (msg_id, idx, content), emb in zip(chunks_to_embed, embs):
-                            emb_bytes = embedding.vector_to_bytes(emb)
-                            chunks_data.append((msg_id, idx, content, emb_bytes))
-
-                        db.save_message_chunks_batch(chunks_data)
-
-                    progress.advance(task_msg, advance=len(batch))
-
-        console.print("[bold green]✓ Index rebuilding completed successfully![/bold green]")
-    except Exception as e:
-        console.print(f"[bold red]Error rebuilding index: {e}[/bold red]")
-        sys.exit(1)
-
+app.add_typer(history_app, name="history")
 
 
 @wechat_app.command("pair")
@@ -631,21 +201,10 @@ def init_cmd(
 def chat_cmd(
     message: Annotated[str | None, typer.Argument(help="Message to send to the agent")] = None,
     config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
-    list_sessions: Annotated[
-        bool, typer.Option("-l", "--list-sessions", help="List all current chat sessions")
-    ] = False,
     resume: Annotated[
         str | None, typer.Option("-r", "--resume", metavar="SESSION_ID", help="Resume a specific session by ID")
     ] = None,
     resume_latest: Annotated[bool, typer.Option("-z", "--resume-latest", help="Resume the latest session")] = False,
-    show_history: Annotated[
-        str | None,
-        typer.Option("-s", "--show-history", metavar="SESSION_ID", help="Show full chat history of a session"),
-    ] = None,
-    grouped: Annotated[
-        bool,
-        typer.Option("-g", "--grouped", help="Sort history by grouping tool call and result together"),
-    ] = False,
 ) -> None:
     """Chat with Kesoku Agent in one-shot session mode."""
     load_config(config)
@@ -653,11 +212,8 @@ def chat_cmd(
         asyncio.run(
             run_cli_chat_async(
                 message=message,
-                list_sessions=list_sessions,
                 resume=resume,
                 resume_latest=resume_latest,
-                show_history=show_history,
-                grouped=grouped,
             )
         )
     except KeyboardInterrupt:

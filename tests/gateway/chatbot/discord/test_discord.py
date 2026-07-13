@@ -1458,7 +1458,7 @@ async def test_on_message_resolves_and_passes_role(mock_config: KesokuConfig, mo
             # Verify create_session was called with the inherited role "asuka" passed correctly
             mock_gateway.create_session.assert_called_once()
             call_kwargs = mock_gateway.create_session.call_args[1]
-            assert call_kwargs["title"] == "test_thread"
+            assert call_kwargs["title"] == "Hello, I am starting a new con"
             assert "Discord Instructions" in call_kwargs["custom_prompt"]
             assert call_kwargs["created_at"] == msg.created_at.timestamp()
             assert call_kwargs["chatbot_id"] == "discord_test"

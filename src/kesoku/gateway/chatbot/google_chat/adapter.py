@@ -422,7 +422,6 @@ class GoogleChatChatbot(Chatbot):
                 "google_chat_sender_email": sender_email,
                 "sender_name": f"{sender_name} (Email: {sender_email})" if sender_email else sender_name,
             },
-            session_title=f"Google Chat Session: {text[:30]}",
             custom_prompt=custom_prompt,
             role=role,
         )

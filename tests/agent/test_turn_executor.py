@@ -533,7 +533,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     # MUST contain Consolidated Sync Guidelines and Preferences
     assert '<background_context type="sync_guidelines">' in content1
     assert "view_message(message_id)" in content1
-    assert "memory_search(query)" in content1
+    assert "chat_search(query)" in content1
     assert "User Preferences:" not in content1
     assert "<instructions>\nPython\n</instructions>" in content1
     assert 'from="u1"' in content1
@@ -592,7 +592,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
     # MUST contain Consolidated Sync Guidelines and Preferences again due to idle resumption
     assert '<background_context type="sync_guidelines">' in content3
     assert "view_message(message_id)" in content3
-    assert "memory_search(query)" in content3
+    assert "chat_search(query)" in content3
     assert "User Preferences:" not in content3
     assert "<instructions>\nPython\n</instructions>" in content3
     assert 'from="u1"' in content3

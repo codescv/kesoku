@@ -184,7 +184,7 @@ async def test_wechat_chatbot_process_message(
         # Verify new session creation
         mock_gateway.create_session.assert_called_once()
         create_args = mock_gateway.create_session.call_args[1]
-        assert "WeChat Session" in create_args["title"]
+        assert create_args["title"] == "Default DM Session on wechat_test"
         assert "WeChat Platforms Instructions" in create_args["custom_prompt"]
 
         # Verify gateway.post
@@ -329,7 +329,7 @@ async def test_wechat_chatbot_slash_command_clear(
         # Verify new session creation was triggered via gateway
         mock_gateway.create_session.assert_called_once_with(
             session_id=None,
-            title="New Session",
+            title="Default DM Session on wechat_test",
             chatbot_id="wechat_test",
             channel_id="user_alice",
         )

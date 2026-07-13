@@ -1,18 +1,12 @@
 """Registry and skill tools package for Kesoku AI Agent."""
 
+from kesoku.agent.tools.file import update_file
 from kesoku.agent.tools.media import analyze_media
 from kesoku.agent.tools.memory import (
-    MAX_MEMORY_CONTENT_LENGTH,
-    delete_memory,
-    list_memories,
+    chat_search,
     list_skills,
-    memory_search,
-    sanitize_key,
     skill_manager,
-    update_memory,
     use_skill,
-    validate_key,
-    view_memory,
     view_message,
 )
 from kesoku.agent.tools.registry import (
@@ -42,15 +36,8 @@ __all__ = [
     "analyze_media",
     "list_skills",
     "use_skill",
-    "list_memories",
-    "view_memory",
-    "update_memory",
-    "delete_memory",
-
-    "memory_search",
+    "chat_search",
     "view_message",
-    "sanitize_key",
-    "validate_key",
-    "MAX_MEMORY_CONTENT_LENGTH",
     "skill_manager",
+    "update_file",
 ]

@@ -34,24 +34,6 @@ which is still SERIAL.
 """
 
 
-MEMORY_AND_HISTORY_INSTRUCTIONS = """
-# Active Memory System (AMS)
-This is your **active memory**. You actively initiate storing, reading, or pruning structured
-long-term facts and project states that persist across sessions.
-Do NOT write raw chat history to this system.
-
-Related Tools: `view_memory`, `list_memories`, `update_memory`, `memory_search`.
-
-Every memory entry has a **category** and a **key**.
-
-You can only use the following categories:
-1. `progress`: Active user project progression, reading positions, milestones, and study next steps.
-   One entry per project.
-2. `memo`: Record of important, interesting, or noteworthy events for the user. DO NOT write chores.
-
-Memory keys must strictly contain ONLY lowercase letters, underscores, and numbers.
-e.g.: {short_event_description}_{yyyymmdd}
-"""
 
 
 BACKGROUND_EXECUTION_INSTRUCTIONS = """
@@ -154,7 +136,6 @@ Unless the user explicitly instructs otherwise, do not refer to any file outside
         [
             OUTPUT_FORMATTING_INSTRUCTIONS.strip(),
             TOOL_CALLING_INSTRUCTIONS.strip(),
-            MEMORY_AND_HISTORY_INSTRUCTIONS.strip(),
             BACKGROUND_EXECUTION_INSTRUCTIONS.strip(),
         ]
     )

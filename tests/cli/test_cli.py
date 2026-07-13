@@ -132,7 +132,7 @@ def test_cli_chat_workflow(mock_gemini: Any, tmp_path: Any) -> None:
     runner.invoke(app, ["init", "-w", str(tmp_path)])
 
     # 1. Check empty session list
-    res_list_empty = runner.invoke(app, ["chat", "-c", str(config_path), "-l"])
+    res_list_empty = runner.invoke(app, ["history", "list", "-c", str(config_path)])
     assert res_list_empty.exit_code == 0
     assert "No chat sessions found" in res_list_empty.stdout
 
@@ -142,7 +142,7 @@ def test_cli_chat_workflow(mock_gemini: Any, tmp_path: Any) -> None:
     assert "Please provide a message" in res_no_args.stdout
 
     # 3. Start a new chat session with patched backend
-    res_chat1 = runner.invoke(app, ["chat", "-c", str(config_path), "Calculate 10 + 20"])
+    res_chat1 = runner.invoke(app, ["chat", "-c", str(config_path), "Calc"])
     assert res_chat1.exit_code == 0
     plain_chat1 = strip_ansi(res_chat1.stdout)
     assert "Started new session" in plain_chat1
@@ -155,11 +155,11 @@ def test_cli_chat_workflow(mock_gemini: Any, tmp_path: Any) -> None:
     session_id = match.group(1)
 
     # 4. Check session list contains the new session
-    res_list = runner.invoke(app, ["chat", "-c", str(config_path), "-l"])
+    res_list = runner.invoke(app, ["history", "list", "-c", str(config_path)])
     assert res_list.exit_code == 0
     plain_list = strip_ansi(res_list.stdout)
     assert session_id in plain_list
-    assert "Calculate 10 + 20" in plain_list
+    assert "Calc" in plain_list
 
     # 5. Resume specific session
     res_resume = runner.invoke(app, ["chat", "-c", str(config_path), "-r", session_id, "And multiply by 2"])
@@ -170,19 +170,19 @@ def test_cli_chat_workflow(mock_gemini: Any, tmp_path: Any) -> None:
     assert res_latest.exit_code == 0
     assert f"Resuming latest session: '{session_id}'" in strip_ansi(res_latest.stdout)
 
-    # 7. Show history (--show-history)
-    res_history = runner.invoke(app, ["chat", "-c", str(config_path), "--show-history", session_id])
+    # 7. Show history (history show)
+    res_history = runner.invoke(app, ["history", "show", session_id, "-c", str(config_path)])
     assert res_history.exit_code == 0
     plain_history = strip_ansi(res_history.stdout)
     assert f"Chat History for Session '{session_id}'" in plain_history
-    assert "Calculate 10 + 20" in plain_history
+    assert "Calc" in plain_history
     assert "And multiply by 2" in plain_history
     assert "And add 5" in plain_history
 
-    # 8. Show history (-s short flag)
-    res_history_short = runner.invoke(app, ["chat", "-c", str(config_path), "-s", session_id])
-    assert res_history_short.exit_code == 0
-    assert f"Chat History for Session '{session_id}'" in strip_ansi(res_history_short.stdout)
+    # 8. Show history grouped (-g flag)
+    res_history_grouped = runner.invoke(app, ["history", "show", session_id, "-g", "-c", str(config_path)])
+    assert res_history_grouped.exit_code == 0
+    assert f"Chat History for Session '{session_id}'" in strip_ansi(res_history_grouped.stdout)
 
 
 def test_cli_service_non_supported_platform() -> None:
@@ -753,164 +753,102 @@ def test_cli_service_named_instances() -> None:
         assert "kesoku-custom-inst" in disable_call[1][0]
 
 
-def test_cli_memory_export(tmp_path: Any) -> None:
-    """Test 'kesoku memory export' subcommand using Typer runner."""
+def test_cli_history_list(tmp_path: Any) -> None:
+    """Test 'kesoku history list' subcommand."""
+    from kesoku.db import DatabaseManager, Session
+    runner.invoke(app, ["init", "-w", str(tmp_path)])
     config_path = tmp_path / "config.toml"
     db_path = tmp_path / "kesoku.db"
-    export_path = tmp_path / "exported_memory.toml"
 
-    # Initialize workspace
-    runner.invoke(app, ["init", "-w", str(tmp_path)])
+    db = DatabaseManager(str(db_path))
 
-    # Seed some mock memories directly into the DB
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        """
-        INSERT INTO agent_memories (category, key, title, content, updated_at, role)
-        VALUES ('progress', 'standard_japanese', '标日', '第22课', 123.45, 'default')
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO agent_memories (category, key, title, content, updated_at, role)
-        VALUES ('notes', 'funny_event', 'Funny', 'Haha', 678.90, 'asuka')
-        """
-    )
-    conn.commit()
-    conn.close()
+    # Create a session
+    sess = Session(id="sess_123", title="Test Session", created_at=100.0, updated_at=200.0, role_name="coder")
+    db.create_session(sess)
 
-    # Invoke export subcommand
-    result = runner.invoke(app, ["memory", "export", "-c", str(config_path), str(export_path)])
+    result = runner.invoke(app, ["history", "list", "-c", str(config_path)])
     assert result.exit_code == 0
-    assert "Successfully exported 2 memory records to TOML" in strip_ansi(result.stdout)
-    assert os.path.exists(export_path)
-
-    # Verify exported TOML file contents
-    import tomllib
-
-    with open(export_path, "rb") as f:
-        exported_data = tomllib.load(f)
-
-    assert "default" in exported_data
-    assert "progress" in exported_data["default"]
-    assert "standard_japanese" in exported_data["default"]["progress"]
-    assert exported_data["default"]["progress"]["standard_japanese"]["title"] == "标日"
-    assert exported_data["default"]["progress"]["standard_japanese"]["content"] == "第22课"
-    assert exported_data["default"]["progress"]["standard_japanese"]["updated_at"] == 123.45
-
-    assert "asuka" in exported_data
-    assert "notes" in exported_data["asuka"]
-    assert "funny_event" in exported_data["asuka"]["notes"]
-    assert exported_data["asuka"]["notes"]["funny_event"]["title"] == "Funny"
-    assert exported_data["asuka"]["notes"]["funny_event"]["content"] == "Haha"
-    assert exported_data["asuka"]["notes"]["funny_event"]["updated_at"] == 678.90
+    output = strip_ansi(result.stdout)
+    assert "sess_123" in output
+    assert "Test Session" in output
+    assert "coder" in output
 
 
-def test_cli_memory_import(tmp_path: Any) -> None:
-    """Test 'kesoku memory import' subcommand."""
+def test_cli_history_show(tmp_path: Any) -> None:
+    """Test 'kesoku history show' subcommand."""
+    from kesoku.constants import MessageRole, MessageStatus, MessageType
+    from kesoku.db import DatabaseManager, Message, Session
+    runner.invoke(app, ["init", "-w", str(tmp_path)])
     config_path = tmp_path / "config.toml"
     db_path = tmp_path / "kesoku.db"
-    import_path = tmp_path / "import_memory.toml"
 
-    # Initialize workspace
-    runner.invoke(app, ["init", "-w", str(tmp_path)])
+    db = DatabaseManager(str(db_path))
 
-    # Create a valid TOML file to import
-    valid_toml = """
-[default.progress.japanese_study]
-title = "Japanese Study Progress"
-content = "Studying N3 grammar."
-updated_at = 99999.9
-
-[asuka.memo.favorite_food]
-title = "Favorite Food"
-content = "Melon pan"
-"""
-    import_path.write_text(valid_toml, encoding="utf-8")
-
-    # 1. Import valid memories (standard categories)
-    result = runner.invoke(app, ["memory", "import", "-c", str(config_path), str(import_path)])
-    assert result.exit_code == 0
-    assert "Successfully imported 2 memory records from TOML" in strip_ansi(result.stdout)
-
-    # Verify inside DB
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT * FROM agent_memories WHERE role = 'default' AND category = 'progress' AND key = 'japanese_study'"
+    sess = Session(id="sess_123", title="Test Session", created_at=100.0, updated_at=200.0, role_name="coder")
+    db.create_session(sess)
+    msg = Message(
+        id="m1",
+        session_id="sess_123",
+        chatbot_id="cli",
+        channel_id="cli_local",
+        sender="User",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Hello world message",
+        timestamp=150.0,
+        status=MessageStatus.PROCESSED,
     )
-    row = cursor.fetchone()
-    assert row is not None
-    assert row["title"] == "Japanese Study Progress"
-    assert row["content"] == "Studying N3 grammar."
+    db.save_message(msg)
 
-    cursor.execute("SELECT * FROM agent_memories WHERE role = 'asuka' AND category = 'memo' AND key = 'favorite_food'")
-    row = cursor.fetchone()
-    assert row is not None
-    assert row["title"] == "Favorite Food"
-    assert row["content"] == "Melon pan"
-    conn.close()
-
-    # 2. Attempt to import unknown category without --create-category
-    invalid_cat_toml = """
-[default.custom_cat.my_key]
-title = "Custom Title"
-content = "Custom Content"
-"""
-    import_path.write_text(invalid_cat_toml, encoding="utf-8")
-    result = runner.invoke(app, ["memory", "import", "-c", str(config_path), str(import_path)])
-    assert result.exit_code == 1
-    assert "is not recognized" in strip_ansi(result.stdout)
-
-    # 3. Import unknown category WITH --create-category
-    result = runner.invoke(app, ["memory", "import", "--create-category", "-c", str(config_path), str(import_path)])
+    result = runner.invoke(app, ["history", "show", "sess_123", "-c", str(config_path)])
     assert result.exit_code == 0
-    assert "Successfully imported 1 memory records from TOML" in strip_ansi(result.stdout)
-
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM agent_memories WHERE category = 'custom_cat' AND key = 'my_key'")
-    row = cursor.fetchone()
-    assert row is not None
-    conn.close()
-
-    # 4. Import invalid TOML format (syntax error)
-    syntax_error_toml = """
-[default.progress.key
-title = "Missing bracket"
-"""
-    import_path.write_text(syntax_error_toml, encoding="utf-8")
-    result = runner.invoke(app, ["memory", "import", "-c", str(config_path), str(import_path)])
-    assert result.exit_code == 1
-    assert "Invalid TOML format" in strip_ansi(result.stdout)
-
-    # 5. Import TOML with invalid structure (e.g. missing title)
-    missing_title_toml = """
-[default.progress.no_title]
-content = "Just content, no title"
-"""
-    import_path.write_text(missing_title_toml, encoding="utf-8")
-    result = runner.invoke(app, ["memory", "import", "-c", str(config_path), str(import_path)])
-    assert result.exit_code == 1
-    assert "is missing 'title'" in strip_ansi(result.stdout)
-
-    # 6. Import TOML with invalid key (e.g. uppercase)
-    invalid_key_toml = """
-[default.progress.INVALID_KEY]
-title = "Invalid key"
-content = "Capital letters not allowed"
-"""
-    path_str = str(import_path)
-    # Target path_str is writeable
-    import_path.write_text(invalid_key_toml, encoding="utf-8")
-    result = runner.invoke(app, ["memory", "import", "-c", str(config_path), path_str])
-    assert result.exit_code == 1
-    assert "Invalid Key 'INVALID_KEY'" in strip_ansi(result.stdout)
+    output = strip_ansi(result.stdout)
+    assert "Hello world message" in output
+    assert "User" in output
 
 
-def test_cli_memory_rebuild_index(tmp_path: Any) -> None:
-    """Test 'kesoku memory rebuild-index' CLI command."""
+def test_cli_history_search(tmp_path: Any, monkeypatch: Any) -> None:
+    """Test 'kesoku history search' subcommand."""
+    from kesoku.constants import MessageRole, MessageStatus, MessageType
+    from kesoku.db import DatabaseManager, Message, Session
+    runner.invoke(app, ["init", "-w", str(tmp_path)])
+    config_path = tmp_path / "config.toml"
+    db_path = tmp_path / "kesoku.db"
+
+    db = DatabaseManager(str(db_path))
+
+    # Mock embedding to return dummy vector
+    def mock_get_embedding(text: str) -> list[float]:
+        return [0.1] * 384
+    monkeypatch.setattr("kesoku.utils.embedding.get_embedding", mock_get_embedding)
+    monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", lambda texts: [[0.1] * 384 for _ in texts])
+
+    sess = Session(id="sess_123", title="Test Session", created_at=100.0, updated_at=200.0, role_name="coder")
+    db.create_session(sess)
+    msg = Message(
+        id="m1",
+        session_id="sess_123",
+        chatbot_id="cli",
+        channel_id="cli_local",
+        sender="User",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="findme",
+        timestamp=150.0,
+        status=MessageStatus.PROCESSED,
+    )
+    db.save_message(msg) # This will index it because of mock
+
+    # Search for "findme"
+    result = runner.invoke(app, ["history", "search", "findme", "-r", "coder", "-c", str(config_path)])
+    assert result.exit_code == 0
+    output = strip_ansi(result.stdout)
+    assert "findme" in output
+    assert "sess_123" in output
+
+
+def test_cli_history_rebuild_index(tmp_path: Any, monkeypatch: Any) -> None:
+    """Test 'kesoku history rebuild-index' subcommand."""
     from kesoku.db import DatabaseManager
     runner.invoke(app, ["init", "-w", str(tmp_path)])
     config_path = tmp_path / "config.toml"
@@ -918,37 +856,43 @@ def test_cli_memory_rebuild_index(tmp_path: Any) -> None:
 
     db = DatabaseManager(str(db_path))
 
+    # Insert a message directly via SQL to bypass automatic indexing
     with db.connection_provider.connection() as conn:
         with conn:
             conn.execute(
-                "INSERT INTO agent_memories (category, key, title, content, updated_at, role, embedding) "
-                "VALUES ('memo', 'key_null', 'Null Title', 'Null Content', 1.0, 'default', NULL)"
-            )
-            conn.execute(
-                "INSERT INTO sessions (id, title, created_at, updated_at, role_name) "
-                "VALUES ('s_null', 'Sess Null', 1.0, 1.0, 'default')"
-            )
-            conn.execute(
-                "INSERT INTO messages "
-                "(id, session_id, chatbot_id, channel_id, sender, role, type, "
-                "content, metadata, timestamp, status, embedding) "
-                "VALUES ('m_null', 's_null', 'cli', 'chan1', 'user', "
-                "'user', 'text', 'hello null', '{}', 1.0, 'processed', NULL)"
+                """
+                INSERT INTO messages (
+                    id, session_id, chatbot_id, channel_id, sender, role, type,
+                    content, metadata, timestamp, status
+                ) VALUES (
+                    'm_unindexed', 'sess_123', 'cli', 'cli_local', 'User', 'user', 'text',
+                    'Unindexed message content', '{}', 150.0, 'processed'
+                )
+                """
             )
 
-    assert len(db.get_unindexed_memories()) == 1
+    # Verify it is unindexed
     assert len(db.get_unindexed_messages()) == 1
 
-    result = runner.invoke(app, ["memory", "rebuild-index", "-c", str(config_path)])
-    assert result.exit_code == 0
-    assert "Found 0 unindexed memories and 1 unindexed messages" in strip_ansi(result.stdout)
-    assert "Index rebuilding completed successfully" in strip_ansi(result.stdout)
+    # Mock embedding
+    def mock_get_embedding(text: str) -> list[float]:
+        return [0.1] * 384
+    monkeypatch.setattr("kesoku.utils.embedding.get_embedding", mock_get_embedding)
+    monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", lambda texts: [[0.1] * 384 for _ in texts])
 
-    assert len(db.get_unindexed_memories()) == 0
+    # Run rebuild-index
+    result = runner.invoke(app, ["history", "rebuild-index", "-c", str(config_path)])
+    assert result.exit_code == 0
+    output = strip_ansi(result.stdout)
+    assert "Found 1 unindexed messages" in output
+    assert "Index rebuilding completed successfully" in output
+
+    # Verify it is now indexed
     assert len(db.get_unindexed_messages()) == 0
 
-    result_force = runner.invoke(app, ["memory", "rebuild-index", "-c", str(config_path), "--force"])
+    # Test force rebuild
+    result_force = runner.invoke(app, ["history", "rebuild-index", "-c", str(config_path), "--force"])
     assert result_force.exit_code == 0
     assert "Force mode enabled" in strip_ansi(result_force.stdout)
-    assert "Found 1 unindexed memories and 1 unindexed messages" in strip_ansi(result_force.stdout)
+
 

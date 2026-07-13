@@ -123,22 +123,7 @@ class DatabaseManager:
                     );
                     """
                 )
-                # Ensure agent_memories table exists
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS agent_memories (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        category TEXT NOT NULL,
-                        key TEXT NOT NULL,
-                        title TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        updated_at REAL NOT NULL,
-                        role TEXT NOT NULL DEFAULT 'default',
-                        embedding BLOB,
-                        UNIQUE(category, key, role)
-                    );
-                    """
-                )
+                conn.execute("DROP TABLE IF EXISTS agent_memories;")
                 # Ensure cross_session_contexts table exists
                 conn.execute(
                     """
@@ -150,35 +135,6 @@ class DatabaseManager:
                     );
                     """
                 )
-                # Migrate legacy 'global' role to 'default'
-                conn.execute("UPDATE OR REPLACE agent_memories SET role = 'default' WHERE role = 'global';")
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_agent_memories_category_role ON agent_memories(category, role);"
-                )
-
-                # Check for embedding column and add it if missing
-                cursor.execute("PRAGMA table_info(agent_memories)")
-                mem_columns = [row["name"] for row in cursor.fetchall()]
-                if "embedding" not in mem_columns:
-                    conn.execute("ALTER TABLE agent_memories ADD COLUMN embedding BLOB")
-
-                # Backfill embedding for memories where it is null
-                cursor.execute("SELECT id, title, content FROM agent_memories WHERE embedding IS NULL")
-                rows_to_backfill = cursor.fetchall()
-                if rows_to_backfill:
-                    logger.info(f"Backfilling embeddings for {len(rows_to_backfill)} memories...")
-                    try:
-                        from kesoku.utils.embedding import get_embeddings, vector_to_bytes
-                        texts = [f"{r['title']}\n{r['content']}" for r in rows_to_backfill]
-                        embs = get_embeddings(texts)
-                        for r, emb in zip(rows_to_backfill, embs):
-                            conn.execute(
-                                "UPDATE agent_memories SET embedding = ? WHERE id = ?",
-                                (vector_to_bytes(emb), r["id"]),
-                            )
-                        logger.info("Backfill completed successfully.")
-                    except Exception as ex:
-                        logger.error(f"Failed to backfill embeddings: {ex}", exc_info=True)
                 # Ensure summary_nodes table exists
                 conn.execute(
                     """
@@ -957,190 +913,6 @@ class DatabaseManager:
 
             return all_msgs
 
-    # Agent Memory CRUD
-    def upsert_agent_memory(self, category: str, key: str, title: str, content: str, role: str = "default") -> None:
-        """Atomically insert or replace an agent memory record."""
-        # Calculate embedding
-        from kesoku.utils.embedding import get_embedding, vector_to_bytes
-        text = f"{title}\n{content}"
-        try:
-            emb = get_embedding(text)
-            emb_bytes = vector_to_bytes(emb)
-        except Exception as e:
-            logger.error(f"Failed to generate embedding for memory {category}/{key}: {e}", exc_info=True)
-            emb_bytes = None
-
-        with self.connection_provider.connection() as conn:
-            with conn:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO agent_memories
-                    (category, key, title, content, updated_at, role, embedding)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (category, key, title, content, time.time(), role, emb_bytes),
-                )
-
-    def get_agent_memory(self, category: str, key: str, role: str = "default") -> dict[str, Any] | None:
-        """Retrieve a specific agent memory record."""
-        with self.connection_provider.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT * FROM agent_memories WHERE category = ? AND key = ? AND role = ?",
-                (category, key, role),
-            )
-            row = cursor.fetchone()
-            if row:
-                return dict(row)
-            return None
-
-    def get_agent_memories(self, category: str | None = None, role: str | None = None) -> list[dict[str, Any]]:
-        """Retrieve agent memories, optionally filtered by category and/or role.
-
-        If role is provided, retrieves memories specifically associated with that role.
-        """
-        with self.connection_provider.connection() as conn:
-            cursor = conn.cursor()
-            query = "SELECT * FROM agent_memories"
-            params = []
-            clauses = []
-
-            if category:
-                clauses.append("category = ?")
-                params.append(category)
-
-            if role:
-                clauses.append("role = ?")
-                params.append(role)
-
-            if clauses:
-                query += " WHERE " + " AND ".join(clauses)
-            query += " ORDER BY updated_at DESC"
-
-            cursor.execute(query, tuple(params))
-            rows = cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    def delete_agent_memory(self, category: str, key: str, role: str = "default") -> None:
-        """Delete a specific agent memory record."""
-        with self.connection_provider.connection() as conn:
-            with conn:
-                conn.execute(
-                    "DELETE FROM agent_memories WHERE category = ? AND key = ? AND role = ?",
-                    (category, key, role),
-                )
-
-    def search_role_memories(
-        self,
-        role: str,
-        query_text: str,
-        start_time: float | None = None,
-        end_time: float | None = None,
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        """Search agent memories for a role matching query_text in content or title.
-
-        Supporting time range queries.
-        """
-        with self.connection_provider.connection() as conn:
-            cursor = conn.cursor()
-            conditions = ["role = ?"]
-            args: list[Any] = [role]
-
-            is_wildcard = not query_text or query_text == "*"
-            if not is_wildcard:
-                conditions.append("(content LIKE ? OR title LIKE ? OR key LIKE ?)")
-                like_query = f"%{query_text}%"
-                args.extend([like_query, like_query, like_query])
-
-            if start_time is not None:
-                conditions.append("updated_at >= ?")
-                args.append(start_time)
-            if end_time is not None:
-                conditions.append("updated_at <= ?")
-                args.append(end_time)
-
-            where_clause = " AND ".join(conditions)
-            sql = f"""
-                SELECT * FROM agent_memories
-                WHERE {where_clause}
-                ORDER BY updated_at DESC
-                LIMIT ?
-            """
-            args.append(limit)
-            cursor.execute(sql, tuple(args))
-            rows = cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    def search_role_memories_semantic(
-        self,
-        role: str,
-        query_text: str,
-        start_time: float | None = None,
-        end_time: float | None = None,
-        limit: int = 20,
-        threshold: float = 0.55,
-    ) -> list[dict[str, Any]]:
-        """Search agent memories for a role using semantic similarity and keyword boosting with time filters."""
-        from kesoku.utils.embedding import bytes_to_vector, cosine_similarity, get_embedding
-
-        is_wildcard = not query_text or query_text == "*"
-
-        query_emb = None
-        if not is_wildcard:
-            try:
-                query_emb = get_embedding(query_text)
-            except Exception as e:
-                logger.error(f"Failed to generate embedding for query: {e}", exc_info=True)
-
-        with self.connection_provider.connection() as conn:
-            cursor = conn.cursor()
-            conditions = ["role = ?"]
-            args: list[Any] = [role]
-
-            if not is_wildcard:
-                conditions.append("(embedding IS NOT NULL OR content LIKE ? OR title LIKE ?)")
-                args.extend([f"%{query_text}%", f"%{query_text}%"])
-
-            if start_time is not None:
-                conditions.append("updated_at >= ?")
-                args.append(start_time)
-            if end_time is not None:
-                conditions.append("updated_at <= ?")
-                args.append(end_time)
-
-            where_clause = " AND ".join(conditions)
-            cursor.execute(
-                f"SELECT * FROM agent_memories WHERE {where_clause}",
-                tuple(args),
-            )
-            rows = cursor.fetchall()
-
-        results = []
-        for row in rows:
-            row_dict = dict(row)
-            score = 0.0
-            if not is_wildcard and query_emb and row_dict["embedding"]:
-                try:
-                    emb = bytes_to_vector(row_dict["embedding"])
-                    score = cosine_similarity(query_emb, emb)
-                except Exception as e:
-                    logger.error(f"Error calculating similarity for key {row_dict['key']}: {e}", exc_info=True)
-
-            if not is_wildcard:
-                q_lower = query_text.lower()
-                if q_lower in row_dict["title"].lower() or q_lower in row_dict["content"].lower():
-                    score += 1.0
-
-            row_dict["similarity_score"] = score
-            results.append(row_dict)
-
-        if is_wildcard:
-            results.sort(key=lambda x: x.get("updated_at", 0.0), reverse=True)
-        else:
-            results = [r for r in results if r.get("similarity_score", 0.0) > threshold]
-            results.sort(key=lambda x: x.get("similarity_score", 0.0), reverse=True)
-        return results[:limit]
 
 
     def search_role_messages(
@@ -1342,13 +1114,7 @@ class DatabaseManager:
 
         return filtered_results
 
-    def get_unindexed_memories(self) -> list[dict[str, Any]]:
-        """Retrieve all memories that do not have an embedding computed yet."""
-        with self.connection_provider.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, title, content FROM agent_memories WHERE embedding IS NULL")
-            rows = cursor.fetchall()
-            return [dict(row) for row in rows]
+
 
     def get_unindexed_messages(self) -> list[dict[str, Any]]:
         """Retrieve all user/assistant text messages that do not have chunks in message_chunks yet."""
@@ -1367,14 +1133,7 @@ class DatabaseManager:
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
 
-    def update_memory_embedding(self, memory_id: int, embedding: bytes) -> None:
-        """Update the embedding BLOB of an agent memory."""
-        with self.connection_provider.connection() as conn:
-            with conn:
-                conn.execute(
-                    "UPDATE agent_memories SET embedding = ? WHERE id = ?",
-                    (embedding, memory_id),
-                )
+
 
     def update_message_embedding(self, message_id: str, embedding: bytes) -> None:
         """Update the embedding BLOB of a message."""
@@ -1410,16 +1169,7 @@ class DatabaseManager:
                     chunks,
                 )
 
-    def get_allowed_memory_categories(self) -> set[str]:
-        """Retrieves the set of all currently permitted or existing memory categories."""
-        categories = {"progress", "memo"}
-        try:
-            memories = self.get_agent_memories()
-            for m in memories:
-                categories.add(m["category"])
-        except Exception as e:
-            logger.warning(f"Failed to fetch existing categories from database: {e}")
-        return categories
+
 
     def set_channel_role(self, chatbot_id: str, channel_id: str, role: str) -> None:
         """Bind a roleplay persona to a chatbot channel/thread."""
@@ -1859,20 +1609,10 @@ class AsyncDatabaseManager:
         """
         self.sync_db = sync_db
         self._on_message_saved_listeners: list[Callable[[Message], Awaitable[None]]] = []
-        self._on_memory_upserted_listeners: list[Callable[[str, str, str, str, str], Awaitable[None]]] = []
-        self._on_memory_deleted_listeners: list[Callable[[str, str, str], Awaitable[None]]] = []
 
     def register_on_message_saved(self, callback: Callable[[Message], Awaitable[None]]) -> None:
         """Register a callback to be triggered when a message is successfully saved."""
         self._on_message_saved_listeners.append(callback)
-
-    def register_on_memory_upserted(self, callback: Callable[[str, str, str, str, str], Awaitable[None]]) -> None:
-        """Register a callback to be triggered when an agent memory is upserted."""
-        self._on_memory_upserted_listeners.append(callback)
-
-    def register_on_memory_deleted(self, callback: Callable[[str, str, str], Awaitable[None]]) -> None:
-        """Register a callback to be triggered when an agent memory is deleted."""
-        self._on_memory_deleted_listeners.append(callback)
 
     async def verify_db(self) -> None:
         """Verify the database connection and schema."""
@@ -2171,102 +1911,7 @@ class AsyncDatabaseManager:
         """
         return await asyncio.to_thread(self.sync_db.get_session_history_by_ranges, session_id, ranges, order)
 
-    async def upsert_agent_memory(
-        self, category: str, key: str, title: str, content: str, role: str = "default"
-    ) -> None:
-        """Upsert an agent memory entry.
 
-        Args:
-            category: The category of the memory.
-            key: The key of the memory.
-            title: The title of the memory.
-            content: The content of the memory.
-            role: The role associated with the memory.
-        """
-        await asyncio.to_thread(self.sync_db.upsert_agent_memory, category, key, title, content, role)
-        for listener in self._on_memory_upserted_listeners:
-            try:
-                await listener(category, key, title, content, role)
-            except Exception as e:
-                logger.error(f"Error in on_memory_upserted listener: {e}", exc_info=True)
-
-    async def get_agent_memory(self, category: str, key: str, role: str = "default") -> dict[str, Any] | None:
-        """Retrieve a specific agent memory entry.
-
-        Args:
-            category: The category of the memory.
-            key: The key of the memory.
-            role: The role associated with the memory.
-
-        Returns:
-            The memory entry dict if found, else None.
-        """
-        return await asyncio.to_thread(self.sync_db.get_agent_memory, category, key, role)
-
-    async def get_agent_memories(self, category: str | None = None, role: str | None = None) -> list[dict[str, Any]]:
-        """Retrieve all agent memories, optionally filtered by category or role.
-
-        Args:
-            category: Optional category filter.
-            role: Optional role filter.
-
-        Returns:
-            A list of memory entry dicts.
-        """
-        return await asyncio.to_thread(self.sync_db.get_agent_memories, category, role)
-
-    async def delete_agent_memory(self, category: str, key: str, role: str = "default") -> None:
-        """Delete an agent memory entry.
-
-        Args:
-            category: The category of the memory.
-            key: The key of the memory.
-            role: The role associated with the memory.
-        """
-        await asyncio.to_thread(self.sync_db.delete_agent_memory, category, key, role)
-        for listener in self._on_memory_deleted_listeners:
-            try:
-                await listener(category, key, role)
-            except Exception as e:
-                logger.error(f"Error in on_memory_deleted listener: {e}", exc_info=True)
-
-    async def search_role_memories(
-        self,
-        role: str,
-        query_text: str,
-        start_time: float | None = None,
-        end_time: float | None = None,
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        """Search agent memories for a role matching query_text."""
-        return await asyncio.to_thread(
-            self.sync_db.search_role_memories,
-            role,
-            query_text,
-            start_time,
-            end_time,
-            limit,
-        )
-
-    async def search_role_memories_semantic(
-        self,
-        role: str,
-        query_text: str,
-        start_time: float | None = None,
-        end_time: float | None = None,
-        limit: int = 20,
-        threshold: float = 0.55,
-    ) -> list[dict[str, Any]]:
-        """Search agent memories for a role using semantic similarity of embeddings."""
-        return await asyncio.to_thread(
-            self.sync_db.search_role_memories_semantic,
-            role,
-            query_text,
-            start_time,
-            end_time,
-            limit,
-            threshold,
-        )
 
     async def search_role_messages_semantic(
         self,
@@ -2288,17 +1933,13 @@ class AsyncDatabaseManager:
             threshold,
         )
 
-    async def get_unindexed_memories(self) -> list[dict[str, Any]]:
-        """Retrieve all memories that do not have an embedding computed yet."""
-        return await asyncio.to_thread(self.sync_db.get_unindexed_memories)
+
 
     async def get_unindexed_messages(self) -> list[dict[str, Any]]:
         """Retrieve all user/assistant text messages that do not have an embedding computed yet."""
         return await asyncio.to_thread(self.sync_db.get_unindexed_messages)
 
-    async def update_memory_embedding(self, memory_id: int, embedding: bytes) -> None:
-        """Update the embedding BLOB of an agent memory."""
-        await asyncio.to_thread(self.sync_db.update_memory_embedding, memory_id, embedding)
+
 
     async def update_message_embedding(self, message_id: str, embedding: bytes) -> None:
         """Update the embedding BLOB of a message."""
@@ -2326,13 +1967,7 @@ class AsyncDatabaseManager:
             limit,
         )
 
-    async def get_allowed_memory_categories(self) -> set[str]:
-        """Retrieves the set of all currently permitted or existing memory categories.
 
-        Returns:
-            A set of allowed categories.
-        """
-        return await asyncio.to_thread(self.sync_db.get_allowed_memory_categories)
 
     async def set_channel_role(self, chatbot_id: str, channel_id: str, role: str) -> None:
         """Set the role for a specific channel.

@@ -269,7 +269,7 @@ class Chatbot(ABC):
                     channel_id=channel_id,
                 )
 
-            from kesoku.agent.tools.memory import memory_search
+            from kesoku.agent.tools.memory import chat_search
 
             ctx = ToolContext(
                 session_id=session.id,
@@ -277,7 +277,7 @@ class Chatbot(ABC):
                 gateway=self.gateway,
             )
             try:
-                res = await memory_search(query=query, context=ctx)
+                res = await chat_search(query=query, context=ctx)
                 await reply_func(res)
             except Exception as e:
                 logger.error(f"Failed grep execution: {e}")
@@ -285,12 +285,12 @@ class Chatbot(ABC):
 
         self.commands.register(
             "grep",
-            "Search active memories and past messages for the current bound role.",
+            "Search past chat messages for the current bound role.",
             handle_grep,
         )
         self.commands.register(
-            "memory-grep",
-            "Search active memories and past messages for the current bound role.",
+            "chat-grep",
+            "Search past chat messages for the current bound role.",
             handle_grep,
         )
 
@@ -312,7 +312,7 @@ class Chatbot(ABC):
                     channel_id=channel_id,
                 )
 
-            from kesoku.agent.tools.memory import memory_search
+            from kesoku.agent.tools.memory import chat_search
 
             ctx = ToolContext(
                 session_id=session.id,
@@ -320,7 +320,7 @@ class Chatbot(ABC):
                 gateway=self.gateway,
             )
             try:
-                res = await memory_search(query=query, context=ctx)
+                res = await chat_search(query=query, context=ctx)
                 await reply_func(res)
             except Exception as e:
                 logger.error(f"Failed search execution: {e}")
@@ -328,12 +328,12 @@ class Chatbot(ABC):
 
         self.commands.register(
             "search",
-            "Perform semantic RAG search on active memories and past messages for the current bound role.",
+            "Perform semantic RAG search on past chat messages for the current bound role.",
             handle_search,
         )
         self.commands.register(
-            "memory-search",
-            "Perform semantic RAG search on active memories and past messages for the current bound role.",
+            "chat-search",
+            "Perform semantic RAG search on past chat messages for the current bound role.",
             handle_search,
         )
 
@@ -459,13 +459,13 @@ class Chatbot(ABC):
                 await self.commands.execute("role", reply_func, channel_id=channel_id, role_name=role_name)
             elif command == "restart":
                 await self.commands.execute(command, reply_func)
-            elif command in {"grep", "memory-grep", "memory_grep"}:
+            elif command in {"grep", "chat-grep", "chat_grep"}:
                 if not channel_id:
                     await reply_func("⚠️ Channel ID is required for this command.")
                     return
                 query = " ".join(parts[1:]) if len(parts) > 1 else ""
                 await self.commands.execute("grep", reply_func, channel_id=channel_id, query=query)
-            elif command in {"search", "memory-search", "memory_search"}:
+            elif command in {"search", "chat-search", "chat_search"}:
                 if not channel_id:
                     await reply_func("⚠️ Channel ID is required for this command.")
                     return
@@ -480,6 +480,13 @@ class Chatbot(ABC):
         except Exception as e:
             logger.error(f"Command /{command} execution failed: {e}", exc_info=True)
             await reply_func(f"⚠️ Failed to execute command: {e}")
+
+    async def is_dm_channel(self, channel_id: str) -> bool:
+        """Check if the given channel is a DM channel (single user chat).
+
+        Default implementation returns False. Adapters should override if they can detect.
+        """
+        return False
 
     async def clear_session_by_channel(self, channel_id: str) -> str:
         """Unbind the active session for the channel, stop its workers/jobs, and start a new session.
@@ -501,10 +508,25 @@ class Chatbot(ABC):
             except Exception as e:
                 logger.warning(f"Failed to clean up background jobs in clear_session_by_channel: {e}")
 
+            # Resolve role and set appropriate session title
+            role = await self.gateway.db.get_channel_role(self.chatbot_id, channel_id)
+            role_name = role if isinstance(role, str) else "default"
+
+            is_dm = await self.is_dm_channel(channel_id)
+            display_role = role_name.capitalize() if role_name != "default" else "Default"
+
+            if is_dm:
+                title = f"{display_role} DM Session on {self.chatbot_id}"
+            else:
+                if role_name != "default":
+                    title = f"{display_role} Session"
+                else:
+                    title = f"{self.chatbot_id} Session"
+
             # 3. Create and bind new session (overwrites active mapping)
             new_session = await self.gateway.create_session(
                 session_id=None,
-                title="New Session",
+                title=title,
                 chatbot_id=self.chatbot_id,
                 channel_id=channel_id,
             )
@@ -1110,7 +1132,15 @@ class Chatbot(ABC):
                     session = None
 
         if not session:
-            title = dto.session_title or f"Session: {dto.text[:30]}"
+            is_dm = await self.is_dm_channel(dto.channel_id)
+            display_role = current_role.capitalize() if current_role and current_role != "default" else "Default"
+
+            if is_dm:
+                title = f"{display_role} DM Session on {self.chatbot_id}"
+            else:
+                title = dto.text[:30].strip() if dto.text else f"{self.chatbot_id} Session"
+                if not title:
+                    title = f"{self.chatbot_id} Session"
             custom_prompt = dto.custom_prompt or ""
 
             session = await self.gateway.create_session(

@@ -219,36 +219,6 @@ def test_message_crud(db_manager):
     assert failed_claim is False
 
 
-def test_agent_memory_crud(db_manager):
-    """Tests agent memory upsertion, retrieval, listing, and deletion."""
-    db_manager.upsert_agent_memory(
-        category="memo",
-        key="python_pref",
-        title="Python Preference",
-        content="User prefers type-annotated Python code.",
-        role="default",
-    )
-    db_manager.upsert_agent_memory(
-        category="memo",
-        key="rust_pref",
-        title="Rust Preference",
-        content="User likes cargo clean.",
-        role="coder",
-    )
-
-    # Get Specific
-    mem = db_manager.get_agent_memory(category="memo", key="python_pref", role="default")
-    assert mem is not None
-    assert mem["title"] == "Python Preference"
-    assert mem["content"] == "User prefers type-annotated Python code."
-
-    # List filtered by category & role (should NOT include default)
-    mems = db_manager.get_agent_memories(category="memo", role="coder")
-    assert len(mems) == 1  # Should fetch only 'coder' memories
-
-    # Delete
-    db_manager.delete_agent_memory(category="memo", key="python_pref", role="default")
-    assert db_manager.get_agent_memory(category="memo", key="python_pref", role="default") is None
 
 
 def test_cross_session_context_and_locking(db_manager):
@@ -422,20 +392,12 @@ def test_search_role_data(db_manager):
     )
     db_manager.save_message(msg4)
 
-    # Insert memories
-    db_manager.upsert_agent_memory("memo", "mem1", "Python Tip", "Python is great", "default")
-    db_manager.upsert_agent_memory("memo", "mem2", "Coder Tip", "Write python code", "coder")
-    db_manager.upsert_agent_memory("memo", "mem3", "Helper Tip", "Help python users", "helper")
 
     # Search messages for 'coder'
     coder_msgs = db_manager.search_role_messages("coder", "python")
     assert len(coder_msgs) == 2
     assert {m.id for m in coder_msgs} == {"m1", "m3"}
 
-    # Search memories for 'coder'
-    coder_mems = db_manager.search_role_memories("coder", "python")
-    assert len(coder_mems) == 1
-    assert {m["key"] for m in coder_mems} == {"mem2"}
 
 
 def test_search_role_data_wildcard_and_filters(db_manager):
@@ -491,15 +453,6 @@ def test_search_role_data_wildcard_and_filters(db_manager):
     db_manager.save_message(msg2)
     db_manager.save_message(msg3)
 
-    # Insert memories
-    db_manager.upsert_agent_memory("memo", "mem1", "Python Tip", "Python is great", "default")
-    db_manager.upsert_agent_memory("memo", "mem2", "Java Tip", "Java is verbose", "coder")
-
-    # We need to set explicit updated_at for memories
-    with db_manager.connection_provider.connection() as conn:
-        with conn:
-            conn.execute("UPDATE agent_memories SET updated_at = ? WHERE key = 'mem1'", (base_ts,))
-            conn.execute("UPDATE agent_memories SET updated_at = ? WHERE key = 'mem2'", (base_ts + 3600,))
 
     # Test 1: Wildcard content search for messages (returns all messages)
     msgs = db_manager.search_role_messages("coder", "*")
@@ -510,20 +463,12 @@ def test_search_role_data_wildcard_and_filters(db_manager):
     assert len(msgs_empty) == 3
     assert {m.id for m in msgs_empty} == {"m1", "m2", "m3"}
 
-    # Test 2: Wildcard content search for memories (should NOT include default)
-    mems = db_manager.search_role_memories("coder", "*")
-    assert len(mems) == 1
-    assert {m["key"] for m in mems} == {"mem2"}
 
     # Test 3: Time range filtering for messages
     msgs_time = db_manager.search_role_messages("coder", "*", start_time=base_ts, end_time=base_ts + 4000)
     assert len(msgs_time) == 2
     assert {m.id for m in msgs_time} == {"m1", "m2"}
 
-    # Test 4: Time range filtering for memories
-    mems_time = db_manager.search_role_memories("coder", "*", start_time=base_ts + 1000, end_time=base_ts + 5000)
-    assert len(mems_time) == 1
-    assert mems_time[0]["key"] == "mem2"
 
     # Test 5: Limit filtering
     msgs_limit = db_manager.search_role_messages("coder", "*", limit=2)
@@ -564,42 +509,4 @@ def test_thread_session_role_inheritance(db_manager):
     assert retrieved.role_name == "asuka"
 
 
-def test_agent_memory_semantic_search(db_manager, monkeypatch):
-    """Tests semantic search on agent memories by mocking embeddings."""
-    embeddings_map = {
-        "Python Tip\nPython is great": [1.0, 0.0],
-        "Java Tip\nJava is verbose": [0.0, 1.0],
-        "Weather Tip\nIt is raining today": [0.5, 0.5],
-        "Find python tips": [0.9, 0.1],
-    }
-
-    def pad_vector(v):
-        return v + [0.0] * (384 - len(v))
-
-    padded_map = {k: pad_vector(v) for k, v in embeddings_map.items()}
-
-    def mock_get_embedding(text: str) -> list[float]:
-        for key_text, vec in padded_map.items():
-            if text in key_text or key_text in text:
-                return vec
-        return pad_vector([0.0, 0.0])
-
-    def mock_get_embeddings(texts: list[str]) -> list[list[float]]:
-        return [mock_get_embedding(t) for t in texts]
-
-    monkeypatch.setattr("kesoku.utils.embedding.get_embedding", mock_get_embedding)
-    monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", mock_get_embeddings)
-
-    db_manager.upsert_agent_memory("memo", "mem_py", "Python Tip", "Python is great", "coder")
-    db_manager.upsert_agent_memory("memo", "mem_java", "Java Tip", "Java is verbose", "coder")
-    db_manager.upsert_agent_memory("memo", "mem_weather", "Weather Tip", "It is raining today", "coder")
-
-    results = db_manager.search_role_memories_semantic(role="coder", query_text="Find python tips", limit=10)
-
-    assert len(results) == 2
-    assert results[0]["key"] == "mem_py"
-    assert results[1]["key"] == "mem_weather"
-
-    assert "similarity_score" in results[0]
-    assert results[0]["similarity_score"] > results[1]["similarity_score"]
 

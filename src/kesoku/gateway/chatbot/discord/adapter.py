@@ -455,7 +455,6 @@ class DiscordChatbot(Chatbot):
         channel_id = str(target_channel.id)
 
         custom_prompt = _build_discord_custom_prompt(target_channel, message.author)
-        session_title = getattr(target_channel, "name", None) or f"Chat with {message.author.display_name}"
 
         # Resolve role
         role = "default"
@@ -498,7 +497,6 @@ class DiscordChatbot(Chatbot):
             message_id=str(message.id),
             timestamp=message.created_at.timestamp(),
             raw_metadata=msg_metadata,
-            session_title=session_title,
             custom_prompt=custom_prompt,
             role=role,
         )
@@ -1013,3 +1011,8 @@ class DiscordChatbot(Chatbot):
         # Trigger typing status for the thread/channel while agent is thinking
         if target_channel_id_str not in self._typing_tasks:
             self._typing_tasks[target_channel_id_str] = asyncio.create_task(self._keep_typing(target_channel))
+
+    async def is_dm_channel(self, channel_id: str) -> bool:
+        """Check if the given channel is a DM channel."""
+        channel = await self._get_discord_channel(channel_id)
+        return isinstance(channel, discord.DMChannel)
