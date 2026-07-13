@@ -369,7 +369,7 @@ def history_view(
         async def assemble():
             from kesoku.agent.turn_executor import TurnExecutor
 
-            executor = TurnExecutor(gateway=gateway, session_id=session_id)
+            executor = TurnExecutor(gateway=gateway, session_id=session_id, tool_runner=None)
             assembled_history, _ = await executor._check_and_auto_compact_history(
                 history=history,
                 system_prompt=session.system_prompt,
