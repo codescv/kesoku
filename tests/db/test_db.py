@@ -80,10 +80,18 @@ def test_session_crud(db_manager):
     latest = db_manager.get_latest_session()
     assert latest.id == "session_xyz"
 
+    # Update title
+    time.sleep(0.01)
+    db_manager.update_session_title("session_abc", "New Custom Title")
+    updated_sess = db_manager.get_session("session_abc")
+    assert updated_sess.title == "New Custom Title"
+    assert updated_sess.updated_at > session1.updated_at
+
     # Delete
     db_manager.delete_session("session_abc")
     assert db_manager.get_session("session_abc") is None
     assert len(db_manager.list_sessions()) == 1
+
 
 
 def test_channel_session_mappings(db_manager):

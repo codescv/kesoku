@@ -9,6 +9,7 @@ import asyncio
 import os
 
 from kesoku.agent.llm import BaseLLM
+from kesoku.agent.namer import SessionNamer
 from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.tools import ToolContext
 from kesoku.agent.turn_executor import TurnExecutor
@@ -53,6 +54,9 @@ class SessionWorker:
         self.active_cache_name: str | None = None
         self.active_cache_llm: BaseLLM | None = None
         self.cached_messages_len: int = 0
+        self._auto_naming_in_progress = False
+        self._auto_naming_done = False
+
 
     @property
     def running(self) -> bool:
@@ -198,6 +202,8 @@ class SessionWorker:
                 worker=self,
                 session_staging_dir=session_staging_dir,
             )
+            # Trigger auto session naming asynchronously
+            asyncio.create_task(self._auto_rename_session())
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -206,6 +212,23 @@ class SessionWorker:
                 await self.context.db.update_message_status(current_msg.id, MessageStatus.ERROR)
             except Exception as db_err:
                 logger.error(f"Failed to update message status to ERROR: {db_err}")
+
+    async def _auto_rename_session(self) -> None:
+        if self._auto_naming_in_progress or self._auto_naming_done:
+            return
+        self._auto_naming_in_progress = True
+        try:
+            namer = SessionNamer(
+                db=self.context.db,
+                gateway=self.gateway,
+                llm=self.context.get_llm(),
+            )
+            success = await namer.auto_rename_session(self.session_id)
+            if success:
+                self._auto_naming_done = True
+        finally:
+            self._auto_naming_in_progress = False
+
 
 
 class Agent:

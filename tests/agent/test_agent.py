@@ -11,6 +11,7 @@ from kesoku.agent.history import build_history, prepare_history_for_llm
 from kesoku.agent.llm import GeminiLLM, MockLLM, ToolCallRequest, get_llm
 from kesoku.agent.tools import ToolContext, ToolRegistry, run_shell_command
 from kesoku.config import KesokuConfig, WorkspaceConfig
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.context import KesokuContext
 from kesoku.db import DatabaseManager, Message
 from kesoku.gateway.gateway import Gateway
@@ -1343,3 +1344,71 @@ async def test_agent_wakeup_by_system_message(temp_db: str) -> None:
     # Verify the system message was successfully claimed and processed
     history = await gw.db.get_session_history("sess_sys_wakeup")
     assert any(m.id == msg.id and m.status == "processed" for m in history)
+
+
+@pytest.mark.asyncio
+async def test_auto_session_naming(temp_db: str) -> None:
+    """Test that session is automatically renamed after the first interaction."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+    reg = ToolRegistry()
+
+    # Create session with default title
+    await gw.create_session("sess_naming", title="New Session")
+
+    # Post first user message
+    user_msg = Message(
+        session_id="sess_naming",
+        chatbot_id="discord",
+        channel_id="123456",
+        sender="u1",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="What is meaning of life?",
+        status=MessageStatus.PENDING_AGENT,
+    )
+    await gw.post(user_msg)
+
+    from kesoku.agent.llm import LLMResponse
+
+    llm = MockLLM(
+        responses=[
+            # 1st response: for the user message
+            LLMResponse(content="The meaning of life is 42.", tool_calls=[]),
+            # 2nd response: for the naming request
+            LLMResponse(content="Meaning of Life Discussion", tool_calls=[]),
+        ]
+    )
+    context = KesokuContext(config=cfg, llm=llm, tool_registry=reg)
+    agent = Agent(gw, context=context)
+
+    # Start agent loop
+    agent_task = asyncio.create_task(agent.start())
+
+    # Wait for the turn to complete and auto-naming to trigger
+    for _ in range(50):
+        await asyncio.sleep(0.1)
+        session = await gw.db.get_session("sess_naming")
+        if session and session.title == "Meaning of Life Discussion":
+            break
+
+    agent.stop()
+    await asyncio.gather(agent_task, return_exceptions=True)
+
+    # Verify session title was updated
+    session = await gw.db.get_session("sess_naming")
+    assert session.title == "Meaning of Life Discussion"
+
+    # Verify that a SESSION_RENAME message was posted to the gateway
+    history = await gw.db.get_session_history("sess_naming", limit=0)
+    rename_msgs = [
+        m
+        for m in history
+        if m.role == MessageRole.SYSTEM and m.type == MessageType.SESSION_RENAME
+    ]
+    assert len(rename_msgs) == 1
+    assert rename_msgs[0].content == "Meaning of Life Discussion"
+    assert rename_msgs[0].channel_id == "123456"
+    assert rename_msgs[0].chatbot_id == "discord"
+

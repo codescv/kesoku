@@ -377,6 +377,22 @@ class DatabaseManager:
             with conn:
                 conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (updated_at, session_id))
 
+    def update_session_title(self, session_id: str, title: str) -> None:
+        """Update the title of a session and set updated_at to now.
+
+        Args:
+            session_id: Session ID to update.
+            title: New title.
+        """
+        with self.connection_provider.connection() as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
+                    (title, time.time(), session_id),
+                )
+
+
+
     def list_sessions(self) -> list[Session]:
         """List all chat sessions ordered by most recently updated.
 
@@ -1653,6 +1669,16 @@ class AsyncDatabaseManager:
             updated_at: The new timestamp.
         """
         await asyncio.to_thread(self.sync_db.update_session_updated_at, session_id, updated_at)
+
+    async def update_session_title(self, session_id: str, title: str) -> None:
+        """Update the title of a session.
+
+        Args:
+            session_id: The ID of the session.
+            title: The new title.
+        """
+        await asyncio.to_thread(self.sync_db.update_session_title, session_id, title)
+
 
     async def list_sessions(self) -> list[Session]:
         """List all sessions.

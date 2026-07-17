@@ -28,6 +28,9 @@ class MessageType(StrEnum):
     """A specific requested invocation of an external tool or skill."""
     TOOL_RESULT = "tool_result"
     """The execution output or exception returned by an invoked tool."""
+    SESSION_RENAME = "session_rename"
+    """Administrative message to rename a session and its external platform representation (e.g. thread)."""
+
 
 
 class MessageStatus(StrEnum):

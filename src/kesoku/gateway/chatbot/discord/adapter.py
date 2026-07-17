@@ -561,6 +561,17 @@ class DiscordChatbot(Chatbot):
 
     async def handle_intermediate_message(self, message: Message) -> None:
         """Render an intermediate thought/tool/system message in the Discord UI."""
+        if message.type == MessageType.SESSION_RENAME:
+            channel = await self._get_discord_channel_with_abort(message)
+            if isinstance(channel, discord.Thread):
+                try:
+                    await channel.edit(name=message.content)
+                    logger.info(f"Renamed Discord thread {channel.id} to '{message.content}'")
+                except Exception as e:
+                    logger.error(f"Failed to rename Discord thread {channel.id}: {e}")
+            await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
+            return
+
         session_id = message.session_id
 
         # Guard: If there is a pending message in the queue, an interruption has been

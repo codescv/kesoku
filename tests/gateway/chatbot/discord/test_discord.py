@@ -1716,3 +1716,34 @@ async def test_send_question_segment_long_choices(mock_config: KesokuConfig, moc
             assert len(view.children) == 2
             assert view.children[0].label == "A"
             assert view.children[1].label == "B"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_session_rename(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test that SESSION_RENAME message renames the Discord thread."""
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+
+            mock_thread = AsyncMock(spec=discord.Thread)
+            bot.bot.get_channel = MagicMock(return_value=mock_thread)
+
+            msg = Message(
+                id="msg123",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="System",
+                role=MessageRole.SYSTEM,
+                type=MessageType.SESSION_RENAME,
+                content="New Thread Title",
+            )
+
+            await bot.handle_message(msg)
+
+            # Verify thread.edit was called with new name
+            mock_thread.edit.assert_called_once_with(name="New Thread Title")
+            # Verify update_message_status was called to mark the message as delivered
+            mock_gateway.db.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
+
