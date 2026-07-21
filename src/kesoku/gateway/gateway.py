@@ -216,10 +216,11 @@ class Gateway:
             await self.agent.stop_session_worker(session_id, immediate=True)
 
         # Mark all outstanding (pending, processing, pending_agent) messages in this session as MessageStatus.ERROR
-        history = await self.db.get_session_history(session_id, limit=0)
-        for msg in history:
+        messages = await self.db.get_messages_by_filters(filters={"session_id": session_id})
+        for msg in messages:
             if msg.status in (MessageStatus.PENDING_AGENT, MessageStatus.PROCESSING, MessageStatus.PENDING):
                 await self.db.update_message_status(msg.id, MessageStatus.ERROR)
+
 
     async def delete_session(self, session_id: str) -> None:
         """Delete a session, its message history from database, and its workspace from disk.

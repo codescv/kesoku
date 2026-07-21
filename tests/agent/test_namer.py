@@ -64,10 +64,10 @@ async def test_session_namer_success(temp_db: str) -> None:
     assert session.title == "Kesoku Introduction"
 
     # Verify rename message posted
-    history = await gw.db.get_session_history("sess1", limit=0)
+    messages = await gw.db.get_messages_by_filters(filters={"session_id": "sess1"})
     rename_msgs = [
         m
-        for m in history
+        for m in messages
         if m.role == MessageRole.SYSTEM and m.type == MessageType.SESSION_RENAME
     ]
     assert len(rename_msgs) == 1

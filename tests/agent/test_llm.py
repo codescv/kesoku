@@ -964,3 +964,114 @@ async def test_claude_llm_prompt_caching_disabled() -> None:
         called_kwargs = mock_client.messages.create.call_args[1]
         assert called_kwargs["system"] == "S" * 60
         assert "cache_control" not in called_kwargs["messages"][0]["content"][-1]
+
+
+@pytest.mark.asyncio
+async def test_claude_llm_native_thinking() -> None:
+    """Verify ClaudeLLM supports native thinking parameters, parsing, and propagation."""
+    # 1. Verify request construction with thinking_level
+    config = ClaudeConfig(thinking_level="high")
+
+    mock_client = MagicMock()
+    mock_res = MagicMock()
+
+    # Mock thinking block and text block
+    mock_thinking_block = MagicMock()
+    mock_thinking_block.type = "thinking"
+    mock_thinking_block.thinking = "Internal thought process"
+    mock_thinking_block.signature = "sig-12345"
+
+    mock_text_block = MagicMock()
+    mock_text_block.type = "text"
+    mock_text_block.text = "Hello there!"
+
+    mock_res.content = [mock_thinking_block, mock_text_block]
+    mock_res.usage.input_tokens = 20
+    mock_res.usage.output_tokens = 30
+    mock_res.usage.cache_read_input_tokens = None
+    mock_client.messages.create.return_value = mock_res
+
+    with patch("kesoku.agent.llm.AnthropicVertex", return_value=mock_client):
+        claude = ClaudeLLM(config=config)
+        response = await claude.generate(prompt="What is on your mind?")
+
+        # Verify response parsing
+        assert response.content == "Hello there!"
+        assert response.thought == "Internal thought process"
+        assert response.thought_signature == "sig-12345"
+
+        # Verify request parameters
+        called_kwargs = mock_client.messages.create.call_args[1]
+        assert called_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert called_kwargs["output_config"] == {"effort": "high"}
+
+    mock_client.reset_mock()
+
+    # 2. Verify history propagation with thought signature
+    msg_user = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="User",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="What is on your mind?",
+    )
+    msg_thought = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.THOUGHT,
+        content="Internal thought process",
+        metadata={"thought_signature": "sig-12345"},
+    )
+    msg_assistant = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="Hello there!",
+    )
+
+    mock_res_2 = MagicMock()
+    mock_res_2.content = [mock_text_block]
+    mock_res_2.usage.input_tokens = 10
+    mock_res_2.usage.output_tokens = 10
+    mock_res_2.usage.cache_read_input_tokens = None
+    mock_client.messages.create.return_value = mock_res_2
+
+    with patch("kesoku.agent.llm.AnthropicVertex", return_value=mock_client):
+        claude = ClaudeLLM(config=config)
+        await claude.generate(
+            prompt="Tell me more.",
+            history=[msg_user, msg_thought, msg_assistant]
+        )
+
+        called_kwargs = mock_client.messages.create.call_args[1]
+        messages = called_kwargs["messages"]
+
+        # Expect alternating messages: User (prompt1) -> Assistant (thinking + text) -> User (prompt2)
+        assert len(messages) == 3
+        assert messages[0]["role"] == "user"
+
+        assistant_msg = messages[1]
+        assert assistant_msg["role"] == "assistant"
+
+        # Should contain two blocks: thinking and text
+        content = assistant_msg["content"]
+        assert len(content) == 2
+
+        assert content[0] == {
+            "type": "thinking",
+            "thinking": "Internal thought process",
+            "signature": "sig-12345"
+        }
+        assert content[1] == {
+            "type": "text",
+            "text": "Hello there!"
+        }
+

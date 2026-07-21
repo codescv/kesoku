@@ -1401,10 +1401,10 @@ async def test_auto_session_naming(temp_db: str) -> None:
     assert session.title == "Meaning of Life Discussion"
 
     # Verify that a SESSION_RENAME message was posted to the gateway
-    history = await gw.db.get_session_history("sess_naming", limit=0)
+    messages = await gw.db.get_messages_by_filters(filters={"session_id": "sess_naming"})
     rename_msgs = [
         m
-        for m in history
+        for m in messages
         if m.role == MessageRole.SYSTEM and m.type == MessageType.SESSION_RENAME
     ]
     assert len(rename_msgs) == 1

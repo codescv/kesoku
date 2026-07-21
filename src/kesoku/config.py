@@ -155,6 +155,10 @@ class ClaudeConfig(BaseModel):
     )
     project_id: str | None = Field(default="gtech-ads-localizer-external", description="GCP Project ID (for Vertex AI)")
     location: str | None = Field(default="us-east5", description="GCP Region/Location (for Vertex AI)")
+    thinking_level: Literal["low", "medium", "high", "xhigh", "max"] | None = Field(
+        default="medium",
+        description="Reasoning effort level for Claude ('low', 'medium', 'high', 'xhigh', 'max', or None)",
+    )
     context_caching: bool = Field(
         default=True,
         description="Whether to enable prompt caching for Claude",

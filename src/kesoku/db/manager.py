@@ -717,9 +717,9 @@ class DatabaseManager:
             cursor.execute(
                 """
                 SELECT * FROM messages
-                WHERE session_id = ?
+                WHERE session_id = ? AND type != ?
                 """,
-                (session_id,),
+                (session_id, MessageType.SESSION_RENAME),
             )
             rows = cursor.fetchall()
             all_msgs = [self._row_to_message(row) for row in rows]
@@ -919,8 +919,10 @@ class DatabaseManager:
             query = f"""
                 SELECT * FROM messages
                 WHERE session_id = ?
+                  AND type != ?
                   AND ({" OR ".join(clauses)})
             """
+            params.insert(1, MessageType.SESSION_RENAME)
             cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
             all_msgs = [self._row_to_message(row) for row in rows]

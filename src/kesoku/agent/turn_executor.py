@@ -626,6 +626,9 @@ class TurnExecutor:
 
         thought_text = res.thought or res.content
         if thought_text:
+            thought_metadata = {}
+            if res.thought_signature:
+                thought_metadata["thought_signature"] = res.thought_signature
             thought_msg = Message(
                 session_id=self.session_id,
                 chatbot_id=chatbot_id,
@@ -636,6 +639,7 @@ class TurnExecutor:
                 content=thought_text,
                 status=MessageStatus.RESPONDED,
                 parent_id=current_msg.id,
+                metadata=thought_metadata,
             )
             await self.gateway.post(thought_msg)
 
@@ -726,6 +730,9 @@ class TurnExecutor:
         channel_id = current_msg.channel_id
 
         if res.thought:
+            thought_metadata = {}
+            if res.thought_signature:
+                thought_metadata["thought_signature"] = res.thought_signature
             thought_msg = Message(
                 session_id=self.session_id,
                 chatbot_id=chatbot_id,
@@ -736,6 +743,7 @@ class TurnExecutor:
                 content=res.thought,
                 status=MessageStatus.RESPONDED,
                 parent_id=current_msg.id,
+                metadata=thought_metadata,
             )
             await self.gateway.post(thought_msg)
 
