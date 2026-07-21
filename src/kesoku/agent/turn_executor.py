@@ -184,6 +184,22 @@ class TurnExecutor:
                 # Resolve LLM dynamically for the current message
                 llm = self._resolve_llm(current_msg)
 
+                if active_cache_name and worker.active_cache_llm:
+                    if worker.active_cache_llm.__class__.__name__ != llm.__class__.__name__:
+                        logger.info(
+                            f"LLM provider class changed from {worker.active_cache_llm.__class__.__name__} "
+                            f"to {llm.__class__.__name__}. Resetting obsolete context cache..."
+                        )
+                        try:
+                            await worker.active_cache_llm.delete_cache(active_cache_name)
+                        except Exception as de:
+                            logger.warning(f"Failed to delete obsolete context cache on provider change: {de}")
+                        active_cache_name = None
+                        cached_messages_len = 0
+                        worker.active_cache_name = None
+                        worker.active_cache_llm = None
+                        worker.cached_messages_len = 0
+
                 # Retrieve system prompt directly from session
                 session = await self.context.db.get_session(self.session_id)
                 system_prompt = session.system_prompt if session else None

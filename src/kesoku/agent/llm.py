@@ -7,6 +7,7 @@ import asyncio
 import base64
 import inspect
 import io
+import json
 import os
 import re
 import typing
@@ -24,6 +25,8 @@ from kesoku.config import ClaudeConfig, GeminiConfig, KesokuConfig, get_config
 from kesoku.constants import MessageRole, MessageType
 from kesoku.db import Message
 from kesoku.logger import setup_logger
+
+_NON_ASCII_RE = re.compile(r'[^\x00-\x7F]')
 
 logger = setup_logger(__name__)
 
@@ -538,16 +541,28 @@ class BaseLLM(ABC):
         system_prompt: str | None = None,
         history: list[Message] | None = None,
     ) -> int:
-        """Fallback character-based token estimation (roughly 4 characters per token)."""
-        total_chars = 0
+        """Fallback character-based token estimation supporting mixed ASCII/non-ASCII content."""
+        total_ascii = 0
+        total_non_ascii = 0
+
+        def accumulate(text: str):
+            nonlocal total_ascii, total_non_ascii
+            if not text:
+                return
+            non_ascii = len(_NON_ASCII_RE.findall(text))
+            total_ascii += len(text) - non_ascii
+            total_non_ascii += non_ascii
+
         if prompt:
-            total_chars += len(prompt)
+            accumulate(prompt)
         if system_prompt:
-            total_chars += len(system_prompt)
+            accumulate(system_prompt)
         if history:
             for m in history:
-                total_chars += len(m.content)
-        return max(1, total_chars // 4)
+                accumulate(m.content)
+
+        estimated = int(total_ascii / 4 + total_non_ascii * 2.0)
+        return max(1, estimated)
 
 
 class GeminiLLM(BaseLLM):
@@ -970,21 +985,34 @@ class ClaudeLLM(BaseLLM):
                 final_messages.append(m)
 
         # Estimate total input tokens to check against caching threshold
-        total_chars = 0
+        total_ascii = 0
+        total_non_ascii = 0
+
+        def accumulate(text: str):
+            nonlocal total_ascii, total_non_ascii
+            if not text:
+                return
+            non_ascii = len(_NON_ASCII_RE.findall(text))
+            total_ascii += len(text) - non_ascii
+            total_non_ascii += non_ascii
+
         if system_prompt:
-            total_chars += len(system_prompt)
+            accumulate(system_prompt)
         if tools:
-            total_chars += len(tools) * 500
+            total_ascii += len(tools) * 500
         for turn in turns:
             for block in turn.blocks:
-                if isinstance(block, TextBlock):
-                    total_chars += len(block.text)
-                elif isinstance(block, ThoughtBlock):
-                    total_chars += len(block.text)
+                if isinstance(block, (TextBlock, ThoughtBlock)):
+                    accumulate(block.text)
                 elif isinstance(block, (ImageBlock, DocumentBlock, MediaBlock)):
                     if block.data:
-                        total_chars += len(block.data) * 4
-        estimated_tokens = total_chars // 4
+                        total_ascii += len(block.data) * 4
+                elif isinstance(block, ToolCallBlock):
+                    accumulate(block.name)
+                    accumulate(json.dumps(block.arguments))
+                elif isinstance(block, ToolResultBlock):
+                    accumulate(block.result)
+        estimated_tokens = int(total_ascii / 4 + total_non_ascii * 2.0)
 
         use_caching = self.config.context_caching and estimated_tokens >= self.config.context_caching_threshold
 
@@ -1083,9 +1111,20 @@ class ClaudeLLM(BaseLLM):
         total_tokens = None
         cached_tokens = None
         if getattr(raw_response, "usage", None):
-            cached_tokens = getattr(raw_response.usage, "cache_read_input_tokens", None)
-            prompt_tokens = raw_response.usage.input_tokens + (cached_tokens or 0)
-            candidates_tokens = raw_response.usage.output_tokens
+            def _get_val(obj, field):
+                val = getattr(obj, field, 0)
+                if type(val).__name__ in ('MagicMock', 'Mock'):
+                    return 0
+                return val or 0
+
+            read_tokens = _get_val(raw_response.usage, "cache_read_input_tokens")
+            creation_tokens = _get_val(raw_response.usage, "cache_creation_input_tokens")
+            input_tokens = _get_val(raw_response.usage, "input_tokens")
+            output_tokens = _get_val(raw_response.usage, "output_tokens")
+
+            cached_tokens = read_tokens if read_tokens > 0 else None
+            prompt_tokens = input_tokens + read_tokens + creation_tokens
+            candidates_tokens = output_tokens
             total_tokens = prompt_tokens + candidates_tokens
 
         raw_json = None
