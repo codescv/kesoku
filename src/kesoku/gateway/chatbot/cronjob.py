@@ -3,6 +3,8 @@
 Acts as a silent sink/receiver for cronjobs that execute without an active user-facing interface.
 """
 
+import datetime
+import random
 from typing import Any
 
 from kesoku.constants import MessageStatus
@@ -53,12 +55,23 @@ class CronjobChatbot(Chatbot):
         """
         tag = kwargs.get("tag")
         role = kwargs.get("role")
+
+        # Generate a unique channel ID for this execution to force a new session.
+        # Use timestamp and a short random string to ensure uniqueness and readability.
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        rand_suffix = f"{random.randint(0, 999):03d}"
+        unique_channel_id = f"{channel_id}_{timestamp}_{rand_suffix}"
+
         await self.trigger_cronjob_message(
-            channel_id=channel_id,
+            channel_id=unique_channel_id,
             prompt_content=prompt_content,
             sender_name="Cronjob",
             custom_prompt=None,
-            metadata={"is_cronjob": True, "is_silent": True},
+            metadata={
+                "is_cronjob": True,
+                "is_silent": True,
+                "parent_channel_id": channel_id,
+            },
             tag=tag,
             role=role,
         )

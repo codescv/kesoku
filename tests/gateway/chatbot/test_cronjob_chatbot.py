@@ -39,13 +39,14 @@ async def test_cronjob_chatbot_handle_message() -> None:
 
 @pytest.mark.asyncio
 async def test_cronjob_chatbot_trigger_cronjob() -> None:
-    """Verify that trigger_cronjob correctly posts PENDING_AGENT message to Gateway."""
+    """Verify that trigger_cronjob correctly posts PENDING_AGENT message to Gateway with unique channel ID."""
     mock_gateway = MagicMock(spec=Gateway)
     mock_db = AsyncMock()
     mock_gateway.db = mock_db
     mock_session = MagicMock()
     mock_session.id = "sess123"
-    mock_db.get_session_by_channel = AsyncMock(return_value=mock_session)
+    mock_db.get_session_by_channel = AsyncMock(return_value=None)
+    mock_gateway.create_session = AsyncMock(return_value=mock_session)
     mock_gateway.post = AsyncMock()
 
     chatbot = CronjobChatbot(chatbot_id="cronjob", gateway=mock_gateway)
@@ -55,18 +56,29 @@ async def test_cronjob_chatbot_trigger_cronjob() -> None:
         prompt_content="Test silent cron content",
     )
 
-    mock_gateway.db.get_session_by_channel.assert_called_once_with("cronjob", "silent_0")
-    mock_gateway.db.update_session_updated_at.assert_called_once_with("sess123", ANY)
+    mock_db.get_session_by_channel.assert_called_once()
+    called_channel_id = mock_db.get_session_by_channel.call_args[0][1]
+    assert called_channel_id.startswith("silent_0_")
+
+    mock_gateway.create_session.assert_called_once_with(
+        session_id=None,
+        title=ANY,
+        custom_prompt=None,
+        chatbot_id="cronjob",
+        channel_id=called_channel_id,
+        role="default",
+    )
     mock_gateway.post.assert_called_once()
 
     posted_msg = mock_gateway.post.call_args[0][0]
     assert posted_msg.chatbot_id == "cronjob"
-    assert posted_msg.channel_id == "silent_0"
+    assert posted_msg.channel_id == called_channel_id
     assert posted_msg.session_id == "sess123"
     assert posted_msg.role == MessageRole.USER
     assert posted_msg.status == MessageStatus.PENDING_AGENT
     assert "Test silent cron content" in posted_msg.content
     assert posted_msg.metadata.get("is_silent") is True
+    assert posted_msg.metadata.get("parent_channel_id") == "silent_0"
 
 
 @pytest.mark.asyncio
@@ -207,6 +219,6 @@ async def test_cronjob_chatbot_trigger_cronjob_with_role() -> None:
         title=ANY,
         custom_prompt=None,
         chatbot_id="cronjob",
-        channel_id="cronjob_silent_12345678",
+        channel_id=ANY,
         role="special_role",
     )
