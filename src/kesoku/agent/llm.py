@@ -386,9 +386,16 @@ def function_to_anthropic_tool(func: Callable) -> dict[str, Any]:
         param_type = "string"  # default fallback
         annotation = param.annotation
 
-        # Handle Optional or Union types (like str | None or typing.Optional)
+        # Handle Annotated types (e.g. Annotated[int, ...])
         origin = typing.get_origin(annotation)
-        if origin is typing.Union or str(origin) == "<class 'union'>":
+        if origin is typing.Annotated:
+            args = typing.get_args(annotation)
+            if args:
+                annotation = args[0]
+                origin = typing.get_origin(annotation)
+
+        # Handle Optional or Union types (like str | None or typing.Optional)
+        if origin is typing.Union or str(origin) in ("<class 'union'>", "<class 'types.UnionType'>"):
             args = typing.get_args(annotation)
             non_none_args = [a for a in args if a is not type(None)]
             if non_none_args:

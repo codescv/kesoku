@@ -46,6 +46,29 @@ def test_function_to_anthropic_tool() -> None:
     assert "max_results" not in schema["input_schema"]["required"]
 
 
+def test_function_to_anthropic_tool_annotated() -> None:
+    """Verify function_to_anthropic_tool correctly handles typing.Annotated type hints."""
+    from typing import Annotated
+
+    def annotated_tool_func(
+        query: Annotated[str, "Query string"],
+        max_results: Annotated[int | None, "Max results"] = 10,
+    ) -> str:
+        """Annotated tool.
+
+        Args:
+            query: Query string.
+            max_results: Max results.
+        """
+        return query
+
+    schema = function_to_anthropic_tool(annotated_tool_func)
+
+    assert schema["name"] == "annotated_tool_func"
+    assert schema["input_schema"]["properties"]["query"]["type"] == "string"
+    assert schema["input_schema"]["properties"]["max_results"]["type"] == "integer"
+
+
 def test_get_llm_providers() -> None:
     """Verify get_llm retrieves the correct LLM provider instance."""
     with patch("kesoku.agent.llm.GeminiLLM", return_value=MagicMock(spec=GeminiLLM)):
