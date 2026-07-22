@@ -2,6 +2,7 @@
 
 import asyncio
 import inspect
+import typing
 from collections.abc import Callable
 from typing import Any
 
@@ -68,6 +69,44 @@ class ToolRunner:
             tool_func = self.tool_registry.get_tool(call.name)
             call_kwargs = dict(call.arguments)
             sig = inspect.signature(tool_func)
+
+            # Coerce parameters based on signature type hints
+            for param_name, param in sig.parameters.items():
+                if param_name in call_kwargs:
+                    val = call_kwargs[param_name]
+                    annotation = param.annotation
+
+                    # Handle Union/Annotated types to get the base type
+                    origin = typing.get_origin(annotation)
+                    if origin is typing.Annotated:
+                        args = typing.get_args(annotation)
+                        if args:
+                            annotation = args[0]
+                            origin = typing.get_origin(annotation)
+                    if origin is typing.Union or str(origin) in ("<class 'union'>", "<class 'types.UnionType'>"):
+                        args = typing.get_args(annotation)
+                        non_none_args = [a for a in args if a is not type(None)]
+                        if non_none_args:
+                            annotation = non_none_args[0]
+
+                    # Coerce value
+                    if annotation is int and not isinstance(val, int):
+                        try:
+                            call_kwargs[param_name] = int(val)
+                        except (ValueError, TypeError):
+                            pass
+                    elif annotation is float and not isinstance(val, (int, float)):
+                        try:
+                            call_kwargs[param_name] = float(val)
+                        except (ValueError, TypeError):
+                            pass
+                    elif annotation is bool and not isinstance(val, bool):
+                        if str(val).lower() in ("true", "1", "yes"):
+                            call_kwargs[param_name] = True
+                        elif str(val).lower() in ("false", "0", "no"):
+                            call_kwargs[param_name] = False
+                    elif annotation is str and not isinstance(val, str):
+                        call_kwargs[param_name] = str(val)
 
             # Validate required parameters to handle LLM truncation gracefully
             missing_args = []

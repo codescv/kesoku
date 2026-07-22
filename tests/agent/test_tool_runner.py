@@ -196,3 +196,64 @@ def test_tool_runner_interrupted() -> None:
     assert result_msg.type == "tool_result"
     assert "aborted due to thought interruption" in result_msg.content
     assert result_msg.metadata["tool_error"] == "Tool execution was aborted due to thought interruption."
+
+
+def test_tool_runner_argument_coercion() -> None:
+    """Verify that ToolRunner coerces string arguments to annotated parameter types."""
+    from typing import Annotated
+    registry = ToolRegistry()
+
+    @registry.register
+    def typed_tool(
+        a_int: int,
+        a_float: float,
+        a_bool: bool,
+        a_str: str,
+        annotated_int: Annotated[int | None, "Annotated int"] = None,
+    ) -> str:
+        """A tool with typed parameters."""
+        return (
+            f"a_int={a_int} ({type(a_int).__name__}), "
+            f"a_float={a_float} ({type(a_float).__name__}), "
+            f"a_bool={a_bool} ({type(a_bool).__name__}), "
+            f"a_str={a_str} ({type(a_str).__name__}), "
+            f"annotated_int={annotated_int} ({type(annotated_int).__name__})"
+        )
+
+    context = ToolContext(session_id="sess_1", session_workspace="ws_1")
+    runner = ToolRunner(registry, context)
+
+    # Pass strings for all parameters
+    call = ToolCallRequest(
+        name="typed_tool",
+        arguments={
+            "a_int": "100",
+            "a_float": "12.34",
+            "a_bool": "true",
+            "a_str": 42,
+            "annotated_int": "500",
+        },
+        tool_call_id="tc_1",
+    )
+    tc_msg = Message(
+        id="msg_tc_1",
+        session_id="sess_1",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role="tool",
+        content="Calling typed_tool",
+    )
+
+    import asyncio
+
+    result_msg = asyncio.run(runner.execute_tool(call, tc_msg))
+
+    assert result_msg.role == "tool"
+    assert result_msg.type == "tool_result"
+
+    expected_result = (
+        "a_int=100 (int), a_float=12.34 (float), a_bool=True (bool), "
+        "a_str=42 (str), annotated_int=500 (int)"
+    )
+    assert result_msg.metadata["tool_result"] == expected_result
