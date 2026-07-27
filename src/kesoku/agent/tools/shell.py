@@ -174,16 +174,6 @@ async def monitor_background_job(
 
         output = f"=== STDOUT ===\n{stdout}\n=== STDERR ===\n{stderr}"
 
-        # Cap output to avoid blowing up context window
-        truncated_output = output
-        if len(output) > MAX_TOOL_OUTPUT_LENGTH:
-            truncated_output = (
-                f"Output truncated (total length {len(output)} bytes).\n"
-                f"Stdout saved to: `{log_filepath_stdout}`.\n"
-                f"Stderr saved to: `{log_filepath_stderr}`.\n\n"
-                f"Preview:\n{output[: MAX_TOOL_OUTPUT_LENGTH // 2]}...\n{output[-MAX_TOOL_OUTPUT_LENGTH // 2 :]}"
-            )
-
         # Post special System wakeup alert to Gateway
         gw = context.gateway or Gateway()
 
@@ -203,9 +193,10 @@ async def monitor_background_job(
         content = (
             f"[System Alert] Background Job `{job_id}` has finished executing {status_str}.\n"
             f"Stdout path: `{log_filepath_stdout}`\n"
-            f"Stderr path: `{log_filepath_stderr}`\n\n"
-            f"{truncated_output}"
+            f"Stderr path: `{log_filepath_stderr}`"
         )
+        if len(output) <= MAX_TOOL_OUTPUT_LENGTH:
+            content += f"\n\n{output}"
 
         wakeup_msg = Message(
             session_id=context.session_id,
@@ -458,20 +449,14 @@ async def run_shell_command(
                 f"Output truncated (total length {len(out_str)} bytes). "
                 f"Full output saved to session workspace file: `{output_filepath}`.\n"
                 f"You can use tool `run_shell_command` (e.g., `cat {output_filename}`) "
-                f"on this path to examine the full output.\n\n"
-                f"Preview (first {effective_max} chars):\n{out_str[:effective_max]}\n\n"
-                f"[Output truncated. If you need to view more output, you can set the 'max_output_chars' "
-                f"parameter to a larger value (up to 30000), or filter the command output "
-                f"(e.g., using grep/awk/head/tail/etc.).]"
+                f"with a larger `max_output_chars` parameter (e.g., 30000) to examine the full output.\n\n"
+                f"Preview (last {effective_max} chars):\n{out_str[-effective_max:]}"
             )
         except Exception as ex:
             logger.error(f"Failed to save truncated output to '{output_filepath}': {ex}")
             final_output = (
                 f"Output truncated (total length {len(out_str)} bytes). "
-                f"Preview:\n{out_str[:effective_max]}\n\n"
-                f"[Output truncated. If you need to view more output, you can set the 'max_output_chars' "
-                f"parameter to a larger value (up to 30000), or filter the command output "
-                f"(e.g., using grep/awk/head/tail/etc.).]"
+                f"Preview (last {effective_max} chars):\n{out_str[-effective_max:]}"
             )
 
     if proc.returncode != 0:

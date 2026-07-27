@@ -289,13 +289,22 @@ async def test_run_shell_command_max_output_chars(tmp_path) -> None:
         res = await run_shell_command(cmd_1200, context=ctx)
 
         assert "Output truncated" in res
-        assert "Preview (first 1000 chars):" in res
-        assert "[Output truncated. If you need to view more output, you can set the 'max_output_chars'" in res
+        assert "Preview (last 1000 chars):" in res
+        assert "with a larger `max_output_chars` parameter" in res
+
+        # Verify preview contains the end of output (last 1000 chars)
+        preview_part = res.split("Preview (last 1000 chars):\n")[1]
+        assert "=== STDERR ===" in preview_part
+        assert "=== STDOUT ===" not in preview_part
 
         # Test custom max_output_chars = 100
         res_custom = await run_shell_command(cmd_1200, max_output_chars=100, context=ctx)
         assert "Output truncated" in res_custom
-        assert "Preview (first 100 chars):" in res_custom
+        assert "Preview (last 100 chars):" in res_custom
+
+        preview_part_custom = res_custom.split("Preview (last 100 chars):\n")[1]
+        assert "=== STDERR ===" in preview_part_custom
+        assert "=== STDOUT ===" not in preview_part_custom
 
         # Test no truncation if content is shorter than max_output_chars
         cmd_50 = "python3 -c 'print(\"a\" * 50)'"
