@@ -506,6 +506,15 @@ class DiscordChatbot(Chatbot):
     async def handle_message(self, message: Message) -> None:
         """Process outgoing message from Gateway and send to target Discord thread."""
         await self.render_outgoing_message(message)
+    async def _call_with_timeout(self, coro, timeout_duration=15.0, error_msg="Discord API call timed out"):
+        """Wrap a coroutine in asyncio.timeout to enforce a timeout."""
+        try:
+            async with asyncio.timeout(timeout_duration):
+                return await coro
+        except TimeoutError as te:
+            logger.error(f"{error_msg} (timeout={timeout_duration}s)")
+            raise DeliveryAbortedError(f"{error_msg}: {te}") from te
+
 
     async def _get_discord_channel(self, channel_id_str: str, metadata: dict[str, Any] | None = None) -> Any | None:
         try:
@@ -516,9 +525,14 @@ class DiscordChatbot(Chatbot):
         channel = self.bot.get_channel(target_id)
         if not channel:
             try:
-                channel = await self.bot.fetch_channel(target_id)
+                channel = await self._call_with_timeout(
+                    self.bot.fetch_channel(target_id),
+                    error_msg=f"Timeout fetching channel {target_id}"
+                )
             except (discord.NotFound, discord.Forbidden) as fe:
                 raise DeliveryAbortedError(f"Discord channel fetch failed: {fe}") from fe
+            except DeliveryAbortedError:
+                raise
             except Exception as e:
                 logger.debug(f"Failed to fetch channel {target_id} by ID: {e}")
 
@@ -529,13 +543,21 @@ class DiscordChatbot(Chatbot):
                     user_id = int(recipient_id_str)
                     user = self.bot.get_user(user_id)
                     if not user:
-                        user = await self.bot.fetch_user(user_id)
+                        user = await self._call_with_timeout(
+                            self.bot.fetch_user(user_id),
+                            error_msg=f"Timeout fetching user {user_id}"
+                        )
                     if user:
                         channel = user.dm_channel
                         if not channel:
-                            channel = await user.create_dm()
+                            channel = await self._call_with_timeout(
+                                user.create_dm(),
+                                error_msg=f"Timeout creating DM for user {user_id}"
+                            )
                 except (discord.NotFound, discord.Forbidden) as fe:
                     raise DeliveryAbortedError(f"Discord DM user fetch failed: {fe}") from fe
+                except DeliveryAbortedError:
+                    raise
                 except Exception as de:
                     logger.warning(f"Failed to resolve DM channel for recipient {recipient_id_str}: {de}")
 
@@ -549,10 +571,9 @@ class DiscordChatbot(Chatbot):
             logger.warning(
                 f"Message {message.id} Failed to fetch Discord channel "
                 f"{message.channel_id} (deleted or forbidden): {de}. "
-                "Aborting session and marking message as delivered to stop retrying."
+                "Aborting session."
             )
             await self.gateway.abort_session(message.session_id)
-            await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
             raise
 
     def supports_intermediate_messages(self) -> bool:
@@ -668,24 +689,37 @@ class DiscordChatbot(Chatbot):
                     chatbot=self,
                     is_thread=is_thread,
                 )
-                header_msg = await channel.send(
-                    content=f"🔍 **Session ID:** `{message.session_id}`",
-                    view=header_view,
+                header_msg = await self._call_with_timeout(
+                    channel.send(
+                        content=f"🔍 **Session ID:** `{message.session_id}`",
+                        view=header_view,
+                    ),
+                    error_msg="Timeout sending message header"
                 )
                 self._header_views[turn_id] = (header_msg, header_view)
+            except DeliveryAbortedError:
+                raise
             except Exception as he:
                 logger.warning(f"Failed to send message header: {he}")
 
         if session_id in self._turn_special_msg:
             discord_msg = self._turn_special_msg[session_id]
             try:
-                await discord_msg.edit(content=new_content)
+                await self._call_with_timeout(
+                    discord_msg.edit(content=new_content),
+                    error_msg="Timeout editing special message"
+                )
+            except DeliveryAbortedError:
+                raise
             except Exception as ee:
                 logger.warning(f"Failed to edit single special message: {ee}")
             await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
             return
 
-        sent_msg = await channel.send(new_content)
+        sent_msg = await self._call_with_timeout(
+            channel.send(new_content),
+            error_msg="Timeout sending special message"
+        )
         self._intermediate_messages[message.channel_id].append(sent_msg)
         self._turn_special_msg[session_id] = sent_msg
         if message.role == MessageRole.TOOL and message.type == MessageType.TOOL_CALL:
@@ -725,7 +759,12 @@ class DiscordChatbot(Chatbot):
                 discord_msg = self._turn_special_msg.get(session_id)
                 if discord_msg:
                     try:
-                        await discord_msg.edit(content=new_content)
+                        await self._call_with_timeout(
+                            discord_msg.edit(content=new_content),
+                            error_msg="Timeout editing special message with tool result"
+                        )
+                    except DeliveryAbortedError:
+                        raise
                     except Exception as ee:
                         logger.warning(f"Failed to edit single special message: {ee}")
 
@@ -739,7 +778,12 @@ class DiscordChatbot(Chatbot):
                 content = discord_msg.content.replace("⏳", emoji)
                 if len(content) > DISCORD_MAX_CONTENT_LENGTH:
                     content = content[: DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
-                await discord_msg.edit(content=content)
+                await self._call_with_timeout(
+                    discord_msg.edit(content=content),
+                    error_msg="Timeout editing tool call message with result"
+                )
+            except DeliveryAbortedError:
+                raise
             except Exception as ee:
                 logger.warning(f"Failed to edit tool call message in-place: {ee}")
 
@@ -754,7 +798,10 @@ class DiscordChatbot(Chatbot):
         is_special = self.is_intermediate_message(message)
         for chunk in chunks:
             if chunk.strip():
-                sent_msg = await channel.send(chunk)
+                sent_msg = await self._call_with_timeout(
+                    channel.send(chunk),
+                    error_msg="Timeout sending text chunk"
+                )
                 if is_special:
                     self._intermediate_messages[message.channel_id].append(sent_msg)
                     self._turn_special_msg[message.session_id] = sent_msg
@@ -773,10 +820,21 @@ class DiscordChatbot(Chatbot):
         else:
             try:
                 discord_file = discord.File(file_path)
-                await channel.send(file=discord_file)
+                await self._call_with_timeout(
+                    channel.send(file=discord_file),
+                    error_msg=f"Timeout sending file {file_path}"
+                )
+            except DeliveryAbortedError:
+                raise
             except Exception as e:
                 logger.error(f"Failed to send file {file_path} to Discord: {e}", exc_info=True)
-                await channel.send(f"⚠️ Failed to send file {file_path}: {e}")
+                try:
+                    await self._call_with_timeout(
+                        channel.send(f"⚠️ Failed to send file {file_path}: {e}"),
+                        error_msg="Timeout sending file failure fallback"
+                    )
+                except Exception as fe:
+                    logger.error(f"Failed to send file fallback: {fe}")
 
     async def send_voice_segment(self, channel_id: str, file_path: str, message: Message) -> None:
         """Deliver a voice segment to the target Discord thread (falling back to standard attachment if failed)."""
@@ -789,7 +847,12 @@ class DiscordChatbot(Chatbot):
             await channel.send(f"⚠️ Voice file not found: {file_path}")
         else:
             try:
-                await send_voice_message(channel, file_path)
+                await self._call_with_timeout(
+                    send_voice_message(channel, file_path),
+                    error_msg=f"Timeout sending voice message {file_path}"
+                )
+            except DeliveryAbortedError:
+                raise
             except Exception as e:
                 logger.warning(
                     f"Failed to send native voice message for {file_path}: {e}. "
@@ -797,10 +860,21 @@ class DiscordChatbot(Chatbot):
                 )
                 try:
                     discord_file = discord.File(file_path)
-                    await channel.send(file=discord_file)
+                    await self._call_with_timeout(
+                        channel.send(file=discord_file),
+                        error_msg=f"Timeout sending voice file fallback {file_path}"
+                    )
+                except DeliveryAbortedError:
+                    raise
                 except Exception as fe:
                     logger.error(f"Failed to send voice file fallback for {file_path}: {fe}", exc_info=True)
-                    await channel.send(f"⚠️ Failed to send voice file {file_path}: {fe}")
+                    try:
+                        await self._call_with_timeout(
+                            channel.send(f"⚠️ Failed to send voice file {file_path}: {fe}"),
+                            error_msg="Timeout sending voice failure fallback"
+                        )
+                    except Exception as ffe:
+                        logger.error(f"Failed to send voice fallback error message: {ffe}")
 
     async def send_question_segment(self, channel_id: str, question: str, choices: list[str], message: Message) -> None:
         """Deliver a multiple choice question block as a dynamic action button view embed."""
@@ -823,10 +897,21 @@ class DiscordChatbot(Chatbot):
             if question_view.use_short_labels:
                 description_lines = [f"**{chr(ord('A') + idx)}.** {choice}" for idx, choice in enumerate(choices)]
                 embed.description = "\n".join(description_lines)
-            await channel.send(embed=embed, view=question_view)
+            await self._call_with_timeout(
+                channel.send(embed=embed, view=question_view),
+                error_msg="Timeout sending question view"
+            )
+        except DeliveryAbortedError:
+            raise
         except Exception as qe:
             logger.error(f"Failed to send question view to Discord: {qe}", exc_info=True)
-            await channel.send(f"⚠️ Failed to send question: {question}")
+            try:
+                await self._call_with_timeout(
+                    channel.send(f"⚠️ Failed to send question: {question}"),
+                    error_msg="Timeout sending question failure fallback"
+                )
+            except Exception as fe:
+                logger.error(f"Failed to send question fallback: {fe}")
 
     async def on_message_delivered(self, message: Message) -> None:
         """Post-delivery lifecycle callback: clean up typing indicator, intermediate lists, and update metrics."""
@@ -889,6 +974,40 @@ class DiscordChatbot(Chatbot):
                         await header_msg.edit(view=header_view)
                 except Exception as ee:
                     logger.warning(f"Failed to update header view with metrics: {ee}")
+
+    async def on_message_delivery_failed(self, message: Message, exception: Exception) -> None:
+        """Post-failure lifecycle callback: clean up typing indicator, intermediate lists, and update status."""
+        logger.warning(f"Delivery failed for message {message.id}: {exception}")
+        await super().on_message_delivery_failed(message, exception)
+
+        if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT:
+            task = self._typing_tasks.pop(message.channel_id, None)
+            if task:
+                task.cancel()
+
+            # Delete all tracked intermediate special messages for this channel
+            intermediate_msgs = self._intermediate_messages.pop(message.channel_id, [])
+            if intermediate_msgs:
+                for msg in intermediate_msgs:
+                    try:
+                        await msg.delete()
+                    except Exception as de:
+                        logger.warning(
+                            f"Failed to delete intermediate message {msg.id} in channel {message.channel_id}: {de}"
+                        )
+
+            # Clean up tool call single-message caches for the session
+            self._turn_special_items.pop(message.session_id, None)
+            self._turn_special_msg.pop(message.session_id, None)
+
+            # Remove stop button from the header view for this turn and delete the header
+            turn_id = message.parent_id or message.session_id
+            if turn_id in self._header_views:
+                header_msg, _ = self._header_views.pop(turn_id)
+                try:
+                    await header_msg.delete()
+                except Exception as ee:
+                    logger.warning(f"Failed to delete header message on failure: {ee}")
 
     async def trigger_cronjob(
         self,

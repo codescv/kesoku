@@ -994,9 +994,9 @@ class Chatbot(ABC):
 
             # 5. Post-delivery lifecycle hook (e.g., stop typing indicator, update metrics, finalize card/header)
             await self.on_message_delivered(message)
-        except DeliveryAbortedError:
+        except DeliveryAbortedError as de:
             # Stop further execution of the template since the delivery was aborted/handled elsewhere
-            pass
+            await self.on_message_delivery_failed(message, de)
 
     async def start(self) -> None:
         """Start listening as a decentralized subscriber for model responses.
@@ -1057,6 +1057,10 @@ class Chatbot(ABC):
     async def on_message_delivered(self, message: Message) -> None:
         """Lifecycle hook triggered after a message is successfully delivered."""
         pass
+
+    async def on_message_delivery_failed(self, message: Message, exception: Exception) -> None:
+        """Lifecycle hook triggered after a message delivery fails."""
+        await self.gateway.db.update_message_status(message.id, MessageStatus.ERROR)
 
     async def pre_ingest_hook(self, dto: InboundMessageDTO) -> None:
         """Hook executed before session resolution or creation.
