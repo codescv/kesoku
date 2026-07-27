@@ -506,7 +506,7 @@ def test_build_discord_custom_prompt_dm() -> None:
 
     prompt = _build_discord_custom_prompt(mock_dm, mock_user)
 
-    assert "You are talking to the user via discord." in prompt
+    assert "You are talking to the user via discord DM (direct message)." in prompt
     assert "Users" not in prompt
     assert "TestUser" not in prompt
     assert "Mentioning Users" not in prompt

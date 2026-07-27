@@ -67,7 +67,7 @@ def _build_discord_custom_prompt(
 
     # Build location instruction and channel topic
     if is_dm:
-        location_instruction = "You are talking to the user via discord."
+        location_instruction = "You are talking to the user via discord DM (direct message)."
         topic_section = ""
     else:
         guild_name = channel.guild.name if channel.guild else "Unknown Server"
