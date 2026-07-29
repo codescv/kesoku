@@ -978,7 +978,13 @@ class DiscordChatbot(Chatbot):
     async def on_message_delivery_failed(self, message: Message, exception: Exception) -> None:
         """Post-failure lifecycle callback: clean up typing indicator, intermediate lists, and update status."""
         logger.warning(f"Delivery failed for message {message.id}: {exception}")
-        await super().on_message_delivery_failed(message, exception)
+        cause = getattr(exception, "__cause__", None)
+        if isinstance(exception, (discord.NotFound, discord.Forbidden)) or isinstance(
+            cause, (discord.NotFound, discord.Forbidden)
+        ):
+            await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
+        else:
+            await super().on_message_delivery_failed(message, exception)
 
         if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT:
             task = self._typing_tasks.pop(message.channel_id, None)
