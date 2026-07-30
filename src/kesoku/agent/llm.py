@@ -282,7 +282,7 @@ def history_to_turns(
             if msg.role == MessageRole.SYSTEM:
                 if resolved_system_prompt is None:
                     resolved_system_prompt = msg.content
-                elif msg != history[0]:
+                else:
                     notification = f"[System Notification]\n{msg.content}"
                     add_blocks(MessageRole.USER, [TextBlock(text=notification)])
                 continue

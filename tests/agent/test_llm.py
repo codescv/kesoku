@@ -487,6 +487,26 @@ def test_history_to_turns_conversion() -> None:
     assert turns[3].blocks[0].text == "Continuing prompt"
 
 
+def test_history_to_turns_with_sliced_system_notification() -> None:
+    """Verify SYSTEM messages at index 0 of sliced history are not dropped when system_prompt is already provided."""
+    msg_wakeup = Message(
+        session_id="session-123",
+        chatbot_id="discord",
+        channel_id="channel-123",
+        sender="System",
+        role=MessageRole.SYSTEM,
+        type=MessageType.TEXT,
+        content="[System Alert] Background Job finished",
+    )
+    history = [msg_wakeup]
+    turns, resolved_prompt = history_to_turns(history, prompt=None, system_prompt="# Active Persona")
+
+    assert resolved_prompt == "# Active Persona"
+    assert len(turns) == 1
+    assert turns[0].role == "user"
+    assert turns[0].blocks[0].text == "[System Notification]\n[System Alert] Background Job finished"
+
+
 def test_image_resizing_and_compression() -> None:
     """Verify that _resize_and_compress_image resizes large images and outputs WebP."""
     import io
