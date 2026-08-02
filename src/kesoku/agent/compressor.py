@@ -125,10 +125,6 @@ class HistoryCompressor:
             return False
         if "STAGING_DIR" in cleaned:
             return False
-        if cleaned.startswith("sessions/") or "/sessions/" in cleaned:
-            return False
-        if cleaned.startswith("staging/") or "/staging/" in cleaned:
-            return False
 
         if not staging_dir:
             return True
@@ -140,12 +136,14 @@ class HistoryCompressor:
             if os.path.commonpath([norm_staging, norm_file]) == norm_staging:
                 return False
 
-            try:
-                rel_staging = os.path.relpath(norm_staging, os.getcwd())
-                if rel_staging and rel_staging != "." and rel_staging in cleaned:
+            session_folder_name = os.path.basename(norm_staging)
+            if session_folder_name and session_folder_name != ".":
+                if cleaned.startswith(f"{session_folder_name}/"):
                     return False
-            except ValueError:
-                pass
+                if cleaned.startswith(f"sessions/{session_folder_name}/"):
+                    return False
+                if f"/sessions/{session_folder_name}/" in f"/{cleaned}":
+                    return False
 
             candidate = os.path.join(norm_staging, cleaned)
             if os.path.exists(candidate):

@@ -42,19 +42,33 @@ def test_parse_summary_json_invalid():
 
 def test_is_outside_staging_dir(tmp_path):
     """Test STAGING_DIR file path checking."""
-    staging_dir = str(tmp_path / "staging")
+    staging_dir = str(tmp_path / "sessions" / "my_sess")
     os.makedirs(staging_dir, exist_ok=True)
 
     # File inside staging dir
     inside_file = os.path.join(staging_dir, "output.png")
     assert HistoryCompressor.is_outside_staging_dir(inside_file, staging_dir) is False
 
-    # Relative sessions path (e.g. sessions/7c277e98/asuka_bbq_chef_bird_1823.png)
+    # Relative path matching this session folder
     assert (
         HistoryCompressor.is_outside_staging_dir(
-            "sessions/7c277e98/asuka_bbq_chef_bird_1823.png", staging_dir
+            "sessions/my_sess/asuka_bbq_chef_bird_1823.png", staging_dir
         )
         is False
+    )
+    assert (
+        HistoryCompressor.is_outside_staging_dir(
+            "my_sess/asuka_bbq_chef_bird_1823.png", staging_dir
+        )
+        is False
+    )
+
+    # File from another session must be considered OUTSIDE (should return True)
+    assert (
+        HistoryCompressor.is_outside_staging_dir(
+            "sessions/other_sess/important_file.txt", staging_dir
+        )
+        is True
     )
 
     # File containing STAGING_DIR substring
