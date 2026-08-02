@@ -188,7 +188,8 @@ async def test_auto_compact_session(tmp_path):
     assert compacted is True
     llm_mock.generate.assert_called_once()
     call_prompt = llm_mock.generate.call_args[1]["prompt"]
-    assert "2026-01-01 18:00" in call_prompt
+    assert "This conversation segment occurred from" in call_prompt
+    assert "Use these exact calendar dates" in call_prompt
     assert "STAGING_DIR" in call_prompt
 
     db_mock.insert_summary_node.assert_called_once()

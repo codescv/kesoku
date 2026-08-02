@@ -1,5 +1,6 @@
 """Custom context compression and hierarchical consolidation manager for Kesoku."""
 
+import datetime
 import json
 import logging
 import os
@@ -22,9 +23,13 @@ Your task is to summarize the following segment of a conversation turn history i
 a highly dense, factual, and chronologically accurate JSON object.
 Keep the summary structured and concise (< 1000 chars total).
 
+Date Context for this segment:
+{date_context}
+
 Guidelines:
-1. timeline: Must use absolute timestamps (e.g., 2026-01-01 18:00), never relative dates/times like
-   "Tuesday" or "15:00", because date context will be lost. Include when, where, who, what.
+1. timeline: Must use absolute timestamps (e.g., {example_timestamp}) derived from the Date Context and the
+   timestamps on each message. Never use relative dates/times like "Tuesday" or "15:00", or fabricate
+   random dates. Include when, where, who, what.
 2. key_decisions_and_changes: Record changes in requirements or approach, such as when the agent proposed
    or tried A, but the user rejected it and requested B. Return None if there are no such changes.
 3. pitfalls: Record only mistakes made by the agent and what was learned (e.g., command errors and how
@@ -34,7 +39,7 @@ Guidelines:
 
 Output ONLY a valid JSON object with exact keys "timeline", "key_decisions_and_changes", "pitfalls", and "files":
 {{
-  "timeline": ["2026-01-01 18:00: ...", "2026-01-01 18:05: ..."],
+  "timeline": ["{example_timestamp}: ..."],
   "key_decisions_and_changes": "..." or null,
   "pitfalls": "..." or null,
   "files": ["/path/to/file1", "/path/to/file2"] or null
@@ -50,9 +55,13 @@ Your task is to merge and consolidate the following chronological sequence of su
 into a single, cohesive, higher-level JSON object.
 Maintain high density and clear structure (< 1000 chars total).
 
+Date Context for these summaries:
+{date_context}
+
 Guidelines:
-1. timeline: Merge events chronologically. Must use absolute timestamps (e.g., 2026-01-01 18:00), never
-   relative dates/times like "Tuesday" or "15:00".
+1. timeline: Merge events chronologically. Must use absolute timestamps (e.g., {example_timestamp}) strictly
+   based on the actual dates in the Date Context and summaries. Never use relative dates/times like
+   "Tuesday" or "15:00", or fabricate dates.
 2. key_decisions_and_changes: Record changes in requirements or approach (e.g., proposed A but changed to B).
    If there are conflicting decisions, prioritize the latest decision and resolve contradictions in favor of
    the most recent events. Return None if there are none.
@@ -62,7 +71,7 @@ Guidelines:
 
 Output ONLY a valid JSON object with exact keys "timeline", "key_decisions_and_changes", "pitfalls", and "files":
 {{
-  "timeline": ["2026-01-01 18:00: ...", "2026-01-01 18:05: ..."],
+  "timeline": ["{example_timestamp}: ..."],
   "key_decisions_and_changes": "..." or null,
   "pitfalls": "..." or null,
   "files": ["/path/to/file1", "/path/to/file2"] or null
@@ -226,6 +235,17 @@ class HistoryCompressor:
             files=files_str,
         )
 
+    @classmethod
+    def format_ts(cls, ts: float | int | None) -> str:
+        """Format UNIX timestamp into standard calendar date and time string with timezone."""
+        if not ts or ts <= 0:
+            return "Unknown Time"
+        try:
+            msg_time = datetime.datetime.fromtimestamp(ts).astimezone()
+            return msg_time.strftime("%Y-%m-%d %H:%M:%S %Z")
+        except Exception:
+            return "Unknown Time"
+
     def segment_turns(self, messages: list[Message]) -> list[list[Message]]:
         """Segment messages into logical turns starting with a USER or SYSTEM message.
 
@@ -234,14 +254,15 @@ class HistoryCompressor:
         return segment_logical_turns(messages)
 
     def format_turn_for_summary(self, turn: list[Message]) -> str:
-        """Format a single turn into text for summarization, stripping thoughts."""
+        """Format a single turn into text for summarization, stripping thoughts and including timestamps."""
         lines = []
         for msg in turn:
             if msg.type == MessageType.THOUGHT:
                 continue
             role_label = msg.role.upper()
             content = msg.content or ""
-            lines.append(f"{role_label}: {content}")
+            ts_str = self.format_ts(msg.timestamp)
+            lines.append(f"[{ts_str}] {role_label}: {content}")
         return "\n".join(lines)
 
     async def auto_compact_session(
@@ -301,12 +322,25 @@ class HistoryCompressor:
                 for t in current_chunk:
                     segment_text += self.format_turn_for_summary(t) + "\n"
 
-                prompt = SUMMARIZE_TURN_PROMPT.format(segment=segment_text)
-                res = await llm.generate(prompt=prompt)
-                summary_content = self.format_summary(res.content, staging_dir=staging_dir)
-
                 start_ts = min(msg.timestamp for t in current_chunk for msg in t)
                 end_ts = max(msg.timestamp for t in current_chunk for msg in t)
+                start_str = self.format_ts(start_ts)
+                end_str = self.format_ts(end_ts)
+                date_context = (
+                    f"This conversation segment occurred from {start_str} to {end_str}. "
+                    "Use these exact calendar dates for all timeline events."
+                )
+
+                example_dt = datetime.datetime.fromtimestamp(start_ts).astimezone()
+                example_timestamp = example_dt.strftime("%Y-%m-%d %H:%M")
+
+                prompt = SUMMARIZE_TURN_PROMPT.format(
+                    date_context=date_context,
+                    example_timestamp=example_timestamp,
+                    segment=segment_text,
+                )
+                res = await llm.generate(prompt=prompt)
+                summary_content = self.format_summary(res.content, staging_dir=staging_dir)
 
                 node_id = str(uuid.uuid4())
                 node = SummaryNode(
@@ -372,14 +406,32 @@ class HistoryCompressor:
             i = 0
             while len(roots) - i >= 2 * K:
                 chunk = roots[i : i + K]
+                start_ts = min(nd.start_timestamp for nd in chunk)
+                end_ts = max(nd.end_timestamp for nd in chunk)
+                start_str = self.format_ts(start_ts)
+                end_str = self.format_ts(end_ts)
+                date_context = (
+                    f"These summaries cover the period from {start_str} to {end_str}. "
+                    "Use these exact calendar dates for all timeline events."
+                )
+
                 summaries_text = ""
                 for idx, nd in enumerate(chunk):
+                    s_str = self.format_ts(nd.start_timestamp)
+                    e_str = self.format_ts(nd.end_timestamp)
                     summaries_text += (
-                        f"--- Summary {idx + 1} (from ts {nd.start_timestamp} to {nd.end_timestamp}) ---\n"
+                        f"--- Summary {idx + 1} (from {s_str} to {e_str}) ---\n"
                         f"{nd.summary}\n\n"
                     )
 
-                prompt = CONSOLIDATE_SUMMARIES_PROMPT.format(summaries=summaries_text)
+                example_dt = datetime.datetime.fromtimestamp(start_ts).astimezone()
+                example_timestamp = example_dt.strftime("%Y-%m-%d %H:%M")
+
+                prompt = CONSOLIDATE_SUMMARIES_PROMPT.format(
+                    date_context=date_context,
+                    example_timestamp=example_timestamp,
+                    summaries=summaries_text,
+                )
                 res = await llm.generate(prompt=prompt)
                 merged_summary = self.format_summary(res.content, staging_dir=staging_dir)
 
