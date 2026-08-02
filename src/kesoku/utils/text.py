@@ -353,6 +353,55 @@ LATEX_SYMBOL_MAP = {
     r"\empty": "∅",
     r"\emptyset": "∅",
     r"\sqrt": "√",
+    # Logic and set operations
+    r"\land": "∧",
+    r"\wedge": "∧",
+    r"\lor": "∨",
+    r"\vee": "∨",
+    r"\lnot": "¬",
+    r"\neg": "¬",
+    r"\setminus": "∖",
+    # Arrows and equivalence
+    r"\iff": "⇔",
+    r"\equiv": "≡",
+    r"\sim": "~",
+    r"\simeq": "≃",
+    r"\cong": "≅",
+    r"\propto": "∝",
+    r"\mapsto": "↦",
+    r"\longrightarrow": "⟶",
+    r"\longleftarrow": "⟵",
+    r"\uparrow": "↑",
+    r"\downarrow": "↓",
+    r"\Uparrow": "⇑",
+    r"\Downarrow": "⇓",
+    # Geometry and dots
+    r"\dots": "…",
+    r"\cdots": "…",
+    r"\ldots": "…",
+    r"\angle": "∠",
+    r"\perp": "⊥",
+    r"\parallel": "∥",
+    r"\triangle": "△",
+    r"\degree": "°",
+    r"\hbar": "ℏ",
+    r"\ell": "ℓ",
+    r"\aleph": "ℵ",
+    r"\langle": "⟨",
+    r"\rangle": "⟩",
+    r"\lfloor": "⌊",
+    r"\rfloor": "⌋",
+    r"\lceil": "⌈",
+    r"\rceil": "⌉",
+    r"\bullet": "•",
+    r"\circ": "∘",
+    r"\star": "⋆",
+    r"\ast": "∗",
+    r"\oplus": "⊕",
+    r"\otimes": "⊗",
+    r"\mp": "∓",
+    r"\ll": "≪",
+    r"\gg": "≫",
 }
 
 SUPERSCRIPT_MAP = {
@@ -411,6 +460,65 @@ SUBSCRIPT_MAP = {
     "x": "ₓ",
 }
 
+BLACKBOARD_MAP = {
+    "A": "𝔸",
+    "B": "𝔹",
+    "C": "ℂ",
+    "D": "𝔻",
+    "E": "𝔼",
+    "F": "𝔽",
+    "G": "𝔾",
+    "H": "ℍ",
+    "I": "𝕀",
+    "J": "𝕁",
+    "K": "𝕂",
+    "L": "𝕃",
+    "M": "𝕄",
+    "N": "ℕ",
+    "O": "𝕆",
+    "P": "ℙ",
+    "Q": "ℚ",
+    "R": "ℝ",
+    "S": "𝕊",
+    "T": "𝕋",
+    "U": "𝕌",
+    "V": "𝕍",
+    "W": "𝕎",
+    "X": "𝕏",
+    "Y": "𝕐",
+    "Z": "ℤ",
+    "k": "𝕜",
+}
+
+CALLIGRAPHIC_MAP = {
+    "A": "𝒜",
+    "B": "ℬ",
+    "C": "𝒞",
+    "D": "𝒟",
+    "E": "ℰ",
+    "F": "ℱ",
+    "G": "𝒢",
+    "H": "ℋ",
+    "I": "ℐ",
+    "J": "𝒥",
+    "K": "𝒦",
+    "L": "ℒ",
+    "M": "ℳ",
+    "N": "𝒩",
+    "O": "𝒪",
+    "P": "𝒫",
+    "Q": "𝒬",
+    "R": "ℛ",
+    "S": "𝒮",
+    "T": "𝒯",
+    "U": "𝒰",
+    "V": "𝒱",
+    "W": "𝒲",
+    "X": "𝒳",
+    "Y": "𝒴",
+    "Z": "𝒵",
+}
+
 
 def _to_superscript(text: str) -> str | None:
     res = []
@@ -430,6 +538,16 @@ def _to_subscript(text: str) -> str | None:
         else:
             return None
     return "".join(res)
+
+
+def _to_blackboard(text: str) -> str:
+    """Convert letters to Unicode blackboard bold symbols."""
+    return "".join(BLACKBOARD_MAP.get(c, c) for c in text)
+
+
+def _to_calligraphic(text: str) -> str:
+    """Convert letters to Unicode calligraphic/script symbols."""
+    return "".join(CALLIGRAPHIC_MAP.get(c, c) for c in text)
 
 
 def _clean_latex_expression(expr: str) -> str:
@@ -477,25 +595,39 @@ def _clean_latex_expression(expr: str) -> str:
         expr,
     )
 
-    # 4. Replace LaTeX symbols
-    sorted_symbols = sorted(LATEX_SYMBOL_MAP.keys(), key=len, reverse=True)
-    for sym in sorted_symbols:
-        expr = expr.replace(sym, LATEX_SYMBOL_MAP[sym])
-
-    # 5. Remove common LaTeX formatting commands
-    expr = re.sub(r"\\mathbf\s*{(.*?)}", r"**\1**", expr)
-    expr = re.sub(r"\\mathit\s*{(.*?)}", r"*\1*", expr)
-    expr = re.sub(r"\\mathrm\s*{(.*?)}", r"\1", expr)
-    expr = re.sub(r"\\text\s*{(.*?)}", r"\1", expr)
-    expr = re.sub(r"\\label\s*{(.*?)}", "", expr)
-
-    # 6. Clean up remaining backslashes
-    expr = re.sub(r"\\([\,>\s])", r"\1", expr)
-    expr = re.sub(r"\\([{}])", r"\1", expr)
-
-    # Remove environments
+    # 4. Remove environments and delimiter sizing commands (\left, \right, \big, etc.)
     expr = re.sub(r"\\begin{[a-zA-Z]*?}", "", expr)
     expr = re.sub(r"\\end{[a-zA-Z]*?}", "", expr)
+    expr = re.sub(r"\\(?:left|right)\.", "", expr)
+    expr = re.sub(r"\\(?:left|right|big|Big|bigg|Bigg)\b\s*", "", expr)
+
+    # 5. Remove common LaTeX formatting commands and font styles
+    expr = re.sub(
+        r"\\mathbb\s*(?:{([^{}]*)}|([a-zA-Z]))",
+        lambda m: _to_blackboard(m.group(1) or m.group(2)),
+        expr,
+    )
+    expr = re.sub(
+        r"\\(?:mathcal|mathscr)\s*(?:{([^{}]*)}|([a-zA-Z]))",
+        lambda m: _to_calligraphic(m.group(1) or m.group(2)),
+        expr,
+    )
+    expr = re.sub(r"\\(?:mathbf|textbf)\s*{(.*?)}", r"**\1**", expr)
+    expr = re.sub(r"\\(?:mathit|textit)\s*{(.*?)}", r"*\1*", expr)
+    expr = re.sub(r"\\texttt\s*{(.*?)}", r"`\1`", expr)
+    expr = re.sub(
+        r"\\(?:mathrm|text|textnormal|operatorname)\s*{(.*?)}", r"\1", expr
+    )
+    expr = re.sub(r"\\label\s*{(.*?)}", "", expr)
+
+    # 6. Replace LaTeX symbols (using word boundary check to prevent partial command matching)
+    sorted_symbols = sorted(LATEX_SYMBOL_MAP.keys(), key=len, reverse=True)
+    for sym in sorted_symbols:
+        expr = re.sub(re.escape(sym) + r"(?![a-zA-Z])", LATEX_SYMBOL_MAP[sym], expr)
+
+    # 7. Clean up remaining backslashes
+    expr = re.sub(r"\\([\,>\s])", r"\1", expr)
+    expr = re.sub(r"\\([{}])", r"\1", expr)
 
     expr = re.sub(r"\s+", " ", expr)
 

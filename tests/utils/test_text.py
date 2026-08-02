@@ -95,6 +95,15 @@ def test_clean_latex() -> None:
     expected_code = "Math x² and code:\n```python\nx = y ** 2\n```\nMore math y³."
     assert clean_latex(code_input) == expected_code
 
+    # Test blackboard bold (\mathbb) with and without braces
+    assert clean_latex(r"Real $x \in \mathbb{R}^n$ and $\mathbb N$.") == "Real x ∈ ℝⁿ and ℕ."
+
+    # Test calligraphic (\mathcal, \mathscr) and text styles
+    assert clean_latex(r"Big $O(\mathcal{N})$ and $\textbf{bold}$.") == "Big O(𝒩) and **bold**."
+
+    # Test delimiter sizing (\left, \right)
+    assert clean_latex(r"Scale $\left( \frac{a}{b} \right)$.") == "Scale ( (a)/(b) )."
+
 
 def test_truncate_middle() -> None:
     """Test truncate_middle text helper."""
