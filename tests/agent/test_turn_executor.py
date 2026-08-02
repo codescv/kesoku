@@ -873,7 +873,7 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
     # Mock only the HistoryCompressor.auto_compact_session method
     from kesoku.db import SummaryNode
 
-    async def mock_auto_compact(session_id, history, llm, config):
+    async def mock_auto_compact(session_id, history, llm, config, *args, **kwargs):
         node = SummaryNode(
             id="node-1-uuid",
             session_id=session_id,
@@ -1123,7 +1123,7 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
 
     compaction_calls = 0
 
-    async def mock_auto_compact(session_id, history, llm, config):
+    async def mock_auto_compact(session_id, history, llm, config, *args, **kwargs):
         nonlocal compaction_calls
         compaction_calls += 1
         if compaction_calls == 1:
@@ -1552,7 +1552,7 @@ async def test_turn_executor_auto_compaction_buffer_exclusion(temp_db: str) -> N
     # Mock auto compact to compress Turn 2 (middle turn) only!
     from kesoku.db import SummaryNode
 
-    async def mock_auto_compact(session_id, history, llm, config):
+    async def mock_auto_compact(session_id, history, llm, config, *args, **kwargs):
         node = SummaryNode(
             id="node-2-uuid",
             session_id=session_id,

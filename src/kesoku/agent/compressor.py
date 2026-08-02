@@ -1,8 +1,12 @@
 """Custom context compression and hierarchical consolidation manager for Kesoku."""
 
+import json
 import logging
+import os
+import re
 import time
 import uuid
+from typing import Any
 
 from kesoku.agent.history import segment_logical_turns
 from kesoku.agent.llm import BaseLLM
@@ -15,35 +19,71 @@ logger = logging.getLogger(__name__)
 
 SUMMARIZE_TURN_PROMPT = """You are an advanced agent context compiler.
 Your task is to summarize the following segment of a conversation turn history into
-a highly dense, factual, and chronologically accurate narrative summary.
-Keep the summary structured and concise (< 1000 chars).
+a highly dense, factual, and chronologically accurate JSON object.
+Keep the summary structured and concise (< 1000 chars total).
 
-It should contain the following sections:
-- Timeline events: when, where, who, what
-- Key Decisions and changes: User decides to use XXX / The plan was A but changed to B.
-- Pitfalls: Agent made a mistake A and fixed it using B.
-- Files: The **root directories** containing the files generated or changed.
+Guidelines:
+1. timeline: Must use absolute timestamps (e.g., 2026-01-01 18:00), never relative dates/times like
+   "Tuesday" or "15:00", because date context will be lost. Include when, where, who, what.
+2. key_decisions_and_changes: Record changes in requirements or approach, such as when the agent proposed
+   or tried A, but the user rejected it and requested B. Return None if there are no such changes.
+3. pitfalls: Record only mistakes made by the agent and what was learned (e.g., command errors and how
+   the agent fixed them), not user mistakes. Return None if there are none.
+4. files: Record only modified or created files that are OUTSIDE of STAGING_DIR. Use absolute paths or
+   repository paths. Do not include temporary/staging files. Return None if there are none.
+
+Output ONLY a valid JSON object with exact keys "timeline", "key_decisions_and_changes", "pitfalls", and "files":
+{{
+  "timeline": ["2026-01-01 18:00: ...", "2026-01-01 18:05: ..."],
+  "key_decisions_and_changes": "..." or null,
+  "pitfalls": "..." or null,
+  "files": ["/path/to/file1", "/path/to/file2"] or null
+}}
 
 Conversation Segment to Summarize:
 {segment}
 
-Summary:"""
+JSON Summary:"""
 
 CONSOLIDATE_SUMMARIES_PROMPT = """You are an advanced agent context compiler.
 Your task is to merge and consolidate the following chronological sequence of summaries
-into a single, cohesive, higher-level summary.
-Maintain high density and clear structure (< 1000 chars).
+into a single, cohesive, higher-level JSON object.
+Maintain high density and clear structure (< 1000 chars total).
 
 Guidelines:
-1. Merge Timeline events chronologically.
-2. If there are conflicting decisions or changes in approach, prioritize the latest decision
-   and resolve contradictions in favor of the most recent events.
-3. Summarize pitfalls and files.
+1. timeline: Merge events chronologically. Must use absolute timestamps (e.g., 2026-01-01 18:00), never
+   relative dates/times like "Tuesday" or "15:00".
+2. key_decisions_and_changes: Record changes in requirements or approach (e.g., proposed A but changed to B).
+   If there are conflicting decisions, prioritize the latest decision and resolve contradictions in favor of
+   the most recent events. Return None if there are none.
+3. pitfalls: Summarize only mistakes made by the agent and lessons learned (how errors were fixed),
+   not user mistakes. Return None if there are none.
+4. files: Record only modified or created files OUTSIDE of STAGING_DIR. Return None if there are none.
+
+Output ONLY a valid JSON object with exact keys "timeline", "key_decisions_and_changes", "pitfalls", and "files":
+{{
+  "timeline": ["2026-01-01 18:00: ...", "2026-01-01 18:05: ..."],
+  "key_decisions_and_changes": "..." or null,
+  "pitfalls": "..." or null,
+  "files": ["/path/to/file1", "/path/to/file2"] or null
+}}
 
 Summaries to Merge (in chronological order):
 {summaries}
 
-Consolidated Summary:"""
+Consolidated JSON Summary:"""
+
+SUMMARY_TEMPLATE = """Timeline:
+{timeline}
+
+Key decisions and changes:
+{key_decisions_and_changes}
+
+Pitfalls:
+{pitfalls}
+
+Files:
+{files}"""
 
 
 class HistoryCompressor:
@@ -52,6 +92,129 @@ class HistoryCompressor:
     def __init__(self, db: AsyncDatabaseManager) -> None:
         """Initialize the HistoryCompressor with database adapter."""
         self.db = db
+
+    @classmethod
+    def parse_summary_json(cls, raw_content: str) -> dict[str, Any]:
+        """Parse JSON object from LLM response, handling markdown fenced blocks and extra text."""
+        text = raw_content.strip()
+        match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if match:
+            json_str = match.group(1)
+        else:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1 and start < end:
+                json_str = text[start : end + 1]
+            else:
+                json_str = text
+        try:
+            data = json.loads(json_str)
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            logger.warning(f"Failed to parse summary JSON from LLM output: {e}")
+        return {}
+
+    @classmethod
+    def is_outside_staging_dir(cls, file_path: str, staging_dir: str | None) -> bool:
+        """Check whether a file path is outside of the session STAGING_DIR."""
+        if not file_path or not isinstance(file_path, str):
+            return False
+        cleaned = file_path.strip().strip("'\"")
+        if not cleaned:
+            return False
+        if "STAGING_DIR" in cleaned:
+            return False
+        if not staging_dir:
+            return True
+
+        abs_staging = os.path.abspath(staging_dir)
+        try:
+            norm_staging = os.path.normpath(abs_staging)
+            if os.path.isabs(cleaned):
+                norm_file = os.path.normpath(cleaned)
+                if os.path.commonpath([norm_staging, norm_file]) == norm_staging:
+                    return False
+            else:
+                if norm_staging in os.path.normpath(cleaned):
+                    return False
+        except ValueError:
+            pass
+
+        return True
+
+    @classmethod
+    def _format_field(cls, val: Any, default_none: bool = False) -> str:
+        """Format a summary field value cleanly, handling None or empty cases."""
+        if val is None:
+            return "None" if default_none else ""
+        if isinstance(val, list):
+            items = [str(item).strip() for item in val if str(item).strip()]
+            if not items:
+                return "None" if default_none else ""
+            if len(items) == 1 and items[0].lower() in ("none", "null", "n/a", "[]", ""):
+                return "None" if default_none else items[0]
+            return "\n".join(f"- {item}" if not item.startswith("-") else item for item in items)
+
+        text = str(val).strip()
+        if not text or text.lower() in ("none", "null", "n/a", "[]", ""):
+            return "None" if default_none else text
+        return text
+
+    @classmethod
+    def format_summary(cls, raw_content: str, staging_dir: str | None = None) -> str:
+        """Parse LLM JSON output, validate files against staging_dir, and format summary using template."""
+        data = cls.parse_summary_json(raw_content)
+
+        # 1. Timeline
+        timeline_val = data.get("timeline") or data.get("timeline_events")
+        timeline_str = cls._format_field(timeline_val, default_none=False)
+        if not timeline_str and raw_content and not data:
+            timeline_str = raw_content.strip()
+
+        # 2. Key decisions and changes
+        decisions_val = (
+            data.get("key_decisions_and_changes")
+            or data.get("key_decisions")
+            or data.get("key_decisions_or_changes")
+        )
+        decisions_str = cls._format_field(decisions_val, default_none=True)
+
+        # 3. Pitfalls
+        pitfalls_val = data.get("pitfalls")
+        pitfalls_str = cls._format_field(pitfalls_val, default_none=True)
+
+        # 4. Files
+        files_val = data.get("files")
+        valid_files = []
+        if files_val:
+            if isinstance(files_val, list):
+                file_items = [str(item).strip() for item in files_val if item]
+            else:
+                text = str(files_val).strip()
+                if text.lower() in ("none", "null", "n/a", "[]", ""):
+                    file_items = []
+                else:
+                    file_items = [
+                        line.strip()
+                        for line in text.replace(",", "\n").splitlines()
+                        if line.strip()
+                    ]
+
+            for item in file_items:
+                if item.lower() in ("none", "null", "n/a", "[]", ""):
+                    continue
+                if cls.is_outside_staging_dir(item, staging_dir):
+                    valid_files.append(item)
+
+        files_str = cls._format_field(valid_files, default_none=True)
+
+        return SUMMARY_TEMPLATE.format(
+            timeline=timeline_str,
+            key_decisions_and_changes=decisions_str,
+            pitfalls=pitfalls_str,
+            files=files_str,
+        )
 
     def segment_turns(self, messages: list[Message]) -> list[list[Message]]:
         """Segment messages into logical turns starting with a USER or SYSTEM message.
@@ -77,6 +240,7 @@ class HistoryCompressor:
         history: list[Message],
         llm: BaseLLM,
         config: KesokuConfig,
+        staging_dir: str | None = None,
     ) -> bool:
         """Check context window usage and automatically compact history in-place.
 
@@ -129,7 +293,7 @@ class HistoryCompressor:
 
                 prompt = SUMMARIZE_TURN_PROMPT.format(segment=segment_text)
                 res = await llm.generate(prompt=prompt)
-                summary_content = res.content.strip()
+                summary_content = self.format_summary(res.content, staging_dir=staging_dir)
 
                 start_ts = min(msg.timestamp for t in current_chunk for msg in t)
                 end_ts = max(msg.timestamp for t in current_chunk for msg in t)
@@ -166,11 +330,17 @@ class HistoryCompressor:
 
         # If any Level-0 nodes were created, trigger forest consolidation
         if compacted_occurred:
-            await self.consolidate_forest(session_id, llm, K)
+            await self.consolidate_forest(session_id, llm, K, staging_dir=staging_dir)
 
         return compacted_occurred
 
-    async def consolidate_forest(self, session_id: str, llm: BaseLLM, K: int) -> None:
+    async def consolidate_forest(
+        self,
+        session_id: str,
+        llm: BaseLLM,
+        K: int,
+        staging_dir: str | None = None,
+    ) -> None:
         """Consolidate root summary nodes hierarchically when they accumulate to 2K nodes.
 
         Only the oldest K nodes are merged.
@@ -201,7 +371,7 @@ class HistoryCompressor:
 
                 prompt = CONSOLIDATE_SUMMARIES_PROMPT.format(summaries=summaries_text)
                 res = await llm.generate(prompt=prompt)
-                merged_summary = res.content.strip()
+                merged_summary = self.format_summary(res.content, staging_dir=staging_dir)
 
                 parent_id = str(uuid.uuid4())
                 parent_node = SummaryNode(

@@ -220,6 +220,7 @@ class TurnExecutor:
                     llm=llm,
                     cfg=cfg,
                     current_msg=current_msg,
+                    staging_dir=session_staging_dir,
                 )
 
                 # If history was compacted, the existing cache is obsolete and must be deleted.
@@ -529,6 +530,7 @@ class TurnExecutor:
         llm: BaseLLM,
         cfg: KesokuConfig,
         current_msg: Message,
+        staging_dir: str | None = None,
     ) -> tuple[list[Message], bool]:
         """Check context window usage and automatically compact history using custom turn-based compressor.
 
@@ -546,6 +548,7 @@ class TurnExecutor:
             history=history,
             llm=llm,
             config=cfg,
+            staging_dir=staging_dir,
         )
 
         # Retrieve all root summary nodes from the database for this session

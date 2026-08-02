@@ -550,6 +550,7 @@ class Chatbot(ABC):
         compressor = HistoryCompressor(self.gateway.db)
         cfg = self.gateway.context.config
         llm = get_llm(provider=cfg.agent.llm, config=cfg)
+        staging_dir = self.get_session_staging_dir(session.workspace_name)
 
         try:
             # Trigger compaction
@@ -558,6 +559,7 @@ class Chatbot(ABC):
                 history=history,
                 llm=llm,
                 config=cfg,
+                staging_dir=staging_dir,
             )
             if compacted:
                 return "🔄 Context Compaction completed successfully! Old turns have been compacted into summary nodes."
