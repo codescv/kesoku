@@ -816,25 +816,18 @@ class DiscordChatbot(Chatbot):
 
         if not await async_exists(file_path):
             logger.error(f"File not found: {file_path}")
-            await channel.send(f"⚠️ File not found: {file_path}")
-        else:
-            try:
-                discord_file = discord.File(file_path)
-                await self._call_with_timeout(
-                    channel.send(file=discord_file),
-                    error_msg=f"Timeout sending file {file_path}"
-                )
-            except DeliveryAbortedError:
-                raise
-            except Exception as e:
-                logger.error(f"Failed to send file {file_path} to Discord: {e}", exc_info=True)
-                try:
-                    await self._call_with_timeout(
-                        channel.send(f"⚠️ Failed to send file {file_path}: {e}"),
-                        error_msg="Timeout sending file failure fallback"
-                    )
-                except Exception as fe:
-                    logger.error(f"Failed to send file fallback: {fe}")
+            raise FileNotFoundError(f"File not found: {file_path}")
+        try:
+            discord_file = discord.File(file_path)
+            await self._call_with_timeout(
+                channel.send(file=discord_file),
+                error_msg=f"Timeout sending file {file_path}"
+            )
+        except DeliveryAbortedError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to send file {file_path} to Discord: {e}", exc_info=True)
+            raise
 
     async def send_voice_segment(self, channel_id: str, file_path: str, message: Message) -> None:
         """Deliver a voice segment to the target Discord thread (falling back to standard attachment if failed)."""
@@ -844,37 +837,30 @@ class DiscordChatbot(Chatbot):
 
         if not await async_exists(file_path):
             logger.error(f"Voice file not found: {file_path}")
-            await channel.send(f"⚠️ Voice file not found: {file_path}")
-        else:
+            raise FileNotFoundError(f"Voice file not found: {file_path}")
+        try:
+            await self._call_with_timeout(
+                send_voice_message(channel, file_path),
+                error_msg=f"Timeout sending voice message {file_path}"
+            )
+        except DeliveryAbortedError:
+            raise
+        except Exception as e:
+            logger.warning(
+                f"Failed to send native voice message for {file_path}: {e}. "
+                "Falling back to standard file attachment."
+            )
             try:
+                discord_file = discord.File(file_path)
                 await self._call_with_timeout(
-                    send_voice_message(channel, file_path),
-                    error_msg=f"Timeout sending voice message {file_path}"
+                    channel.send(file=discord_file),
+                    error_msg=f"Timeout sending voice file fallback {file_path}"
                 )
             except DeliveryAbortedError:
                 raise
-            except Exception as e:
-                logger.warning(
-                    f"Failed to send native voice message for {file_path}: {e}. "
-                    "Falling back to standard file attachment."
-                )
-                try:
-                    discord_file = discord.File(file_path)
-                    await self._call_with_timeout(
-                        channel.send(file=discord_file),
-                        error_msg=f"Timeout sending voice file fallback {file_path}"
-                    )
-                except DeliveryAbortedError:
-                    raise
-                except Exception as fe:
-                    logger.error(f"Failed to send voice file fallback for {file_path}: {fe}", exc_info=True)
-                    try:
-                        await self._call_with_timeout(
-                            channel.send(f"⚠️ Failed to send voice file {file_path}: {fe}"),
-                            error_msg="Timeout sending voice failure fallback"
-                        )
-                    except Exception as ffe:
-                        logger.error(f"Failed to send voice fallback error message: {ffe}")
+            except Exception as fe:
+                logger.error(f"Failed to send voice file fallback for {file_path}: {fe}", exc_info=True)
+                raise
 
     async def send_question_segment(self, channel_id: str, question: str, choices: list[str], message: Message) -> None:
         """Deliver a multiple choice question block as a dynamic action button view embed."""

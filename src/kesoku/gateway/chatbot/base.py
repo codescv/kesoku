@@ -979,12 +979,10 @@ class Chatbot(ABC):
                         await self.send_text_chunks(message.channel_id, chunks, message)
 
                 elif segment["type"] == "file":
-                    resolved_path = await self.resolve_outbound_path(segment["path"], message.session_id)
-                    await self.send_file_segment(message.channel_id, resolved_path, message)
+                    await self._attempt_send_attachment(segment, message)
 
                 elif segment["type"] == "voice":
-                    resolved_path = await self.resolve_outbound_path(segment["path"], message.session_id)
-                    await self.send_voice_segment(message.channel_id, resolved_path, message)
+                    await self._attempt_send_attachment(segment, message)
 
                 elif segment["type"] == "question":
                     await self.send_question_segment(
@@ -1051,6 +1049,147 @@ class Chatbot(ABC):
     async def send_voice_segment(self, channel_id: str, file_path: str, message: Message) -> None:
         """Send a voice message/file to the specified channel."""
         pass
+
+    async def _attempt_send_attachment(self, segment: dict[str, Any], message: Message) -> None:
+        """Attempt to deliver a file or voice attachment segment, with automatic Self-Healing on failure.
+
+        If sending fails on the first attempt, an error notification is injected into the session
+        history to let the Agent automatically correct the filename/path. If a self-healing retry
+        also fails, a user-facing error message is sent to the channel.
+
+        Args:
+            segment: Segment dictionary with 'type' and 'path'.
+            message: The Message instance being processed.
+
+        Raises:
+            DeliveryAbortedError: Raised to abort delivery of remaining segments in this message.
+        """
+        raw_path = segment["path"]
+        resolved_path = await self.resolve_outbound_path(raw_path, message.session_id)
+        try:
+            if segment["type"] == "file":
+                await self.send_file_segment(message.channel_id, resolved_path, message)
+            elif segment["type"] == "voice":
+                await self.send_voice_segment(message.channel_id, resolved_path, message)
+        except DeliveryAbortedError:
+            raise
+        except Exception as e:
+            logger.warning(
+                f"Attachment delivery failed for '[{segment['type']}: {raw_path}]' "
+                f"(resolved: {resolved_path}): {e}"
+            )
+            is_already_healing = await self._is_self_healing_retry(message)
+            if is_already_healing:
+                logger.error(
+                    f"Agent self-healing failed for attachment '[{segment['type']}: {raw_path}]'. "
+                    f"Delivering error notice to user."
+                )
+                err_notice = f"⚠️ 文件发送失败 ({os.path.basename(raw_path)}): {e}"
+                await self.send_text_chunks(message.channel_id, [err_notice], message)
+            else:
+                logger.info(f"Initiating Agent self-healing for attachment '[{segment['type']}: {raw_path}]'.")
+                await self._inject_self_healing_notification(segment, raw_path, resolved_path, message, e)
+                raise DeliveryAbortedError(f"Self-healing initiated for failed attachment: {raw_path}")
+
+    async def _is_self_healing_retry(self, message: Message) -> bool:
+        """Check if the current message is generated from an attachment self-healing retry.
+
+        Args:
+            message: The outgoing Message instance being inspected.
+
+        Returns:
+            True if the active conversational turn was triggered by an injected self-healing notification.
+        """
+        try:
+            history = await self.gateway.db.get_session_history(message.session_id, limit=20)
+            for msg in reversed(history):
+                if msg.id == message.id:
+                    continue
+                if msg.role in (MessageRole.USER, MessageRole.SYSTEM):
+                    if msg.metadata and msg.metadata.get("is_self_healing_retry"):
+                        return True
+                    return False
+        except Exception as e:
+            logger.warning(f"Failed to check self-healing retry status for session {message.session_id}: {e}")
+        return False
+
+    async def _get_staging_files_list(self, session_id: str) -> list[str]:
+        """List relative paths of files in the session staging directory.
+
+        Args:
+            session_id: Active session ID context.
+
+        Returns:
+            A list of up to 20 relative file paths in the staging directory.
+        """
+        try:
+            session = await self.gateway.db.get_session(session_id)
+            if not session:
+                return []
+            staging_dir = self.get_session_staging_dir(session.workspace_name)
+            if not await async_exists(staging_dir):
+                return []
+
+            def _list_files(s_dir: str) -> list[str]:
+                results = []
+                for root, _, filenames in os.walk(s_dir):
+                    for f in filenames:
+                        results.append(os.path.relpath(os.path.join(root, f), s_dir))
+                return sorted(results)[:20]
+
+            return await asyncio.to_thread(_list_files, staging_dir)
+        except Exception as e:
+            logger.warning(f"Failed to list staging directory files for session {session_id}: {e}")
+            return []
+
+    async def _inject_self_healing_notification(
+        self,
+        segment: dict[str, Any],
+        raw_path: str,
+        resolved_path: str,
+        message: Message,
+        exception: Exception,
+    ) -> None:
+        """Inject a system error notification into the session to trigger Agent self-healing.
+
+        Args:
+            segment: The attachment segment dictionary.
+            raw_path: The raw path string originally written by the Agent.
+            resolved_path: The path after resolution attempts.
+            message: The Message instance being processed.
+            exception: The exception raised during delivery.
+        """
+        available_files = await self._get_staging_files_list(message.session_id)
+        files_str = "\n".join(f"- {f}" for f in available_files) if available_files else "No files found."
+
+        content = (
+            f"File transmission failed for attachment tag '[{segment['type']}: {raw_path}]' "
+            f"(resolved path '{resolved_path}'): {exception}\n"
+            f"Please inspect your generated filenames and reply with the correct "
+            f"'[{segment['type']}: <actual_filename>]' tag to deliver the file to the user.\n"
+            f"Available files in your staging directory:\n{files_str}"
+        )
+
+        healing_msg = Message(
+            session_id=message.session_id,
+            chatbot_id=self.chatbot_id,
+            channel_id=message.channel_id,
+            sender="System",
+            role=MessageRole.SYSTEM,
+            type=MessageType.TEXT,
+            content=content,
+            timestamp=time.time(),
+            status=MessageStatus.PENDING_AGENT,
+            metadata={
+                "is_self_healing_retry": True,
+                "failed_path": raw_path,
+            },
+        )
+        await self.gateway.post(healing_msg)
+        logger.info(
+            f"Injected self-healing notification message {healing_msg.id} into session {message.session_id} "
+            f"for failed attachment {raw_path}."
+        )
 
     async def send_question_segment(self, channel_id: str, question: str, choices: list[str], message: Message) -> None:
         """Send a multiple choice question to the specified channel."""

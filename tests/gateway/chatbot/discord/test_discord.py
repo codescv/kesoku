@@ -321,7 +321,7 @@ async def test_handle_message_with_files_split_and_upload(mock_config: KesokuCon
 
 @pytest.mark.asyncio
 async def test_handle_message_with_non_existent_file(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
-    """Test that missing files trigger a user-facing warning message."""
+    """Test that missing files trigger self-healing first, and warn user on retry failure."""
     with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
         mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
@@ -341,15 +341,45 @@ async def test_handle_message_with_non_existent_file(mock_config: KesokuConfig, 
                 content=content,
             )
 
+            # First attempt: should initiate self-healing and NOT send warning to channel
             with patch("os.path.exists", return_value=False) as mock_exists:
                 await bot.handle_message(msg)
                 assert mock_exists.call_count >= 1
                 mock_exists.assert_any_call("/tmp/ghost.png")
 
-                # channel.send should be called 2 times: text segment and warning segment
-                assert mock_channel.send.call_count == 2
-                mock_channel.send.assert_any_call("See this: ")
-                mock_channel.send.assert_any_call("⚠️ File not found: /tmp/ghost.png")
+                # channel.send should be called 1 time for the text segment only
+                assert mock_channel.send.call_count == 1
+                mock_channel.send.assert_called_with("See this: ")
+                assert mock_gateway.post.call_count == 1
+
+            # Second attempt: simulating self-healing retry failure
+            healing_msg = Message(
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="System",
+                role=MessageRole.SYSTEM,
+                type=MessageType.TEXT,
+                content="Self healing notice",
+                metadata={"is_self_healing_retry": True},
+            )
+            mock_gateway.db.get_session_history = AsyncMock(return_value=[healing_msg])
+            msg_retry = Message(
+                id="msg124",
+                session_id="thread123",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
+                content="Retry: [file: /tmp/ghost2.png]",
+            )
+            with patch("os.path.exists", return_value=False):
+                await bot.handle_message(msg_retry)
+                # channel.send should be called 3 times now (1 from first attempt + text + error warning)
+                assert mock_channel.send.call_count == 3
+                any_call_args = [call[0][0] for call in mock_channel.send.call_args_list]
+                assert any("⚠️ 文件发送失败" in arg for arg in any_call_args)
 
 
 @pytest.mark.asyncio

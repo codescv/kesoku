@@ -466,3 +466,91 @@ async def test_cronjob_session_role_inheritance(tmp_path) -> None:
         session = db_mgr.get_session(msg.session_id)
         assert session is not None
         assert session.role_name == "asuka"
+
+
+@pytest.mark.asyncio
+async def test_attempt_send_attachment_self_healing_injection(tmp_path) -> None:
+    """Test that a first-time attachment sending failure injects a self-healing system message."""
+    from kesoku.constants import MessageStatus
+    from kesoku.gateway.chatbot.base import DeliveryAbortedError
+
+    mock_gateway = MagicMock(spec=Gateway)
+    mock_db = AsyncMock()
+    mock_gateway.db = mock_db
+    mock_gateway.post = AsyncMock()
+
+    mock_db.get_session_history = AsyncMock(return_value=[])
+    mock_db.get_session = AsyncMock(return_value=None)
+
+    chatbot = MockChatbot(chatbot_id="mock_bot", gateway=mock_gateway)
+
+    chatbot.send_file_segment = AsyncMock(side_effect=FileNotFoundError("Missing file"))
+    chatbot.send_text_chunks = AsyncMock()
+
+    msg = Message(
+        session_id="session123",
+        chatbot_id="mock_bot",
+        channel_id="chan123",
+        sender="Agent",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="Here is file [file: cat.png]",
+        timestamp=1000.0,
+    )
+
+    with pytest.raises(DeliveryAbortedError, match="Self-healing initiated"):
+        await chatbot._attempt_send_attachment({"type": "file", "path": "cat.png"}, msg)
+
+    assert mock_gateway.post.call_count == 1
+    injected_msg = mock_gateway.post.call_args[0][0]
+    assert injected_msg.role == MessageRole.SYSTEM
+    assert injected_msg.status == MessageStatus.PENDING_AGENT
+    assert injected_msg.metadata["is_self_healing_retry"] is True
+    assert "File transmission failed for attachment tag" in injected_msg.content
+    chatbot.send_text_chunks.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_attempt_send_attachment_self_healing_failure_notice(tmp_path) -> None:
+    """Test that failing after an attachment self-healing retry sends an error notice to user."""
+    mock_gateway = MagicMock(spec=Gateway)
+    mock_db = AsyncMock()
+    mock_gateway.db = mock_db
+    mock_gateway.post = AsyncMock()
+
+    healing_msg = Message(
+        session_id="session123",
+        chatbot_id="mock_bot",
+        channel_id="chan123",
+        sender="System",
+        role=MessageRole.SYSTEM,
+        type=MessageType.TEXT,
+        content="Please inspect generated filenames",
+        timestamp=999.0,
+        metadata={"is_self_healing_retry": True},
+    )
+    mock_db.get_session_history = AsyncMock(return_value=[healing_msg])
+    mock_db.get_session = AsyncMock(return_value=None)
+
+    chatbot = MockChatbot(chatbot_id="mock_bot", gateway=mock_gateway)
+    chatbot.send_file_segment = AsyncMock(side_effect=FileNotFoundError("Still missing file"))
+    chatbot.send_text_chunks = AsyncMock()
+
+    msg = Message(
+        session_id="session123",
+        chatbot_id="mock_bot",
+        channel_id="chan123",
+        sender="Agent",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="Let me retry [file: cat2.png]",
+        timestamp=1000.0,
+    )
+
+    await chatbot._attempt_send_attachment({"type": "file", "path": "cat2.png"}, msg)
+
+    mock_gateway.post.assert_not_called()
+    chatbot.send_text_chunks.assert_called_once()
+    sent_text = chatbot.send_text_chunks.call_args[0][1][0]
+    assert "⚠️ 文件发送失败" in sent_text
+

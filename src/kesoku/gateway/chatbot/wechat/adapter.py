@@ -1059,7 +1059,7 @@ You are interacting with the user via WeChat (Weixin).
         """Deliver a file attachment segment via WeChat media API with retry mechanism and logging."""
         if not await async_exists(file_path):
             logger.error("WeChat: Outbound file not found: %s", file_path)
-            return
+            raise FileNotFoundError(f"File not found: {file_path}")
 
         context_token = self._token_store.get(self._account_id, channel_id)
         logger.info("WeChat: Starting file transmission for %s to channel %s...", Path(file_path).name, channel_id)
@@ -1108,6 +1108,7 @@ You are interacting with the user via WeChat (Weixin).
                         e,
                         exc_info=True,
                     )
+                    raise
 
     async def send_voice_segment(self, channel_id: str, file_path: str, message: Message) -> None:
         """Deliver a voice segment, routing it directly as a generic file attachment."""
