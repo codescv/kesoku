@@ -49,6 +49,14 @@ def test_is_outside_staging_dir(tmp_path):
     inside_file = os.path.join(staging_dir, "output.png")
     assert HistoryCompressor.is_outside_staging_dir(inside_file, staging_dir) is False
 
+    # Relative sessions path (e.g. sessions/7c277e98/asuka_bbq_chef_bird_1823.png)
+    assert (
+        HistoryCompressor.is_outside_staging_dir(
+            "sessions/7c277e98/asuka_bbq_chef_bird_1823.png", staging_dir
+        )
+        is False
+    )
+
     # File containing STAGING_DIR substring
     assert HistoryCompressor.is_outside_staging_dir("$STAGING_DIR/test.log", staging_dir) is False
 
