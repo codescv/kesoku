@@ -207,7 +207,6 @@ async def monitor_background_job(
             type=MessageType.TEXT,
             content=content,
             status=MessageStatus.PENDING_AGENT,  # This triggers LLM wakeup
-            parent_id=original_msg_id,
         )
         await gw.post(wakeup_msg)
         logger.info(f"Background Job '{job_id}' finished. Posted wakeup message to session '{context.session_id}'")
