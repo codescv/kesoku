@@ -1,5 +1,6 @@
 """Unit tests for DatabaseManager and models in kesoku.db."""
 
+import math
 import os
 import time
 
@@ -7,6 +8,7 @@ import pytest
 
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import DatabaseManager, Message, Session
+from kesoku.db.manager import calculate_time_score
 
 
 @pytest.fixture
@@ -515,6 +517,80 @@ def test_thread_session_role_inheritance(db_manager):
     retrieved = db_manager.get_session("sess_thread_asuka")
     assert retrieved is not None
     assert retrieved.role_name == "asuka"
+
+
+def test_calculate_time_score():
+    """Tests the calculate_time_score function for literal and non-literal matches with decay."""
+    now = 1000000.0
+
+    # 1. Literal match within 8 hours -> 1.0
+    ts_2h_ago = now - 2 * 3600
+    assert calculate_time_score(ts_2h_ago, is_literal_match=True, now=now) == 1.0
+
+    # Exactly 8 hours ago -> 1.0
+    ts_8h_ago = now - 8 * 3600
+    assert calculate_time_score(ts_8h_ago, is_literal_match=True, now=now) == 1.0
+
+    # 2. Literal match after 8 hours (32 hours ago = 8 + 24 hours -> half-life of 24h) -> 0.5
+    ts_32h_ago = now - 32 * 3600
+    score_32h = calculate_time_score(ts_32h_ago, is_literal_match=True, now=now)
+    assert math.isclose(score_32h, 0.5, rel_tol=1e-4)
+
+    # 3. Non-literal match within 8 hours -> 0.5
+    assert calculate_time_score(ts_2h_ago, is_literal_match=False, now=now) == 0.5
+    assert calculate_time_score(ts_8h_ago, is_literal_match=False, now=now) == 0.5
+
+    # 4. Non-literal match after 8 hours (32 hours ago = 8 + 24 hours) -> 0.25
+    score_non_lit_32h = calculate_time_score(ts_32h_ago, is_literal_match=False, now=now)
+    assert math.isclose(score_non_lit_32h, 0.25, rel_tol=1e-4)
+
+
+def test_search_role_messages_semantic_time_ranking(db_manager):
+    """Tests search_role_messages_semantic with literal match and time decay scoring."""
+    db_manager.set_channel_role("discord", "chan_sem", "coder")
+    session = Session(id="sess_sem", title="Semantic Search Test", created_at=1000000.0, updated_at=1000000.0)
+    db_manager.create_session(session)
+    db_manager.set_active_session_for_channel("discord", "chan_sem", "sess_sem")
+
+    now = 1000000.0
+
+    # m_recent_lit: literal match 'python', 2 hours ago
+    msg_recent_lit = Message(
+        id="m_recent_lit",
+        session_id="sess_sem",
+        chatbot_id="discord",
+        channel_id="chan_sem",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="I love writing python scripts today",
+        timestamp=now - 2 * 3600,
+        status=MessageStatus.PROCESSED,
+    )
+    # m_old_lit: literal match 'python', 80 hours ago (8 + 72h = 3 half-lives -> 1.0 * (1/8) = 0.125)
+    msg_old_lit = Message(
+        id="m_old_lit",
+        session_id="sess_sem",
+        chatbot_id="discord",
+        channel_id="chan_sem",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="I also wrote python scripts last month",
+        timestamp=now - 80 * 3600,
+        status=MessageStatus.PROCESSED,
+    )
+    db_manager.save_message(msg_recent_lit)
+    db_manager.save_message(msg_old_lit)
+
+    results = db_manager.search_role_messages_semantic("coder", "python", now=now, threshold=0.1)
+    assert len(results) >= 2
+    # Recent literal match should rank higher than old literal match
+    assert results[0].id == "m_recent_lit"
+    assert results[0].metadata["similarity_score"] > results[1].metadata["similarity_score"]
+    # Recent literal match should have score around 1.0 (or 1.0 + semantic)
+    assert results[0].metadata["similarity_score"] >= 1.0
+
 
 
 

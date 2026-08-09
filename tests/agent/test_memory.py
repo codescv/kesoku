@@ -102,6 +102,7 @@ async def test_chat_search_hybrid_and_boosting(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("kesoku.utils.embedding.get_embedding", mock_get_embedding)
     monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", lambda texts: [mock_get_embedding(t) for t in texts])
 
+    now = time.time()
     msg_sem = Message(
         id="m_sem",
         session_id="sess_1",
@@ -111,7 +112,7 @@ async def test_chat_search_hybrid_and_boosting(tmp_path, monkeypatch) -> None:
         role=MessageRole.USER,
         type=MessageType.TEXT,
         content="Game Console Joystick",
-        timestamp=1.0,
+        timestamp=now - 50 * 3600,
         status=MessageStatus.PROCESSED,
     )
     msg_exact = Message(
@@ -123,7 +124,7 @@ async def test_chat_search_hybrid_and_boosting(tmp_path, monkeypatch) -> None:
         role=MessageRole.USER,
         type=MessageType.TEXT,
         content="Hello controller world",
-        timestamp=2.0,
+        timestamp=now - 300,
         status=MessageStatus.PROCESSED,
     )
     msg_both = Message(
@@ -135,7 +136,7 @@ async def test_chat_search_hybrid_and_boosting(tmp_path, monkeypatch) -> None:
         role=MessageRole.USER,
         type=MessageType.TEXT,
         content="How controller is built",
-        timestamp=3.0,
+        timestamp=now - 200,
         status=MessageStatus.PROCESSED,
     )
     long_content = "controller " + "a" * 600
@@ -148,7 +149,7 @@ async def test_chat_search_hybrid_and_boosting(tmp_path, monkeypatch) -> None:
         role=MessageRole.USER,
         type=MessageType.TEXT,
         content=long_content,
-        timestamp=4.0,
+        timestamp=now - 100,
         status=MessageStatus.PROCESSED,
     )
 

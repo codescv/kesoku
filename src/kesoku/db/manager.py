@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import json
 import logging
+import math
 import os
 import shutil
 import sqlite3
@@ -15,6 +16,45 @@ from kesoku.db.connection import ConnectionProvider
 from kesoku.db.models import CrossSessionContext, Message, Session, SummaryNode
 
 logger = logging.getLogger(__name__)
+
+
+def calculate_time_score(
+    timestamp: float,
+    is_literal_match: bool,
+    now: float | None = None,
+    half_life_hours: float = 24.0,
+) -> float:
+    """Calculate time-decay score for a search result message.
+
+    If the query literally matches the message content:
+        - Full score bonus of 1.0 within 8 hours.
+        - Exponentially decays from 1.0 after 8 hours.
+    If the query does not literally match:
+        - Score bonus of 0.5 within 8 hours.
+        - Exponentially decays from 0.5 after 8 hours.
+
+    Args:
+        timestamp: Unix epoch timestamp of the message.
+        is_literal_match: True if query text is literally in message content.
+        now: Reference timestamp (defaults to time.time()).
+        half_life_hours: Half-life in hours for exponential decay after 8 hours (default: 24.0).
+
+    Returns:
+        Time bonus score as a float.
+    """
+    if now is None:
+        now = time.time()
+
+    age_seconds = max(0.0, now - timestamp)
+    age_hours = age_seconds / 3600.0
+
+    base_score = 1.0 if is_literal_match else 0.5
+    if age_hours <= 8.0:
+        return base_score
+
+    decay_hours = age_hours - 8.0
+    # Exponential decay using half-life: base_score * 0.5^(decay_hours / half_life)
+    return base_score * math.exp(-math.log(2) * (decay_hours / half_life_hours))
 
 
 class DatabaseManager:
@@ -983,6 +1023,7 @@ class DatabaseManager:
         end_time: float | None = None,
         limit: int = 20,
         threshold: float = 0.55,
+        now: float | None = None,
     ) -> list[Message]:
         """Search user/assistant text messages for a role using chunk-based semantic search and literal matching."""
         from kesoku.utils.embedding import bytes_to_vector, cosine_similarity, get_embedding
@@ -1059,6 +1100,7 @@ class DatabaseManager:
             cursor.execute(sql, tuple(args))
             rows = cursor.fetchall()
 
+        current_time = now if now is not None else time.time()
         results = []
         for row in rows:
             msg = Message(
@@ -1080,18 +1122,20 @@ class DatabaseManager:
             msg.metadata["original_content"] = row["original_content"]
             msg.metadata["chunk_index"] = row["chunk_index"]
 
-            score = 0.0
+            semantic_score = 0.0
             if query_emb and row["chunk_embedding"]:
                 try:
                     emb = bytes_to_vector(row["chunk_embedding"])
-                    score = cosine_similarity(query_emb, emb)
+                    semantic_score = cosine_similarity(query_emb, emb)
                 except Exception as e:
                     logger.error(f"Error calculating similarity for chunk of message {msg.id}: {e}", exc_info=True)
 
-            if query_text.lower() in msg.content.lower():
-                score += 1.0
+            is_literal_match = query_text.lower() in msg.content.lower()
+            # Calculate time score: 1.0 (literal) or 0.5 (semantic only) within 8h, decaying exponentially thereafter
+            time_score = calculate_time_score(msg.timestamp, is_literal_match=is_literal_match, now=current_time)
+            total_score = semantic_score + time_score
 
-            msg.metadata["similarity_score"] = score
+            msg.metadata["similarity_score"] = total_score
             results.append(msg)
 
         # Sort candidates globally by similarity score descending
@@ -1949,6 +1993,7 @@ class AsyncDatabaseManager:
         end_time: float | None = None,
         limit: int = 20,
         threshold: float = 0.55,
+        now: float | None = None,
     ) -> list[Message]:
         """Search user/assistant text messages for a role using semantic similarity of embeddings."""
         return await asyncio.to_thread(
@@ -1959,6 +2004,7 @@ class AsyncDatabaseManager:
             end_time,
             limit,
             threshold,
+            now,
         )
 
 
