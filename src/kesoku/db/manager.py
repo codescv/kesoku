@@ -23,21 +23,27 @@ def calculate_time_score(
     is_literal_match: bool,
     now: float | None = None,
     half_life_hours: float = 24.0,
+    recent_boost: float = 0.2,
 ) -> float:
     """Calculate time-decay score for a search result message.
 
     If the query literally matches the message content:
-        - Full score bonus of 1.0 within 8 hours.
-        - Exponentially decays from 1.0 after 8 hours.
+        - Base score is 1.0.
+        - Within 8 hours: receives a recency boost up to (1.0 + recent_boost) for the newest messages,
+          decreasing linearly to 1.0 at 8 hours.
+        - After 8 hours: exponentially decays from 1.0.
     If the query does not literally match:
-        - Score bonus of 0.5 within 8 hours.
-        - Exponentially decays from 0.5 after 8 hours.
+        - Base score is 0.5.
+        - Within 8 hours: receives a recency boost up to 0.5 * (1.0 + recent_boost),
+          decreasing linearly to 0.5 at 8 hours.
+        - After 8 hours: exponentially decays from 0.5.
 
     Args:
         timestamp: Unix epoch timestamp of the message.
         is_literal_match: True if query text is literally in message content.
         now: Reference timestamp (defaults to time.time()).
         half_life_hours: Half-life in hours for exponential decay after 8 hours (default: 24.0).
+        recent_boost: Fraction of boost given to brand new messages within 8h (default: 0.2, i.e., +20%).
 
     Returns:
         Time bonus score as a float.
@@ -50,7 +56,9 @@ def calculate_time_score(
 
     base_score = 1.0 if is_literal_match else 0.5
     if age_hours <= 8.0:
-        return base_score
+        # Give a slight boost for more recent messages within 8 hours (from (1 + recent_boost) * base down to base)
+        boost_ratio = 1.0 + recent_boost * (1.0 - (age_hours / 8.0))
+        return base_score * boost_ratio
 
     decay_hours = age_hours - 8.0
     # Exponential decay using half-life: base_score * 0.5^(decay_hours / half_life)

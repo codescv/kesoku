@@ -520,25 +520,40 @@ def test_thread_session_role_inheritance(db_manager):
 
 
 def test_calculate_time_score():
-    """Tests the calculate_time_score function for literal and non-literal matches with decay."""
+    """Tests the calculate_time_score function for literal and non-literal matches with 8h boost and decay."""
     now = 1000000.0
 
-    # 1. Literal match within 8 hours -> 1.0
+    # 1. Literal match within 8 hours: brand new (0h) -> 1.2, 2h ago -> 1.15, exactly 8h ago -> 1.0
+    ts_0h_ago = now
     ts_2h_ago = now - 2 * 3600
-    assert calculate_time_score(ts_2h_ago, is_literal_match=True, now=now) == 1.0
-
-    # Exactly 8 hours ago -> 1.0
+    ts_4h_ago = now - 4 * 3600
     ts_8h_ago = now - 8 * 3600
-    assert calculate_time_score(ts_8h_ago, is_literal_match=True, now=now) == 1.0
+
+    score_0h = calculate_time_score(ts_0h_ago, is_literal_match=True, now=now)
+    score_2h = calculate_time_score(ts_2h_ago, is_literal_match=True, now=now)
+    score_4h = calculate_time_score(ts_4h_ago, is_literal_match=True, now=now)
+    score_8h = calculate_time_score(ts_8h_ago, is_literal_match=True, now=now)
+
+    assert math.isclose(score_0h, 1.20, rel_tol=1e-4)
+    assert math.isclose(score_2h, 1.15, rel_tol=1e-4)
+    assert math.isclose(score_4h, 1.10, rel_tol=1e-4)
+    assert math.isclose(score_8h, 1.00, rel_tol=1e-4)
+    assert score_0h > score_2h > score_4h > score_8h
 
     # 2. Literal match after 8 hours (32 hours ago = 8 + 24 hours -> half-life of 24h) -> 0.5
     ts_32h_ago = now - 32 * 3600
     score_32h = calculate_time_score(ts_32h_ago, is_literal_match=True, now=now)
     assert math.isclose(score_32h, 0.5, rel_tol=1e-4)
 
-    # 3. Non-literal match within 8 hours -> 0.5
-    assert calculate_time_score(ts_2h_ago, is_literal_match=False, now=now) == 0.5
-    assert calculate_time_score(ts_8h_ago, is_literal_match=False, now=now) == 0.5
+    # 3. Non-literal match within 8 hours: brand new (0h) -> 0.60, 2h ago -> 0.575, exactly 8h ago -> 0.50
+    non_lit_0h = calculate_time_score(ts_0h_ago, is_literal_match=False, now=now)
+    non_lit_2h = calculate_time_score(ts_2h_ago, is_literal_match=False, now=now)
+    non_lit_8h = calculate_time_score(ts_8h_ago, is_literal_match=False, now=now)
+
+    assert math.isclose(non_lit_0h, 0.60, rel_tol=1e-4)
+    assert math.isclose(non_lit_2h, 0.575, rel_tol=1e-4)
+    assert math.isclose(non_lit_8h, 0.50, rel_tol=1e-4)
+    assert non_lit_0h > non_lit_2h > non_lit_8h
 
     # 4. Non-literal match after 8 hours (32 hours ago = 8 + 24 hours) -> 0.25
     score_non_lit_32h = calculate_time_score(ts_32h_ago, is_literal_match=False, now=now)
