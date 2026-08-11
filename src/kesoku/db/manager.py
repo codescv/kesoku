@@ -1144,6 +1144,8 @@ class DatabaseManager:
             total_score = semantic_score + time_score
 
             msg.metadata["similarity_score"] = total_score
+            msg.metadata["semantic_score"] = semantic_score
+            msg.metadata["time_score"] = time_score
             results.append(msg)
 
         # Sort candidates globally by similarity score descending
@@ -1183,6 +1185,52 @@ class DatabaseManager:
                 msg.metadata["post_chunk"] = chunks_map.get((msg_id, matched_idx + 1))
 
         return filtered_results
+
+    def get_surrounding_messages(
+        self,
+        session_id: str,
+        target_timestamp: float,
+        window_before: int = 1,
+        window_after: int = 1,
+    ) -> list[Message]:
+        """Fetch surrounding text messages around a target message within the same session.
+
+        Args:
+            session_id: Session identifier.
+            target_timestamp: Timestamp of the target message.
+            window_before: Number of preceding messages to fetch.
+            window_after: Number of succeeding messages to fetch.
+
+        Returns:
+            List of surrounding messages ordered chronologically.
+        """
+        with self.connection_provider.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM messages
+                WHERE session_id = ? AND timestamp <= ? AND role IN ('user', 'assistant') AND type = 'text'
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (session_id, target_timestamp, window_before + 1),
+            )
+            rows_before = cursor.fetchall()
+            before_msgs = [self._row_to_message(r) for r in reversed(rows_before)]
+
+            cursor.execute(
+                """
+                SELECT * FROM messages
+                WHERE session_id = ? AND timestamp > ? AND role IN ('user', 'assistant') AND type = 'text'
+                ORDER BY timestamp ASC
+                LIMIT ?
+                """,
+                (session_id, target_timestamp, window_after),
+            )
+            rows_after = cursor.fetchall()
+            after_msgs = [self._row_to_message(r) for r in rows_after]
+
+        return before_msgs + after_msgs
 
 
 
@@ -2049,7 +2097,21 @@ class AsyncDatabaseManager:
             limit,
         )
 
-
+    async def get_surrounding_messages(
+        self,
+        session_id: str,
+        target_timestamp: float,
+        window_before: int = 1,
+        window_after: int = 1,
+    ) -> list[Message]:
+        """Fetch surrounding text messages around a target message within the same session."""
+        return await asyncio.to_thread(
+            self.sync_db.get_surrounding_messages,
+            session_id,
+            target_timestamp,
+            window_before,
+            window_after,
+        )
 
     async def set_channel_role(self, chatbot_id: str, channel_id: str, role: str) -> None:
         """Set the role for a specific channel.

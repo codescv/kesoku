@@ -109,6 +109,22 @@ class AgentConfig(BaseModel):
         default=4,
         description="Branching factor K to merge K Level-n nodes into Level-n+1",
     )
+    auto_context_search: bool = Field(
+        default=True,
+        description="Whether to automatically search historical conversations and augment context for relevant queries",
+    )
+    auto_context_search_threshold: float = Field(
+        default=1.13,
+        description="Total score threshold (similarity + recency) for auto context retrieval",
+    )
+    auto_context_search_semantic_min: float = Field(
+        default=0.58,
+        description="Minimum pure semantic similarity score threshold for auto context retrieval",
+    )
+    auto_context_search_limit: int = Field(
+        default=3,
+        description="Maximum number of historical dialogue snippets to inject into context",
+    )
 
 
 class GeminiConfig(BaseModel):

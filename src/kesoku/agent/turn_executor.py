@@ -489,9 +489,26 @@ class TurnExecutor:
                 "- Use `view_message(message_id)` to inspect full historical messages when needed.",
                 "</background_context>",
             ]
-            full_prefix = "\n".join(lines)
+            full_prefix = "\n".join(lines) + "\n" if lines else ""
 
-
+        # 4. Prepend Auto Context Search (if enabled)
+        augmented_context_prefix = ""
+        cfg = self.context.config
+        if cfg.agent.auto_context_search and active_role:
+            raw_query = latest_user_msg.content or ""
+            # Guardrails: skip very short queries, empty strings, or pure greetings
+            if len(raw_query.strip()) >= 6:
+                try:
+                    augmented_context_prefix = await self._retrieve_auto_search_context(
+                        role=active_role,
+                        query_text=raw_query.strip(),
+                        current_session_id=self.session_id,
+                        threshold=cfg.agent.auto_context_search_threshold,
+                        semantic_min=cfg.agent.auto_context_search_semantic_min,
+                        limit=cfg.agent.auto_context_search_limit,
+                    )
+                except Exception as se:
+                    logger.warning(f"Failed to retrieve auto search context: {se}")
 
         msg_idx = history.index(latest_user_msg)
         copied_msg = latest_user_msg.model_copy()
@@ -508,6 +525,7 @@ class TurnExecutor:
         copied_msg.content = (
             f"{instructions_prefix}"
             f"{full_prefix}"
+            f"{augmented_context_prefix}"
             f'<current_message from="{sender_name}" time="{time_str}" timezone="{tz_name}">\n'
             f"{copied_msg.content}\n"
             "</current_message>"
@@ -521,6 +539,84 @@ class TurnExecutor:
         )
 
         return latest_user_msg
+
+    async def _retrieve_auto_search_context(
+        self,
+        role: str,
+        query_text: str,
+        current_session_id: str | None = None,
+        threshold: float = 1.13,
+        semantic_min: float = 0.58,
+        limit: int = 3,
+        window_size: int = 1,
+    ) -> str:
+        """Search relevant past messages for role and build augmented context snippet."""
+        raw_hits = await self.context.db.search_role_messages_semantic(
+            role=role,
+            query_text=query_text,
+            limit=limit * 2,
+            threshold=threshold,
+        )
+
+        if not raw_hits:
+            return ""
+
+        valid_hits = []
+        for hit in raw_hits:
+            if current_session_id and hit.session_id == current_session_id:
+                continue
+            sem_score = hit.metadata.get("semantic_score", 0.0)
+            is_literal = query_text.lower() in hit.content.lower()
+            if is_literal or sem_score >= semantic_min:
+                valid_hits.append(hit)
+
+        if not valid_hits:
+            return ""
+
+        valid_hits = valid_hits[:limit]
+        snippets: list[str] = []
+        seen_msg_ids: set[str] = set()
+
+        for hit in valid_hits:
+            score = hit.metadata.get("similarity_score", 0.0)
+            context_msgs = await self.context.db.get_surrounding_messages(
+                session_id=hit.session_id,
+                target_timestamp=hit.timestamp,
+                window_before=window_size,
+                window_after=window_size,
+            )
+
+            dialogue_lines: list[str] = []
+            for msg in context_msgs:
+                if msg.id in seen_msg_ids:
+                    continue
+                seen_msg_ids.add(msg.id)
+                speaker = "User" if msg.role == MessageRole.USER else "Agent"
+                msg_time = datetime.datetime.fromtimestamp(msg.timestamp).astimezone()
+                time_str = msg_time.strftime("%Y-%m-%d %H:%M:%S")
+                dialogue_lines.append(f"  {speaker} [{time_str}]: {msg.content.strip()}")
+
+            if dialogue_lines:
+                snippet_block = (
+                    f'<dialogue_snippet session_id="{hit.session_id[:8]}" relevance_score="{score:.2f}">\n'
+                    + "\n".join(dialogue_lines)
+                    + "\n</dialogue_snippet>"
+                )
+                snippets.append(snippet_block)
+
+        if not snippets:
+            return ""
+
+        logger.info(
+            f"Auto-injected {len(snippets)} historical dialogue snippets for query: '{query_text[:40]}...'"
+        )
+        return (
+            "<relevant_historical_context>\n"
+            "<!-- The following past conversation snippets are automatically retrieved based on semantic similarity "
+            "to the user message: -->\n"
+            + "\n\n".join(snippets)
+            + "\n</relevant_historical_context>\n"
+        )
 
     async def _check_and_auto_compact_history(
         self,

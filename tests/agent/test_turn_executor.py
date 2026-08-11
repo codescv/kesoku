@@ -1736,3 +1736,117 @@ async def test_history_compressor_in_place_update(temp_db: str) -> None:
     db_msg2 = await gw.db.get_message(msg2.id)
     assert db_msg1.summary_node_id == mem_msg1.summary_node_id
     assert db_msg2.summary_node_id == mem_msg2.summary_node_id
+
+
+@pytest.mark.asyncio
+async def test_turn_executor_auto_context_search_injection(temp_db: str) -> None:
+    """Verify that auto context search retrieves and injects past dialogue snippets."""
+    from kesoku.agent.turn_executor import TurnExecutor
+    from kesoku.constants import MessageRole
+    from kesoku.db import DatabaseManager
+
+    DatabaseManager(temp_db).init_tables()
+
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    cfg.agent.auto_context_search = True
+    cfg.agent.auto_context_search_threshold = 1.0
+    cfg.agent.auto_context_search_semantic_min = 0.5
+
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.db.set_channel_role("cli", "ch1", "asuka")
+
+    # Create past session for role 'asuka'
+    await gw.create_session("sess_past", title="Past Session")
+    await gw.db.set_active_session_for_channel("cli", "ch1", "sess_past")
+    past_msg1 = Message(
+        session_id="sess_past",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="刚才可达鸭的念力攻击很厉害",
+        status="processed",
+        timestamp=time.time() - 3600,
+    )
+    await gw.post(past_msg1)
+    past_msg2 = Message(
+        session_id="sess_past",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="可达鸭头越痛念力越强！",
+        status="delivered",
+        timestamp=time.time() - 3590,
+    )
+    await gw.post(past_msg2)
+
+    # Index chunks in message_chunks
+    dummy_emb = b"\x00" * 64
+    with DatabaseManager(temp_db).connection_provider.connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO message_chunks (message_id, chunk_index, content, embedding) VALUES (?, ?, ?, ?)",
+            (past_msg1.id, 0, past_msg1.content, dummy_emb),
+        )
+        cursor.execute(
+            "INSERT INTO message_chunks (message_id, chunk_index, content, embedding) VALUES (?, ?, ?, ?)",
+            (past_msg2.id, 0, past_msg2.content, dummy_emb),
+        )
+
+    # Active session
+    await gw.create_session("sess_active", title="Active Session")
+    await gw.db.set_active_session_for_channel("cli", "ch1", "sess_active")
+    active_msg = Message(
+        session_id="sess_active",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="你刚才怎么变成可达鸭了？",
+        status="pending_agent",
+        timestamp=time.time(),
+    )
+    await gw.post(active_msg)
+
+    # Mock LLM to capture history
+    class CaptureLLM(BaseLLM):
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+            **kwargs: Any,
+        ) -> LLMResponse:
+            self.captured_history = list(history or [])
+            return LLMResponse(content="Response content", total_tokens=10)
+
+    llm = CaptureLLM()
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    turn_logger = MagicMock(spec=TurnLogger)
+
+    context = KesokuContext(config=cfg, llm=llm)
+    executor = TurnExecutor("sess_active", gw, tool_runner, turn_logger, context=context)
+
+    worker = MagicMock()
+    type(worker).running = PropertyMock(side_effect=[True, False])
+
+    async def mock_pivot(m: Message) -> Message:
+        return m
+
+    worker.drain_queue_and_pivot.side_effect = mock_pivot
+    worker.queue_empty.return_value = True
+
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor.process_turn(
+            current_msg=active_msg,
+            worker=worker,
+            session_staging_dir="/tmp/sess_active",
+        )
+
+    captured_contents = [m.content for m in llm.captured_history]
+    # Verify <relevant_historical_context> was injected with dialogue snippet
+    assert any("<relevant_historical_context>" in c for c in captured_contents)
+    assert any("可达鸭" in c for c in captured_contents)
