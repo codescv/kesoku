@@ -20,17 +20,15 @@ def test_parse_summary_json_valid_markdown():
     raw = """Here is the json:
 ```json
 {
-  "timeline": ["2026-01-01 18:00: Started task"],
-  "key_decisions_and_changes": null,
-  "pitfalls": "None",
-  "files": ["/repo/src/main.py"]
+  "timeline": ["2026-01-01 18:00 - 2026-01-01 18:30: Started task"],
+  "tools_and_skills": ["run_shell_command: Executed CLI script"],
+  "learnings": "None"
 }
 ```"""
     data = HistoryCompressor.parse_summary_json(raw)
-    assert data["timeline"] == ["2026-01-01 18:00: Started task"]
-    assert data["key_decisions_and_changes"] is None
-    assert data["pitfalls"] == "None"
-    assert data["files"] == ["/repo/src/main.py"]
+    assert data["timeline"] == ["2026-01-01 18:00 - 2026-01-01 18:30: Started task"]
+    assert data["tools_and_skills"] == ["run_shell_command: Executed CLI script"]
+    assert data["learnings"] == "None"
 
 
 def test_parse_summary_json_invalid():
@@ -95,30 +93,23 @@ def test_format_field():
     assert "- 2026-01-01 18:05: Event B" in formatted
 
 
-def test_format_summary_filtering_staging_files(tmp_path):
-    """Test complete format_summary pipeline including STAGING_DIR filtering and template assembly."""
-    staging_dir = str(tmp_path / "staging")
-    os.makedirs(staging_dir, exist_ok=True)
-
-    json_input = f"""```json
-{{
-  "timeline": ["2026-01-01 18:00: User requested feature X"],
-  "key_decisions_and_changes": "None",
-  "pitfalls": null,
-  "files": [
-    "/repo/src/kesoku/agent/compressor.py",
-    "{staging_dir}/output.log"
-  ]
-}}
+def test_format_summary_with_new_structure():
+    """Test complete format_summary pipeline with timeline, tools_and_skills, and learnings."""
+    json_input = """```json
+{
+  "timeline": ["2026-01-01 18:00 - 2026-01-01 18:30: User requested feature X"],
+  "tools_and_skills": [
+    "run_shell_command (ai-image): Generated illustrations for story scene"
+  ],
+  "learnings": "Use rg instead of grep for searching."
+}
 ```"""
 
-    result = HistoryCompressor.format_summary(json_input, staging_dir=staging_dir)
+    result = HistoryCompressor.format_summary(json_input)
 
-    assert "Timeline:\n- 2026-01-01 18:00: User requested feature X" in result
-    assert "Key decisions and changes:\nNone" in result
-    assert "Pitfalls:\nNone" in result
-    assert "/repo/src/kesoku/agent/compressor.py" in result
-    assert "output.log" not in result
+    assert "Timeline:\n- 2026-01-01 18:00 - 2026-01-01 18:30: User requested feature X" in result
+    assert "Tools & Skills:\n- run_shell_command (ai-image): Generated illustrations for story scene" in result
+    assert "Learnings:\nUse rg instead of grep for searching." in result
     assert result.startswith("Timeline:")
 
 
@@ -126,14 +117,13 @@ def test_format_summary_all_none():
     """Test format_summary when optional sections are missing or empty."""
     json_input = """{
   "timeline": ["2026-01-01 18:00: Checked system status."],
-  "key_decisions_and_changes": [],
-  "pitfalls": "null",
-  "files": []
+  "tools_and_skills": [],
+  "learnings": "null"
 }"""
     result = HistoryCompressor.format_summary(json_input)
-    assert "Key decisions and changes:\nNone" in result
-    assert "Pitfalls:\nNone" in result
-    assert "Files:\nNone" in result
+    assert "Timeline:\n- 2026-01-01 18:00: Checked system status." in result
+    assert "Tools & Skills:\nNone" in result
+    assert "Learnings:\nNone" in result
 
 
 @pytest.mark.asyncio
@@ -144,10 +134,9 @@ async def test_auto_compact_session(tmp_path):
     llm_mock.estimate_tokens_fallback = MagicMock(return_value=10000)
 
     json_reply = """{
-      "timeline": ["2026-01-01 18:00: Started task"],
-      "key_decisions_and_changes": "None",
-      "pitfalls": "None",
-      "files": ["/repo/file.py"]
+      "timeline": ["2026-01-01 18:00 - 2026-01-01 18:30: Started task"],
+      "tools_and_skills": ["run_shell_command: Executed CLI script"],
+      "learnings": "None"
     }"""
     llm_mock.generate.return_value = LLMResponse(content=json_reply)
 
@@ -190,12 +179,11 @@ async def test_auto_compact_session(tmp_path):
     call_prompt = llm_mock.generate.call_args[1]["prompt"]
     assert "This conversation segment occurred from" in call_prompt
     assert "Use these exact calendar dates" in call_prompt
-    assert "STAGING_DIR" in call_prompt
 
     db_mock.insert_summary_node.assert_called_once()
     inserted_node: SummaryNode = db_mock.insert_summary_node.call_args[0][0]
-    assert "Timeline:\n- 2026-01-01 18:00: Started task" in inserted_node.summary
-    assert "Files:\n- /repo/file.py" in inserted_node.summary
+    assert "Timeline:\n- 2026-01-01 18:00 - 2026-01-01 18:30: Started task" in inserted_node.summary
+    assert "Tools & Skills:\n- run_shell_command: Executed CLI script" in inserted_node.summary
 
 
 @pytest.mark.asyncio
@@ -206,10 +194,9 @@ async def test_consolidate_forest():
     llm_mock.estimate_tokens_fallback = MagicMock(return_value=100)
 
     json_reply = """{
-      "timeline": ["2026-01-01 19:00: Merged events"],
-      "key_decisions_and_changes": "None",
-      "pitfalls": "None",
-      "files": ["/repo/merged.py"]
+      "timeline": ["2026-01-01 19:00 - 2026-01-01 19:30: Merged events"],
+      "tools_and_skills": ["run_shell_command: Executed CLI script"],
+      "learnings": "None"
     }"""
     llm_mock.generate.return_value = LLMResponse(content=json_reply)
 
@@ -239,5 +226,5 @@ async def test_consolidate_forest():
     assert db_mock.insert_summary_node.call_count == 1
     inserted_parent = db_mock.insert_summary_node.call_args_list[0][0][0]
     assert inserted_parent.level == 1
-    assert "Timeline:\n- 2026-01-01 19:00: Merged events" in inserted_parent.summary
-    assert "/repo/merged.py" in inserted_parent.summary
+    assert "Timeline:\n- 2026-01-01 19:00 - 2026-01-01 19:30: Merged events" in inserted_parent.summary
+    assert "Tools & Skills:\n- run_shell_command: Executed CLI script" in inserted_parent.summary

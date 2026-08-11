@@ -20,29 +20,36 @@ logger = logging.getLogger(__name__)
 
 SUMMARIZE_TURN_PROMPT = """You are an advanced agent context compiler.
 Your task is to summarize the following segment of a conversation turn history into
-a highly dense, factual, and chronologically accurate JSON object.
-Keep the summary structured and concise (< 1000 chars total).
+a highly dense, factual, and cohesive JSON object.
+Keep the summary structured and concise (< 1200 chars total).
 
 Date Context for this segment:
 {date_context}
 
 Guidelines:
-1. timeline: Must use absolute timestamps (e.g., {example_timestamp}) derived from the Date Context and the
-   timestamps on each message. Never use relative dates/times like "Tuesday" or "15:00", or fabricate
-   random dates. Include when, where, who, what.
-2. key_decisions_and_changes: Record changes in requirements or approach, such as when the agent proposed
-   or tried A, but the user rejected it and requested B. Return None if there are no such changes.
-3. pitfalls: Record only mistakes made by the agent and what was learned (e.g., command errors and how
-   the agent fixed them), not user mistakes. Return None if there are none.
-4. files: Record only modified or created files that are OUTSIDE of STAGING_DIR. Use absolute paths or
-   repository paths. Do not include temporary/staging files. Return None if there are none.
+1. timeline: Group nearby consecutive events into cohesive chronological narrative phases
+   (e.g., "{example_start_time} - {example_end_time}: ..."). Do NOT produce granular per-turn line items,
+   but also avoid collapsing the entire segment into a single sentence; capture distinct milestones, topics,
+   or scene transitions as separate phase blocks (typically 2 to 5 blocks, maximum 5).
+2. tools_and_skills: List distinct tools and skills invoked during this segment, accompanied by a brief
+   one-sentence description of what each was used for (e.g., "run_shell_command (japanese-challenge skill):
+   Quizzed grammar points and managed mistake notebook"). Return None if none were used.
+3. learnings: Summarize practical takeaways:
+   - Tool & skill execution insights: effective parameters, syntax fixes, and error recovery patterns.
+   - User preferences & corrections: user preferences discovered, and behavioral rules learned when the
+     user corrected the agent.
+   Return None if none.
 
-Output ONLY a valid JSON object with exact keys "timeline", "key_decisions_and_changes", "pitfalls", and "files":
+Output ONLY a valid JSON object with exact keys "timeline", "tools_and_skills", and "learnings":
 {{
-  "timeline": ["{example_timestamp}: ..."],
-  "key_decisions_and_changes": "..." or null,
-  "pitfalls": "..." or null,
-  "files": ["/path/to/file1", "/path/to/file2"] or null
+  "timeline": [
+    "{example_start_time} - {example_end_time}: [Concise narrative of phase 1]",
+    "{example_start_time} - {example_end_time}: [Concise narrative of phase 2]"
+  ],
+  "tools_and_skills": [
+    "tool_name (skill_name if applicable): [One concise sentence explaining its purpose/usage]"
+  ] or null,
+  "learnings": "..." or null
 }}
 
 Conversation Segment to Summarize:
@@ -53,28 +60,34 @@ JSON Summary:"""
 CONSOLIDATE_SUMMARIES_PROMPT = """You are an advanced agent context compiler.
 Your task is to merge and consolidate the following chronological sequence of summaries
 into a single, cohesive, higher-level JSON object.
-Maintain high density and clear structure (< 1000 chars total).
+Maintain high density and clear structure (< 1200 chars total).
 
 Date Context for these summaries:
 {date_context}
 
 Guidelines:
-1. timeline: Merge events chronologically. Must use absolute timestamps (e.g., {example_timestamp}) strictly
-   based on the actual dates in the Date Context and summaries. Never use relative dates/times like
-   "Tuesday" or "15:00", or fabricate dates.
-2. key_decisions_and_changes: Record changes in requirements or approach (e.g., proposed A but changed to B).
-   If there are conflicting decisions, prioritize the latest decision and resolve contradictions in favor of
-   the most recent events. Return None if there are none.
-3. pitfalls: Summarize only mistakes made by the agent and lessons learned (how errors were fixed),
-   not user mistakes. Return None if there are none.
-4. files: Record only modified or created files OUTSIDE of STAGING_DIR. Return None if there are none.
+1. timeline: Merge and consolidate events chronologically into distinct macro-phase blocks
+   (e.g., "{example_start_time} - {example_end_time}: ..."). Do not collapse the entire history into a single
+   one-liner; preserve distinct narrative phases, key topics, or major activity milestones across the
+   timeline (typically 2 to 5 blocks, maximum 5).
+2. tools_and_skills: Deduplicate and consolidate all distinct tools and skills used across the summaries, each
+   with a brief one-sentence description of its purpose/usage. Return None if none.
+3. learnings: Merge, deduplicate, and synthesize all key learnings across the summaries:
+   - Tool & skill execution insights: effective parameters, syntax fixes, and error recovery patterns.
+   - User preferences & corrections: user preferences discovered, and behavioral rules learned when the
+     user corrected the agent.
+   Resolve any conflicting rules in favor of the most recent events. Return None if none.
 
-Output ONLY a valid JSON object with exact keys "timeline", "key_decisions_and_changes", "pitfalls", and "files":
+Output ONLY a valid JSON object with exact keys "timeline", "tools_and_skills", and "learnings":
 {{
-  "timeline": ["{example_timestamp}: ..."],
-  "key_decisions_and_changes": "..." or null,
-  "pitfalls": "..." or null,
-  "files": ["/path/to/file1", "/path/to/file2"] or null
+  "timeline": [
+    "{example_start_time} - {example_end_time}: [Concise narrative of merged macro phase 1]",
+    "{example_start_time} - {example_end_time}: [Concise narrative of merged macro phase 2]"
+  ],
+  "tools_and_skills": [
+    "tool_name (skill_name if applicable): [One concise sentence explaining its purpose/usage]"
+  ] or null,
+  "learnings": "..." or null
 }}
 
 Summaries to Merge (in chronological order):
@@ -85,14 +98,11 @@ Consolidated JSON Summary:"""
 SUMMARY_TEMPLATE = """Timeline:
 {timeline}
 
-Key decisions and changes:
-{key_decisions_and_changes}
+Tools & Skills:
+{tools_and_skills}
 
-Pitfalls:
-{pitfalls}
-
-Files:
-{files}"""
+Learnings:
+{learnings}"""
 
 
 class HistoryCompressor:
@@ -182,7 +192,7 @@ class HistoryCompressor:
 
     @classmethod
     def format_summary(cls, raw_content: str, staging_dir: str | None = None) -> str:
-        """Parse LLM JSON output, validate files against staging_dir, and format summary using template."""
+        """Parse LLM JSON output and format summary using template."""
         data = cls.parse_summary_json(raw_content)
 
         # 1. Timeline
@@ -191,48 +201,18 @@ class HistoryCompressor:
         if not timeline_str and raw_content and not data:
             timeline_str = raw_content.strip()
 
-        # 2. Key decisions and changes
-        decisions_val = (
-            data.get("key_decisions_and_changes")
-            or data.get("key_decisions")
-            or data.get("key_decisions_or_changes")
-        )
-        decisions_str = cls._format_field(decisions_val, default_none=True)
+        # 2. Tools and skills
+        tools_val = data.get("tools_and_skills") or data.get("tools") or data.get("skills")
+        tools_str = cls._format_field(tools_val, default_none=True)
 
-        # 3. Pitfalls
-        pitfalls_val = data.get("pitfalls")
-        pitfalls_str = cls._format_field(pitfalls_val, default_none=True)
-
-        # 4. Files
-        files_val = data.get("files")
-        valid_files = []
-        if files_val:
-            if isinstance(files_val, list):
-                file_items = [str(item).strip() for item in files_val if item]
-            else:
-                text = str(files_val).strip()
-                if text.lower() in ("none", "null", "n/a", "[]", ""):
-                    file_items = []
-                else:
-                    file_items = [
-                        line.strip()
-                        for line in text.replace(",", "\n").splitlines()
-                        if line.strip()
-                    ]
-
-            for item in file_items:
-                if item.lower() in ("none", "null", "n/a", "[]", ""):
-                    continue
-                if cls.is_outside_staging_dir(item, staging_dir):
-                    valid_files.append(item)
-
-        files_str = cls._format_field(valid_files, default_none=True)
+        # 3. Learnings
+        learnings_val = data.get("learnings") or data.get("learning")
+        learnings_str = cls._format_field(learnings_val, default_none=True)
 
         return SUMMARY_TEMPLATE.format(
             timeline=timeline_str,
-            key_decisions_and_changes=decisions_str,
-            pitfalls=pitfalls_str,
-            files=files_str,
+            tools_and_skills=tools_str,
+            learnings=learnings_str,
         )
 
     @classmethod
@@ -331,12 +311,15 @@ class HistoryCompressor:
                     "Use these exact calendar dates for all timeline events."
                 )
 
-                example_dt = datetime.datetime.fromtimestamp(start_ts).astimezone()
-                example_timestamp = example_dt.strftime("%Y-%m-%d %H:%M")
+                start_dt = datetime.datetime.fromtimestamp(start_ts).astimezone()
+                end_dt = datetime.datetime.fromtimestamp(end_ts).astimezone()
+                example_start_time = start_dt.strftime("%Y-%m-%d %H:%M")
+                example_end_time = end_dt.strftime("%Y-%m-%d %H:%M")
 
                 prompt = SUMMARIZE_TURN_PROMPT.format(
                     date_context=date_context,
-                    example_timestamp=example_timestamp,
+                    example_start_time=example_start_time,
+                    example_end_time=example_end_time,
                     segment=segment_text,
                 )
                 res = await llm.generate(prompt=prompt)
@@ -424,12 +407,15 @@ class HistoryCompressor:
                         f"{nd.summary}\n\n"
                     )
 
-                example_dt = datetime.datetime.fromtimestamp(start_ts).astimezone()
-                example_timestamp = example_dt.strftime("%Y-%m-%d %H:%M")
+                start_dt = datetime.datetime.fromtimestamp(start_ts).astimezone()
+                end_dt = datetime.datetime.fromtimestamp(end_ts).astimezone()
+                example_start_time = start_dt.strftime("%Y-%m-%d %H:%M")
+                example_end_time = end_dt.strftime("%Y-%m-%d %H:%M")
 
                 prompt = CONSOLIDATE_SUMMARIES_PROMPT.format(
                     date_context=date_context,
-                    example_timestamp=example_timestamp,
+                    example_start_time=example_start_time,
+                    example_end_time=example_end_time,
                     summaries=summaries_text,
                 )
                 res = await llm.generate(prompt=prompt)
