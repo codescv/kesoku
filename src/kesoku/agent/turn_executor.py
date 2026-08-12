@@ -238,8 +238,8 @@ class TurnExecutor:
 
                 await self._inject_context_and_trigger_consolidation(history, current_msg, llm)
 
-                # Prepare history for the LLM by stripping thoughts and attachments dynamically
-                llm_history = prepare_history_for_llm(history)
+                # Prepare history for the LLM by stripping thoughts, attachments, and truncating historical tool outputs
+                llm_history = prepare_history_for_llm(history, staging_dir=session_staging_dir)
 
                 # Setup context cache if enabled, Gemini model, and not already created
                 if cfg.gemini.context_caching and llm.__class__.__name__ == "GeminiLLM" and active_cache_name is None:

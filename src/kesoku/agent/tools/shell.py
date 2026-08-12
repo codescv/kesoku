@@ -229,7 +229,7 @@ async def run_shell_command(
     command: str,
     cwd: str | None = None,
     background_threshold_seconds: float | None = None,
-    max_output_chars: int = 1000,
+    max_output_chars: int = 5000,
     context: ToolContext | None = None,
 ) -> str:
     """Execute a CLI shell command within a target directory, defaulting to the AWD (Agent Working Directory).
@@ -245,7 +245,7 @@ async def run_shell_command(
       and write at most 4000 characters per command.
     - NEVER run commands that are more than 5000 characters just to be safe.
     - If you have a command that is very long, only emit 1 tool call to avoid token limit exceed error.
-    - Tool output is capped at `max_output_chars` (default 1000, max 30000) characters to save tokens.
+    - Tool output is capped at `max_output_chars` (default 5000, max 30000) characters to save tokens.
       If you need more output, increase the `max_output_chars` parameter, or filter/redirect the command output.
     - You are encouraged to combine commands using '|', '&&', ';' etc to save turns.
 
@@ -256,7 +256,7 @@ async def run_shell_command(
         background_threshold_seconds: Optional foreground timeout limit (in seconds) override.
             If the command takes longer than this limit, it transitions to background execution.
             If not provided, defaults to configuration setting.
-        max_output_chars: Maximum output characters to return. Defaults to 1000.
+        max_output_chars: Maximum output characters to return. Defaults to 5000.
             Output exceeding this length is truncated and full output saved to a staging file.
         context: Optional tool execution context.
 

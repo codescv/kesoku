@@ -284,21 +284,21 @@ async def test_run_shell_command_max_output_chars(tmp_path) -> None:
 
         ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
 
-        # Test default (max_output_chars = 1000)
-        cmd_1200 = "python3 -c 'print(\"a\" * 1200)'"
-        res = await run_shell_command(cmd_1200, context=ctx)
+        # Test default (max_output_chars = 5000)
+        cmd_6000 = "python3 -c 'print(\"a\" * 6000)'"
+        res = await run_shell_command(cmd_6000, context=ctx)
 
         assert "Output truncated" in res
-        assert "Preview (last 1000 chars):" in res
+        assert "Preview (last 5000 chars):" in res
         assert "with a larger `max_output_chars` parameter" in res
 
-        # Verify preview contains the end of output (last 1000 chars)
-        preview_part = res.split("Preview (last 1000 chars):\n")[1]
+        # Verify preview contains the end of output (last 5000 chars)
+        preview_part = res.split("Preview (last 5000 chars):\n")[1]
         assert "=== STDERR ===" in preview_part
         assert "=== STDOUT ===" not in preview_part
 
         # Test custom max_output_chars = 100
-        res_custom = await run_shell_command(cmd_1200, max_output_chars=100, context=ctx)
+        res_custom = await run_shell_command(cmd_6000, max_output_chars=100, context=ctx)
         assert "Output truncated" in res_custom
         assert "Preview (last 100 chars):" in res_custom
 

@@ -710,6 +710,141 @@ async def test_priority_based_dropping_and_atomic_batches_turn_based(temp_db: st
 
 
 @pytest.mark.asyncio
+async def test_prepare_history_for_llm_truncates_historical_tool_output(temp_db: str, tmp_path: Any) -> None:
+    """Verify that tool results in completed historical turns are truncated to 500 chars and saved to file."""
+    import os
+
+    from kesoku.agent.history import build_history, prepare_history_for_llm
+    from kesoku.constants import MessageRole, MessageStatus, MessageType
+
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    await gw.create_session("sess_tool_trunc", title="Tool Truncation Session")
+
+    # Turn 1 (Historical/Completed turn)
+    u1 = Message(
+        session_id="sess_tool_trunc",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Run command 1",
+        status=MessageStatus.PROCESSED,
+    )
+    await gw.post(u1)
+
+    tc1 = Message(
+        session_id="sess_tool_trunc",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_CALL,
+        content="Calling tool 1",
+        status=MessageStatus.RESPONDED,
+        parent_id=u1.id,
+        metadata={"tool_name": "run_shell_command"},
+    )
+    await gw.post(tc1)
+
+    long_output_1 = "X" * 1200
+    tr1 = Message(
+        session_id="sess_tool_trunc",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="run_shell_command",
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
+        content=f"Tool `run_shell_command` returned:\n```\n{long_output_1}\n```",
+        status=MessageStatus.RESPONDED,
+        parent_id=tc1.id,
+        metadata={"tool_name": "run_shell_command", "tool_result": long_output_1},
+    )
+    await gw.post(tr1)
+
+    resp1 = Message(
+        session_id="sess_tool_trunc",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="Turn 1 done",
+        status=MessageStatus.RESPONDED,
+    )
+    await gw.post(resp1)
+
+    # Turn 2 (Active latest turn)
+    u2 = Message(
+        session_id="sess_tool_trunc",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Run command 2",
+        status=MessageStatus.PROCESSED,
+    )
+    await gw.post(u2)
+
+    tc2 = Message(
+        session_id="sess_tool_trunc",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_CALL,
+        content="Calling tool 2",
+        status=MessageStatus.RESPONDED,
+        parent_id=u2.id,
+        metadata={"tool_name": "run_shell_command"},
+    )
+    await gw.post(tc2)
+
+    long_output_2 = "Y" * 1200
+    tr2 = Message(
+        session_id="sess_tool_trunc",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="run_shell_command",
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_RESULT,
+        content=f"Tool `run_shell_command` returned:\n```\n{long_output_2}\n```",
+        status=MessageStatus.RESPONDED,
+        parent_id=tc2.id,
+        metadata={"tool_name": "run_shell_command", "tool_result": long_output_2},
+    )
+    await gw.post(tr2)
+
+    history = await build_history(gateway=gw, session_id="sess_tool_trunc")
+    llm_history = prepare_history_for_llm(
+        history,
+        max_historical_tool_chars=500,
+        staging_dir=str(tmp_path),
+    )
+
+    tr1_prepared = next(m for m in llm_history if m.id == tr1.id)
+    tr2_prepared = next(m for m in llm_history if m.id == tr2.id)
+
+    # Historical turn tool result MUST be truncated to 500 chars and saved to file
+    assert "Output truncated for history" in tr1_prepared.metadata["tool_result"]
+    assert "Preview (last 500 chars):" in tr1_prepared.metadata["tool_result"]
+    assert "Full output saved to:" in tr1_prepared.metadata["tool_result"]
+    saved_file = tr1_prepared.metadata.get("output_filepath")
+    assert saved_file is not None
+    assert os.path.exists(saved_file)
+    with open(saved_file, encoding="utf-8") as f:
+        assert f.read() == long_output_1
+
+    # Active latest turn tool result MUST NOT be truncated
+    assert tr2_prepared.metadata["tool_result"] == long_output_2
+    assert "Output truncated" not in tr2_prepared.metadata["tool_result"]
+
+
+@pytest.mark.asyncio
 async def test_session_worker_dynamic_llm(temp_db: str) -> None:
     """Verify that SessionWorker resolves the correct LLM based on channel overrides."""
     DatabaseManager(temp_db).init_tables()

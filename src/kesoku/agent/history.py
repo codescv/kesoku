@@ -3,6 +3,10 @@
 import datetime
 import logging
 import os
+import re
+import tempfile
+import time
+import uuid
 from typing import Literal
 
 import tzlocal
@@ -10,6 +14,7 @@ import tzlocal
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
+from kesoku.utils.path import PathResolver
 
 logger = logging.getLogger(__name__)
 
@@ -84,12 +89,23 @@ def segment_logical_turns(history: list[Message]) -> list[list[Message]]:
     return turns
 
 
-def prepare_history_for_llm(history: list[Message]) -> list[Message]:
+def prepare_history_for_llm(
+    history: list[Message],
+    max_historical_tool_chars: int = 500,
+    staging_dir: str | None = None,
+) -> list[Message]:
     """Clean up and format the conversational history specifically for the LLM.
 
     Groups messages into complete logical turns, strips thoughts from all completed
-    turns, strips attachments from historical user prompts, adds headers to user
+    turns, truncates historical tool outputs exceeding max_historical_tool_chars to external files,
+    strips attachments from historical user prompts, adds headers to user
     messages, and returns the simplified history.
+
+    Args:
+        history: Flat chronological list of database messages.
+        max_historical_tool_chars: Maximum character limit for tool results in historical turns.
+            Defaults to 500 characters.
+        staging_dir: Optional session staging directory to write full outputs to.
     """
     # 1. Groups messages into complete logical turns (User/System prompt -> ... -> before next user/system prompt).
     turns = segment_logical_turns(history)
@@ -106,7 +122,7 @@ def prepare_history_for_llm(history: list[Message]) -> list[Message]:
             # Keep all thoughts and details in the latest/active turn
             cleaned_turns.append(turn)
         else:
-            # Completed turn: strip thoughts, signatures, and clean historical user attachments
+            # Completed turn: strip thoughts, signatures, truncate tool results, and clean historical user attachments
             clean_turn = []
             for m in turn:
                 # Drop assistant thoughts in completed turns
@@ -120,6 +136,76 @@ def prepare_history_for_llm(history: list[Message]) -> list[Message]:
                         m = m.model_copy()
                         m.metadata = dict(m.metadata)
                         m.metadata.pop("thought_signature", None)
+
+                # Truncate tool results in completed turns if they exceed max_historical_tool_chars (default 500)
+                if m.role == MessageRole.TOOL and m.type == MessageType.TOOL_RESULT:
+                    tool_name = (m.metadata.get("tool_name") if m.metadata else None) or m.sender or "tool"
+                    tool_error = m.metadata.get("tool_error") if m.metadata else None
+                    raw_res = (m.metadata.get("tool_result") if m.metadata else None) or m.content or ""
+
+                    # Resolve target staging directory
+                    target_dir = staging_dir
+                    if not target_dir and m.session_id:
+                        try:
+                            target_dir = PathResolver.get_session_staging_dir(m.session_id)
+                        except Exception:
+                            target_dir = None
+                    if not target_dir:
+                        target_dir = os.path.join(tempfile.gettempdir(), "kesoku_staging")
+
+                    if tool_error and len(tool_error) > max_historical_tool_chars:
+                        os.makedirs(target_dir, exist_ok=True)
+                        file_match = re.search(r"saved to(?: session workspace file)?: `([^`]+)`", tool_error)
+                        if file_match and os.path.exists(file_match.group(1)):
+                            err_filepath = file_match.group(1)
+                        else:
+                            timestamp = int(time.time())
+                            err_filename = f"hist_err_{tool_name}_{timestamp}_{uuid.uuid4().hex[:8]}.txt"
+                            err_filepath = os.path.join(target_dir, err_filename)
+                            try:
+                                with open(err_filepath, "w", encoding="utf-8") as f:
+                                    f.write(tool_error)
+                            except Exception as ex:
+                                logger.warning(f"Failed to write historical tool error to {err_filepath}: {ex}")
+
+                        err_preview = tool_error[-max_historical_tool_chars:]
+                        truncated_err = (
+                            f"Error truncated for history (total length {len(tool_error)} chars). "
+                            f"Full error log saved to: `{err_filepath}`.\n\n"
+                            f"Preview (last {max_historical_tool_chars} chars):\n{err_preview}"
+                        )
+                        m = m.model_copy()
+                        m.metadata = dict(m.metadata) if m.metadata else {}
+                        m.metadata["tool_error"] = truncated_err
+                        m.metadata["output_filepath"] = err_filepath
+                        m.content = f"Tool `{tool_name}` error:\n```\n{truncated_err}\n```"
+
+                    elif not tool_error and len(raw_res) > max_historical_tool_chars:
+                        os.makedirs(target_dir, exist_ok=True)
+                        file_match = re.search(r"saved to(?: session workspace file)?: `([^`]+)`", raw_res)
+                        if file_match and os.path.exists(file_match.group(1)):
+                            filepath = file_match.group(1)
+                        else:
+                            timestamp = int(time.time())
+                            filename = f"hist_tool_{tool_name}_{timestamp}_{uuid.uuid4().hex[:8]}.txt"
+                            filepath = os.path.join(target_dir, filename)
+                            try:
+                                with open(filepath, "w", encoding="utf-8") as f:
+                                    f.write(raw_res)
+                            except Exception as ex:
+                                logger.warning(f"Failed to write historical tool output to {filepath}: {ex}")
+
+                        preview = raw_res[-max_historical_tool_chars:]
+                        truncated_res = (
+                            f"Output truncated for history (total length {len(raw_res)} chars). "
+                            f"Full output saved to: `{filepath}`.\n\n"
+                            f"Preview (last {max_historical_tool_chars} chars):\n{preview}"
+                        )
+                        m = m.model_copy()
+                        m.metadata = dict(m.metadata) if m.metadata else {}
+                        m.metadata["tool_result"] = truncated_res
+                        m.metadata["output_filepath"] = filepath
+                        m.content = f"Tool `{tool_name}` returned:\n```\n{truncated_res}\n```"
 
                 # Strip attachments from historical user messages to optimize context size
                 if m.role == MessageRole.USER:
