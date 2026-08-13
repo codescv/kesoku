@@ -228,3 +228,56 @@ async def test_consolidate_forest():
     assert inserted_parent.level == 1
     assert "Timeline:\n- 2026-01-01 19:00 - 2026-01-01 19:30: Merged events" in inserted_parent.summary
     assert "Tools & Skills:\n- run_shell_command: Executed CLI script" in inserted_parent.summary
+
+def test_estimate_prepared_turn_tokens():
+    """Test estimate_prepared_turn_tokens drops thoughts and truncates long tool outputs."""
+    db_mock = AsyncMock()
+    llm_mock = MagicMock()
+    # Mock fallback token estimation to return len(prompt) // 4
+    llm_mock.estimate_tokens_fallback.side_effect = lambda prompt: len(prompt) // 4
+
+    compressor = HistoryCompressor(db_mock)
+
+    turn = [
+        Message(
+            id="msg_1",
+            session_id="s1",
+            chatbot_id="cb",
+            channel_id="ch",
+            sender="user",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="Hello " * 10,  # 60 chars -> 15 tokens
+            status=MessageStatus.RESPONDED,
+            timestamp=100.0,
+        ),
+        Message(
+            id="msg_2",
+            session_id="s1",
+            chatbot_id="cb",
+            channel_id="ch",
+            sender="assistant",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.THOUGHT,
+            content="Thinking deeply... " * 500,  # Should be dropped entirely
+            status=MessageStatus.RESPONDED,
+            timestamp=101.0,
+        ),
+        Message(
+            id="msg_3",
+            session_id="s1",
+            chatbot_id="cb",
+            channel_id="ch",
+            sender="tool",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content="x" * 2000,  # Exceeds 500 chars -> truncated to 500 chars -> 125 tokens
+            status=MessageStatus.RESPONDED,
+            timestamp=102.0,
+        ),
+    ]
+
+    tokens = compressor.estimate_prepared_turn_tokens(turn, llm_mock, max_historical_tool_chars=500)
+    # Expected: 60 // 4 = 15 tokens from msg_1 + 500 // 4 = 125 tokens from truncated msg_3 = 140
+    assert tokens == 140
+

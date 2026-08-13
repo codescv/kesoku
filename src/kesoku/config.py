@@ -94,11 +94,11 @@ class AgentConfig(BaseModel):
         description="Number of turns from start protected from compression",
     )
     protect_tail_turns: int = Field(
-        default=5,
+        default=3,
         description="Number of turns from end protected from compression",
     )
     base_node_min_tokens: int = Field(
-        default=20000,
+        default=25000,
         description="Token threshold above which x buffer turns are compressed",
     )
     base_node_turns: int = Field(

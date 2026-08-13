@@ -12,7 +12,7 @@ from typing import Any
 from kesoku.agent.history import segment_logical_turns
 from kesoku.agent.llm import BaseLLM
 from kesoku.config import KesokuConfig
-from kesoku.constants import MessageType
+from kesoku.constants import MessageRole, MessageType
 from kesoku.db import Message, SummaryNode
 from kesoku.db.manager import AsyncDatabaseManager
 
@@ -233,6 +233,42 @@ class HistoryCompressor:
         """
         return segment_logical_turns(messages)
 
+    def estimate_prepared_turn_tokens(
+        self,
+        turn: list[Message],
+        llm: BaseLLM,
+        max_historical_tool_chars: int = 500,
+    ) -> int:
+        """Estimate token count for a completed turn as prepared for the LLM.
+
+        Strips assistant thoughts and truncates historical tool outputs to
+        max_historical_tool_chars to match what is actually sent to the LLM.
+
+        Args:
+            turn: List of Message objects forming a single turn.
+            llm: BaseLLM instance providing token estimation methods.
+            max_historical_tool_chars: Maximum character limit for historical tool results.
+
+        Returns:
+            Estimated total tokens for the turn.
+        """
+        total_tokens = 0
+        for msg in turn:
+            # Drop assistant thoughts in completed turns
+            if msg.type == MessageType.THOUGHT or (
+                msg.role == MessageRole.ASSISTANT and msg.type == MessageType.THOUGHT
+            ):
+                continue
+
+            content = msg.content or ""
+            # Truncate historical tool outputs exceeding character limit
+            if msg.role == MessageRole.TOOL and msg.type == MessageType.TOOL_RESULT:
+                if len(content) > max_historical_tool_chars:
+                    content = content[-max_historical_tool_chars:]
+
+            total_tokens += llm.estimate_tokens_fallback(prompt=content)
+        return total_tokens
+
     def format_turn_for_summary(self, turn: list[Message]) -> str:
         """Format a single turn into text for summarization, stripping thoughts and including timestamps."""
         lines = []
@@ -291,11 +327,11 @@ class HistoryCompressor:
 
         for turn in uncompressed_turns:
             current_chunk.append(turn)
-            current_tokens += sum(llm.estimate_tokens_fallback(prompt=msg.content) for msg in turn)
+            current_tokens += self.estimate_prepared_turn_tokens(turn, llm)
 
             if len(current_chunk) >= base_turns and current_tokens >= min_tokens:
                 logger.info(
-                    f"Compressing {len(current_chunk)} turns ({current_tokens} tokens) "
+                    f"Compressing {len(current_chunk)} turns ({current_tokens} prepared tokens) "
                     f"into Level-0 summary node for session {session_id}."
                 )
                 segment_text = ""
