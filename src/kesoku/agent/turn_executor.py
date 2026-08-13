@@ -84,6 +84,21 @@ class TurnExecutor:
             return True
         return False
 
+    async def _is_first_message_of_day(self, history: list[Message], current_msg: Message) -> bool:
+        """Determine if current_msg is the first user message of the calendar day for this session."""
+        prior_user_msgs = [
+            m for m in history
+            if m.id != current_msg.id and m.role == MessageRole.USER
+        ]
+        if not prior_user_msgs:
+            return True
+
+        last_user_msg = prior_user_msgs[-1]
+        current_date = datetime.datetime.fromtimestamp(current_msg.timestamp).astimezone().date()
+        last_date = datetime.datetime.fromtimestamp(last_user_msg.timestamp).astimezone().date()
+
+        return current_date != last_date
+
     def _resolve_llm(self, current_msg: Message) -> BaseLLM:
         """Resolve the appropriate LLM instance for the current message, applying overrides.
 
@@ -465,19 +480,38 @@ class TurnExecutor:
         # 2. Read role-based preferences.md every turn
         inject_preferences = True
         instructions_prefix = ""
-        if inject_preferences and active_role:
+        facts_prefix = ""
+        if active_role:
             roles_dir = self.context.config.workspace.roles_dir
             if not os.path.isabs(roles_dir) and self.context.config.agent_working_dir:
                 roles_dir = os.path.join(self.context.config.agent_working_dir, roles_dir)
-            pref_path = os.path.join(roles_dir, active_role, "preferences.md")
-            if await async_exists(pref_path):
-                try:
-                    role_prefs_content = await async_read_text_file(pref_path)
-                    role_prefs_content = role_prefs_content.strip()
-                    if role_prefs_content:
-                        instructions_prefix = f"<instructions>\n{role_prefs_content}\n</instructions>\n"
-                except Exception as e:
-                    logger.warning(f"Failed to read preferences.md for role '{active_role}': {e}")
+            if inject_preferences:
+                pref_path = os.path.join(roles_dir, active_role, "preferences.md")
+                if await async_exists(pref_path):
+                    try:
+                        role_prefs_content = await async_read_text_file(pref_path)
+                        role_prefs_content = role_prefs_content.strip()
+                        if role_prefs_content:
+                            instructions_prefix = f"<instructions>\n{role_prefs_content}\n</instructions>\n"
+                    except Exception as e:
+                        logger.warning(f"Failed to read preferences.md for role '{active_role}': {e}")
+
+            # 2.1. Read role-based facts.md for the first message of the day in this session
+            is_first_msg_of_day = await self._is_first_message_of_day(history, current_msg)
+            if is_first_msg_of_day:
+                facts_path = os.path.join(roles_dir, active_role, "facts.md")
+                if await async_exists(facts_path):
+                    try:
+                        role_facts_content = await async_read_text_file(facts_path)
+                        role_facts_content = role_facts_content.strip()
+                        if role_facts_content:
+                            facts_prefix = f"<facts>\n{role_facts_content}\n</facts>\n"
+                            logger.info(
+                                f"Injected facts.md for role '{active_role}' into session '{self.session_id}' "
+                                f"(first message of the day)"
+                            )
+                    except Exception as e:
+                        logger.warning(f"Failed to read facts.md for role '{active_role}': {e}")
 
         # 3. Prepend Consolidated Passive Synchronization, Preferences, and Context Compression Guidelines
         # (if Bootstrap)
@@ -524,6 +558,7 @@ class TurnExecutor:
 
         copied_msg.content = (
             f"{instructions_prefix}"
+            f"{facts_prefix}"
             f"{full_prefix}"
             f"{augmented_context_prefix}"
             f'<current_message from="{sender_name}" time="{time_str}" timezone="{tz_name}">\n'

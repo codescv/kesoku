@@ -1850,3 +1850,166 @@ async def test_turn_executor_auto_context_search_injection(temp_db: str) -> None
     # Verify <relevant_historical_context> was injected with dialogue snippet
     assert any("<relevant_historical_context>" in c for c in captured_contents)
     assert any("可达鸭" in c for c in captured_contents)
+
+
+@pytest.mark.asyncio
+async def test_turn_executor_daily_facts_injection(temp_db: str, tmp_path: Any) -> None:
+    """Verify that role facts.md is injected only on the first user message of each day per session."""
+    from kesoku.agent.turn_executor import TurnExecutor
+    from kesoku.constants import MessageRole
+    from kesoku.db import DatabaseManager
+
+    DatabaseManager(temp_db).init_tables()
+
+    # Create role directory with preferences.md and facts.md
+    roles_dir = tmp_path / "roles"
+    asuka_dir = roles_dir / "asuka"
+    asuka_dir.mkdir(parents=True, exist_ok=True)
+    (asuka_dir / "preferences.md").write_text("Asuka preferences")
+    (asuka_dir / "facts.md").write_text("Asuka重大事件时间表：领养了猫咪Neon")
+
+    cfg = KesokuConfig(
+        workspace=WorkspaceConfig(db_path=temp_db, roles_dir=str(roles_dir)),
+    )
+    cfg.agent.auto_context_search = False  # Isolate facts test
+
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.db.set_channel_role("cli", "ch1", "asuka")
+    await gw.create_session("sess_facts", title="Facts Session")
+    await gw.db.set_active_session_for_channel("cli", "ch1", "sess_facts")
+
+    # Mock LLM to capture history
+    class CaptureLLM(BaseLLM):
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+            **kwargs: Any,
+        ) -> LLMResponse:
+            self.captured_history = list(history or [])
+            return LLMResponse(content="Response content", total_tokens=10)
+
+    llm = CaptureLLM()
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    turn_logger = MagicMock(spec=TurnLogger)
+
+    context = KesokuContext(config=cfg, llm=llm)
+    executor = TurnExecutor("sess_facts", gw, tool_runner, turn_logger, context=context)
+
+    (tmp_path / "staging").mkdir(parents=True, exist_ok=True)
+
+    def create_mock_worker() -> MagicMock:
+        w = MagicMock()
+        type(w).running = PropertyMock(side_effect=[True, False])
+
+        async def mock_pivot(m: Message) -> Message:
+            return m
+
+        w.drain_queue_and_pivot.side_effect = mock_pivot
+        w.queue_empty.return_value = True
+        return w
+
+    # --- Turn 1: Day 1 (Morning) ---
+    day1_morning = 1786400000.0  # Unix timestamp on Day 1
+    msg_day1_1 = Message(
+        session_id="sess_facts",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="早上好！",
+        status="pending_agent",
+        timestamp=day1_morning,
+    )
+    await gw.post(msg_day1_1)
+
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor.process_turn(
+            current_msg=msg_day1_1,
+            worker=create_mock_worker(),
+            session_staging_dir=str(tmp_path / "staging"),
+        )
+
+    captured_day1_1 = [m.content for m in llm.captured_history]
+    # Verify <facts> was injected on the first turn of Day 1
+    assert any("<facts>\nAsuka重大事件时间表：领养了猫咪Neon\n</facts>" in c for c in captured_day1_1)
+
+    # Post assistant reply for Turn 1
+    reply_1 = Message(
+        session_id="sess_facts",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="早安笨蛋！",
+        status="delivered",
+        timestamp=day1_morning + 10,
+    )
+    await gw.post(reply_1)
+
+    # --- Turn 2: Day 1 (Afternoon, same day) ---
+    day1_afternoon = day1_morning + 7200.0  # +2 hours on same day
+    msg_day1_2 = Message(
+        session_id="sess_facts",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="中午吃什么？",
+        status="pending_agent",
+        timestamp=day1_afternoon,
+    )
+    await gw.post(msg_day1_2)
+
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor.process_turn(
+            current_msg=msg_day1_2,
+            worker=create_mock_worker(),
+            session_staging_dir=str(tmp_path / "staging"),
+        )
+
+    captured_day1_2 = [m.content for m in llm.captured_history]
+    # Verify the NEW active message in Turn 2 does NOT have <facts> injected
+    last_user_content = [m.content for m in llm.captured_history if m.role == MessageRole.USER][-1]
+    assert "<facts>" not in last_user_content
+
+    # Post assistant reply for Turn 2
+    reply_2 = Message(
+        session_id="sess_facts",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="吃便当啦！",
+        status="delivered",
+        timestamp=day1_afternoon + 10,
+    )
+    await gw.post(reply_2)
+
+    # --- Turn 3: Day 2 (Next calendar day) ---
+    day2_morning = day1_morning + 86400.0  # +24 hours, next calendar day
+    msg_day2_1 = Message(
+        session_id="sess_facts",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="第二天早上好！",
+        status="pending_agent",
+        timestamp=day2_morning,
+    )
+    await gw.post(msg_day2_1)
+
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor.process_turn(
+            current_msg=msg_day2_1,
+            worker=create_mock_worker(),
+            session_staging_dir=str(tmp_path / "staging"),
+        )
+
+    last_user_content_day2 = [m.content for m in llm.captured_history if m.role == MessageRole.USER][-1]
+    # Verify <facts> WAS injected on the first turn of Day 2
+    assert "<facts>\nAsuka重大事件时间表：领养了猫咪Neon\n</facts>" in last_user_content_day2
