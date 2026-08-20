@@ -36,6 +36,265 @@ logger = setup_logger(__name__)
 
 DISCORD_MAX_CONTENT_LENGTH = 2000
 
+TOOL_EMOJI_MAP: dict[str, str] = {
+    "run_shell_command": "💻",
+    "web_search": "🔍",
+    "update_file": "📝",
+    "analyze_media": "🖼️",
+    "chat_search": "🧠",
+    "view_message": "📜",
+    "use_skill": "🧩",
+    "list_skills": "🧩",
+    "skill_manager": "🧩",
+}
+DEFAULT_TOOL_EMOJI = "🛠️"
+MAX_VISIBLE_TOOL_CALLS = 12
+
+
+def get_tool_emoji(tool_name: str) -> str:
+    """Get representative emoji for the given tool name.
+
+    Args:
+        tool_name: The tool identifier.
+
+    Returns:
+        The mapped emoji or default tool emoji.
+    """
+    return TOOL_EMOJI_MAP.get(tool_name, DEFAULT_TOOL_EMOJI)
+
+
+def compact_path(path_str: str, max_len: int = 40) -> str:
+    """Compact long file paths by keeping trailing path components.
+
+    Args:
+        path_str: File path to compact.
+        max_len: Maximum length threshold before compaction.
+
+    Returns:
+        Compacted path string.
+    """
+    if len(path_str) <= max_len:
+        return path_str
+
+    parts = path_str.replace("\\", "/").rstrip("/").split("/")
+    if len(parts) <= 1:
+        return path_str[: max_len - 3] + "..."
+
+    filename = parts[-1]
+    if len(filename) >= max_len - 4:
+        return "..." + filename[-(max_len - 4) :]
+
+    compacted = filename
+    for p in reversed(parts[:-1]):
+        if not p:
+            continue
+        candidate = f"{p}/{compacted}"
+        if len(candidate) + 4 <= max_len:
+            compacted = candidate
+        else:
+            break
+
+    return f".../{compacted}"
+
+
+def format_tool_arguments(tool_name: str, tool_args: dict[str, Any] | None, max_len: int = 120) -> str:
+    """Extract and format core tool arguments concisely for chat UI display.
+
+    Args:
+        tool_name: Name of the tool.
+        tool_args: Raw tool arguments dictionary.
+        max_len: Maximum length for the formatted arguments string.
+
+    Returns:
+        Concise, formatted argument string.
+    """
+    if not isinstance(tool_args, dict):
+        return ""
+
+    # Filter out context and internal framework arguments
+    filtered = {k: v for k, v in tool_args.items() if k not in {"context", "session_id", "active_jobs", "gateway"}}
+    if not filtered:
+        return ""
+
+    arg_str = ""
+
+    if tool_name == "run_shell_command":
+        cmd = filtered.get("command") or filtered.get("cmd") or ""
+        if isinstance(cmd, str):
+            arg_str = cmd.strip()
+
+    elif tool_name in {"web_search", "chat_search"}:
+        query = filtered.get("query") or filtered.get("q") or ""
+        if isinstance(query, str):
+            arg_str = query.strip()
+
+    elif tool_name == "update_file":
+        target = filtered.get("path") or filtered.get("file_path") or filtered.get("target_file") or ""
+        mode = filtered.get("mode") or filtered.get("action")
+        if target:
+            c_path = compact_path(str(target), max_len=60)
+            arg_str = f"{c_path} ({mode})" if mode else c_path
+
+    elif tool_name == "analyze_media":
+        media_path = filtered.get("media_path") or filtered.get("path") or ""
+        prompt = filtered.get("prompt") or ""
+        c_path = compact_path(str(media_path), max_len=40) if media_path else ""
+        if c_path and prompt:
+            arg_str = f"{c_path}: {prompt}"
+        elif c_path:
+            arg_str = c_path
+        elif prompt:
+            arg_str = str(prompt)
+
+    elif tool_name == "use_skill":
+        skill_name = filtered.get("skill_name") or filtered.get("name") or ""
+        args_payload = filtered.get("args") or filtered.get("parameters")
+        if skill_name and args_payload:
+            arg_str = f"{skill_name} ({args_payload})"
+        elif skill_name:
+            arg_str = str(skill_name)
+
+    elif tool_name == "view_message":
+        msg_id = filtered.get("message_id") or filtered.get("id") or filtered.get("query") or ""
+        if msg_id:
+            arg_str = str(msg_id)
+
+    elif tool_name == "skill_manager":
+        action = filtered.get("action") or ""
+        name = filtered.get("name") or filtered.get("skill_name") or ""
+        if action and name:
+            arg_str = f"{action} {name}"
+        elif action:
+            arg_str = str(action)
+        elif name:
+            arg_str = str(name)
+
+    # Generic fallback
+    if not arg_str:
+        if len(filtered) == 1:
+            val = next(iter(filtered.values()))
+            if isinstance(val, str) and (val.startswith("/") or "/" in val):
+                arg_str = compact_path(val, max_len=max_len)
+            else:
+                arg_str = str(val)
+        else:
+            pairs = []
+            for k, v in filtered.items():
+                if isinstance(v, str) and (v.startswith("/") or "/" in v):
+                    v_str = compact_path(v, max_len=40)
+                else:
+                    v_str = str(v)
+                pairs.append(f"{k}: {v_str}")
+            arg_str = ", ".join(pairs)
+
+    # Clean display
+    arg_str = arg_str.replace("\n", " ").strip()
+    if len(arg_str) > max_len:
+        arg_str = arg_str[:max_len] + "..."
+
+    return arg_str
+
+
+def extract_error_snippet(content: str, max_len: int = 50) -> str:
+    """Extract a concise single-line error snippet from tool failure content.
+
+    Args:
+        content: Error message or traceback content.
+        max_len: Maximum length for the snippet.
+
+    Returns:
+        Cleaned, short error snippet in parentheses or empty string.
+    """
+    if not content:
+        return ""
+
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    if not lines:
+        return ""
+
+    # Look for common exception or error patterns
+    error_line = lines[-1]
+    for line in lines:
+        if any(err_kw in line for err_kw in ("Error:", "Exception:", "failed:", "exit status", "exit code", "Errno")):
+            error_line = line
+            break
+
+    # Strip prefixes if present
+    for prefix in ("Exception: ", "Error: ", "RuntimeError: ", "ShellCommandError: "):
+        if prefix in error_line:
+            error_line = error_line.split(prefix, 1)[1].strip()
+
+    error_line = error_line.replace("\n", " ").strip()
+    if len(error_line) > max_len:
+        error_line = error_line[:max_len] + "..."
+
+    return f"({error_line})" if error_line else ""
+
+
+def render_turn_special_items(items: list[dict[str, Any]]) -> str:
+    """Render intermediate special items (thoughts, tool calls, system messages) for Discord display.
+
+    Applies rolling folding if the number of completed tool calls exceeds MAX_VISIBLE_TOOL_CALLS.
+
+    Args:
+        items: List of tracked special items for the turn.
+
+    Returns:
+        Formatted multi-line Discord string.
+    """
+    # Separate tool calls to determine if folding is needed
+    tool_call_indices = [idx for idx, item in enumerate(items) if item.get("type") == "tool_call"]
+    total_tools = len(tool_call_indices)
+
+    hidden_indices = set()
+    folded_count = 0
+    if total_tools > MAX_VISIBLE_TOOL_CALLS:
+        keep_count = MAX_VISIBLE_TOOL_CALLS - 2
+        fold_candidates = [idx for idx in tool_call_indices if items[idx].get("status") in {"✅", "❌"}]
+        num_to_fold = len(fold_candidates) - keep_count
+        if num_to_fold > 0:
+            hidden_indices = set(fold_candidates[:num_to_fold])
+            folded_count = num_to_fold
+
+    lines = []
+    summary_inserted = False
+
+    for idx, item in enumerate(items):
+        item_type = item.get("type")
+
+        if item_type == "thought":
+            lines.append(f"💭 {item['content']}")
+        elif item_type == "system":
+            lines.append(f"⚙️ *System Message:* {item['content']}")
+        elif item_type == "tool_call":
+            if idx in hidden_indices:
+                if not summary_inserted:
+                    lines.append(f"📦 *... ({folded_count} tools completed ✅)*")
+                    summary_inserted = True
+                continue
+
+            emoji = item.get("emoji") or get_tool_emoji(item.get("tool_name", ""))
+            arg_str = item.get("arg_str", "")
+            status = item.get("status", "⏳")
+            error_snippet = item.get("error_snippet", "")
+
+            if arg_str:
+                if status == "❌" and error_snippet:
+                    lines.append(f"{emoji} `{arg_str}` ❌ `{error_snippet}`")
+                else:
+                    lines.append(f"{emoji} `{arg_str}` {status}")
+            else:
+                if status == "❌" and error_snippet:
+                    lines.append(f"{emoji} ❌ `{error_snippet}`")
+                else:
+                    lines.append(f"{emoji} {status}")
+
+    new_content = "\n".join(lines)
+    if len(new_content) > DISCORD_MAX_CONTENT_LENGTH:
+        new_content = new_content[: DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
+
+    return new_content
+
 
 def _build_discord_custom_prompt(
     channel: discord.Thread | discord.DMChannel | discord.GroupChannel | discord.TextChannel,
@@ -245,29 +504,9 @@ class DiscordChatbot(Chatbot):
         Returns:
             Formatted suffix string (e.g., ': `arg_value`'), or empty string if none.
         """
-        # Retrieve the tool arguments from metadata
+        tool_name = message.metadata.get("tool_name") or message.sender or "unknown_tool"
         tool_args = message.metadata.get("tool_arguments")
-
-        # Format tool arguments display string according to the rules
-        arg_str = ""
-        if isinstance(tool_args, dict):
-            # Exclude framework/context arguments
-            filtered_args = {k: v for k, v in tool_args.items() if k != "context"}
-            if len(filtered_args) == 1:
-                # Exactly one argument: show the argument value
-                val = next(iter(filtered_args.values()))
-                arg_str = str(val)
-            elif len(filtered_args) > 1:
-                # Multiple arguments: show comma-separated name-value pairs
-                arg_str = ", ".join(f"{k}: {v}" for k, v in filtered_args.items())
-
-        if arg_str:
-            # Keep display clean by replacing newlines with spaces
-            arg_str = arg_str.replace("\n", " ")
-            # Truncate to maximum of 80 characters
-            if len(arg_str) > 80:
-                arg_str = arg_str[:80] + "..."
-
+        arg_str = format_tool_arguments(tool_name, tool_args, max_len=120)
         return f": `{arg_str}`" if arg_str else ""
 
     async def on_ready(self) -> None:
@@ -628,7 +867,9 @@ class DiscordChatbot(Chatbot):
 
         elif message.role == MessageRole.TOOL:
             tool_name = message.metadata.get("tool_name") or message.sender or "unknown_tool"
-            arg_suffix = await self._get_tool_arguments_suffix(message)
+            emoji = get_tool_emoji(tool_name)
+            tool_args = message.metadata.get("tool_arguments")
+            arg_str = format_tool_arguments(tool_name, tool_args, max_len=120)
 
             tc_exists = any(
                 item["type"] == "tool_call" and item["id"] == message.id
@@ -640,8 +881,10 @@ class DiscordChatbot(Chatbot):
                         "type": "tool_call",
                         "id": message.id,
                         "tool_name": tool_name,
-                        "arg_suffix": arg_suffix,
+                        "emoji": emoji,
+                        "arg_str": arg_str,
                         "status": "⏳",
+                        "error_snippet": "",
                     }
                 )
 
@@ -662,17 +905,7 @@ class DiscordChatbot(Chatbot):
                     }
                 )
 
-        lines = []
-        for item in self._turn_special_items[session_id]:
-            if item["type"] == "thought":
-                lines.append(f"💭 {item['content']}")
-            elif item["type"] == "tool_call":
-                lines.append(f"🛠️ **{item['tool_name']}**{item['arg_suffix']} {item['status']}")
-            elif item["type"] == "system":
-                lines.append(f"⚙️ *System Message:* {item['content']}")
-        new_content = "\n".join(lines)
-        if len(new_content) > DISCORD_MAX_CONTENT_LENGTH:
-            new_content = new_content[: DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
+        new_content = render_turn_special_items(self._turn_special_items[session_id])
 
         channel = await self._get_discord_channel_with_abort(message)
         if not channel:
@@ -731,6 +964,9 @@ class DiscordChatbot(Chatbot):
         """Update the status of a previously executed tool to Success or Error emoji in the special messages list."""
         tool_call_msg_id = message.parent_id
         session_id = message.session_id
+        is_error = bool(message.metadata.get("tool_error"))
+        error_snippet = extract_error_snippet(message.content) if is_error else ""
+
         if session_id in self._turn_special_items:
             items = self._turn_special_items[session_id]
             tc_item = None
@@ -740,21 +976,10 @@ class DiscordChatbot(Chatbot):
                     break
 
             if tc_item:
-                emoji = "❌" if message.metadata.get("tool_error") else "✅"
-                tc_item["status"] = emoji
+                tc_item["status"] = "❌" if is_error else "✅"
+                tc_item["error_snippet"] = error_snippet
 
-                # Re-render the combined statuses of all special messages
-                lines = []
-                for item in items:
-                    if item["type"] == "thought":
-                        lines.append(f"💭 {item['content']}")
-                    elif item["type"] == "tool_call":
-                        lines.append(f"🛠️ **{item['tool_name']}**{item['arg_suffix']} {item['status']}")
-                    elif item["type"] == "system":
-                        lines.append(f"⚙️ *System Message:* {item['content']}")
-                new_content = "\n".join(lines)
-                if len(new_content) > DISCORD_MAX_CONTENT_LENGTH:
-                    new_content = new_content[: DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
+                new_content = render_turn_special_items(items)
 
                 discord_msg = self._turn_special_msg.get(session_id)
                 if discord_msg:
@@ -774,8 +999,10 @@ class DiscordChatbot(Chatbot):
         if tool_call_msg_id and tool_call_msg_id in self._sent_tool_calls:
             discord_msg = self._sent_tool_calls.pop(tool_call_msg_id)
             try:
-                emoji = "❌" if message.metadata.get("tool_error") else "✅"
+                emoji = "❌" if is_error else "✅"
                 content = discord_msg.content.replace("⏳", emoji)
+                if is_error and error_snippet:
+                    content = f"{content} `{error_snippet}`"
                 if len(content) > DISCORD_MAX_CONTENT_LENGTH:
                     content = content[: DISCORD_MAX_CONTENT_LENGTH - len(" (omitted)")] + " (omitted)"
                 await self._call_with_timeout(

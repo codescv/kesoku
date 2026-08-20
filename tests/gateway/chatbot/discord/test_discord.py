@@ -670,7 +670,7 @@ async def test_typing_status_cleanup_on_stop(mock_config: KesokuConfig, mock_gat
 
 @pytest.mark.asyncio
 async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
-    """Test refined tool display formatting with arguments in DiscordChatbot."""
+    """Test emoji-based tool display formatting with compact arguments in DiscordChatbot."""
     from kesoku.constants import MessageRole, MessageType
 
     with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
@@ -680,7 +680,59 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
             mock_channel = AsyncMock(spec=discord.Thread)
             bot.bot.get_channel = MagicMock(return_value=mock_channel)
 
-            # Case 1: Tool call with zero arguments
+            # Case 1: Shell tool call
+            msg_shell = Message(
+                id="msg_sh",
+                session_id="thread_case_sh",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_CALL,
+                content="Calling tool...",
+                metadata={"tool_name": "run_shell_command", "tool_arguments": {"command": "pytest tests/"}},
+            )
+            await bot.handle_message(msg_shell)
+            mock_channel.send.assert_any_call("💻 `pytest tests/` ⏳")
+
+            # Case 2: Web search tool call
+            msg_search = Message(
+                id="msg_search",
+                session_id="thread_case_search",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_CALL,
+                content="Calling tool...",
+                metadata={"tool_name": "web_search", "tool_arguments": {"query": "kesoku agent"}},
+            )
+            await bot.handle_message(msg_search)
+            mock_channel.send.assert_any_call("🔍 `kesoku agent` ⏳")
+
+            # Case 3: Update file with long path compaction
+            msg_file = Message(
+                id="msg_file",
+                session_id="thread_case_file",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_CALL,
+                content="Calling tool...",
+                metadata={
+                    "tool_name": "update_file",
+                    "tool_arguments": {
+                        "path": (
+                            "/usr/local/google/home/chii/Developer/kesoku/src/kesoku/gateway/chatbot/discord/adapter.py"
+                        )
+                    },
+                },
+            )
+            await bot.handle_message(msg_file)
+            mock_channel.send.assert_any_call("📝 `.../kesoku/src/kesoku/gateway/chatbot/discord/adapter.py` ⏳")
+
+            # Case 4: Tool call with zero arguments
             msg_no_args = Message(
                 id="msg1",
                 session_id="thread_case1",
@@ -690,43 +742,13 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
                 role=MessageRole.TOOL,
                 type=MessageType.TOOL_CALL,
                 content="Calling tool...",
-                metadata={"tool_name": "my_tool", "tool_arguments": {}},
+                metadata={"tool_name": "unknown_tool", "tool_arguments": {}},
             )
             await bot.handle_message(msg_no_args)
-            mock_channel.send.assert_any_call("🛠️ **my_tool** ⏳")
+            mock_channel.send.assert_any_call("🛠️ ⏳")
 
-            # Case 2: Tool call with exactly one argument
-            msg_one_arg = Message(
-                id="msg2",
-                session_id="thread_case2",
-                chatbot_id="discord_test",
-                channel_id="12345",
-                sender="Kesoku",
-                role=MessageRole.TOOL,
-                type=MessageType.TOOL_CALL,
-                content="Calling tool...",
-                metadata={"tool_name": "my_tool", "tool_arguments": {"query": "hello world"}},
-            )
-            await bot.handle_message(msg_one_arg)
-            mock_channel.send.assert_any_call("🛠️ **my_tool**: `hello world` ⏳")
-
-            # Case 3: Tool call with exactly one argument and context
-            msg_context_arg = Message(
-                id="msg3",
-                session_id="thread_case3",
-                chatbot_id="discord_test",
-                channel_id="12345",
-                sender="Kesoku",
-                role=MessageRole.TOOL,
-                type=MessageType.TOOL_CALL,
-                content="Calling tool...",
-                metadata={"tool_name": "my_tool", "tool_arguments": {"query": "hello", "context": "ignored"}},
-            )
-            await bot.handle_message(msg_context_arg)
-            mock_channel.send.assert_any_call("🛠️ **my_tool**: `hello` ⏳")
-
-            # Case 4: Tool call with long single argument (truncation)
-            long_arg = "A" * 100
+            # Case 5: Tool call with long single argument (120 chars truncation)
+            long_arg = "A" * 150
             msg_long_arg = Message(
                 id="msg4",
                 session_id="thread_case4",
@@ -736,13 +758,13 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
                 role=MessageRole.TOOL,
                 type=MessageType.TOOL_CALL,
                 content="Calling tool...",
-                metadata={"tool_name": "my_tool", "tool_arguments": {"query": long_arg}},
+                metadata={"tool_name": "run_shell_command", "tool_arguments": {"command": long_arg}},
             )
             await bot.handle_message(msg_long_arg)
-            expected_long = "A" * 80 + "..."
-            mock_channel.send.assert_any_call(f"🛠️ **my_tool**: `{expected_long}` ⏳")
+            expected_long = "A" * 120 + "..."
+            mock_channel.send.assert_any_call(f"💻 `{expected_long}` ⏳")
 
-            # Case 5: Tool call with multiple arguments
+            # Case 6: Unknown tool with multiple arguments
             msg_multiple_args = Message(
                 id="msg5",
                 session_id="thread_case5",
@@ -755,7 +777,7 @@ async def test_handle_message_tool_display_formatting(mock_config: KesokuConfig,
                 metadata={"tool_name": "my_tool", "tool_arguments": {"arg1": "val1", "arg2": "val2"}},
             )
             await bot.handle_message(msg_multiple_args)
-            mock_channel.send.assert_any_call("🛠️ **my_tool**: `arg1: val1, arg2: val2` ⏳")
+            mock_channel.send.assert_any_call("🛠️ `arg1: val1, arg2: val2` ⏳")
 
 
 @pytest.mark.asyncio
@@ -772,7 +794,7 @@ async def test_handle_message_tool_result_in_place_edit(mock_config: KesokuConfi
 
             # Mock the sent tool call message in cache
             mock_discord_msg = AsyncMock(spec=discord.Message)
-            mock_discord_msg.content = "🛠️ **my_tool**: `edit_query` ⏳"
+            mock_discord_msg.content = "💻 `edit_query` ⏳"
             bot._sent_tool_calls["parent123"] = mock_discord_msg
 
             # Mock parent message retrieval (to verify it is NOT called)
@@ -793,11 +815,129 @@ async def test_handle_message_tool_result_in_place_edit(mock_config: KesokuConfi
             await bot.handle_message(result_msg)
 
             # Verify that edit was called with the formatted content on the discord message object
-            mock_discord_msg.edit.assert_called_once_with(content="🛠️ **my_tool**: `edit_query` ✅")
+            mock_discord_msg.edit.assert_called_once_with(content="💻 `edit_query` ✅")
             # The cache should be cleaned up
             assert "parent123" not in bot._sent_tool_calls
             # Verify DB parent lookup was bypassed
             mock_gateway.db.get_messages_by_filters.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_message_tool_result_with_error(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Test that tool failure appends a concise error snippet."""
+    from kesoku.constants import MessageRole, MessageType
+
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.Thread)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+
+            # Mock the sent tool call message in cache
+            mock_discord_msg = AsyncMock(spec=discord.Message)
+            mock_discord_msg.content = "💻 `cat non_existing.txt` ⏳"
+            bot._sent_tool_calls["parent_err"] = mock_discord_msg
+
+            result_msg = Message(
+                id="res_err",
+                session_id="thread_err",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="run_shell_command",
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_RESULT,
+                content="ShellCommandError: Command 'cat non_existing.txt' returned non-zero exit status 1.",
+                parent_id="parent_err",
+                metadata={"tool_error": True},
+            )
+
+            await bot.handle_message(result_msg)
+
+            mock_discord_msg.edit.assert_called_once()
+            edited_content = mock_discord_msg.edit.call_args[1]["content"]
+            assert "❌" in edited_content
+            assert "Command 'cat non_existing.txt' returned non-zero" in edited_content
+
+
+def test_compact_path_helper() -> None:
+    """Test path compaction for various path lengths."""
+    from kesoku.gateway.chatbot.discord.adapter import compact_path
+
+    # Short path remains intact
+    assert compact_path("tests/test.py", max_len=40) == "tests/test.py"
+    # Long path gets compacted with trailing parts preserved
+    long_p = "/home/user/workspace/project/src/module/sub/file.py"
+    compacted = compact_path(long_p, max_len=30)
+    assert compacted.startswith(".../")
+    assert compacted.endswith("file.py")
+    assert len(compacted) <= 30
+
+
+def test_format_tool_arguments_helper() -> None:
+    """Test tool argument extraction across built-in and custom tools."""
+    from kesoku.gateway.chatbot.discord.adapter import format_tool_arguments
+
+    # run_shell_command
+    assert format_tool_arguments("run_shell_command", {"command": "ls -la\npwd"}) == "ls -la pwd"
+    # web_search
+    assert format_tool_arguments("web_search", {"query": "python uv"}) == "python uv"
+    # update_file
+    assert (
+        format_tool_arguments("update_file", {"path": "src/main.py", "action": "write"})
+        == "src/main.py (write)"
+    )
+    # analyze_media
+    assert (
+        format_tool_arguments("analyze_media", {"media_path": "img.png", "prompt": "describe"})
+        == "img.png: describe"
+    )
+    # use_skill
+    assert format_tool_arguments("use_skill", {"skill_name": "math", "args": "2+2"}) == "math (2+2)"
+    # view_message
+    assert format_tool_arguments("view_message", {"message_id": "msg_999"}) == "msg_999"
+    # skill_manager
+    assert format_tool_arguments("skill_manager", {"action": "list", "name": "all"}) == "list all"
+
+
+def test_extract_error_snippet_helper() -> None:
+    """Test concise error snippet extraction."""
+    from kesoku.gateway.chatbot.discord.adapter import extract_error_snippet
+
+    assert extract_error_snippet("") == ""
+    assert extract_error_snippet("FileNotFoundError: [Errno 2] No such file") == "([Errno 2] No such file)"
+    assert (
+        extract_error_snippet("Traceback (most recent call last):\n  File ...\nValueError: invalid literal")
+        == "(invalid literal)"
+    )
+
+
+def test_render_turn_special_items_rolling_folding() -> None:
+    """Test that rolling folding collapses older completed tools when exceeding MAX_VISIBLE_TOOL_CALLS."""
+    from kesoku.gateway.chatbot.discord.adapter import render_turn_special_items
+
+    items = []
+    # Add 15 completed tool calls
+    for i in range(15):
+        items.append(
+            {
+                "type": "tool_call",
+                "id": f"tc_{i}",
+                "tool_name": "run_shell_command",
+                "emoji": "💻",
+                "arg_str": f"cmd_{i}",
+                "status": "✅",
+                "error_snippet": "",
+            }
+        )
+
+    rendered = render_turn_special_items(items)
+    # Should contain summary line for folded items
+    assert "tools completed ✅" in rendered
+    # Should contain the latest command
+    assert "cmd_14" in rendered
+    # Should NOT contain the oldest command cmd_0 because it was folded
+    assert "cmd_0" not in rendered
 
 
 @pytest.mark.asyncio
