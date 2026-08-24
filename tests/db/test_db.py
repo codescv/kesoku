@@ -404,14 +404,14 @@ def test_search_role_data(db_manager):
 
 
     # Search messages for 'coder'
-    coder_msgs = db_manager.search_role_messages("coder", "python")
+    coder_msgs = db_manager.search_role_messages_semantic("coder", "python", threshold=0.1)
     assert len(coder_msgs) == 2
     assert {m.id for m in coder_msgs} == {"m1", "m3"}
 
 
 
 def test_search_role_data_wildcard_and_filters(db_manager):
-    """Tests search_role_memories and search_role_messages with wildcard and filters."""
+    """Tests search_role_memories and search_role_messages_semantic with wildcard and filters."""
     # Set up role 'coder' on channel 'chan_1'
     db_manager.set_channel_role("discord", "chan_1", "coder")
 
@@ -465,23 +465,23 @@ def test_search_role_data_wildcard_and_filters(db_manager):
 
 
     # Test 1: Wildcard content search for messages (returns all messages)
-    msgs = db_manager.search_role_messages("coder", "*")
+    msgs = db_manager.search_role_messages_semantic("coder", "*")
     assert len(msgs) == 3
     assert {m.id for m in msgs} == {"m1", "m2", "m3"}
 
-    msgs_empty = db_manager.search_role_messages("coder", "")
+    msgs_empty = db_manager.search_role_messages_semantic("coder", "")
     assert len(msgs_empty) == 3
     assert {m.id for m in msgs_empty} == {"m1", "m2", "m3"}
 
 
     # Test 3: Time range filtering for messages
-    msgs_time = db_manager.search_role_messages("coder", "*", start_time=base_ts, end_time=base_ts + 4000)
+    msgs_time = db_manager.search_role_messages_semantic("coder", "*", start_time=base_ts, end_time=base_ts + 4000)
     assert len(msgs_time) == 2
     assert {m.id for m in msgs_time} == {"m1", "m2"}
 
 
     # Test 5: Limit filtering
-    msgs_limit = db_manager.search_role_messages("coder", "*", limit=2)
+    msgs_limit = db_manager.search_role_messages_semantic("coder", "*", limit=2)
     assert len(msgs_limit) == 2
     # Should return latest first
     assert msgs_limit[0].id == "m3"
@@ -605,6 +605,82 @@ def test_search_role_messages_semantic_time_ranking(db_manager):
     assert results[0].metadata["similarity_score"] > results[1].metadata["similarity_score"]
     # Recent literal match should have score around 1.0 (or 1.0 + semantic)
     assert results[0].metadata["similarity_score"] >= 1.0
+
+
+def test_search_role_messages_semantic_multi_keyword_or(db_manager):
+    """Tests search_role_messages_semantic with multi-keyword OR syntax, space separation, and quotes."""
+    db_manager.set_channel_role("discord", "chan_or", "developer")
+    session = Session(id="sess_or", title="Multi-keyword OR Test", created_at=1000000.0, updated_at=1000000.0)
+    db_manager.create_session(session)
+    db_manager.set_active_session_for_channel("discord", "chan_or", "sess_or")
+
+    now = 1000000.0
+
+    msg_python = Message(
+        id="m_py",
+        session_id="sess_or",
+        chatbot_id="discord",
+        channel_id="chan_or",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Working with Python async programming",
+        timestamp=now - 100,
+        status=MessageStatus.PROCESSED,
+    )
+    msg_rust = Message(
+        id="m_rs",
+        session_id="sess_or",
+        chatbot_id="discord",
+        channel_id="chan_or",
+        sender="assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="Rust memory safety and concurrency",
+        timestamp=now - 200,
+        status=MessageStatus.PROCESSED,
+    )
+    msg_phrase = Message(
+        id="m_phrase",
+        session_id="sess_or",
+        chatbot_id="discord",
+        channel_id="chan_or",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Here is a deep learning neural network tutorial",
+        timestamp=now - 300,
+        status=MessageStatus.PROCESSED,
+    )
+    db_manager.save_message(msg_python)
+    db_manager.save_message(msg_rust)
+    db_manager.save_message(msg_phrase)
+
+    # 1. Space-separated multi-keyword (implicit OR) -> matches both python and rust messages
+    res_space = db_manager.search_role_messages_semantic("developer", "Python Rust", now=now, threshold=0.1)
+    matched_ids_space = {m.id for m in res_space}
+    assert "m_py" in matched_ids_space
+    assert "m_rs" in matched_ids_space
+
+    # 2. Explicit OR keyword -> matches python or rust
+    res_or = db_manager.search_role_messages_semantic("developer", "Python OR Rust", now=now, threshold=0.1)
+    matched_ids_or = {m.id for m in res_or}
+    assert "m_py" in matched_ids_or
+    assert "m_rs" in matched_ids_or
+
+    # 3. Explicit pipe | keyword -> matches python or rust
+    res_pipe = db_manager.search_role_messages_semantic("developer", "Python | Rust", now=now, threshold=0.1)
+    matched_ids_pipe = {m.id for m in res_pipe}
+    assert "m_py" in matched_ids_pipe
+    assert "m_rs" in matched_ids_pipe
+
+    # 4. Quoted exact phrase -> matches "deep learning"
+    res_quoted = db_manager.search_role_messages_semantic(
+        "developer", '"deep learning" OR Rust', now=now, threshold=0.1
+    )
+    matched_ids_quoted = {m.id for m in res_quoted}
+    assert "m_phrase" in matched_ids_quoted
+    assert "m_rs" in matched_ids_quoted
 
 
 

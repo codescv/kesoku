@@ -14,6 +14,8 @@ from kesoku.agent.history_sorter import sort_session_messages
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db.connection import ConnectionProvider
 from kesoku.db.models import CrossSessionContext, Message, Session, SummaryNode
+from kesoku.utils import embedding as embedding_utils
+from kesoku.utils.text import chunk_message_text, parse_search_keywords
 
 logger = logging.getLogger(__name__)
 
@@ -639,14 +641,11 @@ class DatabaseManager:
         chunks_to_insert = []
         if msg.role in ("user", "assistant") and msg.type == "text" and msg.content:
             try:
-                from kesoku.utils.embedding import get_embedding, vector_to_bytes
-                from kesoku.utils.text import chunk_message_text
-
                 chunks = chunk_message_text(msg.content, threshold=80)
                 for idx, chunk_content in enumerate(chunks):
                     try:
-                        emb = get_embedding(chunk_content)
-                        emb_bytes = vector_to_bytes(emb)
+                        emb = embedding_utils.get_embedding(chunk_content)
+                        emb_bytes = embedding_utils.vector_to_bytes(emb)
                         chunks_to_insert.append((msg.id, idx, chunk_content, emb_bytes))
                     except Exception as e:
                         logger.error(
@@ -981,48 +980,6 @@ class DatabaseManager:
 
 
 
-    def search_role_messages(
-        self,
-        role: str,
-        query_text: str,
-        start_time: float | None = None,
-        end_time: float | None = None,
-        limit: int = 50,
-    ) -> list[Message]:
-        """Search user/assistant text messages for a role matching query_text.
-
-        Excludes thoughts, tool calls, and tool results. Supporting time range queries.
-        """
-        with self.connection_provider.connection() as conn:
-            cursor = conn.cursor()
-            conditions = ["COALESCE(s.role_name, 'default') = ?", "m.role IN ('user', 'assistant')", "m.type = 'text'"]
-            args: list[Any] = [role]
-
-            is_wildcard = not query_text or query_text == "*"
-            if not is_wildcard:
-                conditions.append("m.content LIKE ?")
-                args.append(f"%{query_text}%")
-
-            if start_time is not None:
-                conditions.append("m.timestamp >= ?")
-                args.append(start_time)
-            if end_time is not None:
-                conditions.append("m.timestamp <= ?")
-                args.append(end_time)
-
-            where_clause = " AND ".join(conditions)
-            sql = f"""
-                SELECT m.* FROM messages m
-                JOIN sessions s ON m.session_id = s.id
-                WHERE {where_clause}
-                ORDER BY m.timestamp DESC
-                LIMIT ?
-            """
-            args.append(limit)
-            cursor.execute(sql, tuple(args))
-            rows = cursor.fetchall()
-            return [self._row_to_message(row) for row in rows]
-
     def search_role_messages_semantic(
         self,
         role: str,
@@ -1033,10 +990,11 @@ class DatabaseManager:
         threshold: float = 0.55,
         now: float | None = None,
     ) -> list[Message]:
-        """Search user/assistant text messages for a role using chunk-based semantic search and literal matching."""
-        from kesoku.utils.embedding import bytes_to_vector, cosine_similarity, get_embedding
+        """Search user/assistant text messages for a role using semantic chunk search.
 
-        is_wildcard = not query_text or query_text == "*"
+        Supports multi-keyword OR matching, wildcard searches, and time range filters.
+        """
+        is_wildcard = not query_text or query_text.strip() == "*"
 
         if is_wildcard:
             with self.connection_provider.connection() as conn:
@@ -1044,7 +1002,7 @@ class DatabaseManager:
                 conditions = [
                     "COALESCE(s.role_name, 'default') = ?",
                     "m.role IN ('user', 'assistant')",
-                    "m.type = 'text'"
+                    "m.type = 'text'",
                 ]
                 args: list[Any] = [role]
 
@@ -1068,10 +1026,12 @@ class DatabaseManager:
                 rows = cursor.fetchall()
                 return [self._row_to_message(row) for row in rows]
 
+        keywords = parse_search_keywords(query_text)
+
         # Semantic chunk-based search
         query_emb = None
         try:
-            query_emb = get_embedding(query_text)
+            query_emb = embedding_utils.get_embedding(query_text)
         except Exception as e:
             logger.error(f"Failed to generate embedding for query: {e}", exc_info=True)
 
@@ -1080,13 +1040,18 @@ class DatabaseManager:
             conditions = [
                 "COALESCE(s.role_name, 'default') = ?",
                 "m.role IN ('user', 'assistant')",
-                "m.type = 'text'"
+                "m.type = 'text'",
             ]
             args: list[Any] = [role]
 
-            # Match chunks where content literally matches or embedding exists
-            conditions.append("(mc.embedding IS NOT NULL OR mc.content LIKE ?)")
-            args.append(f"%{query_text}%")
+            # Match chunks where embedding exists or content literally matches any keyword
+            if keywords:
+                like_clauses = " OR ".join(["mc.content LIKE ?" for _ in keywords])
+                conditions.append(f"(mc.embedding IS NOT NULL OR {like_clauses})")
+                for kw in keywords:
+                    args.append(f"%{kw}%")
+            else:
+                conditions.append("mc.embedding IS NOT NULL")
 
             if start_time is not None:
                 conditions.append("m.timestamp >= ?")
@@ -1133,12 +1098,13 @@ class DatabaseManager:
             semantic_score = 0.0
             if query_emb and row["chunk_embedding"]:
                 try:
-                    emb = bytes_to_vector(row["chunk_embedding"])
-                    semantic_score = cosine_similarity(query_emb, emb)
+                    emb = embedding_utils.bytes_to_vector(row["chunk_embedding"])
+                    semantic_score = embedding_utils.cosine_similarity(query_emb, emb)
                 except Exception as e:
                     logger.error(f"Error calculating similarity for chunk of message {msg.id}: {e}", exc_info=True)
 
-            is_literal_match = query_text.lower() in msg.content.lower()
+            # Literal match if message chunk content contains any of the parsed keywords
+            is_literal_match = any(kw.lower() in msg.content.lower() for kw in keywords) if keywords else False
             # Calculate time score: 1.0 (literal) or 0.5 (semantic only) within 8h, decaying exponentially thereafter
             time_score = calculate_time_score(msg.timestamp, is_literal_match=is_literal_match, now=current_time)
             total_score = semantic_score + time_score
@@ -2078,24 +2044,6 @@ class AsyncDatabaseManager:
     async def save_message_chunks_batch(self, chunks: list[tuple[str, int, str, bytes]]) -> None:
         """Saves multiple message chunks to the database."""
         await asyncio.to_thread(self.sync_db.save_message_chunks_batch, chunks)
-
-    async def search_role_messages(
-        self,
-        role: str,
-        query_text: str,
-        start_time: float | None = None,
-        end_time: float | None = None,
-        limit: int = 50,
-    ) -> list[Message]:
-        """Search messages for a role matching query_text."""
-        return await asyncio.to_thread(
-            self.sync_db.search_role_messages,
-            role,
-            query_text,
-            start_time,
-            end_time,
-            limit,
-        )
 
     async def get_surrounding_messages(
         self,

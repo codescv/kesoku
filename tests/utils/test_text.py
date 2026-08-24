@@ -186,3 +186,35 @@ def test_chunk_message_text() -> None:
     chunks = chunk_message_text(text, threshold=10)
     assert chunks == ["这是一个非常非常长而且没有任何标点符号的长句子直接超过了阈值。"]
 
+
+def test_parse_search_keywords() -> None:
+    """Test parse_search_keywords parsing whitespace, OR operators, and quoted phrases."""
+    from kesoku.utils.text import parse_search_keywords
+
+    # 1. Empty and None
+    assert parse_search_keywords("") == []
+    assert parse_search_keywords(None) == []
+
+    # 2. Single keyword
+    assert parse_search_keywords("python") == ["python"]
+
+    # 3. Space-separated keywords (implicit OR)
+    assert parse_search_keywords("python 异步 教程") == ["python", "异步", "教程"]
+
+    # 4. Explicit OR / or / | keywords
+    assert parse_search_keywords("python OR 异步 or rust | c++") == ["python", "异步", "rust", "c++"]
+    assert parse_search_keywords("python|golang") == ["python", "golang"]
+
+    # 5. Quoted phrases (exact phrases with spaces)
+    assert parse_search_keywords('"hello world" OR "quick brown fox" test') == [
+        "hello world",
+        "quick brown fox",
+        "test",
+    ]
+
+    # 6. Deduplication preserving order
+    assert parse_search_keywords("python OR python or Python") == ["python"]
+
+    # 7. Wildcard string
+    assert parse_search_keywords("*") == ["*"]
+

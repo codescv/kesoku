@@ -773,3 +773,57 @@ def chunk_message_text(text: str, threshold: int = 80) -> list[str]:
 
     return [c for c in chunks if c]
 
+
+def parse_search_keywords(query: str) -> list[str]:
+    """Parse a search query into distinct keyword phrases supporting OR and quoted strings.
+
+    Supports:
+    - Double quotes for exact phrases with spaces: `"exact phrase"` -> `'exact phrase'`
+    - Whitespace separation: `foo bar` -> `['foo', 'bar']` (default OR)
+    - Explicit OR operators: `foo OR bar or baz | qux` -> `['foo', 'bar', 'baz', 'qux']`
+    - Case-insensitivity for operators (OR, or, Or, oR, |)
+    - Stripping empty tokens and deduplicating while preserving order.
+
+    Args:
+        query: Raw search query string.
+
+    Returns:
+        List of non-empty search keyword strings.
+    """
+    if not query:
+        return []
+
+    # Pattern matches either a double-quoted phrase or a sequence of non-whitespace non-quote characters
+    pattern = re.compile(r'"([^"]+)"|(\S+)')
+    tokens: list[str] = []
+    or_operators = {"or", "|"}
+
+    for match in pattern.finditer(query):
+        quoted, unquoted = match.groups()
+        if quoted is not None:
+            cleaned = quoted.strip()
+            if cleaned:
+                tokens.append(cleaned)
+        elif unquoted is not None:
+            # Check if this token is an explicit OR operator (or contains '|' like a|b)
+            if unquoted.lower() in or_operators:
+                continue
+            if "|" in unquoted:
+                sub_tokens = [s.strip() for s in unquoted.split("|") if s.strip()]
+                for st in sub_tokens:
+                    if st.lower() not in or_operators and st:
+                        tokens.append(st)
+            else:
+                tokens.append(unquoted)
+
+    # Deduplicate while preserving order, case-insensitive comparison
+    seen = set()
+    result = []
+    for t in tokens:
+        t_norm = t.lower()
+        if t_norm not in seen:
+            seen.add(t_norm)
+            result.append(t)
+
+    return result
+
