@@ -625,14 +625,15 @@ class QuestionView(discord.ui.View):
                 label=label,
                 custom_id=f"btn_q_{session_id}_{idx}_{choice[:20]}",
             )
-            button.callback = self.make_callback(choice)
+            button.callback = self.make_callback(choice, button)
             self.add_item(button)
 
-    def make_callback(self, choice: str) -> Any:
+    def make_callback(self, choice: str, button: discord.ui.Button | None = None) -> Any:
         """Create a callback function bound to a specific multiple-choice value.
 
         Args:
             choice: The string choice value.
+            button: The button instance to disable when clicked.
 
         Returns:
             A callback coroutine for the button interaction.
@@ -642,12 +643,20 @@ class QuestionView(discord.ui.View):
             # Defer the interaction response
             await interaction.response.defer()
 
-            # Disable all buttons to prevent multiple clicks or duplicate responses
-            for item in self.children:
-                if isinstance(item, discord.ui.Button):
-                    item.disabled = True
+            # Disable only the clicked button
+            target_button = button
+            if target_button is None:
+                for item in self.children:
+                    if isinstance(item, discord.ui.Button) and (
+                        item.label == choice or (item.custom_id and choice[:20] in item.custom_id)
+                    ):
+                        target_button = item
+                        break
 
-            # Edit the interaction message to show disabled buttons
+            if target_button is not None:
+                target_button.disabled = True
+
+            # Edit the interaction message to show updated buttons
             await interaction.message.edit(view=self)
 
             # Send a visible confirmation message to the channel

@@ -476,11 +476,11 @@ async def test_question_view_init_and_callback(mock_gateway: MagicMock) -> None:
     # 1. Defer called
     mock_interaction.response.defer.assert_called_once()
 
-    # 2. Buttons are all disabled
+    # 2. Only the clicked button is disabled, the other remains enabled
     assert view.children[0].disabled is True
-    assert view.children[1].disabled is True
+    assert view.children[1].disabled is False
 
-    # 3. Message edited to show disabled view
+    # 3. Message edited to show updated view
     mock_message.edit.assert_called_once_with(view=view)
 
     # 4. Visual feedback message sent to channel
@@ -502,6 +502,17 @@ async def test_question_view_init_and_callback(mock_gateway: MagicMock) -> None:
 
     # 6. Chatbot typing task is started
     assert "chan_abc" in mock_chatbot._typing_tasks
+
+    # Trigger callback of the second button ("Blue") to test sequential clicking
+    mock_channel.send.reset_mock()
+    mock_gateway.post.reset_mock()
+    button2_callback = view.children[1].callback
+    await button2_callback(mock_interaction)
+
+    # Now both buttons are disabled
+    assert view.children[0].disabled is True
+    assert view.children[1].disabled is True
+    mock_channel.send.assert_called_once_with("<@user_999> selected: **Blue**")
 
 
 @pytest.mark.asyncio
