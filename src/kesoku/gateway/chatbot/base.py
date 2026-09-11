@@ -1020,9 +1020,63 @@ class Chatbot(ABC):
                 exclude_roles=[MessageRole.USER],
                 **filters,
             ):
-                await self.handle_message(msg)
+                try:
+                    await self.handle_message(msg)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    # A single undeliverable message must never take down the delivery loop:
+                    # it is the only consumer for this chatbot, so losing it silently stops
+                    # every subsequent reply from ever reaching the user.
+                    logger.error(
+                        f"Chatbot '{self.chatbot_id}' failed to handle message {msg.id} "
+                        f"(session {msg.session_id}): {e}",
+                        exc_info=True,
+                    )
+                    try:
+                        await self.gateway.db.update_message_status(msg.id, MessageStatus.ERROR)
+                    except Exception as se:
+                        logger.error(f"Failed to mark message {msg.id} as errored: {se}")
         except asyncio.CancelledError:
             logger.debug(f"Chatbot '{self.chatbot_id}' listener cancelled.")
+        except Exception as e:
+            logger.critical(
+                f"Chatbot '{self.chatbot_id}' listener loop terminated unexpectedly: {e}",
+                exc_info=True,
+            )
+            raise
+
+    def spawn_subscriber_task(self) -> asyncio.Task[None]:
+        """Run the gateway subscriber loop as a background task with crash logging.
+
+        Platform adapters occupy their main coroutine with their own client loop, so the
+        subscriber runs in a separate task. Without an explicit done-callback its death is
+        invisible: the task object stays referenced by the adapter, so Python never emits
+        "Task exception was never retrieved" and outbound delivery stops with no log at all.
+
+        Returns:
+            The created subscriber task.
+        """
+        task = asyncio.create_task(Chatbot.start(self))
+        task.add_done_callback(self._log_subscriber_task_exit)
+        return task
+
+    def _log_subscriber_task_exit(self, task: asyncio.Task[None]) -> None:
+        """Report why the gateway subscriber task finished.
+
+        Args:
+            task: The completed subscriber task.
+        """
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.critical(
+                f"Chatbot '{self.chatbot_id}' subscriber task died; outbound delivery has stopped: {exc}",
+                exc_info=exc,
+            )
+        else:
+            logger.warning(f"Chatbot '{self.chatbot_id}' subscriber task exited; outbound delivery has stopped.")
 
     def stop(self) -> None:
         """Stop the subscriber listener task."""

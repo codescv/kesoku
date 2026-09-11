@@ -236,7 +236,7 @@ class GoogleChatChatbot(Chatbot):
         if self.config.reaction_emoji and self._user_chat_service:
             await self._load_custom_emojis()
         # Start base subscriber listener for outgoing agent responses
-        self._listener_task = asyncio.create_task(super().start())
+        self._listener_task = self.spawn_subscriber_task()
         # Start background subscriber loop for incoming Google Chat events
         self._pubsub_task = asyncio.create_task(self._run_pubsub_pull())
 

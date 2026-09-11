@@ -10,6 +10,8 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
+import numpy as np
+
 from kesoku.agent.history_sorter import sort_session_messages
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db.connection import ConnectionProvider
@@ -18,6 +20,11 @@ from kesoku.utils import embedding as embedding_utils
 from kesoku.utils.text import chunk_message_text, parse_search_keywords
 
 logger = logging.getLogger(__name__)
+
+# Number of candidate chunks scored per batch during semantic search. Bounds how many
+# embedding BLOBs are resident at once, keeping peak memory flat regardless of corpus size.
+SEARCH_SCORE_BATCH_SIZE = 2048
+
 
 
 def calculate_time_score(
@@ -65,6 +72,51 @@ def calculate_time_score(
     decay_hours = age_hours - 8.0
     # Exponential decay using half-life: base_score * 0.5^(decay_hours / half_life)
     return base_score * math.exp(-math.log(2) * (decay_hours / half_life_hours))
+
+
+def _batch_semantic_scores(
+    rows: list[sqlite3.Row],
+    query_vec: np.ndarray | None,
+    query_norm: float,
+) -> list[float]:
+    """Cosine-similarity a batch of candidate chunk rows against the query vector.
+
+    Stacks the raw embedding BLOBs into a single float32 matrix and scores them with one
+    matmul. This avoids materializing a 384-element Python float list per row, which
+    dominated both allocation and CPU time when scanning a large corpus.
+
+    Args:
+        rows: Candidate rows exposing a ``chunk_embedding`` BLOB column.
+        query_vec: The query embedding, or None when unavailable or degenerate.
+        query_norm: Precomputed L2 norm of ``query_vec``.
+
+    Returns:
+        One cosine similarity per input row, in row order (0.0 where it cannot be computed).
+    """
+    scores = [0.0] * len(rows)
+    if query_vec is None:
+        return scores
+
+    # Only stack embeddings whose byte length matches the query dimensionality; a mismatch
+    # means the row was indexed with a different model and cannot be compared.
+    expected_bytes = query_vec.nbytes
+    indices: list[int] = []
+    blobs: list[bytes] = []
+    for i, row in enumerate(rows):
+        blob = row["chunk_embedding"]
+        if blob and len(blob) == expected_bytes:
+            indices.append(i)
+            blobs.append(blob)
+    if not indices:
+        return scores
+
+    matrix = np.frombuffer(b"".join(blobs), dtype=np.float32).reshape(len(indices), query_vec.size)
+    norms = np.linalg.norm(matrix, axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sims = np.where(norms > 0.0, (matrix @ query_vec) / (norms * query_norm), 0.0)
+    for i, sim in zip(indices, sims.tolist(), strict=True):
+        scores[i] = float(sim)
+    return scores
 
 
 class DatabaseManager:
@@ -1035,122 +1087,160 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to generate embedding for query: {e}", exc_info=True)
 
-        with self.connection_provider.connection() as conn:
-            cursor = conn.cursor()
-            conditions = [
-                "COALESCE(s.role_name, 'default') = ?",
-                "m.role IN ('user', 'assistant')",
-                "m.type = 'text'",
-            ]
-            args: list[Any] = [role]
-
-            # Match chunks where embedding exists or content literally matches any keyword
-            if keywords:
-                like_clauses = " OR ".join(["mc.content LIKE ?" for _ in keywords])
-                conditions.append(f"(mc.embedding IS NOT NULL OR {like_clauses})")
-                for kw in keywords:
-                    args.append(f"%{kw}%")
-            else:
-                conditions.append("mc.embedding IS NOT NULL")
-
-            if start_time is not None:
-                conditions.append("m.timestamp >= ?")
-                args.append(start_time)
-            if end_time is not None:
-                conditions.append("m.timestamp <= ?")
-                args.append(end_time)
-
-            where_clause = " AND ".join(conditions)
-            sql = f"""
-                SELECT mc.content AS chunk_content, mc.embedding AS chunk_embedding, mc.chunk_index,
-                       m.id, m.session_id, m.chatbot_id, m.channel_id, m.sender, m.role, m.type,
-                       m.content AS original_content, m.metadata, m.timestamp, m.status, m.parent_id, m.summary_node_id
-                FROM message_chunks mc
-                JOIN messages m ON mc.message_id = m.id
-                JOIN sessions s ON m.session_id = s.id
-                WHERE {where_clause}
-            """
-            cursor.execute(sql, tuple(args))
-            rows = cursor.fetchall()
+        query_vec: np.ndarray | None = None
+        query_norm = 0.0
+        if query_emb:
+            query_vec = np.asarray(query_emb, dtype=np.float32)
+            query_norm = float(np.linalg.norm(query_vec))
+            if query_norm == 0.0:
+                query_vec = None
 
         current_time = now if now is not None else time.time()
-        results = []
-        for row in rows:
-            msg = Message(
-                id=row["id"],
-                session_id=row["session_id"],
-                chatbot_id=row["chatbot_id"],
-                channel_id=row["channel_id"],
-                sender=row["sender"],
-                role=row["role"],
-                type=row["type"],
-                content=row["chunk_content"],
-                metadata=json.loads(row["metadata"]),
-                timestamp=row["timestamp"],
-                status=row["status"],
-                parent_id=row["parent_id"],
-                summary_node_id=row["summary_node_id"],
-                embedding=row["chunk_embedding"],
+
+        conditions = [
+            "COALESCE(s.role_name, 'default') = ?",
+            "m.role IN ('user', 'assistant')",
+            "m.type = 'text'",
+        ]
+        # SQLite binds positionally, so SELECT-clause params must precede WHERE-clause params.
+        select_args: list[Any] = []
+        where_args: list[Any] = [role]
+
+        # Match chunks where embedding exists or content literally matches any keyword
+        if keywords:
+            like_clauses = " OR ".join(["mc.content LIKE ?" for _ in keywords])
+            # Evaluate the literal match in SQL so chunk text never has to be loaded.
+            literal_expr = f"CASE WHEN {like_clauses} THEN 1 ELSE 0 END"
+            select_args.extend(f"%{kw}%" for kw in keywords)
+            conditions.append(f"(mc.embedding IS NOT NULL OR {like_clauses})")
+            where_args.extend(f"%{kw}%" for kw in keywords)
+        else:
+            literal_expr = "0"
+            conditions.append("mc.embedding IS NOT NULL")
+
+        if start_time is not None:
+            conditions.append("m.timestamp >= ?")
+            where_args.append(start_time)
+        if end_time is not None:
+            conditions.append("m.timestamp <= ?")
+            where_args.append(end_time)
+
+        where_clause = " AND ".join(conditions)
+
+        # Phase 1: score every candidate chunk while loading only what scoring needs
+        # (embedding, timestamp, literal-match flag). Message and chunk text are left in
+        # the database until the winners are known.
+        sql = f"""
+            SELECT mc.message_id AS message_id, mc.chunk_index AS chunk_index,
+                   mc.embedding AS chunk_embedding, m.timestamp AS timestamp,
+                   {literal_expr} AS literal_match
+            FROM message_chunks mc
+            JOIN messages m ON mc.message_id = m.id
+            JOIN sessions s ON m.session_id = s.id
+            WHERE {where_clause}
+        """
+
+        # Each entry: (message_id, chunk_index, total_score, semantic_score, time_score)
+        candidates: list[tuple[str, int, float, float, float]] = []
+        with self.connection_provider.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, tuple(select_args + where_args))
+            while True:
+                batch = cursor.fetchmany(SEARCH_SCORE_BATCH_SIZE)
+                if not batch:
+                    break
+                semantic_scores = _batch_semantic_scores(batch, query_vec, query_norm)
+                for row, semantic_score in zip(batch, semantic_scores, strict=True):
+                    # Time score: 1.0 (literal) or 0.5 (semantic only) within 8h, decaying after
+                    time_score = calculate_time_score(
+                        row["timestamp"],
+                        is_literal_match=bool(row["literal_match"]),
+                        now=current_time,
+                    )
+                    candidates.append(
+                        (
+                            row["message_id"],
+                            row["chunk_index"],
+                            semantic_score + time_score,
+                            semantic_score,
+                            time_score,
+                        )
+                    )
+                # Release this batch's embedding BLOBs before fetching the next one.
+                del batch, semantic_scores
+
+        # Sort candidates globally by similarity score descending. Sorting indices keeps the
+        # sort stable on the original row order for ties, matching the previous behaviour.
+        order = sorted(range(len(candidates)), key=lambda i: -candidates[i][2])
+
+        # Apply message contribution limit (max 3 chunks per message) and filter score > threshold
+        selected: list[tuple[str, int, float, float, float]] = []
+        msg_counts: dict[str, int] = {}
+        for idx in order:
+            candidate = candidates[idx]
+            if candidate[2] <= threshold:
+                continue
+            count = msg_counts.get(candidate[0], 0)
+            if count < 3:
+                selected.append(candidate)
+                msg_counts[candidate[0]] = count + 1
+                if len(selected) >= limit:
+                    break
+
+        if not selected:
+            return []
+
+        # Phase 2: hydrate only the winning chunks with their message row and neighbours.
+        msg_ids = list({candidate[0] for candidate in selected})
+        placeholders = ",".join("?" for _ in msg_ids)
+        with self.connection_provider.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT * FROM messages WHERE id IN ({placeholders})", tuple(msg_ids))
+            message_rows = {row["id"]: row for row in cursor.fetchall()}
+            cursor.execute(
+                "SELECT message_id, chunk_index, content, embedding FROM message_chunks "
+                f"WHERE message_id IN ({placeholders})",
+                tuple(msg_ids),
             )
-            msg.metadata["original_content"] = row["original_content"]
-            msg.metadata["chunk_index"] = row["chunk_index"]
+            chunks_map = {(row["message_id"], row["chunk_index"]): row for row in cursor.fetchall()}
 
-            semantic_score = 0.0
-            if query_emb and row["chunk_embedding"]:
-                try:
-                    emb = embedding_utils.bytes_to_vector(row["chunk_embedding"])
-                    semantic_score = embedding_utils.cosine_similarity(query_emb, emb)
-                except Exception as e:
-                    logger.error(f"Error calculating similarity for chunk of message {msg.id}: {e}", exc_info=True)
+        results: list[Message] = []
+        for message_id, chunk_index, total_score, semantic_score, time_score in selected:
+            message_row = message_rows.get(message_id)
+            chunk_row = chunks_map.get((message_id, chunk_index))
+            if message_row is None or chunk_row is None:
+                continue
 
-            # Literal match if message chunk content contains any of the parsed keywords
-            is_literal_match = any(kw.lower() in msg.content.lower() for kw in keywords) if keywords else False
-            # Calculate time score: 1.0 (literal) or 0.5 (semantic only) within 8h, decaying exponentially thereafter
-            time_score = calculate_time_score(msg.timestamp, is_literal_match=is_literal_match, now=current_time)
-            total_score = semantic_score + time_score
-
+            msg = Message(
+                id=message_row["id"],
+                session_id=message_row["session_id"],
+                chatbot_id=message_row["chatbot_id"],
+                channel_id=message_row["channel_id"],
+                sender=message_row["sender"],
+                role=message_row["role"],
+                type=message_row["type"],
+                content=chunk_row["content"],
+                metadata=json.loads(message_row["metadata"]),
+                timestamp=message_row["timestamp"],
+                status=message_row["status"],
+                parent_id=message_row["parent_id"],
+                summary_node_id=message_row["summary_node_id"],
+                embedding=chunk_row["embedding"],
+            )
+            msg.metadata["original_content"] = message_row["content"]
+            msg.metadata["chunk_index"] = chunk_index
             msg.metadata["similarity_score"] = total_score
             msg.metadata["semantic_score"] = semantic_score
             msg.metadata["time_score"] = time_score
+
+            prev_chunk = chunks_map.get((message_id, chunk_index - 1))
+            post_chunk = chunks_map.get((message_id, chunk_index + 1))
+            msg.metadata["prev_chunk"] = prev_chunk["content"] if prev_chunk else None
+            msg.metadata["post_chunk"] = post_chunk["content"] if post_chunk else None
             results.append(msg)
 
-        # Sort candidates globally by similarity score descending
-        results.sort(key=lambda x: x.metadata.get("similarity_score", 0.0), reverse=True)
+        return results
 
-        # Apply message contribution limit (max 3 chunks per message) and filter score > threshold
-        filtered_results = []
-        msg_counts = {}
-        for msg in results:
-            msg_id = msg.id
-            score = msg.metadata.get("similarity_score", 0.0)
-            if score <= threshold:
-                continue
-            count = msg_counts.get(msg_id, 0)
-            if count < 3:
-                filtered_results.append(msg)
-                msg_counts[msg_id] = count + 1
-
-        filtered_results = filtered_results[:limit]
-        if filtered_results:
-            msg_ids = list({m.id for m in filtered_results})
-            placeholders = ",".join("?" for _ in msg_ids)
-            with self.connection_provider.connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    f"SELECT message_id, chunk_index, content FROM message_chunks WHERE message_id IN ({placeholders})",
-                    tuple(msg_ids),
-                )
-                all_chunks = cursor.fetchall()
-
-            chunks_map = {(row["message_id"], row["chunk_index"]): row["content"] for row in all_chunks}
-
-            for msg in filtered_results:
-                matched_idx = msg.metadata["chunk_index"]
-                msg_id = msg.id
-                msg.metadata["prev_chunk"] = chunks_map.get((msg_id, matched_idx - 1))
-                msg.metadata["post_chunk"] = chunks_map.get((msg_id, matched_idx + 1))
-
-        return filtered_results
 
     def get_surrounding_messages(
         self,

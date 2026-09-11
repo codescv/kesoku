@@ -458,7 +458,7 @@ class DiscordChatbot(Chatbot):
 
     async def start(self) -> None:
         """Start the Discord bot and Gateway listener subscriber background loop."""
-        self._subscriber_task = asyncio.create_task(super().start())
+        self._subscriber_task = self.spawn_subscriber_task()
         logger.info(f"Connecting Discord bot '{self.chatbot_id}'...")
         await self.bot.start(self.bot_token)
 

@@ -721,7 +721,7 @@ You are interacting with the user via WeChat (Weixin).
     async def start(self) -> None:
         """Start the WeChat bot and Gateway listener subscriber loop."""
         self._running = True
-        self._listener_task = asyncio.create_task(super().start())
+        self._listener_task = self.spawn_subscriber_task()
 
         ssl_ctx = None
         try:
