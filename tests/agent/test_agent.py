@@ -256,25 +256,27 @@ def test_gemini_llm_safety_threshold() -> None:
     """Test that GeminiLLM applies the configured harm block threshold to every safety category."""
     from google.genai import types
 
-    from kesoku.agent.llm import CONFIGURABLE_HARM_CATEGORIES
+    from kesoku.agent.llm import CONFIGURABLE_HARM_CATEGORIES, VERTEX_ONLY_HARM_CATEGORIES
     from kesoku.config import GeminiConfig
 
-    cfg = GeminiConfig(safety_threshold="off", auth_mode="api_key", api_key="dummy")
+    for auth_mode, expected in (
+        ("api_key", CONFIGURABLE_HARM_CATEGORIES),
+        ("vertex", CONFIGURABLE_HARM_CATEGORIES + VERTEX_ONLY_HARM_CATEGORIES),
+    ):
+        cfg = GeminiConfig(safety_threshold="off", auth_mode=auth_mode, api_key="dummy", project_id="p")
 
-    with patch("google.genai.Client") as mock_client_cls:
-        mock_client_inst = MagicMock()
-        mock_client_cls.return_value = mock_client_inst
-        mock_client_inst.models.generate_content.return_value = MagicMock(parts=[], candidates=[])
+        with patch("google.genai.Client") as mock_client_cls:
+            mock_client_inst = MagicMock()
+            mock_client_cls.return_value = mock_client_inst
+            mock_client_inst.models.generate_content.return_value = MagicMock(parts=[], candidates=[])
 
-        llm = GeminiLLM(config=cfg)
-        asyncio.run(llm.generate(prompt="Test"))
+            llm = GeminiLLM(config=cfg)
+            asyncio.run(llm.generate(prompt="Test"))
 
-        _, kwargs = mock_client_inst.models.generate_content.call_args
-        settings = kwargs["config"].safety_settings
-        assert [s.category for s in settings] == [
-            types.HarmCategory(category) for category in CONFIGURABLE_HARM_CATEGORIES
-        ]
-        assert all(s.threshold == types.HarmBlockThreshold.OFF for s in settings)
+            _, kwargs = mock_client_inst.models.generate_content.call_args
+            settings = kwargs["config"].safety_settings
+            assert [s.category for s in settings] == [types.HarmCategory(c) for c in expected]
+            assert all(s.threshold == types.HarmBlockThreshold.OFF for s in settings)
 
 
 def test_gemini_llm_safety_threshold_none_uses_provider_default() -> None:

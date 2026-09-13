@@ -40,11 +40,22 @@ class ToolCallRequest(BaseModel):
     tool_call_id: str | None = None
 
 
+# Harm categories whose block threshold both the Gemini API and Vertex AI accept.
 CONFIGURABLE_HARM_CATEGORIES = (
     "HARM_CATEGORY_HARASSMENT",
     "HARM_CATEGORY_HATE_SPEECH",
     "HARM_CATEGORY_SEXUALLY_EXPLICIT",
     "HARM_CATEGORY_DANGEROUS_CONTENT",
+    "HARM_CATEGORY_CIVIC_INTEGRITY",
+)
+
+# Additional categories accepted only by Vertex AI (rejected by the Gemini API).
+VERTEX_ONLY_HARM_CATEGORIES = (
+    "HARM_CATEGORY_IMAGE_HATE",
+    "HARM_CATEGORY_IMAGE_DANGEROUS_CONTENT",
+    "HARM_CATEGORY_IMAGE_HARASSMENT",
+    "HARM_CATEGORY_IMAGE_SEXUALLY_EXPLICIT",
+    "HARM_CATEGORY_JAILBREAK",
 )
 
 
@@ -687,9 +698,14 @@ class GeminiLLM(BaseLLM):
             )
         if self.config.safety_threshold is not None:
             threshold = self.config.safety_threshold.upper()
+            categories = list(CONFIGURABLE_HARM_CATEGORIES)
+            # Image and jailbreak categories only exist on Vertex AI; sending them to the
+            # Gemini API endpoint is rejected.
+            if self.config.auth_mode == "vertex":
+                categories.extend(VERTEX_ONLY_HARM_CATEGORIES)
             config.safety_settings = [
                 types.SafetySetting(category=category, threshold=threshold)  # type: ignore[arg-type]
-                for category in CONFIGURABLE_HARM_CATEGORIES
+                for category in categories
             ]
 
         return {"contents": contents, "config": config}

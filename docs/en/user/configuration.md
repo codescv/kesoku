@@ -41,7 +41,7 @@ Configures Google GenAI/Gemini integrations.
 *   **`project_id`** (string): Google Cloud Project ID (required for `"vertex"` mode).
 *   **`location`** (string, default: `"us-central1"`): GCP region for Vertex AI endpoints.
 *   **`thinking_level`** (string, default: `"high"`): The thinking/reasoning budget. Supported: `"minimal"`, `"low"`, `"medium"`, `"high"`.
-*   **`safety_threshold`** (string, default: `"off"`): Harm block threshold applied to every configurable safety category (`"off"`, `"block_none"`, `"block_low_and_above"`, `"block_medium_and_above"`, `"block_only_high"`). The provider defaults intermittently blank out long roleplay replies (the response comes back with `finish_reason=SAFETY` and no content at all), so filtering is disabled by default. Omit the key to fall back to the provider defaults.
+*   **`safety_threshold`** (string, default: `"off"`): Harm block threshold applied to every configurable safety category (`"off"`, `"block_none"`, `"block_low_and_above"`, `"block_medium_and_above"`, `"block_only_high"`). Covers harassment, hate speech, sexually explicit, dangerous content and civic integrity, plus the Vertex-only image (hate / dangerous / harassment / sexually explicit) and jailbreak categories when `auth_mode = "vertex"`. The provider defaults intermittently blank out long roleplay replies (the response comes back with `finish_reason=SAFETY` and no content at all), so filtering is disabled by default. Set to `null` to fall back to the provider defaults.
 
 ### 4. `[claude]`
 Configures Anthropic's Claude models hosted on Google Cloud Vertex AI.
