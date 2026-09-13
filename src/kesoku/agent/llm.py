@@ -40,6 +40,14 @@ class ToolCallRequest(BaseModel):
     tool_call_id: str | None = None
 
 
+CONFIGURABLE_HARM_CATEGORIES = (
+    "HARM_CATEGORY_HARASSMENT",
+    "HARM_CATEGORY_HATE_SPEECH",
+    "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+    "HARM_CATEGORY_DANGEROUS_CONTENT",
+)
+
+
 class LLMResponse(BaseModel):
     """Standardized response from any LLM provider."""
 
@@ -677,6 +685,12 @@ class GeminiLLM(BaseLLM):
                 thinking_level=self.config.thinking_level,
                 include_thoughts=True,
             )
+        if self.config.safety_threshold is not None:
+            threshold = self.config.safety_threshold.upper()
+            config.safety_settings = [
+                types.SafetySetting(category=category, threshold=threshold)  # type: ignore[arg-type]
+                for category in CONFIGURABLE_HARM_CATEGORIES
+            ]
 
         return {"contents": contents, "config": config}
 

@@ -41,6 +41,7 @@ kesoku init -c config.toml
 *   **`project_id`**（字符串）：使用 Vertex AI 模式时的 Google Cloud 项目 ID。
 *   **`location`**（字符串，默认：`"us-central1"`）：使用 Vertex AI 模式时的接口物理分区区域。
 *   **`thinking_level`**（字符串，默认：`"high"`）：推理和思考时间预算。支持：`"minimal"`（最少）、`"low"`（低）、`"medium"`（中）、`"high"`（高）。
+*   **`safety_threshold`**（字符串，默认：`"off"`）：应用到所有可配置安全类别的拦截阈值，可选 `"off"`、`"block_none"`、`"block_low_and_above"`、`"block_medium_and_above"`、`"block_only_high"`。服务端默认阈值会偶发性地拦截较长的角色扮演回复（返回 `finish_reason=SAFETY` 且没有任何内容），因此默认关闭过滤；删除该配置项即可回退到服务端默认值。
 
 ### 4. `[claude]`
 配置部署于 Google Cloud Vertex AI 上的 Anthropic Claude 接入参数。

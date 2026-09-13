@@ -252,6 +252,49 @@ def test_gemini_llm_thinking_level() -> None:
         assert gen_cfg.thinking_config.include_thoughts is True
 
 
+def test_gemini_llm_safety_threshold() -> None:
+    """Test that GeminiLLM applies the configured harm block threshold to every safety category."""
+    from google.genai import types
+
+    from kesoku.agent.llm import CONFIGURABLE_HARM_CATEGORIES
+    from kesoku.config import GeminiConfig
+
+    cfg = GeminiConfig(safety_threshold="off", auth_mode="api_key", api_key="dummy")
+
+    with patch("google.genai.Client") as mock_client_cls:
+        mock_client_inst = MagicMock()
+        mock_client_cls.return_value = mock_client_inst
+        mock_client_inst.models.generate_content.return_value = MagicMock(parts=[], candidates=[])
+
+        llm = GeminiLLM(config=cfg)
+        asyncio.run(llm.generate(prompt="Test"))
+
+        _, kwargs = mock_client_inst.models.generate_content.call_args
+        settings = kwargs["config"].safety_settings
+        assert [s.category for s in settings] == [
+            types.HarmCategory(category) for category in CONFIGURABLE_HARM_CATEGORIES
+        ]
+        assert all(s.threshold == types.HarmBlockThreshold.OFF for s in settings)
+
+
+def test_gemini_llm_safety_threshold_none_uses_provider_default() -> None:
+    """Test that clearing safety_threshold leaves safety_settings untouched."""
+    from kesoku.config import GeminiConfig
+
+    cfg = GeminiConfig(safety_threshold=None, auth_mode="api_key", api_key="dummy")
+
+    with patch("google.genai.Client") as mock_client_cls:
+        mock_client_inst = MagicMock()
+        mock_client_cls.return_value = mock_client_inst
+        mock_client_inst.models.generate_content.return_value = MagicMock(parts=[], candidates=[])
+
+        llm = GeminiLLM(config=cfg)
+        asyncio.run(llm.generate(prompt="Test"))
+
+        _, kwargs = mock_client_inst.models.generate_content.call_args
+        assert kwargs["config"].safety_settings is None
+
+
 @pytest.mark.asyncio
 async def test_orphaned_tool_call_healing(temp_db: str) -> None:
     """Verify that orphaned tool calls are healed with synthesized interruption messages."""
@@ -899,8 +942,9 @@ async def test_session_worker_dynamic_llm(temp_db: str) -> None:
 
 @pytest.mark.asyncio
 async def test_agent_empty_response_nudge(temp_db: str) -> None:
-    """Verify that the agent nudges the LLM when the first response is empty, and succeeds on the second try."""
+    """Verify that empty responses are silently retried first and only then nudged with a system message."""
     from kesoku.agent.llm import BaseLLM, LLMResponse
+    from kesoku.agent.turn_executor import EMPTY_RESPONSE_RETRIES
 
     DatabaseManager(temp_db).init_tables()
     cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
@@ -934,11 +978,11 @@ async def test_agent_empty_response_nudge(temp_db: str) -> None:
             **kwargs: Any,
         ) -> LLMResponse:
             self.generate_calls += 1
-            if self.generate_calls == 1:
-                # First call returns empty content to trigger nudge
+            # The first EMPTY_RESPONSE_RETRIES calls are retried silently; the next empty one
+            # triggers the explicit system nudge.
+            if self.generate_calls <= EMPTY_RESPONSE_RETRIES + 1:
                 return LLMResponse(content="", thought="I thought about it but forgot to reply.")
             else:
-                # Second call returns content after nudge
                 return LLMResponse(content="Hello! Here is the reply after nudge.")
 
     llm = NudgeLLM()
@@ -954,10 +998,11 @@ async def test_agent_empty_response_nudge(temp_db: str) -> None:
 
     # We expect:
     # 1. User Prompt ("Hello!")
-    # 2. Thought ("I thought about it...")
-    # 3. System nudge message ("[System Notification: Your previous response had empty content...]")
+    # 2. Thoughts from each empty attempt
+    # 3. Exactly one system nudge message, posted only after the silent retries were exhausted
     # 4. Final Assistant Response ("Hello! Here is the reply after nudge.")
     assert len(history) >= 4
+    assert llm.generate_calls >= EMPTY_RESPONSE_RETRIES + 2
 
     nudge_msgs = [m for m in history if m.sender == "System" and "empty content" in m.content]
     assert len(nudge_msgs) == 1

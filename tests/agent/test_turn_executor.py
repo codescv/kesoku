@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
 
 from kesoku.agent.llm import BaseLLM, LLMResponse, ToolCallRequest
-from kesoku.agent.turn_executor import TurnExecutor
+from kesoku.agent.turn_executor import EMPTY_RESPONSE_RETRIES, TurnExecutor
 from kesoku.agent.turn_logger import TurnLogger
 from kesoku.config import KesokuConfig, WorkspaceConfig
 from kesoku.context import KesokuContext
@@ -96,7 +96,7 @@ async def test_turn_executor_successful_turn(temp_db: str) -> None:
 
 @pytest.mark.asyncio
 async def test_turn_executor_nudging(temp_db: str) -> None:
-    """Verify that TurnExecutor nudges the LLM once if it returns an empty content response."""
+    """Verify that TurnExecutor retries empty responses silently and nudges once retries are exhausted."""
     DatabaseManager(temp_db).init_tables()
     cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
     gw = Gateway(context=KesokuContext(config=cfg))
@@ -126,7 +126,7 @@ async def test_turn_executor_nudging(temp_db: str) -> None:
             **kwargs: Any,
         ) -> LLMResponse:
             self.calls += 1
-            if self.calls == 1:
+            if self.calls <= EMPTY_RESPONSE_RETRIES + 1:
                 return LLMResponse(content="", thought="Thinking...")
             return LLMResponse(content="Success after nudge!")
 
@@ -139,7 +139,7 @@ async def test_turn_executor_nudging(temp_db: str) -> None:
 
     # Configure mock worker
     worker = MagicMock()
-    type(worker).running = PropertyMock(side_effect=[True, True, False])
+    type(worker).running = PropertyMock(side_effect=[True] * (EMPTY_RESPONSE_RETRIES + 2) + [False])
 
     async def mock_pivot(m: Message) -> Message:
         return m
@@ -160,7 +160,9 @@ async def test_turn_executor_nudging(temp_db: str) -> None:
     # Check messages in session
     history = await gw.db.get_session_history("sess_nudge")
     system_msgs = [m for m in history if m.role == "system" and "empty content" in m.content]
+    # Exactly one nudge, posted only after the silent retries were exhausted
     assert len(system_msgs) == 1
+    assert llm.calls == EMPTY_RESPONSE_RETRIES + 2
 
     assistant_msgs = [m for m in history if m.role == "assistant" and m.type == "text"]
     assert len(assistant_msgs) == 1
@@ -281,7 +283,7 @@ async def test_turn_executor_tool_calls(temp_db: str) -> None:
 
 @pytest.mark.asyncio
 async def test_turn_executor_pivot_resets_nudged(temp_db: str) -> None:
-    """Verify that when a pivot happens inside the loop, turn metrics and nudge state are reset."""
+    """Verify that a pivot inside the loop resets turn metrics and the empty-response counter."""
     DatabaseManager(temp_db).init_tables()
     cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
     gw = Gateway(context=KesokuContext(config=cfg))
@@ -322,14 +324,11 @@ async def test_turn_executor_pivot_resets_nudged(temp_db: str) -> None:
             **kwargs: Any,
         ) -> LLMResponse:
             self.calls += 1
-            if self.calls == 1:
-                # First prompt: return empty to trigger nudge
-                return LLMResponse(content="", thought="Empty on first")
-            # After pivot (which resets nudge state!):
-            # 1. First generation after pivot (call 2): return empty content to trigger nudge on Pivoted prompt too!
-            if self.calls == 2:
-                return LLMResponse(content="", thought="Empty on second")
-            # 2. Second generation after pivot (call 3): return success response
+            # One empty response for the first prompt, then EMPTY_RESPONSE_RETRIES + 1 empty
+            # responses after the pivot. Since the pivot resets the counter, the nudge must be
+            # posted on the last of those and never earlier.
+            if self.calls <= EMPTY_RESPONSE_RETRIES + 2:
+                return LLMResponse(content="", thought=f"Empty on call {self.calls}")
             return LLMResponse(content="Pivoted response success!")
 
     llm = NudgeAndPivotLLM()
@@ -341,7 +340,7 @@ async def test_turn_executor_pivot_resets_nudged(temp_db: str) -> None:
 
     # Configure mock worker that returns msg1 in first loop, but pivots to msg2 in second loop
     worker = MagicMock()
-    type(worker).running = PropertyMock(side_effect=[True, True, True, False])
+    type(worker).running = PropertyMock(side_effect=[True] * (EMPTY_RESPONSE_RETRIES + 3) + [False])
 
     loop_count = 0
 
@@ -367,16 +366,13 @@ async def test_turn_executor_pivot_resets_nudged(temp_db: str) -> None:
     history = await gw.db.get_session_history("sess_pivot")
 
     # We expect:
-    # 1. First WeChat prompt
-    # 2. Nudge message on the first WeChat prompt (parent is msg1)
-    # 3. Pivoted prompt
-    # 4. Nudge message on the pivoted prompt (parent is msg2)
-    # 5. Success response to pivoted prompt (parent is msg2)
+    # 1. First prompt, whose single empty response is only silently retried
+    # 2. Pivoted prompt, whose empty responses exhaust the retries and earn one nudge (parent is msg2)
+    # 3. Success response to pivoted prompt (parent is msg2)
 
     nudges = [m for m in history if m.role == "system" and "empty content" in m.content]
-    assert len(nudges) == 2
-    assert nudges[0].parent_id == msg1.id
-    assert nudges[1].parent_id == msg2.id
+    assert len(nudges) == 1
+    assert nudges[0].parent_id == msg2.id
 
     final_replies = [m for m in history if m.role == "assistant" and m.content == "Pivoted response success!"]
     assert len(final_replies) == 1

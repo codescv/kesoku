@@ -147,6 +147,16 @@ class GeminiConfig(BaseModel):
             "Thinking level allocated for reasoning ('minimal', 'low', 'medium', 'high', or None to use model default)"
         ),
     )
+    safety_threshold: (
+        Literal["off", "block_none", "block_low_and_above", "block_medium_and_above", "block_only_high"] | None
+    ) = Field(
+        default="off",
+        description=(
+            "Harm block threshold applied to every configurable safety category. Vertex's default thresholds "
+            "intermittently blank out long-form roleplay responses (finish_reason=SAFETY with no content), so "
+            "filtering is disabled by default. Set to None to fall back to the provider defaults."
+        ),
+    )
     context_caching: bool = Field(
         default=True,
         description="Whether to enable explicit context caching for long sessions",

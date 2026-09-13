@@ -33,6 +33,10 @@ from kesoku.logger import setup_logger
 logger = setup_logger(__name__)
 MAX_TOTAL_CROSS_SESSION_CONTEXT_LENGTH = 3000
 MAX_CHATBOT_ERROR_MESSAGE_LENGTH = 500
+# Number of silent re-generations attempted when the model returns no content at all
+# (e.g. Vertex safety filtering yields finish_reason=SAFETY with zero parts) before
+# falling back to nudging the model with an explicit system message.
+EMPTY_RESPONSE_RETRIES = 2
 
 
 class TurnExecutor:
@@ -165,7 +169,7 @@ class TurnExecutor:
         if not isinstance(cached_messages_len, int):
             cached_messages_len = 0
 
-        nudged = False
+        empty_attempts = 0
         try:
             while worker.running:
                 # Check-in before atomic action (Thought Interruption)
@@ -174,10 +178,10 @@ class TurnExecutor:
                 if current_msg.id != prev_msg_id:
                     logger.info(
                         f"Pivoted from message {prev_msg_id} to {current_msg.id} during turn loop. "
-                        f"Resetting turn metrics and nudge flag."
+                        f"Resetting turn metrics and empty-response counter."
                     )
                     self.tool_runner.tool_context.original_msg_id = current_msg.id
-                    nudged = False
+                    empty_attempts = 0
                     turn_tool_calls = 0
                     turn_tokens = 0
                     last_context_tokens = 0
@@ -376,7 +380,7 @@ class TurnExecutor:
                     else:
                         break
                 else:
-                    should_continue, nudged = await self._handle_final_response(
+                    should_continue, empty_attempts = await self._handle_final_response(
                         res=res,
                         current_msg=current_msg,
                         last_context_tokens=last_context_tokens,
@@ -385,7 +389,7 @@ class TurnExecutor:
                         turn_tokens=turn_tokens,
                         start_time=start_time,
                         llm=llm,
-                        nudged=nudged,
+                        empty_attempts=empty_attempts,
                     )
                     if should_continue:
                         continue
@@ -867,13 +871,15 @@ class TurnExecutor:
         turn_tokens: int,
         start_time: float,
         llm: BaseLLM,
-        nudged: bool,
-    ) -> tuple[bool, bool]:
-        """Handle final assistant response including thought logging, nudge logic, and metrics embedding.
+        empty_attempts: int,
+    ) -> tuple[bool, int]:
+        """Handle final assistant response including thought logging, retry logic, and metrics embedding.
+
+        `empty_attempts` tracks how many times the model already answered with no content this turn.
 
         Returns:
-            tuple[should_continue, new_nudged_flag]:
-                - should_continue=True: loop should continue (i.e. nudged LLM for retry).
+            tuple[should_continue, empty_attempts]:
+                - should_continue=True: loop should continue (i.e. retrying/nudging the LLM).
                 - should_continue=False: loop should break (i.e. successfully processed turn).
         """
         chatbot_id = current_msg.chatbot_id
@@ -899,10 +905,19 @@ class TurnExecutor:
 
         final_content = res.content
         if not final_content.strip():
-            if not nudged:
-                logger.info(
+            empty_attempts += 1
+            if empty_attempts <= EMPTY_RESPONSE_RETRIES:
+                # Empty responses are usually transient (e.g. the provider filtered the candidate),
+                # so re-generate with the exact same history instead of polluting it with a nudge.
+                logger.warning(
                     f"LLM returned empty content in session {self.session_id} "
-                    f"(finish_reason={res.finish_reason}). Nudging model."
+                    f"(finish_reason={res.finish_reason}, attempt {empty_attempts}). Retrying."
+                )
+                return True, empty_attempts
+            if empty_attempts == EMPTY_RESPONSE_RETRIES + 1:
+                logger.warning(
+                    f"LLM still returned empty content in session {self.session_id} "
+                    f"(finish_reason={res.finish_reason}, attempt {empty_attempts}). Nudging model."
                 )
                 nudge_msg = Message(
                     session_id=self.session_id,
@@ -919,13 +934,15 @@ class TurnExecutor:
                     parent_id=current_msg.id,
                 )
                 await self.gateway.post(nudge_msg)
-                return True, True  # should_continue=True, nudged=True
-            else:
-                logger.warning(
-                    f"LLM returned empty content again after nudge in session {self.session_id} "
-                    f"(finish_reason={res.finish_reason}). Using fallback."
-                )
-                final_content = "Processed request successfully."
+                return True, empty_attempts
+            logger.error(
+                f"LLM returned empty content {empty_attempts} times in session {self.session_id} "
+                f"(finish_reason={res.finish_reason}). Giving up on this turn."
+            )
+            final_content = (
+                f"\u26a0\ufe0f The model returned an empty response after {empty_attempts} attempts "
+                f"(finish_reason={res.finish_reason}). Please rephrase and try again."
+            )
 
         limit = getattr(llm, "context_window_limit", 1048576)
         context_percent = (last_context_tokens / limit) * 100 if limit else 0.0
@@ -956,4 +973,4 @@ class TurnExecutor:
         )
         await self.gateway.post(final_msg)
         await self.context.db.update_message_status(current_msg.id, MessageStatus.PROCESSED)
-        return False, nudged  # should_continue=False, nudged unmodified
+        return False, empty_attempts  # should_continue=False, counter unmodified
