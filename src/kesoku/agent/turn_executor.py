@@ -900,7 +900,10 @@ class TurnExecutor:
         final_content = res.content
         if not final_content.strip():
             if not nudged:
-                logger.info(f"LLM returned empty content in session {self.session_id}. Nudging model.")
+                logger.info(
+                    f"LLM returned empty content in session {self.session_id} "
+                    f"(finish_reason={res.finish_reason}). Nudging model."
+                )
                 nudge_msg = Message(
                     session_id=self.session_id,
                     chatbot_id=chatbot_id,
@@ -919,7 +922,8 @@ class TurnExecutor:
                 return True, True  # should_continue=True, nudged=True
             else:
                 logger.warning(
-                    f"LLM returned empty content again after nudge in session {self.session_id}. Using fallback."
+                    f"LLM returned empty content again after nudge in session {self.session_id} "
+                    f"(finish_reason={res.finish_reason}). Using fallback."
                 )
                 final_content = "Processed request successfully."
 
