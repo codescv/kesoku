@@ -31,21 +31,28 @@ Guidelines:
    (e.g., "{example_start_time} - {example_end_time}: ..."). Do NOT produce granular per-turn line items,
    but also avoid collapsing the entire segment into a single sentence; capture distinct milestones, topics,
    or scene transitions as separate phase blocks (typically 2 to 5 blocks, maximum 5).
-2. tools_and_skills: List distinct tools and skills invoked during this segment, accompanied by a brief
+2. user_asks: List explicit requirements, instructions, constraints, or standing requests made by the user
+   that remain valid and applicable across the entire session (to prevent the agent from forgetting them).
+   Do NOT include one-off already-completed questions; focus on session-wide goals, rules, or ongoing requirements.
+   Return None if none were specified.
+3. tools_and_skills: List distinct tools and skills invoked during this segment, accompanied by a brief
    one-sentence description of what each was used for (e.g., "run_shell_command (japanese-challenge skill):
    Quizzed grammar points and managed mistake notebook"). Return None if none were used.
-3. learnings: Summarize practical takeaways:
+4. learnings: Summarize practical takeaways:
    - Tool & skill execution insights: effective parameters, syntax fixes, and error recovery patterns.
    - User preferences & corrections: user preferences discovered, and behavioral rules learned when the
      user corrected the agent.
    Return None if none.
 
-Output ONLY a valid JSON object with exact keys "timeline", "tools_and_skills", and "learnings":
+Output ONLY a valid JSON object with exact keys "timeline", "user_asks", "tools_and_skills", and "learnings":
 {{
   "timeline": [
     "{example_start_time} - {example_end_time}: [Concise narrative of phase 1]",
     "{example_start_time} - {example_end_time}: [Concise narrative of phase 2]"
   ],
+  "user_asks": [
+    "[Session-wide user requirement, instruction, or constraint]"
+  ] or null,
   "tools_and_skills": [
     "tool_name (skill_name if applicable): [One concise sentence explaining its purpose/usage]"
   ] or null,
@@ -70,20 +77,26 @@ Guidelines:
    (e.g., "{example_start_time} - {example_end_time}: ..."). Do not collapse the entire history into a single
    one-liner; preserve distinct narrative phases, key topics, or major activity milestones across the
    timeline (typically 2 to 5 blocks, maximum 5).
-2. tools_and_skills: Deduplicate and consolidate all distinct tools and skills used across the summaries, each
+2. user_asks: Merge, deduplicate, and carry forward all active session-wide user requirements, instructions,
+   and constraints across the summaries so they are never forgotten. Resolve any updated or superseded
+   requirements in favor of the most recent user instructions. Return None if none.
+3. tools_and_skills: Deduplicate and consolidate all distinct tools and skills used across the summaries, each
    with a brief one-sentence description of its purpose/usage. Return None if none.
-3. learnings: Merge, deduplicate, and synthesize all key learnings across the summaries:
+4. learnings: Merge, deduplicate, and synthesize all key learnings across the summaries:
    - Tool & skill execution insights: effective parameters, syntax fixes, and error recovery patterns.
    - User preferences & corrections: user preferences discovered, and behavioral rules learned when the
      user corrected the agent.
    Resolve any conflicting rules in favor of the most recent events. Return None if none.
 
-Output ONLY a valid JSON object with exact keys "timeline", "tools_and_skills", and "learnings":
+Output ONLY a valid JSON object with exact keys "timeline", "user_asks", "tools_and_skills", and "learnings":
 {{
   "timeline": [
     "{example_start_time} - {example_end_time}: [Concise narrative of merged macro phase 1]",
     "{example_start_time} - {example_end_time}: [Concise narrative of merged macro phase 2]"
   ],
+  "user_asks": [
+    "[Active session-wide user requirement, instruction, or constraint]"
+  ] or null,
   "tools_and_skills": [
     "tool_name (skill_name if applicable): [One concise sentence explaining its purpose/usage]"
   ] or null,
@@ -97,6 +110,9 @@ Consolidated JSON Summary:"""
 
 SUMMARY_TEMPLATE = """Timeline:
 {timeline}
+
+User Asks:
+{user_asks}
 
 Tools & Skills:
 {tools_and_skills}
@@ -201,16 +217,21 @@ class HistoryCompressor:
         if not timeline_str and raw_content and not data:
             timeline_str = raw_content.strip()
 
-        # 2. Tools and skills
+        # 2. User asks
+        user_asks_val = data.get("user_asks") or data.get("user_ask")
+        user_asks_str = cls._format_field(user_asks_val, default_none=True)
+
+        # 3. Tools and skills
         tools_val = data.get("tools_and_skills") or data.get("tools") or data.get("skills")
         tools_str = cls._format_field(tools_val, default_none=True)
 
-        # 3. Learnings
+        # 4. Learnings
         learnings_val = data.get("learnings") or data.get("learning")
         learnings_str = cls._format_field(learnings_val, default_none=True)
 
         return SUMMARY_TEMPLATE.format(
             timeline=timeline_str,
+            user_asks=user_asks_str,
             tools_and_skills=tools_str,
             learnings=learnings_str,
         )

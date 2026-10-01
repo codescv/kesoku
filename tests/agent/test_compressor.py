@@ -21,12 +21,14 @@ def test_parse_summary_json_valid_markdown():
 ```json
 {
   "timeline": ["2026-01-01 18:00 - 2026-01-01 18:30: Started task"],
+  "user_asks": ["Always reply in Chinese across this session"],
   "tools_and_skills": ["run_shell_command: Executed CLI script"],
   "learnings": "None"
 }
 ```"""
     data = HistoryCompressor.parse_summary_json(raw)
     assert data["timeline"] == ["2026-01-01 18:00 - 2026-01-01 18:30: Started task"]
+    assert data["user_asks"] == ["Always reply in Chinese across this session"]
     assert data["tools_and_skills"] == ["run_shell_command: Executed CLI script"]
     assert data["learnings"] == "None"
 
@@ -94,10 +96,13 @@ def test_format_field():
 
 
 def test_format_summary_with_new_structure():
-    """Test complete format_summary pipeline with timeline, tools_and_skills, and learnings."""
+    """Test complete format_summary pipeline with timeline, user_asks, tools_and_skills, and learnings."""
     json_input = """```json
 {
   "timeline": ["2026-01-01 18:00 - 2026-01-01 18:30: User requested feature X"],
+  "user_asks": [
+    "Keep all code snippets compatible with Python 3.12"
+  ],
   "tools_and_skills": [
     "run_shell_command (ai-image): Generated illustrations for story scene"
   ],
@@ -108,6 +113,7 @@ def test_format_summary_with_new_structure():
     result = HistoryCompressor.format_summary(json_input)
 
     assert "Timeline:\n- 2026-01-01 18:00 - 2026-01-01 18:30: User requested feature X" in result
+    assert "User Asks:\n- Keep all code snippets compatible with Python 3.12" in result
     assert "Tools & Skills:\n- run_shell_command (ai-image): Generated illustrations for story scene" in result
     assert "Learnings:\nUse rg instead of grep for searching." in result
     assert result.startswith("Timeline:")
@@ -117,11 +123,13 @@ def test_format_summary_all_none():
     """Test format_summary when optional sections are missing or empty."""
     json_input = """{
   "timeline": ["2026-01-01 18:00: Checked system status."],
+  "user_asks": null,
   "tools_and_skills": [],
   "learnings": "null"
 }"""
     result = HistoryCompressor.format_summary(json_input)
     assert "Timeline:\n- 2026-01-01 18:00: Checked system status." in result
+    assert "User Asks:\nNone" in result
     assert "Tools & Skills:\nNone" in result
     assert "Learnings:\nNone" in result
 
@@ -135,6 +143,7 @@ async def test_auto_compact_session(tmp_path):
 
     json_reply = """{
       "timeline": ["2026-01-01 18:00 - 2026-01-01 18:30: Started task"],
+      "user_asks": ["Do not modify production database"],
       "tools_and_skills": ["run_shell_command: Executed CLI script"],
       "learnings": "None"
     }"""
@@ -183,6 +192,7 @@ async def test_auto_compact_session(tmp_path):
     db_mock.insert_summary_node.assert_called_once()
     inserted_node: SummaryNode = db_mock.insert_summary_node.call_args[0][0]
     assert "Timeline:\n- 2026-01-01 18:00 - 2026-01-01 18:30: Started task" in inserted_node.summary
+    assert "User Asks:\n- Do not modify production database" in inserted_node.summary
     assert "Tools & Skills:\n- run_shell_command: Executed CLI script" in inserted_node.summary
 
 
@@ -195,6 +205,7 @@ async def test_consolidate_forest():
 
     json_reply = """{
       "timeline": ["2026-01-01 19:00 - 2026-01-01 19:30: Merged events"],
+      "user_asks": ["Do not modify production database"],
       "tools_and_skills": ["run_shell_command: Executed CLI script"],
       "learnings": "None"
     }"""
@@ -227,6 +238,7 @@ async def test_consolidate_forest():
     inserted_parent = db_mock.insert_summary_node.call_args_list[0][0][0]
     assert inserted_parent.level == 1
     assert "Timeline:\n- 2026-01-01 19:00 - 2026-01-01 19:30: Merged events" in inserted_parent.summary
+    assert "User Asks:\n- Do not modify production database" in inserted_parent.summary
     assert "Tools & Skills:\n- run_shell_command: Executed CLI script" in inserted_parent.summary
 
 def test_estimate_prepared_turn_tokens():
