@@ -1,10 +1,12 @@
 """Skills and chat history search tools for Kesoku AI Agent."""
 
 import logging
+import os
 import time
 
 from kesoku.agent.skills import SkillManager
 from kesoku.agent.tools.registry import ToolContext, default_registry
+from kesoku.utils.path import PathResolver
 from kesoku.utils.text import truncate_middle
 from kesoku.utils.time_utils import parse_time_to_timestamp
 
@@ -206,3 +208,49 @@ async def view_message(
     except Exception as e:
         logger.error(f"Failed to view message {message_id}: {e}", exc_info=True)
         return f"Error retrieving message details: {e}"
+
+
+@default_registry.register
+def update_session_notes(
+    content: str,
+    context: ToolContext | None = None,
+) -> str:
+    """Update the pinned session notes (`notes.md`) for the current conversation session.
+
+    The contents of session notes are automatically injected into every turn as `<session_notes>`
+    right before `<current_message>` so you never forget session-wide user requirements or ongoing context.
+    Call this tool proactively whenever the user states or updates:
+    - Session-wide rules, constraints, formatting/language preferences, or behavioral instructions.
+    - Active task goals, ongoing roleplay/scene state, or progress that must stay consistent across turns.
+
+    This replaces the session notes with `content`. Keep the notes concise, well-structured,
+    and up-to-date by merging new requirements with existing ones and removing obsolete rules.
+    Pass an empty string to clear all session notes.
+
+    Args:
+        content: Complete markdown content for the pinned session notes.
+        context: Injected tool execution context.
+
+    Returns:
+        Confirmation message indicating the updated session notes status.
+    """
+    if context and context.session_workspace:
+        staging_dir = PathResolver.get_session_staging_dir(context.session_workspace)
+    elif context and context.session_id:
+        staging_dir = PathResolver.get_session_staging_dir(context.session_id)
+    else:
+        return "Error: ToolContext with session_workspace is missing."
+
+    notes_path = os.path.join(staging_dir, "notes.md")
+    cleaned = content.strip()
+    try:
+        os.makedirs(staging_dir, exist_ok=True)
+        with open(notes_path, "w", encoding="utf-8") as f:
+            f.write(cleaned)
+        if not cleaned:
+            return f"Success: Cleared pinned session notes at '{notes_path}'."
+        return f"Success: Updated pinned session notes at '{notes_path}' ({len(cleaned)} chars)."
+    except Exception as e:
+        logger.error(f"Failed to update session notes at {notes_path}: {e}", exc_info=True)
+        return f"Error updating session notes: {e}"
+

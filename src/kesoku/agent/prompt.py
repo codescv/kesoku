@@ -44,6 +44,17 @@ If a command transitions to a background job:
 3. End your turn. You will be automatically alerted once execution completes.
 """
 
+SESSION_NOTES_INSTRUCTIONS = """
+# Pinned Session Notes
+- Use `update_session_notes` (which manages `$STAGING_DIR/notes.md`) to maintain pinned notes for the current session.
+- The contents of `$STAGING_DIR/notes.md` are automatically injected into every turn as `<session_notes>`
+  right before `<current_message>`.
+- Whenever the user states requirements, rules, formatting/language preferences, or ongoing scene/task states
+  that must remain consistent across this session, immediately call `update_session_notes` so you never forget them.
+- Keep session notes concise and up-to-date: merge new rules with existing ones, overwrite outdated rules
+  when the user changes their mind, and remove completed one-off tasks.
+"""
+
 
 def build_sys_prompt(
     custom_prompt: str | None = None,
@@ -137,6 +148,7 @@ Unless the user explicitly instructs otherwise, do not refer to any file outside
             OUTPUT_FORMATTING_INSTRUCTIONS.strip(),
             TOOL_CALLING_INSTRUCTIONS.strip(),
             BACKGROUND_EXECUTION_INSTRUCTIONS.strip(),
+            SESSION_NOTES_INSTRUCTIONS.strip(),
         ]
     )
 

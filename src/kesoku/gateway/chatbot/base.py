@@ -22,7 +22,12 @@ from kesoku.db import Message
 from kesoku.gateway.chatbot.context_reporter import ContextHtmlReporter
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
-from kesoku.utils.async_fs import async_exists, async_realpath
+from kesoku.utils.async_fs import (
+    async_exists,
+    async_read_text_file,
+    async_realpath,
+    async_write_text_file,
+)
 from kesoku.utils.path import PathResolver
 from kesoku.utils.service import restart_service as utils_restart_service
 from kesoku.utils.table import parse_markdown_tables, render_table_to_image
@@ -379,6 +384,46 @@ class Chatbot(ABC):
             handle_cronjob,
         )
 
+        async def handle_notes(
+            reply_func: Callable[[str], Awaitable[None]],
+            channel_id: str,
+            content: str = "",
+        ) -> None:
+            status_msg = await self.manage_session_notes_by_channel(channel_id, content)
+            await reply_func(status_msg)
+
+        self.commands.register(
+            "notes",
+            "View, update, or clear pinned session notes (/notes, /notes <text>, /notes clear).",
+            handle_notes,
+        )
+
+    async def manage_session_notes_by_channel(self, channel_id: str, content: str = "") -> str:
+        """View, update, or clear pinned session notes (notes.md) for the active session of a channel."""
+        session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
+        if not session:
+            return "⚠️ No active session found for this chat."
+
+        staging_dir = self.get_session_staging_dir(session.workspace_name)
+        notes_path = os.path.join(staging_dir, "notes.md")
+        cleaned = content.strip()
+
+        if not cleaned:
+            if await async_exists(notes_path):
+                existing = (await async_read_text_file(notes_path)).strip()
+                if existing:
+                    return f"📌 **Pinned Session Notes:**\n\n{existing}"
+            return "ℹ️ No pinned notes for the current session."
+
+        if cleaned.lower() == "clear":
+            if await async_exists(notes_path):
+                await async_write_text_file(notes_path, "")
+            return "🧹 Cleared pinned session notes."
+
+        os.makedirs(staging_dir, exist_ok=True)
+        await async_write_text_file(notes_path, cleaned)
+        return f"📌 **Updated Pinned Session Notes:**\n\n{cleaned}"
+
     async def restart_service(self) -> None:
         """Restart the Kesoku service."""
         await utils_restart_service(self.chatbot_id, self.stop)
@@ -457,6 +502,13 @@ class Chatbot(ABC):
                     return
                 role_name = " ".join(parts[1:]) if len(parts) > 1 else ""
                 await self.commands.execute("role", reply_func, channel_id=channel_id, role_name=role_name)
+            elif command == "notes":
+                if not channel_id:
+                    await reply_func("⚠️ Channel ID is required for this command.")
+                    return
+                raw_stripped = text.strip()
+                content = raw_stripped[len(raw_command) :].strip()
+                await self.commands.execute("notes", reply_func, channel_id=channel_id, content=content)
             elif command == "restart":
                 await self.commands.execute(command, reply_func)
             elif command in {"grep", "chat-grep", "chat_grep"}:

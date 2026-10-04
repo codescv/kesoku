@@ -255,7 +255,12 @@ class TurnExecutor:
                     worker.active_cache_llm = None
                     worker.cached_messages_len = 0
 
-                await self._inject_context_and_trigger_consolidation(history, current_msg, llm)
+                await self._inject_context_and_trigger_consolidation(
+                    history,
+                    current_msg,
+                    llm,
+                    session_staging_dir=session_staging_dir,
+                )
 
                 # Prepare history for the LLM by stripping thoughts, attachments, and truncating historical tool outputs
                 llm_history = prepare_history_for_llm(history, staging_dir=session_staging_dir)
@@ -455,6 +460,7 @@ class TurnExecutor:
         history: list[Message],
         current_msg: Message,
         llm: BaseLLM,
+        session_staging_dir: str | None = None,
     ) -> Message | None:
         """Inject context and user preferences, triggering background consolidation if needed.
 
@@ -517,6 +523,26 @@ class TurnExecutor:
                     except Exception as e:
                         logger.warning(f"Failed to read facts.md for role '{active_role}': {e}")
 
+        # 2.2. Read pinned session notes (notes.md) from session staging directory every turn
+        session_notes_prefix = ""
+        target_staging_dir = session_staging_dir
+        if not target_staging_dir and self.context and self.context.config:
+            sessions_dir = self.context.config.workspace.sessions_dir
+            if not os.path.isabs(sessions_dir) and self.context.config.agent_working_dir:
+                sessions_dir = os.path.join(self.context.config.agent_working_dir, sessions_dir)
+            target_staging_dir = os.path.join(sessions_dir, self.session_id)
+
+        if target_staging_dir:
+            notes_path = os.path.join(target_staging_dir, "notes.md")
+            if await async_exists(notes_path):
+                try:
+                    notes_content = await async_read_text_file(notes_path)
+                    notes_content = notes_content.strip()
+                    if notes_content:
+                        session_notes_prefix = f"<session_notes>\n{notes_content}\n</session_notes>\n"
+                except Exception as e:
+                    logger.warning(f"Failed to read notes.md for session '{self.session_id}': {e}")
+
         # 3. Prepend Consolidated Passive Synchronization, Preferences, and Context Compression Guidelines
         # (if Bootstrap)
         full_prefix = ""
@@ -562,6 +588,7 @@ class TurnExecutor:
 
         copied_msg.content = (
             f"{instructions_prefix}"
+            f"{session_notes_prefix}"
             f"{facts_prefix}"
             f"{full_prefix}"
             f"{augmented_context_prefix}"

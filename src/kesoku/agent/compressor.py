@@ -207,6 +207,39 @@ class HistoryCompressor:
         return text
 
     @classmethod
+    def _sync_user_asks_to_notes(cls, user_asks_str: str, staging_dir: str | None) -> None:
+        """Passively sync extracted session-wide user_asks into $STAGING_DIR/notes.md if missing."""
+        if not staging_dir or not user_asks_str or user_asks_str.strip().lower() in ("none", "null", "n/a", "[]", ""):
+            return
+
+        notes_path = os.path.join(staging_dir, "notes.md")
+        try:
+            existing_content = ""
+            if os.path.exists(notes_path):
+                with open(notes_path, encoding="utf-8") as f:
+                    existing_content = f.read().strip()
+
+            new_lines: list[str] = []
+            for raw_line in user_asks_str.splitlines():
+                cleaned_item = raw_line.lstrip("-* ").strip()
+                if not cleaned_item or cleaned_item.lower() in ("none", "null", "n/a", "[]"):
+                    continue
+                if cleaned_item not in existing_content:
+                    new_lines.append(f"- {cleaned_item}")
+
+            if new_lines:
+                os.makedirs(staging_dir, exist_ok=True)
+                updated_content = (
+                    f"{existing_content}\n" + "\n".join(new_lines)
+                    if existing_content
+                    else "\n".join(new_lines)
+                )
+                with open(notes_path, "w", encoding="utf-8") as f:
+                    f.write(updated_content.strip())
+        except Exception as e:
+            logger.warning(f"Failed to passively sync user_asks to {notes_path}: {e}")
+
+    @classmethod
     def format_summary(cls, raw_content: str, staging_dir: str | None = None) -> str:
         """Parse LLM JSON output and format summary using template."""
         data = cls.parse_summary_json(raw_content)
@@ -220,6 +253,7 @@ class HistoryCompressor:
         # 2. User asks
         user_asks_val = data.get("user_asks") or data.get("user_ask")
         user_asks_str = cls._format_field(user_asks_val, default_none=True)
+        cls._sync_user_asks_to_notes(user_asks_str, staging_dir)
 
         # 3. Tools and skills
         tools_val = data.get("tools_and_skills") or data.get("tools") or data.get("skills")

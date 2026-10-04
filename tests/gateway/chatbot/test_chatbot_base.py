@@ -554,3 +554,49 @@ async def test_attempt_send_attachment_self_healing_failure_notice(tmp_path) -> 
     sent_text = chatbot.send_text_chunks.call_args[0][1][0]
     assert "⚠️ 文件发送失败" in sent_text
 
+
+@pytest.mark.asyncio
+async def test_chatbot_notes_command(tmp_path) -> None:
+    """Test /notes command for viewing, updating, and clearing pinned session notes."""
+    mock_gateway = MagicMock(spec=Gateway)
+    mock_db = AsyncMock()
+    mock_gateway.db = mock_db
+    mock_session = Session(id="session_notes_1", title="Test Session")
+    mock_db.get_session_by_channel = AsyncMock(return_value=mock_session)
+
+    chatbot = MockChatbot("mock_bot", mock_gateway)
+    staging_dir = str(tmp_path / "session_notes_1")
+    chatbot.get_session_staging_dir = MagicMock(return_value=staging_dir)
+
+    replies: list[str] = []
+
+    async def reply_func(msg: str) -> None:
+        replies.append(msg)
+
+    # 1. Initially empty
+    await chatbot.execute_command_from_text("/notes", reply_func, channel_id="ch1")
+    assert "No pinned notes" in replies[-1]
+
+    # 2. Set notes
+    await chatbot.execute_command_from_text(
+        "/notes - Always reply in Japanese\n- Keep it short",
+        reply_func,
+        channel_id="ch1",
+    )
+    assert "Updated Pinned Session Notes" in replies[-1]
+    assert "- Always reply in Japanese" in replies[-1]
+
+    # 3. View notes
+    await chatbot.execute_command_from_text("/notes", reply_func, channel_id="ch1")
+    assert "Pinned Session Notes:" in replies[-1]
+    assert "- Always reply in Japanese" in replies[-1]
+
+    # 4. Clear notes
+    await chatbot.execute_command_from_text("/notes clear", reply_func, channel_id="ch1")
+    assert "Cleared pinned session notes" in replies[-1]
+
+    # 5. Verify cleared
+    await chatbot.execute_command_from_text("/notes", reply_func, channel_id="ch1")
+    assert "No pinned notes" in replies[-1]
+
+

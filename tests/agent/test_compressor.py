@@ -293,3 +293,36 @@ def test_estimate_prepared_turn_tokens():
     # Expected: 60 // 4 = 15 tokens from msg_1 + 500 // 4 = 125 tokens from truncated msg_3 = 140
     assert tokens == 140
 
+
+def test_format_summary_syncs_user_asks_to_notes(tmp_path):
+    """Test that format_summary passively syncs extracted user_asks into $STAGING_DIR/notes.md."""
+    staging_dir = str(tmp_path / "sess_notes_sync")
+    json_input_1 = """{
+      "timeline": ["2026-01-01 18:00: Started chat"],
+      "user_asks": ["Always reply in Japanese with furigana", "Keep answers under 3 sentences"],
+      "tools_and_skills": null,
+      "learnings": null
+    }"""
+    HistoryCompressor.format_summary(json_input_1, staging_dir=staging_dir)
+
+    notes_path = os.path.join(staging_dir, "notes.md")
+    assert os.path.exists(notes_path)
+    with open(notes_path, encoding="utf-8") as f:
+        content = f.read()
+    assert "- Always reply in Japanese with furigana" in content
+    assert "- Keep answers under 3 sentences" in content
+
+    # Second pass with one duplicate and one new rule should only append the new rule
+    json_input_2 = """{
+      "timeline": ["2026-01-01 18:30: Continued chat"],
+      "user_asks": ["Always reply in Japanese with furigana", "Do not use markdown headers"],
+      "tools_and_skills": null,
+      "learnings": null
+    }"""
+    HistoryCompressor.format_summary(json_input_2, staging_dir=staging_dir)
+    with open(notes_path, encoding="utf-8") as f:
+        content_2 = f.read()
+    assert content_2.count("Always reply in Japanese with furigana") == 1
+    assert "- Do not use markdown headers" in content_2
+
+

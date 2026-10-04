@@ -89,9 +89,11 @@ def test_build_sys_prompt_with_session(tmp_path) -> None:
 
         prompt = build_sys_prompt(session=sess)
 
-        # Check that Session Staging Directory instruction is included
+        # Check that Session Staging Directory and Pinned Session Notes instructions are included
         assert "# Session Staging Directory" in prompt
         assert "STAGING_DIR=" in prompt
         assert sess.workspace_name in prompt
+        assert "# Pinned Session Notes" in prompt
+        assert "update_session_notes" in prompt
     finally:
         kesoku.config._global_config = original_config

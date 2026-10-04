@@ -2009,3 +2009,134 @@ async def test_turn_executor_daily_facts_injection(temp_db: str, tmp_path: Any) 
     last_user_content_day2 = [m.content for m in llm.captured_history if m.role == MessageRole.USER][-1]
     # Verify <facts> WAS injected on the first turn of Day 2
     assert "<facts>\nAsuka重大事件时间表：领养了猫咪Neon\n</facts>" in last_user_content_day2
+
+
+@pytest.mark.asyncio
+async def test_turn_executor_session_notes_injection_and_tool(temp_db: str, tmp_path: Any) -> None:
+    """Verify update_session_notes writes notes.md and TurnExecutor injects <session_notes> on every turn."""
+    from kesoku.agent.tools.memory import update_session_notes
+    from kesoku.agent.tools.registry import ToolContext
+    from kesoku.agent.turn_executor import TurnExecutor
+    from kesoku.constants import MessageRole
+    from kesoku.db import DatabaseManager
+
+    DatabaseManager(temp_db).init_tables()
+
+    roles_dir = tmp_path / "roles"
+    asuka_dir = roles_dir / "asuka"
+    asuka_dir.mkdir(parents=True, exist_ok=True)
+    (asuka_dir / "preferences.md").write_text("Asuka preferences")
+
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    staging_dir = sessions_dir / "sess_notes"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+
+    cfg = KesokuConfig(
+        workspace=WorkspaceConfig(
+            db_path=temp_db,
+            roles_dir=str(roles_dir),
+            sessions_dir=str(sessions_dir),
+        ),
+    )
+    cfg.agent.auto_context_search = False
+
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.db.set_channel_role("cli", "ch1", "asuka")
+    await gw.create_session("sess_notes", title="Notes Session")
+    await gw.db.set_active_session_for_channel("cli", "ch1", "sess_notes")
+
+    # 1. Use update_session_notes tool to write pinned session notes
+    tool_ctx = ToolContext(session_id="sess_notes", session_workspace="sess_notes", gateway=gw)
+    with patch("kesoku.utils.path.get_config", return_value=cfg):
+        res_str = update_session_notes(
+            content="- 本session只用纯日语交流\n- 当前场景：镰仓海边约会",
+            context=tool_ctx,
+        )
+    assert "Success: Updated pinned session notes" in res_str
+    assert (staging_dir / "notes.md").exists()
+
+    class CaptureLLM(BaseLLM):
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+            **kwargs: Any,
+        ) -> LLMResponse:
+            self.captured_history = list(history or [])
+            return LLMResponse(content="了解！", total_tokens=10)
+
+    llm = CaptureLLM()
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    turn_logger = MagicMock(spec=TurnLogger)
+
+    context = KesokuContext(config=cfg, llm=llm)
+    executor = TurnExecutor("sess_notes", gw, tool_runner, turn_logger, context=context)
+
+    def create_mock_worker() -> MagicMock:
+        w = MagicMock()
+        type(w).running = PropertyMock(side_effect=[True, False])
+
+        async def mock_pivot(m: Message) -> Message:
+            return m
+
+        w.drain_queue_and_pivot.side_effect = mock_pivot
+        w.queue_empty.return_value = True
+        return w
+
+    # 2. Turn 1: Verify <session_notes> is injected
+    t1 = 1786400000.0
+    msg_1 = Message(
+        session_id="sess_notes",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="我们去买冰淇淋吧",
+        status="pending_agent",
+        timestamp=t1,
+    )
+    await gw.post(msg_1)
+
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor.process_turn(
+            current_msg=msg_1,
+            worker=create_mock_worker(),
+            session_staging_dir=str(staging_dir),
+        )
+
+    last_user_1 = [m.content for m in llm.captured_history if m.role == MessageRole.USER][-1]
+    assert "<session_notes>\n- 本session只用纯日语交流\n- 当前场景：镰仓海边约会\n</session_notes>" in last_user_1
+
+    # 3. Turn 2 (same day): Update session notes and verify updated <session_notes> is still injected
+    with patch("kesoku.utils.path.get_config", return_value=cfg):
+        update_session_notes(
+            content="- 本session使用中日双语\n- 当前场景：江之电车厢内",
+            context=tool_ctx,
+        )
+
+    msg_2 = Message(
+        session_id="sess_notes",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="现在去哪？",
+        status="pending_agent",
+        timestamp=t1 + 60.0,
+    )
+    await gw.post(msg_2)
+
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor.process_turn(
+            current_msg=msg_2,
+            worker=create_mock_worker(),
+            session_staging_dir=str(staging_dir),
+        )
+
+    last_user_2 = [m.content for m in llm.captured_history if m.role == MessageRole.USER][-1]
+    assert "<session_notes>\n- 本session使用中日双语\n- 当前场景：江之电车厢内\n</session_notes>" in last_user_2
+
