@@ -389,3 +389,40 @@ async def test_search_command_success(mock_chatbot: MagicMock) -> None:
     # Assert commands.execute was called with correct parameters
     mock_chatbot.commands.execute.assert_called_once_with("search", ANY, channel_id="987654321", query="test_search")
 
+
+@pytest.mark.asyncio
+async def test_notes_command_success(mock_chatbot: MagicMock) -> None:
+    """Test that the /notes Discord slash command automatically passes interaction.channel_id."""
+    setup_discord_commands(mock_chatbot)
+
+    commands = mock_chatbot.tree.get_commands()
+    notes_cmd = next((cmd for cmd in commands if cmd.name == "notes"), None)
+    assert notes_cmd is not None
+
+    # Verify command has optional 'content' parameter
+    assert len(notes_cmd.parameters) == 1
+    assert notes_cmd.parameters[0].name == "content"
+    assert notes_cmd.parameters[0].required is False
+
+    interaction = AsyncMock(spec=discord.Interaction)
+    interaction.user = MagicMock(spec=discord.User)
+    interaction.user.name = "test_user"
+    interaction.user.id = 123456789
+    interaction.channel_id = 987654321
+
+    interaction.response = AsyncMock()
+    interaction.followup = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    mock_chatbot.commands.execute = AsyncMock()
+
+    await notes_cmd.callback(interaction, content="Always speak Japanese")
+
+    mock_chatbot.commands.execute.assert_called_once_with(
+        "notes",
+        ANY,
+        channel_id="987654321",
+        content="Always speak Japanese",
+    )
+
+

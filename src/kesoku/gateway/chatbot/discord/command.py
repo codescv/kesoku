@@ -127,6 +127,39 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
                 description=description,
                 callback=make_search_callback(cmd_name),
             )
+        elif cmd_name == "notes":
+
+            async def notes_callback(interaction: discord.Interaction, content: str = "") -> None:
+                logger.info(
+                    f"Received /notes slash command with content='{content}' from user {interaction.user.name} "
+                    f"(ID: {interaction.user.id}) in channel {interaction.channel_id}"
+                )
+                await interaction.response.defer()
+
+                async def reply_func(text: str) -> None:
+                    from kesoku.utils.text import split_text_into_chunks
+
+                    chunks = split_text_into_chunks(text, 2000)
+                    for chunk in chunks:
+                        if chunk.strip():
+                            await interaction.followup.send(chunk)
+
+                try:
+                    await chatbot.commands.execute(
+                        "notes",
+                        reply_func,
+                        channel_id=str(interaction.channel_id),
+                        content=content,
+                    )
+                except Exception as e:
+                    logger.error(f"Discord command /notes execution failed: {e}")
+                    await reply_func(f"⚠️ Failed to execute command: {e}")
+
+            cmd = app_commands.Command(
+                name="notes",
+                description=description,
+                callback=notes_callback,
+            )
         else:
 
             def make_callback(c_name: str) -> Callable[[discord.Interaction], Awaitable[None]]:
@@ -158,6 +191,7 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
                             "compact",
                             "context",
                             "debug",
+                            "notes",
                         }:
                             await chatbot.commands.execute(c_name, reply_func, channel_id=str(interaction.channel_id))
                         else:
