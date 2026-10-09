@@ -941,6 +941,19 @@ async def test_session_worker_dynamic_llm(temp_db: str) -> None:
         assert resolved_llm == mock_claude
         mock_get_llm.assert_called_once_with(provider="claude")
 
+        # Also verify channel override with model_name specified
+        mock_get_llm.reset_mock()
+        mock_cfg.discord.channels = [
+            DiscordChannelOverride(
+                channels=["announcements"],
+                llm="claude",
+                model_name="claude-opus-5-5",
+            )
+        ]
+        resolved_llm_with_model = executor._resolve_llm(msg)
+        assert resolved_llm_with_model == mock_claude
+        mock_get_llm.assert_called_once_with(provider="claude", model_name="claude-opus-5-5")
+
 
 @pytest.mark.asyncio
 async def test_agent_empty_response_nudge(temp_db: str) -> None:

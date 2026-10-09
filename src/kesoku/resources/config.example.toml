@@ -107,8 +107,9 @@ chatbot_id = "discord"
 
 # Optional: Channel-specific configuration overrides
 # [[discord.channels]]
-# channels = ["1234567890"]    # Target channel IDs
+# channels = ["1234567890"]    # Target channel IDs or names
 # llm = "claude"               # Override LLM provider
+# model_name = "claude-opus-5-5" # Override LLM model identifier
 # auto_thread = false          # Disable automatic thread creation
 
 

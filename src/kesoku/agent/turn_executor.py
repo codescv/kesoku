@@ -127,15 +127,23 @@ class TurnExecutor:
                 if parent_name:
                     identifiers.add(parent_name)
                 if any(ident in override.channels for ident in identifiers if ident):
-                    if override.llm:
+                    if override.llm or override.model_name:
                         logger.info(
-                            f"Applying LLM override '{override.llm}' for Discord channel {channel_id} "
-                            f"('{channel_name}')"
+                            f"Applying LLM override (provider={override.llm}, model={override.model_name}) "
+                            f"for Discord channel {channel_id} ('{channel_name}')"
                         )
                         try:
+                            if override.model_name:
+                                return self.context.get_llm(
+                                    provider=override.llm,
+                                    model_name=override.model_name,
+                                )
                             return self.context.get_llm(provider=override.llm)
                         except Exception as e:
-                            logger.error(f"Failed to get override LLM provider '{override.llm}': {e}")
+                            logger.error(
+                                f"Failed to get override LLM (provider='{override.llm}', "
+                                f"model='{override.model_name}'): {e}"
+                            )
 
         return self.context.get_llm()
 
@@ -204,10 +212,15 @@ class TurnExecutor:
                 llm = self._resolve_llm(current_msg)
 
                 if active_cache_name and worker.active_cache_llm:
-                    if worker.active_cache_llm.__class__.__name__ != llm.__class__.__name__:
+                    old_model = getattr(worker.active_cache_llm, "model_name", None)
+                    new_model = getattr(llm, "model_name", None)
+                    if (
+                        worker.active_cache_llm.__class__.__name__ != llm.__class__.__name__
+                        or old_model != new_model
+                    ):
                         logger.info(
-                            f"LLM provider class changed from {worker.active_cache_llm.__class__.__name__} "
-                            f"to {llm.__class__.__name__}. Resetting obsolete context cache..."
+                            f"LLM changed from {worker.active_cache_llm.__class__.__name__} ({old_model}) "
+                            f"to {llm.__class__.__name__} ({new_model}). Resetting obsolete context cache..."
                         )
                         try:
                             await worker.active_cache_llm.delete_cache(active_cache_name)

@@ -58,6 +58,7 @@ user_allowlist = ["my_username"]       # Optional: allowed Discord usernames or 
 [[discord.channels]]
 channels = ["1234567890", "general"]   # Match channel ID or exact channel name
 llm = "claude"                          # Use Claude model in these channels
+model_name = "claude-opus-5-5"          # Optional: override the specific model identifier
 auto_thread = false                     # Disable automatic thread creation in these channels
 ```
 

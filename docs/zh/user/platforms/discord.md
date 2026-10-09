@@ -58,6 +58,7 @@ user_allowlist = ["允许的用户名"]       # 可选：限制仅允许特定�
 [[discord.channels]]
 channels = ["1234567890", "general"]   # 匹配频道 ID 或精确匹配频道名称
 llm = "claude"                          # 在这些频道中，强制使用 Claude 模型
+model_name = "claude-opus-5-5"          # 可选：覆盖该频道使用的具体模型代号
 auto_thread = false                     # 在这些频道中，关闭自动创建子线程的行为
 ```
 

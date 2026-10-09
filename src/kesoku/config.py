@@ -200,6 +200,10 @@ class DiscordChannelOverride(BaseModel):
 
     channels: list[str] = Field(default_factory=list, description="Channel IDs or names to match")
     llm: str | None = Field(default=None, description="Override LLM provider (e.g., 'claude', 'gemini')")
+    model_name: str | None = Field(
+        default=None,
+        description="Override LLM model identifier (e.g., 'claude-opus-5-5', 'gemini-3.8-pro')",
+    )
     auto_thread: bool | None = Field(default=None, description="Override auto_thread behavior")
 
 

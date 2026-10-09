@@ -121,6 +121,19 @@ def test_get_llm_with_context_override() -> None:
         called_config = mock_gemini.call_args[1]["config"]
         assert called_config.model_name == "gemini-2.0-flash-lite"
 
+    # Case 4: explicit model_name override for claude and gemini
+    with patch("kesoku.agent.llm.ClaudeLLM") as mock_claude:
+        get_llm(provider="claude", config=cfg, model_name="claude-opus-5-5")
+        mock_claude.assert_called_once()
+        called_config = mock_claude.call_args[1]["config"]
+        assert called_config.model_name == "claude-opus-5-5"
+
+    with patch("kesoku.agent.llm.GeminiLLM") as mock_gemini:
+        get_llm(provider="gemini", config=cfg, model_name="gemini-3.8-pro")
+        mock_gemini.assert_called_once()
+        called_config = mock_gemini.call_args[1]["config"]
+        assert called_config.model_name == "gemini-3.8-pro"
+
 
 @pytest.mark.asyncio
 async def test_claude_llm_generate_history_conversion() -> None:

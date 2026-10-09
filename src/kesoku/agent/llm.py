@@ -1269,6 +1269,7 @@ def get_llm(
     provider: str | None = None,
     config: KesokuConfig | None = None,
     use_context_compression: bool = False,
+    model_name: str | None = None,
 ) -> BaseLLM:
     """Get an LLM instance based on config or specified provider.
 
@@ -1276,6 +1277,7 @@ def get_llm(
         provider: Optional provider name ('gemini', 'claude', or 'mock'). If None, uses agent.llm from config.
         config: Optional configuration container. If None, uses get_config().
         use_context_compression: Whether to resolve using context compression settings.
+        model_name: Optional model identifier override for the resolved provider.
 
     Returns:
         An instance of BaseLLM (GeminiLLM, ClaudeLLM, or MockLLM).
@@ -1292,12 +1294,16 @@ def get_llm(
     provider_lower = provider.lower()
     if provider_lower == "gemini":
         gemini_cfg = config.gemini
-        if use_context_compression and gemini_cfg.context_model_name:
+        if model_name:
+            gemini_cfg = gemini_cfg.model_copy(update={"model_name": model_name})
+        elif use_context_compression and gemini_cfg.context_model_name:
             gemini_cfg = gemini_cfg.model_copy(update={"model_name": gemini_cfg.context_model_name})
         return GeminiLLM(config=gemini_cfg)
     elif provider_lower == "claude":
         claude_cfg = config.claude
-        if use_context_compression and claude_cfg.context_model_name:
+        if model_name:
+            claude_cfg = claude_cfg.model_copy(update={"model_name": model_name})
+        elif use_context_compression and claude_cfg.context_model_name:
             claude_cfg = claude_cfg.model_copy(update={"model_name": claude_cfg.context_model_name})
         return ClaudeLLM(config=claude_cfg)
     elif provider_lower == "mock":

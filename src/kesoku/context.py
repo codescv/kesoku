@@ -46,17 +46,23 @@ class KesokuContext:
             return self._config
         return get_config()
 
-    def get_llm(self, provider: str | None = None, use_context_compression: bool = False) -> BaseLLM:
+    def get_llm(
+        self,
+        provider: str | None = None,
+        use_context_compression: bool = False,
+        model_name: str | None = None,
+    ) -> BaseLLM:
         """Dynamically resolve and build an LLM provider instance at execution time.
 
         Args:
             provider: Optional provider name (e.g. 'gemini', 'claude'). If None, resolves from config.
             use_context_compression: Whether to resolve using context compression settings.
+            model_name: Optional model identifier override for the resolved provider.
 
         Returns:
             An instance of BaseLLM.
         """
-        if self._llm is not None and provider is None:
+        if self._llm is not None and provider is None and model_name is None:
             return self._llm
 
         target_provider = provider or (
@@ -64,4 +70,11 @@ class KesokuContext:
             if use_context_compression and self.config.agent.context_llm
             else self.config.agent.llm
         )
+        if model_name is not None:
+            return get_llm(
+                provider=target_provider,
+                config=self.config,
+                use_context_compression=use_context_compression,
+                model_name=model_name,
+            )
         return get_llm(provider=target_provider, config=self.config, use_context_compression=use_context_compression)
