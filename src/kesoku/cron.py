@@ -396,3 +396,28 @@ class CronManager:
                 asyncio.create_task(self._execute_job(job, idx))
                 triggered_count += 1
         return triggered_count
+
+    async def trigger_jobs_by_channel(self, chatbot_id: str, channel_ids: set[str]) -> list[dict[str, Any]]:
+        """Trigger all cronjobs bound to the given chatbot and any of the channel IDs immediately.
+
+        Schedule, probability, idle-time and daily-limit filters are bypassed.
+
+        Args:
+            chatbot_id: The chatbot ID the jobs must belong to.
+            channel_ids: Candidate channel IDs (e.g. a thread and its parent channel).
+
+        Returns:
+            The list of triggered job configurations.
+        """
+        jobs = self.get_all_jobs()
+        triggered: list[dict[str, Any]] = []
+        for idx, job in enumerate(jobs):
+            if job.get("chatbot_id") != chatbot_id:
+                continue
+            job_channel = job.get("channel_id")
+            if job_channel is None or str(job_channel) not in channel_ids:
+                continue
+            logger.info(f"Manually triggering Job {idx} for chatbot '{chatbot_id}' channel '{job_channel}'")
+            asyncio.create_task(self._execute_job(job, idx))
+            triggered.append(job)
+        return triggered

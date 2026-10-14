@@ -41,3 +41,4 @@ Kesoku chatbot adapters support standard slash commands (e.g. on Discord) or tex
     *   Closes active connections, stops background listeners.
     *   Reloads the OS systemd daemon or triggers an in-place `execv` swap.
 *   **`/cronjob`** (Alias: **`/cronjob {tag}`**): Lists or manually triggers scheduled automation tasks registered under the config.
+*   **`/cron`**: Immediately triggers the cronjob(s) bound to the current channel (matching this chatbot's `chatbot_id` and the channel's `channel_id`; inside a Discord thread, the parent channel also matches). Schedule, probability, idle-time and daily-limit filters are bypassed.

@@ -463,3 +463,47 @@ async def test_cron_manager_trigger_jobs_by_tag():
         assert count == 0
         await asyncio.sleep(0.1)
         mock_bot.trigger_cronjob.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cron_manager_trigger_by_channel():
+    mock_bot, _ = create_mock_bot()
+    other_bot, _ = create_mock_bot("discord_other")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_real = os.path.realpath(tmpdir)
+        with open(os.path.join(tmpdir_real, "p.md"), "w") as f:
+            f.write("Prompt P")
+
+        toml_data = {
+            "job": [
+                # Matches: same chatbot, same channel (int channel_id is normalized to str)
+                {"schedule": "0 0 1 1 *", "prompt": "p.md", "channel_id": "100", "chatbot_id": "discord"},
+                # Matches via parent channel candidate
+                {"schedule": "0 0 1 1 *", "prompt": "p.md", "channel_id": 200, "chatbot_id": "discord"},
+                # Different chatbot on same channel: must not trigger
+                {"schedule": "0 0 1 1 *", "prompt": "p.md", "channel_id": "100", "chatbot_id": "discord_other"},
+                # Different channel
+                {"schedule": "0 0 1 1 *", "prompt": "p.md", "channel_id": "300", "chatbot_id": "discord"},
+            ]
+        }
+        with open(os.path.join(tmpdir_real, "cronjob.toml"), "wb") as f:
+            tomli_w.dump(toml_data, f)
+
+        manager = CronManager(chatbots=[mock_bot, other_bot], config_dir=tmpdir_real)
+
+        jobs = await manager.trigger_jobs_by_channel("discord", {"100", "200"})
+        assert len(jobs) == 2
+        await asyncio.sleep(0.1)
+
+        assert mock_bot.trigger_cronjob.call_count == 2
+        channels = sorted(c[1]["channel_id"] for c in mock_bot.trigger_cronjob.call_args_list)
+        assert channels == ["100", "200"]
+        other_bot.trigger_cronjob.assert_not_called()
+
+        # No match
+        mock_bot.trigger_cronjob.reset_mock()
+        jobs = await manager.trigger_jobs_by_channel("discord", {"999"})
+        assert jobs == []
+        await asyncio.sleep(0.1)
+        mock_bot.trigger_cronjob.assert_not_called()

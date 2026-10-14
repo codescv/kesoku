@@ -384,6 +384,20 @@ class Chatbot(ABC):
             handle_cronjob,
         )
 
+        async def handle_cron(
+            reply_func: Callable[[str], Awaitable[None]],
+            channel_id: str,
+            **kwargs: Any,
+        ) -> None:
+            status_msg = await self.trigger_cronjobs_by_channel(channel_id)
+            await reply_func(status_msg)
+
+        self.commands.register(
+            "cron",
+            "Immediately trigger the cronjob(s) bound to the current channel.",
+            handle_cron,
+        )
+
         async def handle_notes(
             reply_func: Callable[[str], Awaitable[None]],
             channel_id: str,
@@ -467,6 +481,34 @@ class Chatbot(ABC):
             logger.error(f"Failed to trigger cronjobs for tag {tag}: {e}", exc_info=True)
             return f"⚠️ Failed to trigger cronjobs: {e}"
 
+    async def get_cron_channel_candidates(self, channel_id: str) -> set[str]:
+        """Return channel IDs whose cronjobs should be considered bound to `channel_id`.
+
+        Default is the channel itself. Adapters with threads (e.g. Discord) should
+        also include the parent channel, since cronjobs are configured on the parent.
+        """
+        return {str(channel_id)}
+
+    async def trigger_cronjobs_by_channel(self, channel_id: str) -> str:
+        """Trigger cronjobs bound to this chatbot and the given channel immediately."""
+        cron_mgr = getattr(self.gateway, "cron_manager", None)
+        if not cron_mgr:
+            return "⚠️ CronManager is not initialized or active."
+
+        try:
+            candidates = await self.get_cron_channel_candidates(channel_id)
+            jobs = await cron_mgr.trigger_jobs_by_channel(self.chatbot_id, candidates)
+            if not jobs:
+                return "⚠️ No cronjobs are configured for this channel."
+            lines = [f"🚀 Triggered {len(jobs)} cronjob(s) for this channel:"]
+            for job in jobs:
+                tag_str = f" (tag: `{job.get('tag')}`)" if job.get("tag") else ""
+                lines.append(f"  • `{job.get('prompt')}`{tag_str}")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error(f"Failed to trigger cronjobs for channel {channel_id}: {e}", exc_info=True)
+            return f"⚠️ Failed to trigger cronjobs: {e}"
+
     async def execute_command_from_text(
         self,
         text: str,
@@ -491,7 +533,7 @@ class Chatbot(ABC):
         command = raw_command.lower().lstrip("/")
 
         try:
-            if command in {"clear", "reset", "status", "compact", "debug"}:
+            if command in {"clear", "reset", "status", "compact", "debug", "cron"}:
                 if not channel_id:
                     await reply_func("⚠️ Channel ID is required for this command.")
                     return

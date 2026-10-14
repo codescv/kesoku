@@ -1361,6 +1361,14 @@ class DiscordChatbot(Chatbot):
         if target_channel_id_str not in self._typing_tasks:
             self._typing_tasks[target_channel_id_str] = asyncio.create_task(self._keep_typing(target_channel))
 
+    async def get_cron_channel_candidates(self, channel_id: str) -> set[str]:
+        """Return the channel itself plus its parent channel if it is a thread."""
+        candidates = {str(channel_id)}
+        channel = await self._get_discord_channel(channel_id)
+        if isinstance(channel, discord.Thread) and channel.parent_id:
+            candidates.add(str(channel.parent_id))
+        return candidates
+
     async def is_dm_channel(self, channel_id: str) -> bool:
         """Check if the given channel is a DM channel."""
         channel = await self._get_discord_channel(channel_id)

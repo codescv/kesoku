@@ -600,3 +600,32 @@ async def test_chatbot_notes_command(tmp_path) -> None:
     assert "No pinned notes" in replies[-1]
 
 
+
+@pytest.mark.asyncio
+async def test_chatbot_cron_command() -> None:
+    """Test /cron triggers cronjobs bound to the current chatbot and channel."""
+    mock_gateway = MagicMock(spec=Gateway)
+    mock_gateway.db = AsyncMock()
+    cron_mgr = MagicMock()
+    cron_mgr.trigger_jobs_by_channel = AsyncMock(return_value=[{"prompt": "cronjobs/a.md", "tag": "asuka"}])
+    mock_gateway.cron_manager = cron_mgr
+
+    chatbot = MockChatbot("mock_bot", mock_gateway)
+    replies: list[str] = []
+
+    async def reply_func(msg: str) -> None:
+        replies.append(msg)
+
+    await chatbot.execute_command_from_text("/cron", reply_func, channel_id="ch1")
+    cron_mgr.trigger_jobs_by_channel.assert_awaited_once_with("mock_bot", {"ch1"})
+    assert "Triggered 1 cronjob" in replies[-1]
+    assert "cronjobs/a.md" in replies[-1]
+
+    # No matching jobs
+    cron_mgr.trigger_jobs_by_channel = AsyncMock(return_value=[])
+    await chatbot.execute_command_from_text("/cron", reply_func, channel_id="ch2")
+    assert "No cronjobs" in replies[-1]
+
+    # Missing channel id
+    await chatbot.execute_command_from_text("/cron", reply_func)
+    assert "Channel ID is required" in replies[-1]
