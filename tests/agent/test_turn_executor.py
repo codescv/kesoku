@@ -1,15 +1,22 @@
 """Unit tests for TurnExecutor class."""
 
 import time
+from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
 from kesoku.agent.llm import BaseLLM, LLMResponse, ToolCallRequest
-from kesoku.agent.turn_executor import EMPTY_RESPONSE_RETRIES, TurnExecutor
+from kesoku.agent.turn_executor import (
+    EMPTY_RESPONSE_RETRIES,
+    TurnExecutor,
+    extract_question_options,
+    is_clicked_option,
+)
 from kesoku.agent.turn_logger import TurnLogger
 from kesoku.config import KesokuConfig, WorkspaceConfig
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.context import KesokuContext
 from kesoku.db import DatabaseManager, Message
 from kesoku.gateway.gateway import Gateway
@@ -2203,3 +2210,193 @@ async def test_turn_executor_implicit_caching_mode_skips_explicit_cache(temp_db:
 
     assert llm.created == []
     assert llm.cached_contents == [None]
+
+
+# ---------------------------------------------------------------------------
+# Clicked-option detection, auto-RAG guard and snippet sanitisation
+# ---------------------------------------------------------------------------
+
+LAST_QUESTION_REPLY = (
+    "地图摊在桌上。\n"
+    "[question: 接下来做什么？ || 秋叶原逛街扫货：挑选情侣穿搭＋顺便淘限定游戏手柄 | 去浅草看花火 | 回家打游戏]"
+)
+OLD_Q_BLOCK = "[question: 下一步怎么做？ || 像香槟软木塞一样弹射出去 | 冷静地递上一杯热可可]"
+
+
+def _tmsg(role: MessageRole, content: str, ts: float, session_id: str = "s", msg_id: str | None = None) -> Message:
+    """Build a minimal Message for executor tests."""
+    kwargs: dict[str, Any] = {"id": msg_id} if msg_id else {}
+    return Message(
+        session_id=session_id,
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1" if role == MessageRole.USER else "Kesoku",
+        role=role,
+        type=MessageType.TEXT,
+        content=content,
+        status=MessageStatus.RESPONDED,
+        timestamp=ts,
+        **kwargs,
+    )
+
+
+def test_extract_question_options() -> None:
+    """Options of the LAST [question:] block are returned stripped; no block gives []."""
+    assert extract_question_options(LAST_QUESTION_REPLY) == [
+        "秋叶原逛街扫货：挑选情侣穿搭＋顺便淘限定游戏手柄",
+        "去浅草看花火",
+        "回家打游戏",
+    ]
+    assert extract_question_options("[question: A? || x | y]\n中间\n[question: B? || p | q | r]") == ["p", "q", "r"]
+    assert extract_question_options("没有按钮") == []
+    assert extract_question_options("") == []
+
+
+@pytest.mark.parametrize(
+    "user_text", ["秋叶原逛街扫货：挑选情侣穿搭＋顺便淘限定游戏手柄", "  去浅草看花火 ", "2", "选2", "2."]
+)
+def test_is_clicked_option_positive(user_text: str) -> None:
+    """Exact option clicks (whitespace-insensitive) and short numeric picks are clicked options."""
+    assert is_clicked_option(user_text, LAST_QUESTION_REPLY)
+
+
+@pytest.mark.parametrize(
+    "user_text", ["可以耐心一点吗，过程都展示出来 不要狂推进度", "去浅草看花火，然后再去吃拉面好不好", "今天去哪？", ""]
+)
+def test_is_clicked_option_negative(user_text: str) -> None:
+    """Free-form text, even overlapping an option, is not a clicked option."""
+    assert not is_clicked_option(user_text, LAST_QUESTION_REPLY)
+
+
+def test_is_clicked_option_without_question_block() -> None:
+    """Without a question block in the previous reply a non-numeric message is never a click."""
+    assert not is_clicked_option("去浅草看花火", "普通回复，没有按钮")
+
+
+def _rag_executor(surrounding: list[Message]) -> TurnExecutor:
+    """TurnExecutor whose DB returns one semantic hit from another session with the given neighbours."""
+    hit = _tmsg(MessageRole.ASSISTANT, "命中消息", 1000.0, session_id="oldsess1")
+    hit.metadata = {"semantic_score": 0.95, "similarity_score": 1.2}
+    ctx = MagicMock()
+    ctx.db.search_role_messages_semantic = AsyncMock(return_value=[hit])
+    ctx.db.get_surrounding_messages = AsyncMock(return_value=surrounding)
+    return TurnExecutor("cursess1", gateway=MagicMock(), tool_runner=MagicMock(), context=ctx)
+
+
+async def test_rag_snippets_strip_question_blocks() -> None:
+    """Retrieved snippets never re-inject historical question stems/options."""
+    ex = _rag_executor(
+        [
+            _tmsg(MessageRole.USER, "今天去哪里玩", 990.0, session_id="oldsess1"),
+            _tmsg(MessageRole.ASSISTANT, f"去神社吧！\n{OLD_Q_BLOCK}", 1000.0, session_id="oldsess1"),
+        ]
+    )
+    out = await ex._retrieve_auto_search_context(
+        role="role_a", query_text="今天去哪里玩", current_session_id="cursess1"
+    )
+    assert "<relevant_historical_context>" in out
+    assert "香槟软木塞" not in out and "下一步怎么做" not in out and "||" not in out
+
+
+async def test_rag_snippets_truncate_long_agent_lines() -> None:
+    """Long Agent lines are truncated; user lines stay readable."""
+    ex = _rag_executor(
+        [
+            _tmsg(MessageRole.USER, "今天去哪里玩", 990.0, session_id="oldsess1"),
+            _tmsg(MessageRole.ASSISTANT, "像爆米花一样膨胀起来，" * 300, 1000.0, session_id="oldsess1"),
+        ]
+    )
+    out = await ex._retrieve_auto_search_context(
+        role="role_a", query_text="今天去哪里玩", current_session_id="cursess1"
+    )
+    agent_lines = [ln for ln in out.splitlines() if ln.strip().startswith("Agent")]
+    assert agent_lines
+    assert all(len(ln) <= 500 for ln in agent_lines)
+    assert "今天去哪里玩" in out and len(out) < 2000
+
+
+async def _inject_executor(tmp_path: Path, session_role: str | None, channel_role: str | None) -> TurnExecutor:
+    """Real DB/gateway executor with roles/role_a/preferences.md and configurable session/channel roles.
+
+    Args:
+        tmp_path: pytest temp dir.
+        session_role: role_name stored on the session (None keeps the default).
+        channel_role: role bound to cli/ch1 (None leaves the channel without a role row).
+    """
+    db_path = str(tmp_path / "k.db")
+    DatabaseManager(db_path).init_tables()
+    roles_dir = tmp_path / "roles"
+    (roles_dir / "role_a").mkdir(parents=True)
+    (roles_dir / "role_a" / "preferences.md").write_text("ROLE_A_PREFS", encoding="utf-8")
+    cfg = KesokuConfig(
+        workspace=WorkspaceConfig(db_path=db_path, roles_dir=str(roles_dir), sessions_dir=str(tmp_path / "sessions"))
+    )
+    cfg.agent_working_dir = str(tmp_path)
+    cfg.agent.auto_context_search = True
+    gw = Gateway(context=KesokuContext(config=cfg))
+    if channel_role:
+        await gw.db.set_channel_role("cli", "ch1", channel_role)
+    await gw.create_session("sessinj", title="inject", role=session_role)
+    await gw.db.set_active_session_for_channel("cli", "ch1", "sessinj")
+    return TurnExecutor("sessinj", gw, MagicMock(), MagicMock(), context=KesokuContext(config=cfg))
+
+
+def _inject_history(user_text: str) -> list[Message]:
+    """Previous question turn followed by the current user message."""
+    now = time.time()
+    return [
+        _tmsg(MessageRole.USER, "今天做什么？", now - 120, session_id="sessinj", msg_id="h_u1"),
+        _tmsg(MessageRole.ASSISTANT, LAST_QUESTION_REPLY, now - 100, session_id="sessinj", msg_id="h_a1"),
+        _tmsg(MessageRole.USER, user_text, now, session_id="sessinj", msg_id="h_u2"),
+    ]
+
+
+async def _run_inject(ex: TurnExecutor, tmp_path: Path, user_text: str, rag: AsyncMock) -> Message | None:
+    """Run _inject_context_and_trigger_consolidation with a patched auto-RAG retriever."""
+    history = _inject_history(user_text)
+    with patch.object(ex, "_retrieve_auto_search_context", rag):
+        return await ex._inject_context_and_trigger_consolidation(
+            history, history[-1], MagicMock(), session_staging_dir=str(tmp_path / "staging")
+        )
+
+
+async def test_inject_skips_auto_rag_for_clicked_option(tmp_path: Path) -> None:
+    """Clicking a button from the previous reply does not trigger auto-RAG."""
+    ex = await _inject_executor(tmp_path, session_role=None, channel_role="role_a")
+    rag = AsyncMock(return_value="<relevant_historical_context>OLD</relevant_historical_context>\n")
+    out = await _run_inject(ex, tmp_path, "秋叶原逛街扫货：挑选情侣穿搭＋顺便淘限定游戏手柄", rag)
+    rag.assert_not_called()
+    assert out is not None and "OLD" not in out.content
+
+
+async def test_inject_skips_auto_rag_for_numeric_pick(tmp_path: Path) -> None:
+    """A short numeric pick ('选2') is treated like a click."""
+    ex = await _inject_executor(tmp_path, session_role=None, channel_role="role_a")
+    rag = AsyncMock(return_value="<relevant_historical_context>OLD</relevant_historical_context>\n")
+    await _run_inject(ex, tmp_path, "选2", rag)
+    rag.assert_not_called()
+
+
+async def test_inject_runs_auto_rag_for_free_text(tmp_path: Path) -> None:
+    """Free-form messages still get auto-RAG context."""
+    ex = await _inject_executor(tmp_path, session_role=None, channel_role="role_a")
+    rag = AsyncMock(return_value="<relevant_historical_context>OLD</relevant_historical_context>\n")
+    out = await _run_inject(ex, tmp_path, "还记得上次我们在浅草吃的那家鲷鱼烧吗", rag)
+    rag.assert_called_once()
+    assert out is not None and "OLD" in out.content
+
+
+async def test_inject_uses_session_role_name_without_channel_role(tmp_path: Path) -> None:
+    """Thread sessions with role_name set but no channel role row still get the role's preferences."""
+    ex = await _inject_executor(tmp_path, session_role="role_a", channel_role=None)
+    out = await _run_inject(ex, tmp_path, "还记得上次我们在浅草吃的那家鲷鱼烧吗", AsyncMock(return_value=""))
+    assert out is not None
+    assert "ROLE_A_PREFS" in out.content
+    assert out.content.index("ROLE_A_PREFS") < out.content.index("<current_message")
+
+
+async def test_inject_default_session_role_falls_back_to_channel(tmp_path: Path) -> None:
+    """A 'default' session role defers to the channel role."""
+    ex = await _inject_executor(tmp_path, session_role=None, channel_role="role_a")
+    out = await _run_inject(ex, tmp_path, "还记得上次我们在浅草吃的那家鲷鱼烧吗", AsyncMock(return_value=""))
+    assert out is not None and "ROLE_A_PREFS" in out.content

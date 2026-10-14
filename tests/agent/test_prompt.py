@@ -1,6 +1,15 @@
 """Unit tests for the modular system prompt construction utility."""
 
+from collections.abc import Iterator
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+import kesoku.config
 from kesoku.agent.prompt import build_sys_prompt
+from kesoku.config import KesokuConfig, init_config, load_config
+from kesoku.db import Session
 
 
 def test_build_sys_prompt_with_custom_context() -> None:
@@ -97,3 +106,89 @@ def test_build_sys_prompt_with_session(tmp_path) -> None:
         assert "update_session_notes" in prompt
     finally:
         kesoku.config._global_config = original_config
+
+
+# ---------------------------------------------------------------------------
+# Role resolution from session.role_name (thread sessions without a channel role)
+# ---------------------------------------------------------------------------
+
+ROLE_INTRO_MARKER = "ROLE_A_INTRO_MARKER_7f3a"
+
+
+@pytest.fixture
+def role_awd(tmp_path: Path) -> Iterator[KesokuConfig]:
+    """Isolated global config whose agent working dir contains roles/role_a/intro.md."""
+    (tmp_path / "roles" / "role_a").mkdir(parents=True)
+    (tmp_path / "roles" / "role_a" / "intro.md").write_text(f"# Role A\n{ROLE_INTRO_MARKER}\n", encoding="utf-8")
+    original = kesoku.config._global_config
+    config_path = tmp_path / "config.toml"
+    init_config(str(config_path))
+    cfg = load_config(str(config_path))
+    cfg.agent_working_dir = str(tmp_path)
+    cfg.workspace.roles_dir = str(tmp_path / "roles")
+    try:
+        yield cfg
+    finally:
+        kesoku.config._global_config = original
+
+
+def _fake_db(mapping: tuple[str, str] | None, channel_role: str = "default") -> MagicMock:
+    """DatabaseManager stand-in with a controllable channel mapping and channel role."""
+    db = MagicMock()
+    db.get_channel_by_session.return_value = mapping
+    db.get_channel_role_with_inheritance.return_value = channel_role
+    return db
+
+
+def test_prompt_session_role_name_without_channel_mapping(role_awd: KesokuConfig) -> None:
+    """A session whose role_name is set but which has no channel mapping loads that role's intro."""
+    sess = Session(id="thread01", title="t", role_name="role_a")
+    with patch("kesoku.agent.prompt.DatabaseManager", return_value=_fake_db(None)):
+        prompt = build_sys_prompt(session=sess)
+    assert ROLE_INTRO_MARKER in prompt
+
+
+def test_prompt_session_role_name_beats_default_channel_role(role_awd: KesokuConfig) -> None:
+    """A mapped channel without a role row resolves to 'default'; session.role_name must still win."""
+    sess = Session(id="thread02", title="t", role_name="role_a")
+    with patch("kesoku.agent.prompt.DatabaseManager", return_value=_fake_db(("cb", "ch"), "default")):
+        prompt = build_sys_prompt(session=sess)
+    assert ROLE_INTRO_MARKER in prompt
+
+
+def test_prompt_default_role_name_uses_channel_lookup(role_awd: KesokuConfig) -> None:
+    """role_name='default' is treated as unset, so the channel role lookup still applies."""
+    sess = Session(id="s1", title="t", role_name="default")
+    db = _fake_db(("cb", "ch"), "role_a")
+    with patch("kesoku.agent.prompt.DatabaseManager", return_value=db):
+        prompt = build_sys_prompt(session=sess)
+    assert ROLE_INTRO_MARKER in prompt
+    db.get_channel_role_with_inheritance.assert_called()
+
+
+def test_prompt_no_role_anywhere_has_no_persona(role_awd: KesokuConfig) -> None:
+    """Without role_name and without a mapping no role intro leaks into the prompt."""
+    for role_name in ("default", None):
+        sess = Session(id="s2", title="t", role_name=role_name)
+        with patch("kesoku.agent.prompt.DatabaseManager", return_value=_fake_db(None)):
+            prompt = build_sys_prompt(session=sess)
+        assert ROLE_INTRO_MARKER not in prompt
+
+
+def test_prompt_explicit_role_argument_respected(role_awd: KesokuConfig) -> None:
+    """An explicitly passed role is used as-is."""
+    sess = Session(id="s3", title="t", role_name="default")
+    with patch("kesoku.agent.prompt.DatabaseManager", return_value=_fake_db(None)):
+        prompt = build_sys_prompt(session=sess, role="role_a")
+    assert ROLE_INTRO_MARKER in prompt
+
+
+def test_prompt_channel_lookup_failure_still_uses_role_name(role_awd: KesokuConfig) -> None:
+    """A DB error during channel lookup never crashes prompt building."""
+    db = MagicMock()
+    db.get_channel_by_session.side_effect = RuntimeError("db locked")
+    sess = Session(id="s4", title="t", role_name="role_a")
+    with patch("kesoku.agent.prompt.DatabaseManager", return_value=db):
+        prompt = build_sys_prompt(session=sess)
+    assert "# Output Formatting Rules" in prompt
+    assert ROLE_INTRO_MARKER in prompt
