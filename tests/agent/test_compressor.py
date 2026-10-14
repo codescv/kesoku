@@ -96,7 +96,7 @@ def test_format_field():
 
 
 def test_format_summary_with_new_structure():
-    """Test complete format_summary pipeline with timeline, user_asks, tools_and_skills, and learnings."""
+    """Test format_summary renders timeline, tools_and_skills, learnings and drops any user_asks."""
     json_input = """```json
 {
   "timeline": ["2026-01-01 18:00 - 2026-01-01 18:30: User requested feature X"],
@@ -113,7 +113,8 @@ def test_format_summary_with_new_structure():
     result = HistoryCompressor.format_summary(json_input)
 
     assert "Timeline:\n- 2026-01-01 18:00 - 2026-01-01 18:30: User requested feature X" in result
-    assert "User Asks:\n- Keep all code snippets compatible with Python 3.12" in result
+    assert "User Asks" not in result
+    assert "Python 3.12" not in result
     assert "Tools & Skills:\n- run_shell_command (ai-image): Generated illustrations for story scene" in result
     assert "Learnings:\nUse rg instead of grep for searching." in result
     assert result.startswith("Timeline:")
@@ -129,7 +130,7 @@ def test_format_summary_all_none():
 }"""
     result = HistoryCompressor.format_summary(json_input)
     assert "Timeline:\n- 2026-01-01 18:00: Checked system status." in result
-    assert "User Asks:\nNone" in result
+    assert "User Asks" not in result
     assert "Tools & Skills:\nNone" in result
     assert "Learnings:\nNone" in result
 
@@ -192,7 +193,8 @@ async def test_auto_compact_session(tmp_path):
     db_mock.insert_summary_node.assert_called_once()
     inserted_node: SummaryNode = db_mock.insert_summary_node.call_args[0][0]
     assert "Timeline:\n- 2026-01-01 18:00 - 2026-01-01 18:30: Started task" in inserted_node.summary
-    assert "User Asks:\n- Do not modify production database" in inserted_node.summary
+    assert "User Asks" not in inserted_node.summary
+    assert "user_asks" not in call_prompt
     assert "Tools & Skills:\n- run_shell_command: Executed CLI script" in inserted_node.summary
 
 
@@ -238,7 +240,7 @@ async def test_consolidate_forest():
     inserted_parent = db_mock.insert_summary_node.call_args_list[0][0][0]
     assert inserted_parent.level == 1
     assert "Timeline:\n- 2026-01-01 19:00 - 2026-01-01 19:30: Merged events" in inserted_parent.summary
-    assert "User Asks:\n- Do not modify production database" in inserted_parent.summary
+    assert "User Asks" not in inserted_parent.summary
     assert "Tools & Skills:\n- run_shell_command: Executed CLI script" in inserted_parent.summary
 
 def test_estimate_prepared_turn_tokens():
@@ -294,35 +296,64 @@ def test_estimate_prepared_turn_tokens():
     assert tokens == 140
 
 
-def test_format_summary_syncs_user_asks_to_notes(tmp_path):
-    """Test that format_summary passively syncs extracted user_asks into $STAGING_DIR/notes.md."""
-    staging_dir = str(tmp_path / "sess_notes_sync")
-    json_input_1 = """{
-      "timeline": ["2026-01-01 18:00: Started chat"],
-      "user_asks": ["Always reply in Japanese with furigana", "Keep answers under 3 sentences"],
-      "tools_and_skills": null,
-      "learnings": null
-    }"""
-    HistoryCompressor.format_summary(json_input_1, staging_dir=staging_dir)
-
+def test_format_summary_does_not_touch_notes(tmp_path):
+    """format_summary must never write extracted requirements into $STAGING_DIR/notes.md."""
+    staging_dir = str(tmp_path / "sess_notes")
+    os.makedirs(staging_dir)
     notes_path = os.path.join(staging_dir, "notes.md")
-    assert os.path.exists(notes_path)
-    with open(notes_path, encoding="utf-8") as f:
-        content = f.read()
-    assert "- Always reply in Japanese with furigana" in content
-    assert "- Keep answers under 3 sentences" in content
-
-    # Second pass with one duplicate and one new rule should only append the new rule
-    json_input_2 = """{
-      "timeline": ["2026-01-01 18:30: Continued chat"],
-      "user_asks": ["Always reply in Japanese with furigana", "Do not use markdown headers"],
+    with open(notes_path, "w", encoding="utf-8") as f:
+        f.write("- current rule")
+    json_input = """{
+      "timeline": ["2026-01-01 18:00: Started chat"],
+      "user_asks": ["Outdated rule that must not come back"],
       "tools_and_skills": null,
       "learnings": null
     }"""
-    HistoryCompressor.format_summary(json_input_2, staging_dir=staging_dir)
+    HistoryCompressor.format_summary(json_input, staging_dir=staging_dir)
     with open(notes_path, encoding="utf-8") as f:
-        content_2 = f.read()
-    assert content_2.count("Always reply in Japanese with furigana") == 1
-    assert "- Do not use markdown headers" in content_2
+        assert f.read() == "- current rule"
 
 
+def test_strip_legacy_user_asks():
+    """Legacy summaries have their User Asks section removed; other sections are kept intact."""
+    legacy = (
+        "Timeline:\n- 2026-10-13 10:40 - 2026-10-13 16:56: Scene\n\n"
+        "User Asks:\n- 偶数回合必须双图\n- 全员比基尼\n\n"
+        "Tools & Skills:\n- run_shell_command: images\n\n"
+        "Learnings:\nUse uv."
+    )
+    stripped = HistoryCompressor.strip_legacy_user_asks(legacy)
+    assert "User Asks" not in stripped
+    assert "比基尼" not in stripped
+    assert stripped.startswith("Timeline:\n- 2026-10-13 10:40")
+    assert "\n\nTools & Skills:\n- run_shell_command: images\n\nLearnings:\nUse uv." in stripped
+
+    # User Asks as the last section, and summaries without it
+    tail = "Timeline:\n- a\n\nUser Asks:\nNone"
+    assert HistoryCompressor.strip_legacy_user_asks(tail) == "Timeline:\n- a"
+    plain = "Timeline:\n- a\n\nLearnings:\nNone"
+    assert HistoryCompressor.strip_legacy_user_asks(plain) == plain
+
+
+@pytest.mark.asyncio
+async def test_consolidate_strips_legacy_user_asks_from_children():
+    """Consolidation input must not contain legacy User Asks from child summaries."""
+    db_mock = AsyncMock()
+    llm_mock = AsyncMock()
+    llm_mock.estimate_tokens_fallback = MagicMock(return_value=100)
+    llm_mock.generate.return_value = LLMResponse(
+        content='{"timeline": ["x"], "tools_and_skills": null, "learnings": null}'
+    )
+    roots = [
+        SummaryNode(
+            id=f"n{i}", session_id="s", level=0,
+            summary=f"Timeline:\n- t{i}\n\nUser Asks:\n- stale rule {i}\n\nLearnings:\nNone",
+            start_timestamp=1000 + i, end_timestamp=1001 + i, token_count=10, source_token_count=100,
+        )
+        for i in range(8)
+    ]
+    db_mock.get_root_summary_nodes.side_effect = [roots, []]
+    await HistoryCompressor(db_mock).consolidate_forest("s", llm_mock, K=4)
+    prompt = llm_mock.generate.call_args[1]["prompt"]
+    assert "stale rule" not in prompt
+    assert "- t0" in prompt

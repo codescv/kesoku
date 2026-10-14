@@ -84,7 +84,7 @@ Long conversational threads cannot be kept in their raw transcripts without hitt
 ### 4.1 Hierarchical Turn-Based Compaction (`HistoryCompressor`)
 1. Before every LLM inference step, the agent checks if the history length exceeds thresholds.
 2. Compaction is triggered when the middle turns (excluding the protected head and tail turns) accumulate enough uncompressed tokens and turns.
-3. The compressor groups the uncompressed turns and generates a structured, high-density Level-0 **Summary Node** using the LLM. The summary node contains timeline events, key decisions, pitfalls, and directories/files modified.
+3. The compressor groups the uncompressed turns and generates a structured, high-density Level-0 **Summary Node** using the LLM. The summary node contains three sections: Timeline, Tools & Skills, and Learnings. It deliberately has no "User Asks" section: requirements frozen into summaries went stale and contradicted newer instructions, so current rules live only in the agent-maintained `notes.md` (legacy "User Asks" sections in old nodes are stripped before being shown to the LLM).
 4. In SQLite, the source messages are updated to link to the new Level-0 summary node.
 5. If Level-L summary nodes accumulate to $2 \times K$ nodes, the oldest $K$ nodes are consolidated and merged into a Level-L+1 summary node (where $K$ is the configured `context_consolidation_k`).
 6. The active history context is assembled dynamically, containing the protected head turns, a scaffold header detailing the summary forest nodes, a system/assistant scaffold acknowledgment message, the remaining uncompacted turns buffer, and the protected tail turns.

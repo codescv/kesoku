@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS agent_memories (
 ### 4.1 分层回合历史压缩 (`HistoryCompressor`)
 1. 在每次发起 LLM 推理前，系统会自动评估当前的历史消息 Token 长度。
 2. 当除去受保护的头部回合（protected head turns）和尾部回合（protected tail turns）之后的中间回合累积了足够的未压缩 Token 数与回合数时，会触发自动压缩流程。
-3. 压缩管理器把需要压缩的中间回合打包，调用 LLM 生成结构化、高密度的 0 级**摘要节点（Level-0 Summary Node）**。摘要中包含时间轴事件、关键决策与变更、遇到的坑（Pitfalls）以及变更的根目录/文件等字段。
+3. 压缩管理器把需要压缩的中间回合打包，调用 LLM 生成结构化、高密度的 0 级**摘要节点（Level-0 Summary Node）**。摘要包含 Timeline、Tools & Skills、Learnings 三段，刻意不再包含 "User Asks"：冻结在摘要里的要求容易过时并与新指令冲突，当前规则只由 agent 维护在 `notes.md` 中（旧节点里的 "User Asks" 段在发送给 LLM 前会被剥离）。
 4. 在 SQLite 数据库中更新原消息记录，将其 `summary_node_id` 字段指向新创建 of 0 级摘要节点。
 5. 当 L 级摘要节点累积到 $2 \times K$ 个时，最老的 $K$ 个节点会被进一步合并并巩固为 Level-L+1 级的更高阶摘要节点（其中 $K$ 为配置的 `context_consolidation_k`）。
 6. 系统会动态拼装活跃历史上下文，拼装顺序为：受保护的头部回合 -> 指向各个摘要节点的骨架指示文本 -> 系统/助手层面的骨架确认应答消息 -> 剩余的未压缩中间回合缓冲区 -> 受保护的尾部回合。

@@ -765,7 +765,10 @@ class TurnExecutor:
         ]
         for node in root_summaries:
             depth_label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(node.level, f"Level-{node.level}")
-            scaffold_parts.append(f"\n[{depth_label} Summary (Level {node.level}, node {node.id})]\n{node.summary}")
+            scaffold_parts.append(
+                f"\n[{depth_label} Summary (Level {node.level}, node {node.id})]\n"
+                f"{HistoryCompressor.strip_legacy_user_asks(node.summary)}"
+            )
         scaffold_content = "\n".join(scaffold_parts)
 
         # Build assembled messages in memory
