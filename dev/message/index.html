@@ -1,0 +1,2680 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://codescv.github.io/kesoku/dev/message/">
+      
+      
+        <link rel="prev" href="../agent-cycle/">
+      
+      
+        <link rel="next" href="../sys-prompt/">
+      
+      
+        
+          <link rel="alternate" href="./" hreflang="en">
+        
+          <link rel="alternate" href="../../zh/dev/message/" hreflang="zh">
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Message Model - Kesoku Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="purple">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#kesoku-ai-agent-message-data-model-lifecycle-specification" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Kesoku Docs" class="md-header__button md-logo" aria-label="Kesoku Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Kesoku Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Message Model
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="purple"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="purple"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+      <div class="md-header__option">
+  <div class="md-select">
+    
+    <button class="md-header__button md-icon" aria-label="Select language">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m12.87 15.07-2.54-2.51.03-.03A17.5 17.5 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2zm-2.62 7 1.62-4.33L19.12 17z"/></svg>
+    </button>
+    <div class="md-select__inner">
+      <ul class="md-select__list">
+        
+          <li class="md-select__item">
+            <a href="./" hreflang="en" class="md-select__link">
+              English
+            </a>
+          </li>
+        
+          <li class="md-select__item">
+            <a href="../../zh/dev/message/" hreflang="zh" class="md-select__link">
+              简体中文
+            </a>
+          </li>
+        
+      </ul>
+    </div>
+  </div>
+</div>
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/codescv/kesoku" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../user/installation/" class="md-tabs__link">
+          
+  
+  
+  User Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../architecture/" class="md-tabs__link">
+          
+  
+  
+  Developer Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Kesoku Docs" class="md-nav__button md-logo" aria-label="Kesoku Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Kesoku Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/codescv/kesoku" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/role-playing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Role Playing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory & Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Skills & Custom Tools
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/safety/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Settings (Shell)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/commands/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Slash Commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2_8" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_8" id="__nav_2_8_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Platforms
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Platforms
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/platforms/discord/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Discord
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/platforms/gchat/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Google Chat
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/platforms/wechat/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WeChat
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/service/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Service Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../user/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Developer Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Developer Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture & Concurrency
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agent-cycle/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Agent Cycle
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Message Model
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Message Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-core-architecture-overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Core Architecture Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-message-attributes-matrix-the-three-axes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Message Attributes Matrix (The Three Axes)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. Message Attributes Matrix (The Three Axes)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#21-roles-role" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.1 Roles (role)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#22-types-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.2 Types (type)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#23-statuses-status" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.3 Statuses (status)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-detailed-message-field-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Detailed Message Field Configuration
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="3. Detailed Message Field Configuration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#31-platform-specific-field-mapping-details" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.1 Platform-Specific Field Mapping Details
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-system-wide-lifecycle-state-transitions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. System-Wide Lifecycle &amp; State Transitions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="4. System-Wide Lifecycle &amp; State Transitions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#41-user-query-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 User Query Lifecycle
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#42-outgoing-assistant-text-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.2 Outgoing Assistant Text Lifecycle
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#43-intermediate-message-lifecycle-thoughts-tools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.3 Intermediate Message Lifecycle (Thoughts &amp; Tools)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#44-orphanedstuck-message-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.4 Orphaned/Stuck Message Recovery
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-history-storage-user-visibility-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. History Storage &amp; User Visibility Rules
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. History Storage &amp; User Visibility Rules">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#51-database-history-get_session_history" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.1 Database History (get_session_history)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#52-llm-context-prompt-history-build_clean_history" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.2 LLM Context Prompt History (build_clean_history)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#53-user-visibility-matrix" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.3 User Visibility Matrix
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#54-advanced-role-mapping-transpilation-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.4 Advanced Role Mapping &amp; Transpilation Rules
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-concrete-end-to-end-trajectory-examples" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Concrete End-to-End Trajectory Examples
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. Concrete End-to-End Trajectory Examples">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#example-61-standard-user-turn-with-tool-execution-discord" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Example 6.1: Standard User Turn with Tool Execution (Discord)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#example-62-background-cronjob-turn-wechat" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Example 6.2: Background Cronjob Turn (WeChat)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#example-63-thought-interruption" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Example 6.3: Thought Interruption
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sys-prompt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    System Prompt
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tools & Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory & Database
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../role-playing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Role Playing Principles
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Skills System
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../llm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Backends
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../chatbot-interface/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chatbot Interface
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+          
+          
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_11" >
+        
+          
+          <label class="md-nav__link" for="__nav_3_11" id="__nav_3_11_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Platforms
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_11_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3_11">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Platforms
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../platforms/discord/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Discord Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../platforms/gchat/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Google Chat Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../platforms/wechat/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WeChat Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../debugging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing & Debugging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-core-architecture-overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Core Architecture Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-message-attributes-matrix-the-three-axes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Message Attributes Matrix (The Three Axes)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. Message Attributes Matrix (The Three Axes)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#21-roles-role" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.1 Roles (role)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#22-types-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.2 Types (type)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#23-statuses-status" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.3 Statuses (status)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-detailed-message-field-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Detailed Message Field Configuration
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="3. Detailed Message Field Configuration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#31-platform-specific-field-mapping-details" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.1 Platform-Specific Field Mapping Details
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-system-wide-lifecycle-state-transitions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. System-Wide Lifecycle &amp; State Transitions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="4. System-Wide Lifecycle &amp; State Transitions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#41-user-query-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 User Query Lifecycle
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#42-outgoing-assistant-text-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.2 Outgoing Assistant Text Lifecycle
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#43-intermediate-message-lifecycle-thoughts-tools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.3 Intermediate Message Lifecycle (Thoughts &amp; Tools)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#44-orphanedstuck-message-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.4 Orphaned/Stuck Message Recovery
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-history-storage-user-visibility-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. History Storage &amp; User Visibility Rules
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. History Storage &amp; User Visibility Rules">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#51-database-history-get_session_history" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.1 Database History (get_session_history)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#52-llm-context-prompt-history-build_clean_history" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.2 LLM Context Prompt History (build_clean_history)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#53-user-visibility-matrix" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.3 User Visibility Matrix
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#54-advanced-role-mapping-transpilation-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.4 Advanced Role Mapping &amp; Transpilation Rules
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-concrete-end-to-end-trajectory-examples" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Concrete End-to-End Trajectory Examples
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="6. Concrete End-to-End Trajectory Examples">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#example-61-standard-user-turn-with-tool-execution-discord" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Example 6.1: Standard User Turn with Tool Execution (Discord)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#example-62-background-cronjob-turn-wechat" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Example 6.2: Background Cronjob Turn (WeChat)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#example-63-thought-interruption" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Example 6.3: Thought Interruption
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="kesoku-ai-agent-message-data-model-lifecycle-specification">Kesoku AI Agent: Message Data Model &amp; Lifecycle Specification</h1>
+<p>This document provides a comprehensive specification of the <code>Message</code> data model, field configuration matrices, system-wide lifecycles, history storage rules, user visibility behaviors, and end-to-end conversational trajectories within the Kesoku AI Agent framework.</p>
+<hr />
+<h2 id="1-core-architecture-overview">1. Core Architecture Overview</h2>
+<p>Kesoku operates on a highly decoupled, asynchronous <strong>Pure Broker Architecture</strong>. At the center of this framework is the <code>Message</code> model (defined in <a href="file:///usr/local/google/home/chii/Developer/kesoku/src/kesoku/db/models.py#L13">src/kesoku/db/models.py</a>), persisted locally in SQLite and broadcast across in-memory subscribers via the <code>Gateway</code> broker (defined in <a href="file:///usr/local/google/home/chii/Developer/kesoku/src/kesoku/gateway/gateway.py">src/kesoku/gateway/gateway.py</a>). </p>
+<p>This decoupled approach allows multiple chatbots (e.g., CLI, Discord, Google Chat, WeChat) and backend agent workers to communicate entirely through state-driven messages.</p>
+<hr />
+<h2 id="2-message-attributes-matrix-the-three-axes">2. Message Attributes Matrix (The Three Axes)</h2>
+<p>Every message in Kesoku is structured around three core axes: <strong>Role</strong>, <strong>Type</strong>, and <strong>Status</strong>.</p>
+<pre class="mermaid"><code>graph TD
+    A[Message] --&gt; B[MessageRole]
+    A --&gt; C[MessageType]
+    A --&gt; D[MessageStatus]
+
+    B --&gt; B1(user)
+    B --&gt; B2(assistant)
+    B --&gt; B3(tool)
+    B --&gt; B4(system)
+
+    C --&gt; C1(text)
+    C --&gt; C2(thought)
+    C --&gt; C3(tool_call)
+    C --&gt; C4(tool_result)
+
+    D --&gt; D1[User Message Statuses]
+    D --&gt; D2[Assistant/Tool Statuses]
+
+    D1 --&gt; D1_pending_agent(pending_agent)
+    D1 --&gt; D1_processing(processing)
+    D1 --&gt; D1_processed(processed)
+    D1 --&gt; D1_interrupted(interrupted)
+    D1 --&gt; D1_error(error)
+
+    D2 --&gt; D2_pending(pending)
+    D2 --&gt; D2_delivered(delivered)
+    D2 --&gt; D2_responded(responded)</code></pre>
+<h3 id="21-roles-role">2.1 Roles (<code>role</code>)</h3>
+<p>Defines the functional entity responsible for authoring or generating the message.</p>
+<ul>
+<li><code>user</code>: Sent by the external human user, scheduled background triggers (Cronjobs), or simulated orchestration events.</li>
+<li><code>assistant</code>: Generated by the Kesoku autonomous AI agent (including internal reasoning thoughts, text responses, or system notification events).</li>
+<li><code>tool</code>: Encapsulates skill execution requests (tool calls) or skill computation outputs (tool results).</li>
+<li><code>system</code>: Contains internal orchestration instructions, exception trace notifications, or background followups.</li>
+</ul>
+<h3 id="22-types-type">2.2 Types (<code>type</code>)</h3>
+<p>Categorizes the operational context or structural format of the message content.</p>
+<ul>
+<li><code>text</code>: Standard textual dialogue intended for final presentation to the human user or raw ingestion by the LLM.</li>
+<li><code>thought</code>: Internal reasoning chain-of-thought generated by the assistant <em>prior</em> to deciding on tool invocations.</li>
+<li><code>tool_call</code>: A structured skill execution request specifying the tool name and input parameters.</li>
+<li><code>tool_result</code>: The raw output (or error/exception stack trace) returned by an executed skill.</li>
+</ul>
+<h3 id="23-statuses-status">2.3 Statuses (<code>status</code>)</h3>
+<p>Tracks the operational state of a message through the pipeline.</p>
+<ul>
+<li><code>pending_agent</code>: A newly ingested user query queued in the database, awaiting pickup by a session worker.</li>
+<li><code>processing</code>: A user prompt currently being actively evaluated by a background session worker.</li>
+<li><code>processed</code>: A user query that has been successfully resolved with a final assistant reply.</li>
+<li><code>interrupted</code>: Message processing that was terminated mid-turn (e.g., because the user sent a newer message mid-turn).</li>
+<li><code>error</code>: Processing that halted due to a missing session context or unrecoverable execution crash.</li>
+<li><code>pending</code>: Outgoing assistant reply queued and awaiting delivery by a specific chatbot adapter.</li>
+<li><code>delivered</code>: Outgoing message successfully printed, broadcasted, or rendered on the target external platform.</li>
+<li><code>responded</code>: Successfully processed internal message (thoughts, tool calls, tool results, system events) requiring no further chatbot delivery actions.</li>
+</ul>
+<hr />
+<h2 id="3-detailed-message-field-configuration">3. Detailed Message Field Configuration</h2>
+<p>The following table documents exactly how field values (<code>role</code>, <code>type</code>, <code>chatbot_id</code>, <code>channel_id</code>, <code>sender</code>, <code>status</code>, <code>parent_id</code>, <code>metadata</code>) are populated based on the origin and target of the message.</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Message Category</th>
+<th style="text-align: left;">Explanation</th>
+<th style="text-align: left;"><code>role</code></th>
+<th style="text-align: left;"><code>type</code></th>
+<th style="text-align: left;"><code>chatbot_id</code></th>
+<th style="text-align: left;"><code>channel_id</code></th>
+<th style="text-align: left;"><code>sender</code></th>
+<th style="text-align: left;">Initial <code>status</code></th>
+<th style="text-align: left;">Final <code>status</code></th>
+<th style="text-align: left;">User Visibility</th>
+<th style="text-align: left;">LLM (Active Turn)</th>
+<th style="text-align: left;">LLM (Past History)</th>
+<th style="text-align: left;"><code>metadata</code> Contents</th>
+<th style="text-align: left;">Example Content</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>Standard User Message</strong></td>
+<td style="text-align: left;">Human user prompt or command input from chat clients</td>
+<td style="text-align: left;"><code>user</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">Active chatbot (<code>"cli"</code>, <code>"discord"</code>, etc.)</td>
+<td style="text-align: left;">Platform-specific chat/room ID</td>
+<td style="text-align: left;">User Name</td>
+<td style="text-align: left;"><code>pending_agent</code></td>
+<td style="text-align: left;"><code>processed</code>, <code>interrupted</code>, or <code>error</code></td>
+<td style="text-align: left;"><strong>Yes</strong> (All channels)</td>
+<td style="text-align: left;"><strong>Yes</strong> (Full content)</td>
+<td style="text-align: left;"><strong>Yes</strong> <em>(Attachments stripped)</em></td>
+<td style="text-align: left;"><code>{"discord_message_id": str, "attachments": [...]}</code></td>
+<td style="text-align: left;"><code>"What is the weather in Tokyo?"</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Cronjob Trigger Message</strong></td>
+<td style="text-align: left;">Automated periodic prompt scheduled in background config</td>
+<td style="text-align: left;"><code>user</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">Chatbot ID</td>
+<td style="text-align: left;">Target channel/room ID</td>
+<td style="text-align: left;"><code>"Cronjob"</code></td>
+<td style="text-align: left;"><code>pending_agent</code></td>
+<td style="text-align: left;"><code>processed</code></td>
+<td style="text-align: left;"><strong>Yes</strong> (All channels)</td>
+<td style="text-align: left;"><strong>Yes</strong></td>
+<td style="text-align: left;"><strong>Yes</strong></td>
+<td style="text-align: left;"><code>{"is_cronjob": True}</code></td>
+<td style="text-align: left;"><code>"Run status diagnostics"</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Manual Compaction Trigger</strong></td>
+<td style="text-align: left;">Triggered by user running <code>/compact</code> command to start compression</td>
+<td style="text-align: left;"><code>user</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">Chatbot ID</td>
+<td style="text-align: left;">Target channel/room ID</td>
+<td style="text-align: left;"><code>"System"</code></td>
+<td style="text-align: left;"><code>pending_agent</code></td>
+<td style="text-align: left;"><code>processed</code></td>
+<td style="text-align: left;"><strong>Yes</strong> (Trigger channel)</td>
+<td style="text-align: left;"><strong>Yes</strong></td>
+<td style="text-align: left;"><strong>Yes</strong></td>
+<td style="text-align: left;"><code>{"is_compaction": True}</code></td>
+<td style="text-align: left;"><code>"[System Notification] The user manually requested compaction..."</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Assistant Thought</strong></td>
+<td style="text-align: left;">Internal reasoning / chain-of-thought before running tools</td>
+<td style="text-align: left;"><code>assistant</code></td>
+<td style="text-align: left;"><code>thought</code></td>
+<td style="text-align: left;">Chatbot ID</td>
+<td style="text-align: left;">Target channel/room ID</td>
+<td style="text-align: left;"><code>"Kesoku"</code></td>
+<td style="text-align: left;"><code>responded</code></td>
+<td style="text-align: left;"><code>responded</code> <em>(starts <code>delivered</code> on UI bots)</em></td>
+<td style="text-align: left;"><strong>Foldable / CLI Only</strong> <em>(WeChat bypass)</em></td>
+<td style="text-align: left;"><strong>Yes</strong></td>
+<td style="text-align: left;"><strong>No</strong> <em>(Stripped from completed turns)</em></td>
+<td style="text-align: left;"><code>None</code></td>
+<td style="text-align: left;"><code>"I need to check Tokyo weather using the search tool."</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Assistant Final Text</strong></td>
+<td style="text-align: left;">Final user-facing text answer generated by the agent</td>
+<td style="text-align: left;"><code>assistant</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">Chatbot ID</td>
+<td style="text-align: left;">Target channel/room ID</td>
+<td style="text-align: left;"><code>"Kesoku"</code></td>
+<td style="text-align: left;"><code>pending</code></td>
+<td style="text-align: left;"><code>delivered</code></td>
+<td style="text-align: left;"><strong>Yes</strong> (All channels)</td>
+<td style="text-align: left;"><strong>Yes</strong></td>
+<td style="text-align: left;"><strong>Yes</strong></td>
+<td style="text-align: left;"><code>{"turn_metrics": {...}}</code></td>
+<td style="text-align: left;"><code>"The current weather in Tokyo is sunny, 24°C."</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Tool Call Message</strong></td>
+<td style="text-align: left;">Request generated by model to execute registered tool</td>
+<td style="text-align: left;"><code>tool</code></td>
+<td style="text-align: left;"><code>tool_call</code></td>
+<td style="text-align: left;">Chatbot ID</td>
+<td style="text-align: left;">Target channel/room ID</td>
+<td style="text-align: left;"><code>"Kesoku"</code></td>
+<td style="text-align: left;"><code>responded</code></td>
+<td style="text-align: left;"><code>responded</code> <em>(starts <code>delivered</code> on UI bots)</em></td>
+<td style="text-align: left;"><strong>Foldable / CLI Only</strong> <em>(WeChat bypass)</em></td>
+<td style="text-align: left;"><strong>Yes</strong></td>
+<td style="text-align: left;"><strong>Yes</strong></td>
+<td style="text-align: left;"><code>{"tool_name": str, "tool_arguments": dict}</code></td>
+<td style="text-align: left;"><code>"Calling tool web_search with args: {'query': 'Tokyo weather'}"</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Tool Result Message</strong></td>
+<td style="text-align: left;">Execution output or error stack trace returned by tool runner</td>
+<td style="text-align: left;"><code>tool</code></td>
+<td style="text-align: left;"><code>tool_result</code></td>
+<td style="text-align: left;">Chatbot ID</td>
+<td style="text-align: left;">Target channel/room ID</td>
+<td style="text-align: left;">Executed Tool</td>
+<td style="text-align: left;"><code>responded</code></td>
+<td style="text-align: left;"><code>responded</code> <em>(starts <code>delivered</code> on UI bots)</em></td>
+<td style="text-align: left;"><strong>Foldable / CLI Only</strong> <em>(WeChat bypass)</em></td>
+<td style="text-align: left;"><strong>Yes</strong></td>
+<td style="text-align: left;"><strong>Yes</strong></td>
+<td style="text-align: left;"><code>{"tool_name": str, "tool_result": str}</code></td>
+<td style="text-align: left;"><code>"[STDOUT] Tokyo: Sunny, 24°C ..."</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>System Prompt Message</strong></td>
+<td style="text-align: left;">Master prompt containing framework rules and system instructions</td>
+<td style="text-align: left;"><code>system</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;"><code>"system"</code> <em>(hardcoded)</em></td>
+<td style="text-align: left;"><code>"system"</code> <em>(hardcoded)</em></td>
+<td style="text-align: left;"><code>"System"</code></td>
+<td style="text-align: left;"><code>responded</code></td>
+<td style="text-align: left;"><code>responded</code></td>
+<td style="text-align: left;"><strong>CLI / UI Only</strong> <em>(Virtual entry)</em></td>
+<td style="text-align: left;"><strong>Yes</strong> <em>(as System Instruction)</em></td>
+<td style="text-align: left;"><strong>Yes</strong> <em>(as System Instruction)</em></td>
+<td style="text-align: left;"><code>None</code></td>
+<td style="text-align: left;"><code>"# System Instructions\nYou are Kesoku..."</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Background Wakeup Alert</strong></td>
+<td style="text-align: left;">Alert posted by background job monitor to wake up agent worker</td>
+<td style="text-align: left;"><code>system</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">Chatbot ID <em>(resolved from original message)</em></td>
+<td style="text-align: left;">Target channel/room ID <em>(resolved)</em></td>
+<td style="text-align: left;"><code>"System"</code></td>
+<td style="text-align: left;"><code>pending_agent</code></td>
+<td style="text-align: left;"><code>processed</code></td>
+<td style="text-align: left;"><strong>No</strong> <em>(Invisible in background)</em></td>
+<td style="text-align: left;"><strong>Yes</strong> <em>(Mapped to USER turn)</em></td>
+<td style="text-align: left;"><strong>Yes</strong> <em>(Mapped to USER turn)</em></td>
+<td style="text-align: left;"><code>None</code></td>
+<td style="text-align: left;"><code>"[System Alert] Background Job job_123 finished..."</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Nudge Message</strong></td>
+<td style="text-align: left;">Internal catalyst injected when LLM returns empty response</td>
+<td style="text-align: left;"><code>system</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">Chatbot ID</td>
+<td style="text-align: left;">Target channel/room ID</td>
+<td style="text-align: left;"><code>"System"</code></td>
+<td style="text-align: left;"><code>responded</code></td>
+<td style="text-align: left;"><code>responded</code></td>
+<td style="text-align: left;"><strong>No</strong> <em>(Invisible in background)</em></td>
+<td style="text-align: left;"><strong>Yes</strong> <em>(Mapped to USER turn)</em></td>
+<td style="text-align: left;"><strong>Yes</strong> <em>(Mapped to USER turn)</em></td>
+<td style="text-align: left;"><code>None</code></td>
+<td style="text-align: left;"><code>"Your previous response had empty content. Please summarize..."</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>User-Facing Notification</strong></td>
+<td style="text-align: left;">Ephemeral platform notification (e.g., compaction alerts)</td>
+<td style="text-align: left;"><code>assistant</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">Chatbot ID</td>
+<td style="text-align: left;">Target channel/room ID</td>
+<td style="text-align: left;"><code>"Notification"</code></td>
+<td style="text-align: left;"><code>pending</code></td>
+<td style="text-align: left;"><code>delivered</code></td>
+<td style="text-align: left;"><strong>Yes</strong> <em>(For platform alert)</em></td>
+<td style="text-align: left;"><strong>No</strong> <em>(Filtered out)</em></td>
+<td style="text-align: left;"><strong>No</strong> <em>(Filtered out)</em></td>
+<td style="text-align: left;"><code>None</code></td>
+<td style="text-align: left;"><code>"🔄 Conversation history has been automatically compacted..."</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>System Error Notification</strong></td>
+<td style="text-align: left;">Error response informing user that unrecoverable crash occurred</td>
+<td style="text-align: left;"><code>assistant</code></td>
+<td style="text-align: left;"><code>text</code></td>
+<td style="text-align: left;">Chatbot ID</td>
+<td style="text-align: left;">Target channel/room ID</td>
+<td style="text-align: left;"><code>"Kesoku"</code></td>
+<td style="text-align: left;"><code>pending</code></td>
+<td style="text-align: left;"><code>delivered</code></td>
+<td style="text-align: left;"><strong>Yes</strong> (All channels)</td>
+<td style="text-align: left;"><strong>Yes</strong></td>
+<td style="text-align: left;"><strong>Yes</strong></td>
+<td style="text-align: left;"><code>None</code></td>
+<td style="text-align: left;"><code>"⚠️ An error occurred while processing your request: ..."</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="31-platform-specific-field-mapping-details">3.1 Platform-Specific Field Mapping Details</h3>
+<ul>
+<li><strong>CLI (<code>cli_bot.py</code>)</strong>:<ul>
+<li><code>channel_id</code>: Defaults to <code>"cli"</code>.</li>
+<li><code>sender</code>: Defaults to <code>"User"</code>.</li>
+</ul>
+</li>
+<li><strong>Discord (<code>discord.py</code>)</strong>:<ul>
+<li><code>channel_id</code>: If in a thread or auto-threaded channel, maps to the <strong>Thread ID</strong>; otherwise, maps to the <strong>Channel ID</strong>.</li>
+<li><code>sender</code>: Populated with the author's display name (<code>message.author.display_name</code>).</li>
+<li><code>content</code>: Prefixed with a beautiful formatted header containing the display name, user mention, and local timestamp:
+    <div class="highlight"><pre><span></span><code>`Username` &lt;@UserID&gt; at `2026-05-27 20:45:00 Asia/Shanghai`:
+[User Prompt Message Content]
+</code></pre></div></li>
+</ul>
+</li>
+<li><strong>Google Chat (<code>google_chat.py</code>)</strong>:<ul>
+<li><code>channel_id</code>: Maps to the fully qualified thread resource name (e.g., <code>spaces/AAAAxxxx/threads/YYYY</code>) or space resource name (e.g., <code>spaces/AAAAxxxx</code>).</li>
+<li><code>sender</code>: Populated with <code>displayName</code> (falling back to <code>"User"</code>).</li>
+</ul>
+</li>
+<li><strong>WeChat (<code>wechat.py</code>)</strong>:<ul>
+<li><code>channel_id</code>: Maps to the unique chat ID (e.g., group room ending in <code>@chatroom</code> or direct sender ID).</li>
+<li><code>sender</code>: Populated with WeChat user ID.</li>
+</ul>
+</li>
+<li><strong>Internal System Messages (<code>cli_chat.py</code>, <code>discord_ui.py</code>)</strong>:<ul>
+<li>For <strong>System Prompt Messages</strong> (virtual messages generated locally for UI displays or CLI history runs to show system settings), the system is categorizing them under a separate system scope:<ul>
+<li><code>chatbot_id</code>: Hardcoded to <code>"system"</code>.</li>
+<li><code>channel_id</code>: Hardcoded to <code>"system"</code>.</li>
+<li><code>sender</code>: Hardcoded to <code>"System"</code>.</li>
+</ul>
+</li>
+<li>For <strong>Background Wakeup Alerts</strong> (generated when a background shell command task completes execution):<ul>
+<li><code>chatbot_id</code>: Dynamically resolved from the original initiating message's <code>chatbot_id</code>.</li>
+<li><code>channel_id</code>: Dynamically resolved from the original initiating message's <code>channel_id</code>.</li>
+<li><code>sender</code>: Hardcoded to <code>"System"</code>.</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<hr />
+<h2 id="4-system-wide-lifecycle-state-transitions">4. System-Wide Lifecycle &amp; State Transitions</h2>
+<div class="highlight"><pre><span></span><code>                      [Incoming Human/Cron/Compaction Message]
+                                        │
+                                        ▼
+                             (status: pending_agent)
+                                        │
+                                        ▼  [Worker picks up turn]
+                               (status: processing)
+                                        │
+        ┌───────────────────────────────┼───────────────────────────────┐
+        ▼ (Intermediate Thoughts/Tools)   ▼ (Interruption Triggered)      ▼ (Turn Completed Successfully)
+    (status: responded)              (status: interrupted)            (status: processed)
+        │                                                               │
+        ▼ [Chatbot renders update]                                      ▼ [Final reply posted]
+    (status: delivered)                                              (status: pending)
+                                                                        │
+                                                                        ▼ [Chatbot adapter delivers]
+                                                                     (status: delivered)
+</code></pre></div>
+<h3 id="41-user-query-lifecycle">4.1 User Query Lifecycle</h3>
+<ol>
+<li><strong>Ingestion</strong>: A chatbot adapter captures user text or media, downloads/decrypts attachments to the session staging folder, instantiates a <code>Message</code> with <code>status=MessageStatus.PENDING_AGENT</code>, and posts it to the gateway.</li>
+<li><strong>Pickup</strong>: The <code>Agent</code> dispatcher continuously listens for <code>PENDING_AGENT</code> messages. When detected, it checks if there is an active worker for the session. If not, it spins up a <code>SessionWorker</code>, claims the message atomically via <code>claim_message(id, MessageStatus.PROCESSING, [MessageStatus.PENDING_AGENT])</code>, and runs the execution turn.</li>
+<li><strong>Resolution</strong>:<ul>
+<li><strong>Success</strong>: Once the LLM loop completes and posts the final assistant text, the gateway updates the user query status to <code>MessageStatus.PROCESSED</code>.</li>
+<li><strong>Interruption</strong>: If a new user message is received on the same channel before the worker finishes, the dispatcher aborts the active worker task and marks both the processing user message and any unfinished tool calls as <code>MessageStatus.INTERRUPTED</code>.</li>
+<li><strong>Error</strong>: If an unrecoverable error occurs during execution, the message is marked as <code>MessageStatus.ERROR</code>.</li>
+</ul>
+</li>
+</ol>
+<h3 id="42-outgoing-assistant-text-lifecycle">4.2 Outgoing Assistant Text Lifecycle</h3>
+<ol>
+<li><strong>Creation</strong>: The <code>SessionWorker</code> posts the final response block (<code>role=assistant</code>, <code>type=text</code>) with <code>status=MessageStatus.PENDING</code>.</li>
+<li><strong>Delivery</strong>: The chatbot adapter (subscribed to <code>PENDING</code> messages for its ID) detects it, formats the text for the platform, chunks it according to character limits, transmits files/attachments, and updates the message status to <code>MessageStatus.DELIVERED</code> in SQLite.</li>
+<li><strong>Post-Delivery Hook</strong>: Chatbots invoke <code>on_message_delivered(message)</code> to cleanly terminate typing indicators, remove ephemeral tool-call status bars, or update the parent thread header with calculated performance metrics.</li>
+</ol>
+<h3 id="43-intermediate-message-lifecycle-thoughts-tools">4.3 Intermediate Message Lifecycle (Thoughts &amp; Tools)</h3>
+<ol>
+<li><strong>Creation</strong>: When the agent worker decides to think or invoke a tool, it posts a message with <code>status=MessageStatus.RESPONDED</code>.</li>
+<li><strong>UI Streaming &amp; Update</strong>:<ul>
+<li><strong>Adapters with UI (Discord, Google Chat)</strong>: Listen for <code>RESPONDED</code> messages and live-render/update thoughts or tool-call progress indicators (e.g., showing a spinner ⏳). Upon updating the channel, the adapter updates the message status to <code>MessageStatus.DELIVERED</code> to prevent double-rendering. When a <code>tool_result</code> arrives, the adapter edits the original status in-place to success (✅) or error (❌) emojis.</li>
+<li><strong>Adapters without UI (WeChat)</strong>: Chatbot adapters that do not support inline updating automatically set the status to <code>MessageStatus.DELIVERED</code> instantly without presenting thoughts or raw tool calls to the external user.</li>
+<li><strong>CLI (<code>CLIChatbot</code>)</strong>: Prints thoughts, tool calls, and outputs immediately in formatted cyan, yellow, and magenta Panels to the terminal, then marks them as <code>DELIVERED</code>.</li>
+</ul>
+</li>
+</ol>
+<h3 id="44-orphanedstuck-message-recovery">4.4 Orphaned/Stuck Message Recovery</h3>
+<ul>
+<li><strong>Worker Interruption</strong>: If the Kesoku service restarts or crashes while a message is actively <code>processing</code>, the message would get stuck. To prevent this, the gateway runs <code>recover_orphaned_processing_messages()</code> during startup, identifying any message in <code>processing</code> status older than 300 seconds and resetting it back to <code>MessageStatus.PENDING_AGENT</code> so the worker can retry it safely.</li>
+<li><strong>Tool Call Interruption</strong>: During startup, the history builder runs <code>get_orphaned_tool_calls()</code>. If a tool call is found without a matching <code>tool_result</code> parent (indicating it was interrupted mid-execution by a service crash), a synthetic result <code>Message</code> is injected explaining the interruption so the LLM does not get confused.</li>
+</ul>
+<hr />
+<h2 id="5-history-storage-user-visibility-rules">5. History Storage &amp; User Visibility Rules</h2>
+<p>Kesoku strictly segregates how history is preserved in database storage versus how it is presented to the user and digested by the LLM.</p>
+<h3 id="51-database-history-get_session_history">5.1 Database History (<code>get_session_history</code>)</h3>
+<p>Every message posted is stored in the SQLite database under the <code>messages</code> table. When fetching history:</p>
+<ul>
+<li><strong>Full Retention</strong>: All messages (including intermediate thoughts, system errors, and every tool execution) are kept in full.</li>
+<li><strong>Logical Sorting (Phased Algorithm)</strong>: Since tool executions run asynchronously and can overlap, sorting messages by simple Unix timestamp can interleave thoughts incorrectly. The database uses <strong>Phased Sorting</strong>, grouping messages into turns and organizing them into clean iteration rounds:<ol>
+<li><strong>Thoughts</strong> (<code>type=thought</code>, phase 0)</li>
+<li><strong>Tool Calls</strong> (<code>type=tool_call</code>, phase 1)</li>
+<li><strong>Tool Results</strong> (<code>type=tool_result</code>, phase 2)</li>
+<li><strong>Final Answers</strong> (<code>type=text</code>, phase 3)</li>
+</ol>
+</li>
+</ul>
+<h3 id="52-llm-context-prompt-history-build_clean_history">5.2 LLM Context Prompt History (<code>build_clean_history</code>)</h3>
+<p>When feeding past messages to the Gemini LLM, the history is run through an optimization pipeline:</p>
+<ul>
+<li><strong>System Exclusions</strong>: Lightweight system notification messages (e.g., <code>role=assistant</code> and <code>sender="Notification"</code>) are entirely excluded from the LLM context.</li>
+<li><strong>Thought Stripping</strong>: To conserve token context window and prevent Gemini from paying attention to outdated thoughts, <strong>all assistant thoughts (<code>type=thought</code>) are stripped from completed historical turns</strong>. Thoughts are strictly preserved <em>only</em> in the active/latest turn to guide current action.</li>
+<li><strong>Attachment Stripping</strong>: Media files, text files, and images are removed from historical user prompt metadata to save tokens. A placeholder (e.g., <code>[Attachments stripped from history: data.csv]</code>) is appended to the text content so the LLM remains aware of the file's presence.</li>
+<li><strong>Tool Logs Retention</strong>: Tool calls and tool outputs are kept in their raw form so the model maintains full situational awareness of what commands it ran previously.</li>
+</ul>
+<h3 id="53-user-visibility-matrix">5.3 User Visibility Matrix</h3>
+<p>This table specifies whether a message is visible to the human user across different platforms.</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Message Type</th>
+<th style="text-align: left;">CLI</th>
+<th style="text-align: left;">Discord</th>
+<th style="text-align: left;">Google Chat</th>
+<th style="text-align: left;">WeChat</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>User Text</strong></td>
+<td style="text-align: left;">Yes</td>
+<td style="text-align: left;">Yes</td>
+<td style="text-align: left;">Yes</td>
+<td style="text-align: left;">Yes</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Assistant Text / File</strong></td>
+<td style="text-align: left;">Yes (Rich Panel / Line)</td>
+<td style="text-align: left;">Yes (Standard reply)</td>
+<td style="text-align: left;">Yes (Markdown card)</td>
+<td style="text-align: left;">Yes (Normalized plain text)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Assistant Thought</strong></td>
+<td style="text-align: left;">Yes (Cyan Panel)</td>
+<td style="text-align: left;">Yes (Live status bar update)</td>
+<td style="text-align: left;">Yes (Foldable active turn card)</td>
+<td style="text-align: left;"><strong>No</strong> (Completely hidden)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Tool Call</strong></td>
+<td style="text-align: left;">Yes (Yellow Panel)</td>
+<td style="text-align: left;">Yes (Live status bar update)</td>
+<td style="text-align: left;">Yes (Foldable active turn card)</td>
+<td style="text-align: left;"><strong>No</strong> (Completely hidden)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Tool Result</strong></td>
+<td style="text-align: left;">Yes (Magenta Panel)</td>
+<td style="text-align: left;">Yes (Status changes ⏳ ──► ✅)</td>
+<td style="text-align: left;">Yes (Status changes ⏳ ──► ✅)</td>
+<td style="text-align: left;"><strong>No</strong> (Completely hidden)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>System Notification</strong></td>
+<td style="text-align: left;">Yes (Panel / Print)</td>
+<td style="text-align: left;">Yes (Live status bar update)</td>
+<td style="text-align: left;">Yes (Foldable active turn card)</td>
+<td style="text-align: left;"><strong>No</strong> (Completely hidden)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="54-advanced-role-mapping-transpilation-rules">5.4 Advanced Role Mapping &amp; Transpilation Rules</h3>
+<p>To circumvent the strict alternating role checks (<code>user</code> ──► <code>model</code> ──► <code>user</code>) enforced by modern LLM Chat APIs (such as Google Gemini or OpenAI API) and optimize the flow of automated instructions, Kesoku implements an intelligent translation layer inside the LLM adapter (<code>history_to_turns</code> in <a href="file:///usr/local/google/home/chii/Developer/kesoku/src/kesoku/agent/llm.py">src/kesoku/agent/llm.py</a>):</p>
+<ul>
+<li><strong>Nudge Messages (<code>role=MessageRole.SYSTEM</code>, <code>status=MessageStatus.RESPONDED</code>)</strong>:<ul>
+<li><em>Purpose</em>: An internal, silent self-healing mechanism used when the LLM returns an empty response mid-turn.</li>
+<li><em>User Visibility</em>: Stored as <code>role=SYSTEM</code> to keep it completely hidden from the human user across all platform chat windows.</li>
+<li><em>LLM Transpilation</em>: The LLM history builder automatically converts any mid-stream <code>SYSTEM</code> message into a standard <code>USER</code> turn prefixed with <code>[System Notification]\n</code>, ensuring the LLM reads it as a fresh instruction without throwing API role alternating violations.</li>
+</ul>
+</li>
+<li><strong>Background Wakeup Alerts (<code>role=MessageRole.SYSTEM</code>, <code>status=MessageStatus.PENDING_AGENT</code>)</strong>:<ul>
+<li><em>Purpose</em>: Created by the background process monitor to wake up the agent worker when a background job completes.</li>
+<li><em>User Visibility</em>: Hidden from the user to avoid cluttering chat logs with raw command stdout/stderr.</li>
+<li><em>LLM Transpilation</em>: Compiled into a standard <code>USER</code> block mid-history so the LLM reads the completed job output as a direct instruction.</li>
+</ul>
+</li>
+<li><strong>User-Facing System Notifications (e.g., Compaction Alerts)</strong>:<ul>
+<li><em>Purpose</em>: Inform the human user that a system action took place (e.g., <code>🔄 Conversation history has been automatically compacted...</code>).</li>
+<li><em>User Visibility</em>: Saved with <code>role=MessageRole.ASSISTANT</code> and <code>sender="Notification"</code>, enabling chatbot adapters to broadcast it to external platforms.</li>
+<li><em>LLM Transpilation</em>: Completely stripped from the history list fed to the LLM by <code>build_clean_history</code> to prevent polluting the model's context window.</li>
+</ul>
+</li>
+<li><strong>Cronjob Trigger Messages</strong>:<ul>
+<li><em>Purpose</em>: Automated actions triggered by scheduled cron jobs.</li>
+<li><em>User Visibility</em>: Visible to the user as a scheduled prompt.</li>
+<li><em>LLM Transpilation</em>: Saved under <code>role=MessageRole.USER</code> with <code>sender="Cronjob"</code> and <code>metadata={"is_cronjob": True}</code> to ensure native conversational turn alternation.</li>
+</ul>
+</li>
+</ul>
+<hr />
+<h2 id="6-concrete-end-to-end-trajectory-examples">6. Concrete End-to-End Trajectory Examples</h2>
+<p>Below are concrete sequential traces of <code>Message</code> records for three common turn scenarios.</p>
+<h3 id="example-61-standard-user-turn-with-tool-execution-discord">Example 6.1: Standard User Turn with Tool Execution (Discord)</h3>
+<p>A user requests: <code>"Run tests for agent history module"</code>.</p>
+<p><div class="highlight"><pre><span></span><code><span class="p">[</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_user_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sess_agent_history&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;chatbot_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;discord&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;channel_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1234567890123&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;sender&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Chii&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;user&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;text&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;`Chii` &lt;@112233&gt; at `2026-05-27 20:50:00 SGT`:\nRun tests for agent history module&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;pending_agent&quot;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">]</span>
+</code></pre></div>
+<em>(Worker picks up the message ──► <code>msg_user_001</code> status changes to <code>processing</code>)</em></p>
+<p><div class="highlight"><pre><span></span><code><span class="p">[</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_thought_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sess_agent_history&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;parent_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_user_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;chatbot_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;discord&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;channel_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1234567890123&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;sender&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Kesoku&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;assistant&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;thought&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;I need to run the unit tests for the history module using uv. I will search for the test file first.&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;responded&quot;</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_call_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sess_agent_history&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;parent_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_user_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;chatbot_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;discord&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;channel_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1234567890123&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;sender&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Kesoku&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tool&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tool_call&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Calling tool `run_shell_command` with arguments:\n```json\n{\n  \&quot;command\&quot;: \&quot;uv run pytest tests/test_history.py\&quot;\n}\n```&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;responded&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;metadata&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;tool_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;run_shell_command&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;tool_arguments&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;command&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;uv run pytest tests/test_history.py&quot;</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">]</span>
+</code></pre></div>
+<em>(Discord bot live-updates its channel with <code>💭 I need to run the unit tests...</code> and <code>🛠️ run_shell_command: uv run pytest tests/test_history.py ⏳</code>. Changes status of both messages to <code>delivered</code>)</em></p>
+<p><div class="highlight"><pre><span></span><code><span class="p">[</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_result_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sess_agent_history&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;parent_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_call_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;chatbot_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;discord&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;channel_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1234567890123&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;sender&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;run_shell_command&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tool&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tool_result&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;=== STDOUT ===\n============================= test session starts =============================\nplugins: anyio-4.3.0\ncollected 5 items\n\ntests/test_history.py .....                                              [100%]\n============================== 5 passed in 0.42s ===============================\n=== STDERR ===\n&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;responded&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;metadata&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;tool_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;run_shell_command&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;tool_result&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;5 passed in 0.42s&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">]</span>
+</code></pre></div>
+<em>(Discord bot edits status emoji of <code>run_shell_command</code> from ⏳ to ✅ in the status bar, then sets <code>msg_result_001</code> status to <code>delivered</code>)</em></p>
+<p><div class="highlight"><pre><span></span><code><span class="p">[</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_reply_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sess_agent_history&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;parent_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_user_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;chatbot_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;discord&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;channel_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1234567890123&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;sender&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Kesoku&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;assistant&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;text&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;I have successfully executed the tests for the agent history module. All 5 tests passed in 0.42 seconds.&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;pending&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;metadata&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;turn_metrics&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;session_turns&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;context_tokens&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">8421</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;turn_tool_calls&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;turn_tokens&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1042</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;turn_time&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">2.1</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">]</span>
+</code></pre></div>
+<em>(Discord bot sends the final reply, prints metrics to the header view, clears typing state, deletes intermediate status lines, and sets <code>msg_reply_001</code> status to <code>delivered</code>. The worker sets the original <code>msg_user_001</code> to <code>processed</code>)</em></p>
+<hr />
+<h3 id="example-62-background-cronjob-turn-wechat">Example 6.2: Background Cronjob Turn (WeChat)</h3>
+<p>A background cron triggers a scheduled status check.</p>
+<p><div class="highlight"><pre><span></span><code><span class="p">[</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_cron_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sess_wechat_status&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;chatbot_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;wechat&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;channel_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;room123456@chatroom&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;sender&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Cronjob&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;user&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;text&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;`Cronjob` at `2026-05-27 21:00:00 CST`:\nRun active diagnostics and output status summary.&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;pending_agent&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;metadata&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;wechat_cronjob&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">]</span>
+</code></pre></div>
+<em>(Worker claims <code>msg_cron_001</code> ──► <code>status = processing</code>)</em></p>
+<p><div class="highlight"><pre><span></span><code><span class="p">[</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_cron_thought&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sess_wechat_status&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;parent_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_cron_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;chatbot_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;wechat&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;channel_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;room123456@chatroom&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;sender&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Kesoku&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;assistant&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;thought&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;WeChat is active. I will run direct system stats and write a concise diagnostic report.&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;responded&quot;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">]</span>
+</code></pre></div>
+<em>(WeChat bot has no intermediate UI support, so it immediately acknowledges and sets <code>msg_cron_thought</code> status to <code>delivered</code> in the background, completely hidden from the WeChat chatroom)</em></p>
+<p><div class="highlight"><pre><span></span><code><span class="p">[</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_cron_reply&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;session_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sess_wechat_status&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;parent_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_cron_001&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;chatbot_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;wechat&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;channel_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;room123456@chatroom&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;sender&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Kesoku&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;assistant&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;text&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Diagnostics completed successfully. System status is stable. Uptime: 3d 12h, Memory: 45% occupied, 0 active errors reported.&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;pending&quot;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">]</span>
+</code></pre></div>
+<em>(WeChat bot splits text into Wechat-compliant chunks, delivers the message to the chatroom, and sets <code>msg_cron_reply</code> status to <code>delivered</code>. Original <code>msg_cron_001</code> transitions to <code>processed</code>)</em></p>
+<hr />
+<h3 id="example-63-thought-interruption">Example 6.3: Thought Interruption</h3>
+<p>Chii enters a prompt, Gemini begins thinking, but Chii cancels it by sending a newer prompt before Gemini can reply.</p>
+<ol>
+<li>Chii enters prompt <code>"Build a new web component"</code>.</li>
+<li>Message is ingested as <code>msg_user_a</code> (<code>status=pending_agent</code>), claimed by worker (<code>status=processing</code>).</li>
+<li>Gemini posts an intermediate thought <code>msg_thought_a</code> (<code>status=responded</code> ──► <code>delivered</code>).</li>
+<li>Before the final reply can be generated, Chii types <code>"Wait, actually build a command line tool instead"</code>.</li>
+<li>The Discord bot captures the new message:<ul>
+<li>Cancels the active worker's task.</li>
+<li>Identifies <code>msg_user_a</code> and sets its status to <code>MessageStatus.INTERRUPTED</code>.</li>
+<li>Deletes <code>msg_thought_a</code> and any intermediate indicators from the Discord channel (if Discord).</li>
+<li>Posts the new query <code>msg_user_b</code> (<code>status=pending_agent</code>).</li>
+</ul>
+</li>
+<li>The dispatcher picks up <code>msg_user_b</code>, claims it (<code>status=processing</code>), and starts the new execution turn cleanly.</li>
+</ol>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "search.suggest", "search.highlight", "content.code.copy"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>
