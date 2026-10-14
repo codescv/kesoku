@@ -14,6 +14,14 @@ logger = logging.getLogger(__name__)
 
 skill_manager = SkillManager()
 
+# Appended to tool results that surface old chat messages. Old messages reflect the formatting and rules
+# that were in force at the time; the agent tends to copy their style (e.g. deprecated formats) verbatim.
+HISTORICAL_RESULT_NOTICE = (
+    "⚠️ Note: these are historical messages for reference only. Their content may be outdated and their "
+    "formatting/style may follow rules that have since been changed. Do NOT imitate their formatting; follow "
+    "the current <instructions>, <session_notes> and the most recent user messages instead."
+)
+
 
 @default_registry.register
 def list_skills(context: ToolContext | None = None) -> str:
@@ -163,6 +171,7 @@ async def chat_search(
                 content_indented = "\n".join(f"  > {line}" for line in truncated_content.splitlines())
                 lines.append(content_indented)
 
+        lines.append(HISTORICAL_RESULT_NOTICE)
         return "\n".join(lines)
     except Exception as e:
         logger.error(f"Failed to execute chat_search: {e}", exc_info=True)
@@ -203,7 +212,8 @@ async def view_message(
             f"- **Content**:\n"
             f"```\n"
             f"{msg.content}\n"
-            f"```"
+            f"```\n"
+            f"{HISTORICAL_RESULT_NOTICE}"
         )
     except Exception as e:
         logger.error(f"Failed to view message {message_id}: {e}", exc_info=True)

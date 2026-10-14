@@ -58,10 +58,15 @@ async def test_view_message_tool(tmp_path) -> None:
     assert "unique_msg_999" in res
     assert "Asuka (assistant)" in res
     assert "This is a secret long content." in res
+    # Historical results carry a "do not imitate formatting" notice
+    from kesoku.agent.tools.memory import HISTORICAL_RESULT_NOTICE
+
+    assert res.endswith(HISTORICAL_RESULT_NOTICE)
 
     # Test non-existent retrieval
     res_fail = await view_message("non_existent_id", context=ctx)
     assert "not found" in res_fail
+    assert HISTORICAL_RESULT_NOTICE not in res_fail
 
 
 @pytest.mark.asyncio
