@@ -22,6 +22,23 @@ logger = logging.getLogger(__name__)
 TRUNCATED_ARG_TOOLS = frozenset({"update_session_notes", "update_file"})
 MAX_HISTORICAL_TOOL_ARG_CHARS = 300
 
+# Matches `[question: <stem> || <options>]` (or the legacy `<stem> | <opt> | ...` form) blocks.
+# Nested brackets are not allowed inside question blocks, so `[^\]]` is a safe body matcher.
+QUESTION_BLOCK_RE = re.compile(r"\[question:\s*[^\]]*\]")
+QUESTION_PLACEHOLDER = "[question: ...]"
+
+
+def strip_question_options(text: str) -> str:
+    """Collapse every `[question: <stem> || <options>]` block in text into `[question: ...]`.
+
+    Old question stems/options re-entering the context verbatim are a strong self-imitation source
+    (near-identical stems and simile-laden options across dozens of turns), so they are elided from
+    older completed turns while the turn structure (a question was asked) is preserved.
+    """
+    if not text or "[question:" not in text:
+        return text
+    return QUESTION_BLOCK_RE.sub(QUESTION_PLACEHOLDER, text)
+
 
 def _hist_filename(kind: str, tool_name: str, msg: Message) -> str:
     """Stable staging filename for a truncated historical tool output, derived from the message id."""
@@ -123,6 +140,7 @@ def prepare_history_for_llm(
     history: list[Message],
     max_historical_tool_chars: int = 500,
     staging_dir: str | None = None,
+    strip_old_questions: bool = True,
 ) -> list[Message]:
     """Clean up and format the conversational history specifically for the LLM.
 
@@ -136,6 +154,9 @@ def prepare_history_for_llm(
         max_historical_tool_chars: Maximum character limit for tool results in historical turns.
             Defaults to 500 characters.
         staging_dir: Optional session staging directory to write full outputs to.
+        strip_old_questions: When True, collapse `[question: ...]` blocks in assistant messages of
+            completed turns older than the last completed turn. The last completed turn keeps its
+            options so short/numeric replies ("选2") and clicked-option detection still work.
     """
     # 1. Groups messages into complete logical turns (User/System prompt -> ... -> before next user/system prompt).
     turns = segment_logical_turns(history)
@@ -147,6 +168,8 @@ def prepare_history_for_llm(
     num_turns = len(turns)
     for idx, turn in enumerate(turns):
         is_latest = idx == num_turns - 1
+        # Turns strictly older than the last completed turn (idx == num_turns - 2) get their options elided.
+        strip_questions_here = strip_old_questions and idx < num_turns - 2
 
         if is_latest:
             # Keep all thoughts and details in the latest/active turn
@@ -158,6 +181,13 @@ def prepare_history_for_llm(
                 # Drop assistant thoughts in completed turns
                 if m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT:
                     continue
+
+                # Elide question stems/options of older completed turns (anti self-imitation)
+                if strip_questions_here and m.role == MessageRole.ASSISTANT and m.content:
+                    stripped_content = strip_question_options(m.content)
+                    if stripped_content != m.content:
+                        m = m.model_copy()
+                        m.content = stripped_content
 
                 # Drop thought signature from historical tool call messages to optimize context size,
                 # and truncate long file-content arguments of file/notes tools.

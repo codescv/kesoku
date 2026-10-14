@@ -69,6 +69,27 @@ CREATE TABLE IF NOT EXISTS channel_roles (
 ### 3. 全局回退
 如果当前频道和父级频道均没有显式绑定任何角色，则系统统一回退采用默认角色 `"default"`。
 
+### 会话角色优先
+在走上述频道解析链之前，`build_sys_prompt` 与回合执行器都会先检查会话自身的 `sessions.role_name`：只要它不是 `"default"`，就直接使用。切换角色会切换/新建会话，因此会话绑定是权威来源；这样即使线程会话的频道在 `channel_roles` 中没有记录（例如只通过 `channel_sessions` 映射的 Discord 线程），也能加载正确的 `intro.md` / `preferences.md`，而不是默认人设。
+
+---
+
+## 🧩 角色专属技能 (`roles/<role>/skills/`)
+
+除了全局 `workspace.skills_dir`，`SkillManager` 还会发现只属于某个人设的技能：`<roles_dir>/<role>/skills/<技能名>/SKILL.md`。
+
+*   `list_skills` / `use_skill` 会根据会话解析当前角色，并包含该角色的专属技能。
+*   与全局技能同名时，角色技能优先。
+*   其他角色（以及没有角色的会话）看不到这些技能。
+*   角色名和技能名只允许 `[A-Za-z0-9_-]`，并使用与全局技能相同的规范路径边界检查。
+
+因此人设专属能力（脚本及其 SKILL.md）可以完全放在角色目录内，而不会污染全局技能列表。
+
+## 🔁 抗自我模仿措施
+
+*   **历史选项折叠**：`agent.strip_historical_question_options = true`（默认）时，`prepare_history_for_llm` 会把「最后一个已完成回合」之前（`idx < num_turns - 2`）的助手消息中的 `[question: <题干> || <选项>]` 折叠为 `[question: ...]`。最后一个已完成回合保留完整选项，保证数字回复和点选检测正常；折叠后的前缀在回合间字节稳定，不影响隐式前缀缓存。
+*   **Auto-RAG 防护**：当用户消息是上一条助手提问的某个选项（精确匹配）或简短数字选择时，跳过自动上下文检索；检索到的片段会折叠 `[question: ...]` 并截断过长的 `Agent` 行（400 字符）。
+
 ---
 
 ## 🔄 系统提示词动态重构时序

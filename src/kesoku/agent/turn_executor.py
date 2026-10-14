@@ -5,6 +5,7 @@ import datetime
 import inspect
 import json
 import os
+import re
 import time
 import traceback
 from typing import TYPE_CHECKING
@@ -15,6 +16,7 @@ from kesoku.agent.compressor import SCAFFOLD_HEADER, HistoryCompressor, estimate
 from kesoku.agent.history import (
     build_history,
     prepare_history_for_llm,
+    strip_question_options,
 )
 from kesoku.agent.llm import BaseLLM, LLMResponse
 from kesoku.agent.tool_runner import ToolRunner
@@ -38,6 +40,61 @@ MAX_CHATBOT_ERROR_MESSAGE_LENGTH = 500
 # (e.g. Vertex safety filtering yields finish_reason=SAFETY with zero parts) before
 # falling back to nudging the model with an explicit system message.
 EMPTY_RESPONSE_RETRIES = 2
+# Max characters kept per Agent line inside auto-retrieved historical dialogue snippets.
+MAX_RAG_AGENT_LINE_CHARS = 400
+
+# Same block syntax the gateway parses: `[question: <stem> || opt1 | opt2]` (legacy: `<stem> | opt1 | opt2`).
+_QUESTION_BLOCK_CAPTURE_RE = re.compile(r"\[question:\s*([^\]]+)\]")
+# Short numeric selections such as "2", "2.", "选2", "選2", "第2个", "２番", "option 2".
+_NUMERIC_PICK_RE = re.compile(
+    r"^\s*(?:选|選|选择|選択|option|opt|#)?\s*第?\s*[0-9０-９一二三四五六七八九十]{1,2}\s*"
+    r"(?:个|個|号|號|番|项|項)?\s*[.。、)）!！]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def extract_question_options(text: str | None) -> list[str]:
+    """Return the options of the LAST `[question: ...]` block in text (empty list if none)."""
+    if not text:
+        return []
+    matches = _QUESTION_BLOCK_CAPTURE_RE.findall(text)
+    if not matches:
+        return []
+    inner = matches[-1].strip()
+    if "||" in inner:
+        _, choices_part = inner.split("||", 1)
+        return [c.strip() for c in choices_part.split("|") if c.strip()]
+    parts = [p.strip() for p in inner.split("|")]
+    return [p for p in parts[1:] if p]
+
+
+def _normalize_choice(text: str) -> str:
+    """Normalize a choice/user text for comparison (whitespace collapsed, surrounding punctuation dropped)."""
+    return re.sub(r"\s+", "", text or "").strip("。.!！?？")
+
+
+def is_clicked_option(user_text: str | None, last_assistant_text: str | None) -> bool:
+    """Detect whether the user message is a selection of the previous assistant turn's question options.
+
+    True when the message exactly equals one of the options of the last `[question: ...]` block in the
+    previous assistant message, or when it is a short numeric pick ("2", "选2", "2.").
+    """
+    if not user_text or not user_text.strip():
+        return False
+    if _NUMERIC_PICK_RE.match(user_text):
+        return True
+    normalized_user = _normalize_choice(user_text)
+    if not normalized_user:
+        return False
+    return any(normalized_user == _normalize_choice(opt) for opt in extract_question_options(last_assistant_text))
+
+
+def sanitize_rag_snippet_line(speaker: str, content: str, max_agent_chars: int = MAX_RAG_AGENT_LINE_CHARS) -> str:
+    """Strip `[question: ...]` blocks and truncate long Agent lines of a retrieved historical message."""
+    cleaned = strip_question_options(content.strip())
+    if speaker == "Agent" and len(cleaned) > max_agent_chars:
+        cleaned = cleaned[:max_agent_chars] + "…[truncated]"
+    return cleaned
 
 
 def estimate_fixed_prompt_overhead(system_prompt: str | None, tools_list: list | None) -> int:
@@ -294,7 +351,11 @@ class TurnExecutor:
                 )
 
                 # Prepare history for the LLM by stripping thoughts, attachments, and truncating historical tool outputs
-                llm_history = prepare_history_for_llm(history, staging_dir=session_staging_dir)
+                llm_history = prepare_history_for_llm(
+                    history,
+                    staging_dir=session_staging_dir,
+                    strip_old_questions=cfg.agent.strip_historical_question_options,
+                )
 
                 # Implicit caching mode: rely on Vertex's automatic prefix caching and drop any explicit cache.
                 implicit_caching = cfg.gemini.context_caching_mode == "implicit"
@@ -528,11 +589,21 @@ class TurnExecutor:
         if not latest_user_msg:
             return None
 
-        active_role = await self.context.db.get_channel_role_with_inheritance(
-            current_msg.chatbot_id,
-            current_msg.channel_id,
-            self.session_id,
-        )
+        active_role = await self._resolve_active_role(current_msg)
+
+        # Previous assistant reply (text) before the latest user message: used for clicked-option detection
+        # (auto-RAG guard).
+        last_assistant_text = ""
+        latest_user_idx = history.index(latest_user_msg)
+        for prev in reversed(history[:latest_user_idx]):
+            if (
+                prev.role == MessageRole.ASSISTANT
+                and prev.type == MessageType.TEXT
+                and prev.sender != "Notification"
+                and prev.content
+            ):
+                last_assistant_text = prev.content
+                break
 
         # 1. Calculate if this is a Bootstrap Turn (first turn of session or idle > 30 mins)
         is_bootstrap = await self._is_bootstrap_turn(history, current_msg)
@@ -610,8 +681,13 @@ class TurnExecutor:
         cfg = self.context.config
         if cfg.agent.auto_context_search and active_role:
             raw_query = latest_user_msg.content or ""
-            # Guardrails: skip very short queries, empty strings, or pure greetings
-            if len(raw_query.strip()) >= 6:
+            # Guardrails: skip very short queries, empty strings, or pure greetings. Also skip when the user
+            # merely clicked/picked an option of the previous question: retrieval on model-written option text
+            # only re-injects old look-alike scenes (self-imitation loop).
+            clicked_option = is_clicked_option(raw_query, last_assistant_text)
+            if clicked_option:
+                logger.info("Skipping auto context search: user message is a clicked option of the last question")
+            if len(raw_query.strip()) >= 6 and not clicked_option:
                 try:
                     augmented_context_prefix = await self._retrieve_auto_search_context(
                         role=active_role,
@@ -655,6 +731,25 @@ class TurnExecutor:
         )
 
         return latest_user_msg
+
+    async def _resolve_active_role(self, current_msg: Message) -> str:
+        """Resolve the persona role for this turn.
+
+        The session's own `role_name` is authoritative when set to a non-default role (role switches swap
+        sessions). Falls back to the channel role lookup (with parent-thread inheritance) otherwise, which
+        covers thread sessions whose channel has no explicit `channel_roles` row.
+        """
+        try:
+            session = await self.context.db.get_session(self.session_id)
+            if session and session.role_name and session.role_name != "default":
+                return session.role_name
+        except Exception as e:
+            logger.warning(f"Failed to read session role for '{self.session_id}': {e}")
+        return await self.context.db.get_channel_role_with_inheritance(
+            current_msg.chatbot_id,
+            current_msg.channel_id,
+            self.session_id,
+        )
 
     async def _retrieve_auto_search_context(
         self,
@@ -710,7 +805,8 @@ class TurnExecutor:
                 speaker = "User" if msg.role == MessageRole.USER else "Agent"
                 msg_time = datetime.datetime.fromtimestamp(msg.timestamp).astimezone()
                 time_str = msg_time.strftime("%Y-%m-%d %H:%M:%S")
-                dialogue_lines.append(f"  {speaker} [{time_str}]: {msg.content.strip()}")
+                snippet_text = sanitize_rag_snippet_line(speaker, msg.content or "")
+                dialogue_lines.append(f"  {speaker} [{time_str}]: {snippet_text}")
 
             if dialogue_lines:
                 snippet_block = (

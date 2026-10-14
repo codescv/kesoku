@@ -25,7 +25,7 @@ HISTORICAL_RESULT_NOTICE = (
 
 @default_registry.register
 def list_skills(context: ToolContext | None = None) -> str:
-    """List all valid skills in skills_dir supported on the current host operating system.
+    """List all valid skills supported on the current host OS, including the active role's own skills.
 
     Args:
         context: Optional tool execution context.
@@ -33,7 +33,7 @@ def list_skills(context: ToolContext | None = None) -> str:
     Returns:
         Formatted summary of available skills.
     """
-    skills = skill_manager.list_skills()
+    skills = skill_manager.list_skills(role=_resolve_session_role_sync(context))
     if not skills:
         return "No skills available or supported on this platform."
     lines = ["=== Available Skills ==="]
@@ -54,10 +54,28 @@ def use_skill(skill_name: str, context: ToolContext | None = None) -> str:
         Complete markdown instructions and absolute path header for the skill.
     """
     try:
-        _, content = skill_manager.get_skill(skill_name)
+        _, content = skill_manager.get_skill(skill_name, role=_resolve_session_role_sync(context))
         return content
     except Exception as e:
         return f"Failed to load skill '{skill_name}': {e}"
+
+
+def _resolve_session_role_sync(context: ToolContext | None) -> str | None:
+    """Resolve the session's persona role synchronously (for sync tools); None when unknown.
+
+    Used to expose role-scoped skills (`roles/<role>/skills/`) only to sessions of that role.
+    """
+    if not context or not context.gateway or not context.session_id:
+        return None
+    try:
+        sync_db = getattr(context.gateway.db, "sync_db", None)
+        if sync_db is None:
+            return None
+        sess = sync_db.get_session(context.session_id)
+        return sess.role_name if sess and sess.role_name else None
+    except Exception as e:
+        logger.warning(f"Failed to resolve session role for skills: {e}")
+        return None
 
 
 async def _resolve_role(role_param: str | None, context: ToolContext | None) -> str:

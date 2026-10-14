@@ -94,13 +94,16 @@ def parse_skill_markdown(filepath: str) -> tuple[SkillManifest, str]:
 class SkillManager:
     """Manages discovering, validating, filtering, and loading specialized agent skills."""
 
-    def __init__(self, skills_dir: str | None = None) -> None:
+    def __init__(self, skills_dir: str | None = None, roles_dir: str | None = None) -> None:
         """Initialize SkillManager.
 
         Args:
             skills_dir: Optional override for skills directory path. If None, uses get_config().
+            roles_dir: Optional override for the roles directory (role-scoped skills live in
+                `<roles_dir>/<role>/skills/`). If None, uses get_config().
         """
         self._skills_dir_override = skills_dir
+        self._roles_dir_override = roles_dir
 
     def _get_skills_dir(self) -> str:
         """Retrieve the real canonical path to the workspace skills directory."""
@@ -112,6 +115,59 @@ class SkillManager:
         if not os.path.exists(real):
             os.makedirs(real, exist_ok=True)
         return real
+
+    def _get_role_skills_dir(self, role: str | None) -> str | None:
+        """Return the canonical `<roles_dir>/<role>/skills` directory, or None if absent/invalid.
+
+        Role names are validated with the same character whitelist as skill names and the result must stay
+        inside the roles directory, so a crafted role name can never escape it.
+        """
+        if not role or not re.match(r"^[a-zA-Z0-9_\-]+$", role):
+            return None
+        if self._roles_dir_override is not None:
+            roles_dir = self._roles_dir_override
+        else:
+            try:
+                roles_dir = get_config().workspace.roles_dir
+            except Exception:
+                return None
+        if not roles_dir:
+            return None
+        roles_base = os.path.realpath(roles_dir)
+        target = os.path.realpath(os.path.join(roles_base, role, "skills"))
+        if os.path.commonpath([roles_base, target]) != roles_base or not os.path.isdir(target):
+            return None
+        return target
+
+    @staticmethod
+    def _resolve_in_base(base: str, skill_name: str) -> str | None:
+        """Resolve skill_name inside base with a canonical boundary check; None if it does not exist."""
+        target = os.path.realpath(os.path.join(base, skill_name))
+        if os.path.commonpath([base, target]) != base or target == base:
+            raise KeyError(f"Invalid skill name '{skill_name}': Path traversal boundary violation.")
+        return target if os.path.isdir(target) else None
+
+    def get_skill_dir(self, skill_name: str, role: str | None = None) -> str:
+        """Resolve a skill directory, preferring the role-scoped skill over the global one.
+
+        Args:
+            skill_name: Raw skill name identifier.
+            role: Optional active role; enables `<roles_dir>/<role>/skills/` lookup.
+
+        Returns:
+            Absolute canonical path to the skill's directory.
+
+        Raises:
+            KeyError: If skill_name is invalid, missing, or violates path boundaries.
+        """
+        if not re.match(r"^[a-zA-Z0-9_\-]+$", skill_name):
+            raise KeyError(f"Invalid skill name '{skill_name}': Contains prohibited characters.")
+        role_base = self._get_role_skills_dir(role)
+        if role_base:
+            found = self._resolve_in_base(role_base, skill_name)
+            if found:
+                return found
+        return self._resolve_skill_dir(skill_name)
 
     def _resolve_skill_dir(self, skill_name: str) -> str:
         """Safely resolve and validate a skill directory ensuring no path traversal.
@@ -184,13 +240,29 @@ class SkillManager:
         allowed = [p.lower().strip() for p in manifest.metadata.platforms]
         return current in allowed
 
-    def list_skills(self) -> list[dict[str, Any]]:
-        """List all valid skills in skills_dir supported on the current host operating system.
+    def list_skills(self, role: str | None = None) -> list[dict[str, Any]]:
+        """List all valid skills supported on the current host OS (global plus the role's own skills).
+
+        Args:
+            role: Optional active role. Skills in `<roles_dir>/<role>/skills/` are included and take
+                precedence over global skills with the same name.
 
         Returns:
             List of dictionaries containing summary details of each supported skill.
         """
-        skills_dir = self._get_skills_dir()
+        results_by_name: dict[str, dict[str, Any]] = {}
+        # Global first, then role-scoped so role skills override on name collision.
+        for item in self._list_skills_in(self._get_skills_dir()):
+            results_by_name[item["name"]] = item
+        role_dir = self._get_role_skills_dir(role)
+        if role_dir:
+            for item in self._list_skills_in(role_dir):
+                results_by_name[item["name"]] = {**item, "role": role}
+        results = sorted(results_by_name.values(), key=lambda x: x["name"])
+        return results
+
+    def _list_skills_in(self, skills_dir: str) -> list[dict[str, Any]]:
+        """List valid, platform-supported skills directly under skills_dir."""
         results = []
         current_platform = _get_current_platform()
 
@@ -226,11 +298,9 @@ class SkillManager:
                 }
             )
 
-        # Sort alphabetically by name
-        results.sort(key=lambda x: x["name"])
         return results
 
-    def get_skill(self, skill_name: str) -> tuple[SkillManifest, str]:
+    def get_skill(self, skill_name: str, role: str | None = None) -> tuple[SkillManifest, str]:
         """Retrieve the manifest and complete instruction content for a specific skill.
 
         Prepares a robust header containing the skill directory absolute path
@@ -238,6 +308,7 @@ class SkillManager:
 
         Args:
             skill_name: Unique skill name identifier.
+            role: Optional active role; a role-scoped skill with the same name takes precedence.
 
         Returns:
             Tuple of (SkillManifest, formatted markdown instructions).
@@ -247,7 +318,7 @@ class SkillManager:
             PermissionError: If required tools/permissions are disabled in config.
             ValueError: If the skill is not supported on the current OS.
         """
-        skill_dir = self._resolve_skill_dir(skill_name)
+        skill_dir = self.get_skill_dir(skill_name, role=role)
         try:
             md_file = self._find_skill_markdown_file(skill_dir)
         except FileNotFoundError as e:

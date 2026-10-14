@@ -157,6 +157,13 @@ class AgentConfig(BaseModel):
         default=3,
         description="Maximum number of historical dialogue snippets to inject into context",
     )
+    strip_historical_question_options: bool = Field(
+        default=True,
+        description=(
+            "Collapse `[question: ...]` stems/options in completed turns older than the last completed turn "
+            "to reduce in-context self-imitation"
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_watermarks(self) -> "AgentConfig":

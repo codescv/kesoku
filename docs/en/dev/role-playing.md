@@ -69,6 +69,40 @@ For Discord bot sessions:
 ### 3. Root Fallback
 If no channel or parent channel is bound, the executor falls back to `"default"`.
 
+### Session Role Takes Precedence
+Before the channel chain above, both `build_sys_prompt` and the turn executor check the session's own
+`sessions.role_name`: when it is set to a non-`"default"` role, it is used directly. Role switches swap or
+create sessions, so the session binding is authoritative, and thread sessions whose channel has no
+`channel_roles` row (e.g. a Discord thread mapped only via `channel_sessions`) still load the right
+`intro.md` / `preferences.md` instead of the default persona.
+
+---
+
+## 🧩 Role-Scoped Skills (`roles/<role>/skills/`)
+
+Besides the global `workspace.skills_dir`, `SkillManager` also discovers skills that belong to a single
+persona under `<roles_dir>/<role>/skills/<skill-name>/SKILL.md`:
+
+*   `list_skills` / `use_skill` resolve the active role from the session and include that role's skills.
+*   A role skill takes precedence over a global skill with the same name.
+*   Other roles (and sessions without a role) never see them.
+*   Role and skill names are restricted to `[A-Za-z0-9_-]` and resolved with the same canonical path
+    boundary checks as global skills.
+
+Persona-specific capabilities (scripts plus their SKILL.md) can therefore live entirely inside the role
+directory without polluting the global skill list.
+
+## 🔁 Anti Self-Imitation Measures
+
+*   **Historical question options**: with `agent.strip_historical_question_options = true` (default),
+    `prepare_history_for_llm` collapses `[question: <stem> || <options>]` into `[question: ...]` in assistant
+    messages of completed turns older than the last completed turn (`idx < num_turns - 2`). The last completed
+    turn keeps its options so numeric replies ("2") and clicked-option detection keep working. The collapsed
+    prefix is byte-stable across turns, so implicit prefix caching still hits.
+*   **Auto-RAG guard**: auto context search is skipped when the user message is a clicked option of the
+    previous assistant question (exact match) or a short numeric pick. Retrieved snippets have
+    `[question: ...]` blocks collapsed and long `Agent` lines truncated (400 chars).
+
 ---
 
 ## 🔄 System Prompt Rebuilding Sequence

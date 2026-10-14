@@ -80,7 +80,11 @@ def build_sys_prompt(
     # Resolve current role
     if role is None:
         role = "default"
-        if session:
+        if session and session.role_name and session.role_name != "default":
+            # The session's own persona binding is authoritative (role switches create/swap sessions).
+            # This also covers thread sessions that have no direct channel mapping.
+            role = session.role_name
+        elif session:
             db = DatabaseManager(cfg.workspace.db_path)
             try:
                 mapping = db.get_channel_by_session(session.id)
