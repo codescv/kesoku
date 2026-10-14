@@ -18,6 +18,30 @@ from kesoku.utils.path import PathResolver
 
 logger = logging.getLogger(__name__)
 
+# Tools whose (potentially long) file-content arguments are truncated once their turn is completed.
+# The written content already lives on disk (and in session notes), so re-sending it every turn is waste.
+TRUNCATED_ARG_TOOLS = frozenset({"update_session_notes", "update_file"})
+MAX_HISTORICAL_TOOL_ARG_CHARS = 300
+
+
+def truncate_tool_call_arguments(tool_name: str | None, args: dict) -> dict:
+    """Truncate long string arguments of historical file/notes tool calls.
+
+    Returns the original dict unchanged when nothing needs truncation, otherwise a truncated copy.
+    """
+    if tool_name not in TRUNCATED_ARG_TOOLS:
+        return args
+    if not any(isinstance(v, str) and len(v) > MAX_HISTORICAL_TOOL_ARG_CHARS for v in args.values()):
+        return args
+    return {
+        k: (
+            v[:MAX_HISTORICAL_TOOL_ARG_CHARS] + f"…[truncated for history, {len(v)} chars total]"
+            if isinstance(v, str) and len(v) > MAX_HISTORICAL_TOOL_ARG_CHARS
+            else v
+        )
+        for k, v in args.items()
+    }
+
 
 async def build_history(
     gateway: Gateway,
@@ -129,13 +153,21 @@ def prepare_history_for_llm(
                 if m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT:
                     continue
 
-                # Drop thought signature from historical tool call messages to optimize context size
+                # Drop thought signature from historical tool call messages to optimize context size,
+                # and truncate long file-content arguments of file/notes tools.
                 if m.role == MessageRole.TOOL and m.type == MessageType.TOOL_CALL:
                     if m.metadata and "thought_signature" in m.metadata:
                         # Copy to avoid mutating shared state in-memory
                         m = m.model_copy()
                         m.metadata = dict(m.metadata)
                         m.metadata.pop("thought_signature", None)
+                    args = m.metadata.get("tool_arguments") if m.metadata else None
+                    if isinstance(args, dict):
+                        truncated_args = truncate_tool_call_arguments(m.metadata.get("tool_name"), args)
+                        if truncated_args is not args:
+                            m = m.model_copy()
+                            m.metadata = dict(m.metadata)
+                            m.metadata["tool_arguments"] = truncated_args
 
                 # Truncate tool results in completed turns if they exceed max_historical_tool_chars (default 500)
                 if m.role == MessageRole.TOOL and m.type == MessageType.TOOL_RESULT:

@@ -13,7 +13,7 @@ import tomllib
 from typing import Literal
 
 import tomli_w
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from kesoku.logger import setup_logger
 
@@ -95,19 +95,51 @@ class AgentConfig(BaseModel):
     )
     protect_tail_turns: int = Field(
         default=3,
-        description="Number of turns from end protected from compression",
+        description="Number of most recent turns (including the current one) protected from compression",
+    )
+    compression_strategy: Literal["chunk", "watermark"] = Field(
+        default="chunk",
+        description=(
+            "'chunk' (legacy): compress every base_node_turns/base_node_min_tokens chunk as soon as it leaves the "
+            "protected tail. 'watermark': compress only when the whole prompt exceeds context_high_watermark, "
+            "down to context_low_watermark"
+        ),
     )
     base_node_min_tokens: int = Field(
         default=25000,
-        description="Token threshold above which x buffer turns are compressed",
+        description="[chunk] Token threshold above which x buffer turns are compressed",
     )
     base_node_turns: int = Field(
         default=4,
-        description="Number of turns x grouped to form a Level-0 node",
+        description="[chunk] Number of turns x grouped to form a Level-0 node",
+    )
+    context_high_watermark: int = Field(
+        default=64000,
+        description="[watermark] Compact when the estimated prompt (system+tools+scaffold+history) exceeds this",
+    )
+    context_low_watermark: int = Field(
+        default=24000,
+        description="[watermark] Once triggered, compress the oldest turns until the estimated prompt is below this",
+    )
+    protect_tail_min_tokens: int = Field(
+        default=12000,
+        description="[watermark] Minimum estimated tokens of the most recent uncompressed turns kept verbatim",
+    )
+    watermark_chunk_tokens: int = Field(
+        default=24000,
+        description="[watermark] Target estimated source tokens per Level-0 summary chunk",
+    )
+    watermark_chunk_min_turns: int = Field(
+        default=2,
+        description="[watermark] Minimum number of turns grouped into a Level-0 summary chunk",
     )
     context_consolidation_k: int = Field(
         default=4,
         description="Branching factor K to merge K Level-n nodes into Level-n+1",
+    )
+    recent_user_messages_limit: int = Field(
+        default=100,
+        description="Max number of verbatim user messages from compressed turns kept in the scaffold (0 disables)",
     )
     auto_context_search: bool = Field(
         default=True,
@@ -125,6 +157,24 @@ class AgentConfig(BaseModel):
         default=3,
         description="Maximum number of historical dialogue snippets to inject into context",
     )
+
+    @model_validator(mode="after")
+    def _validate_watermarks(self) -> "AgentConfig":
+        """Reject watermark settings that would make compaction thrash every turn."""
+        if self.compression_strategy != "watermark":
+            return self
+        if self.context_low_watermark >= self.context_high_watermark:
+            raise ValueError(
+                f"context_low_watermark ({self.context_low_watermark}) must be < "
+                f"context_high_watermark ({self.context_high_watermark})"
+            )
+        if self.protect_tail_min_tokens >= self.context_low_watermark:
+            raise ValueError(
+                f"protect_tail_min_tokens ({self.protect_tail_min_tokens}) must be < "
+                f"context_low_watermark ({self.context_low_watermark}); otherwise the protected tail alone "
+                "keeps the prompt above the low watermark and compaction runs every turn"
+            )
+        return self
 
 
 class GeminiConfig(BaseModel):
@@ -160,6 +210,13 @@ class GeminiConfig(BaseModel):
     context_caching: bool = Field(
         default=True,
         description="Whether to enable explicit context caching for long sessions",
+    )
+    context_caching_mode: Literal["explicit", "implicit"] = Field(
+        default="explicit",
+        description=(
+            "'explicit' creates a Gemini cachedContent over the history prefix (storage billed per hour); "
+            "'implicit' relies on Vertex's automatic prefix caching (no storage fee, best-effort hits)"
+        ),
     )
     context_caching_threshold: int = Field(
         default=4096,

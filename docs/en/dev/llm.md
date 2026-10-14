@@ -61,7 +61,7 @@ Before sending history to a model, Kesoku converts database `Message` records in
 ### 1. `GeminiLLM` (Google GenAI SDK)
 *   **Authentication**: Supports `api_key` mode (reading keys directly) and `vertex` mode (leveraging Application Default Credentials on GCP).
 *   **Thinking Level**: Maps `"thinking_level"` (minimal, low, medium, high) into corresponding token budgets on `types.GenerateContentConfig(thinking_config=...)`.
-*   **Context Caching**: If the history size exceeds `context_caching_threshold` (default: 4K tokens), it calls `client.aio.caches.create` to create a TTL-guarded context cache on Vertex AI or Gemini API, reducing prompt costs.
+*   **Context Caching**: If the history size exceeds `context_caching_threshold` (default: 4K tokens), it calls `client.aio.caches.create` to create a TTL-guarded context cache on Vertex AI or Gemini API, reducing prompt costs. Set `[gemini].context_caching_mode = "implicit"` to skip explicit caches and rely on Vertex implicit prefix caching instead (no storage fee, best-effort hits; observed lifetime < 5 minutes).
 
 ### 2. `ClaudeLLM` (Anthropic Vertex API)
 *   **Alternating Turns Alignment**: Anthropic requires strict user/assistant alternation. The translator automatically merges consecutive user text and tool outcomes into a single user turn, and consecutive assistant thoughts/tool calls into a single assistant turn.

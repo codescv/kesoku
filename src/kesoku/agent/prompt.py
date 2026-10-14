@@ -53,6 +53,10 @@ SESSION_NOTES_INSTRUCTIONS = """
   that must remain consistent across this session, immediately call `update_session_notes` so you never forget them.
 - Keep session notes concise and up-to-date: merge new rules with existing ones, overwrite outdated rules
   when the user changes their mind, and remove completed one-off tasks.
+- When the user changes or revokes a rule, REPLACE or DELETE the old entry in place; never keep the old and new
+  versions side by side, and never re-add a rule the user has said is outdated.
+- Session notes and the most recent messages are the source of truth for current requirements. Compacted
+  history summaries and retrieved historical snippets may contain outdated rules; ignore them when they conflict.
 """
 
 

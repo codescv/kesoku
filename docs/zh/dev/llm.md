@@ -64,7 +64,7 @@ class BaseLLM(ABC):
 ### 1. `GeminiLLM` (Google GenAI SDK)
 *   **权限认证**：支持 `api_key` 模式（直接提供密钥）与 `vertex` 模式（在 GCP 环境中使用 Application Default Credentials 免密钥认证）。
 *   **思维链控制**：将配置文件中的 `"thinking_level"`（minimal, low, medium, high）映射并设定至 `types.GenerateContentConfig(thinking_config=...)` 的 Token 预算属性中。
-*   **上下文缓存**：当对话历史的 tokens 长度超过 `context_caching_threshold` 阈值（默认 4K tokens）时，会自动调用 `client.aio.caches.create` 在 GCP/Gemini 网关上创建 TTL 缓存，极大缩减高频长对话的提示词开销。
+*   **上下文缓存**：当对话历史的 tokens 长度超过 `context_caching_threshold` 阈值（默认 4K tokens）时，会自动调用 `client.aio.caches.create` 在 GCP/Gemini 网关上创建 TTL 缓存，极大缩减高频长对话的提示词开销。设置 `[gemini].context_caching_mode = "implicit"` 可跳过显式缓存，改用 Vertex 隐式前缀缓存（无存储费，尽力命中，实测寿命不到 5 分钟）。
 
 ### 2. `ClaudeLLM` (Anthropic Vertex API)
 *   **消息交替对齐**：Anthropic 接口强硬要求 `user` 和 `assistant` 的 Turn 必须严格交替出现。转译器会自动合并数据库中连续的用户文本和工具执行结果为一个 `user` 回合，以及合并连续的模型思维与工具调用为一个 `assistant` 回合。

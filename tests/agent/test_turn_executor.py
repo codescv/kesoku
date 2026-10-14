@@ -1621,8 +1621,10 @@ async def test_turn_executor_auto_compaction_buffer_exclusion(temp_db: str) -> N
     # Assert Turn 3 is present
     assert any("Turn 3 active" in c for c in captured_contents)
 
-    # Assert Turn 2 raw messages are NOT present!
-    assert not any("Turn 2 user" in c for c in captured_contents)
+    # Assert Turn 2 raw messages are NOT present as raw history; the user's own words survive only
+    # verbatim inside the scaffold's <recent_user_messages> block.
+    assert all("<recent_user_messages>" in c for c in captured_contents if "Turn 2 user" in c)
+    assert any("Turn 2 user" in c for c in captured_contents)
     assert not any("Turn 2 reply" in c for c in captured_contents)
 
 
@@ -2140,3 +2142,64 @@ async def test_turn_executor_session_notes_injection_and_tool(temp_db: str, tmp_
     last_user_2 = [m.content for m in llm.captured_history if m.role == MessageRole.USER][-1]
     assert "<session_notes>\n- 本session使用中日双语\n- 当前场景：江之电车厢内\n</session_notes>" in last_user_2
 
+
+
+@pytest.mark.asyncio
+async def test_turn_executor_implicit_caching_mode_skips_explicit_cache(temp_db: str) -> None:
+    """With context_caching_mode='implicit', no explicit cache is created and no cached_content is passed."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    cfg.gemini.context_caching = True
+    cfg.gemini.context_caching_threshold = 10
+    cfg.gemini.context_caching_mode = "implicit"
+
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.create_session("sess_implicit", title="Implicit Cache Session")
+    for content, status in [("Long prompt prefix.", "responded"), ("Current message.", "pending_agent")]:
+        msg = Message(
+            session_id="sess_implicit", chatbot_id="cli", channel_id="ch1", sender="u1",
+            role="user", content=content, status=status,
+        )
+        await gw.post(msg)
+
+    class GeminiLLM(BaseLLM):
+        def __init__(self) -> None:
+            self.created: list[str] = []
+            self.cached_contents: list[str | None] = []
+
+        def count_tokens(self, prompt=None, system_prompt=None, history=None, tools=None) -> int:
+            return 100
+
+        async def create_cache(self, *args: Any, **kwargs: Any) -> str | None:
+            self.created.append("cache")
+            return "mock_cache"
+
+        async def delete_cache(self, cache_name: str) -> None:
+            pass
+
+        async def generate(self, prompt=None, system_prompt=None, history=None, tools=None,
+                           cached_content=None, **kwargs: Any) -> LLMResponse:
+            self.cached_contents.append(cached_content)
+            return LLMResponse(content="ok", total_tokens=10)
+
+    llm = GeminiLLM()
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    context = KesokuContext(config=cfg, llm=llm)
+    executor = TurnExecutor("sess_implicit", gw, tool_runner, MagicMock(spec=TurnLogger), context=context)
+    worker = MagicMock()
+    worker.active_cache_name = None
+    type(worker).running = PropertyMock(side_effect=[True, False])
+
+    async def mock_pivot(m: Message) -> Message:
+        return m
+
+    worker.drain_queue_and_pivot.side_effect = mock_pivot
+    worker.queue_empty.return_value = True
+    current = (await gw.db.get_session_history("sess_implicit"))[-1]
+
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor.process_turn(current_msg=current, worker=worker, session_staging_dir="/tmp/sess_implicit")
+
+    assert llm.created == []
+    assert llm.cached_contents == [None]

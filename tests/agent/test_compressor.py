@@ -115,7 +115,7 @@ def test_format_summary_with_new_structure():
     assert "Timeline:\n- 2026-01-01 18:00 - 2026-01-01 18:30: User requested feature X" in result
     assert "User Asks" not in result
     assert "Python 3.12" not in result
-    assert "Tools & Skills:\n- run_shell_command (ai-image): Generated illustrations for story scene" in result
+    assert "Tools & Skills" not in result
     assert "Learnings:\nUse rg instead of grep for searching." in result
     assert result.startswith("Timeline:")
 
@@ -131,7 +131,7 @@ def test_format_summary_all_none():
     result = HistoryCompressor.format_summary(json_input)
     assert "Timeline:\n- 2026-01-01 18:00: Checked system status." in result
     assert "User Asks" not in result
-    assert "Tools & Skills:\nNone" in result
+    assert "Tools & Skills" not in result
     assert "Learnings:\nNone" in result
 
 
@@ -195,7 +195,7 @@ async def test_auto_compact_session(tmp_path):
     assert "Timeline:\n- 2026-01-01 18:00 - 2026-01-01 18:30: Started task" in inserted_node.summary
     assert "User Asks" not in inserted_node.summary
     assert "user_asks" not in call_prompt
-    assert "Tools & Skills:\n- run_shell_command: Executed CLI script" in inserted_node.summary
+    assert "Tools & Skills" not in inserted_node.summary
 
 
 @pytest.mark.asyncio
@@ -241,7 +241,7 @@ async def test_consolidate_forest():
     assert inserted_parent.level == 1
     assert "Timeline:\n- 2026-01-01 19:00 - 2026-01-01 19:30: Merged events" in inserted_parent.summary
     assert "User Asks" not in inserted_parent.summary
-    assert "Tools & Skills:\n- run_shell_command: Executed CLI script" in inserted_parent.summary
+    assert "Tools & Skills" not in inserted_parent.summary
 
 def test_estimate_prepared_turn_tokens():
     """Test estimate_prepared_turn_tokens drops thoughts and truncates long tool outputs."""
@@ -314,7 +314,7 @@ def test_format_summary_does_not_touch_notes(tmp_path):
         assert f.read() == "- current rule"
 
 
-def test_strip_legacy_user_asks():
+def test_strip_legacy_sections():
     """Legacy summaries have their User Asks section removed; other sections are kept intact."""
     legacy = (
         "Timeline:\n- 2026-10-13 10:40 - 2026-10-13 16:56: Scene\n\n"
@@ -322,17 +322,18 @@ def test_strip_legacy_user_asks():
         "Tools & Skills:\n- run_shell_command: images\n\n"
         "Learnings:\nUse uv."
     )
-    stripped = HistoryCompressor.strip_legacy_user_asks(legacy)
+    stripped = HistoryCompressor.strip_legacy_sections(legacy)
     assert "User Asks" not in stripped
     assert "比基尼" not in stripped
     assert stripped.startswith("Timeline:\n- 2026-10-13 10:40")
-    assert "\n\nTools & Skills:\n- run_shell_command: images\n\nLearnings:\nUse uv." in stripped
+    assert "Tools & Skills" not in stripped
+    assert stripped.endswith("\n\nLearnings:\nUse uv.")
 
     # User Asks as the last section, and summaries without it
     tail = "Timeline:\n- a\n\nUser Asks:\nNone"
-    assert HistoryCompressor.strip_legacy_user_asks(tail) == "Timeline:\n- a"
+    assert HistoryCompressor.strip_legacy_sections(tail) == "Timeline:\n- a"
     plain = "Timeline:\n- a\n\nLearnings:\nNone"
-    assert HistoryCompressor.strip_legacy_user_asks(plain) == plain
+    assert HistoryCompressor.strip_legacy_sections(plain) == plain
 
 
 @pytest.mark.asyncio
@@ -357,3 +358,17 @@ async def test_consolidate_strips_legacy_user_asks_from_children():
     prompt = llm_mock.generate.call_args[1]["prompt"]
     assert "stale rule" not in prompt
     assert "- t0" in prompt
+
+
+def test_estimate_prepared_turn_tokens_truncates_notes_tool_args():
+    """Estimation mirrors history truncation of long update_session_notes arguments."""
+    compressor = HistoryCompressor(AsyncMock())
+    llm_mock = MagicMock()
+    llm_mock.estimate_tokens_fallback = MagicMock(side_effect=lambda prompt=None, **_: len(prompt or ""))
+    call = Message(
+        session_id="s", chatbot_id="cb", channel_id="ch", sender="update_session_notes",
+        role=MessageRole.TOOL, type=MessageType.TOOL_CALL, content="Calling tool ...",
+        status=MessageStatus.RESPONDED,
+        metadata={"tool_name": "update_session_notes", "tool_arguments": {"content": "n" * 5000}},
+    )
+    assert compressor.estimate_prepared_turn_tokens([call], llm_mock) < 500

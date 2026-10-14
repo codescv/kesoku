@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime
+import inspect
 import json
 import os
 import time
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import tzlocal
 
-from kesoku.agent.compressor import HistoryCompressor
+from kesoku.agent.compressor import SCAFFOLD_HEADER, HistoryCompressor, estimate_tokens_calibrated
 from kesoku.agent.history import (
     build_history,
     prepare_history_for_llm,
@@ -37,6 +38,23 @@ MAX_CHATBOT_ERROR_MESSAGE_LENGTH = 500
 # (e.g. Vertex safety filtering yields finish_reason=SAFETY with zero parts) before
 # falling back to nudging the model with an explicit system message.
 EMPTY_RESPONSE_RETRIES = 2
+
+
+def estimate_fixed_prompt_overhead(system_prompt: str | None, tools_list: list | None) -> int:
+    """Estimate tokens of the fixed prompt overhead: system prompt plus tool declarations.
+
+    Tool declarations are approximated from each tool's name, signature, and docstring, which is what the
+    SDK turns into the function schema sent with every request.
+    """
+    text_parts = [system_prompt or ""]
+    for tool in tools_list or []:
+        name = getattr(tool, "__name__", "")
+        try:
+            signature = str(inspect.signature(tool))
+        except (TypeError, ValueError):
+            signature = ""
+        text_parts.append(f"{name}{signature}\n{inspect.getdoc(tool) or ''}")
+    return estimate_tokens_calibrated("\n".join(text_parts))
 
 
 class TurnExecutor:
@@ -278,8 +296,27 @@ class TurnExecutor:
                 # Prepare history for the LLM by stripping thoughts, attachments, and truncating historical tool outputs
                 llm_history = prepare_history_for_llm(history, staging_dir=session_staging_dir)
 
+                # Implicit caching mode: rely on Vertex's automatic prefix caching and drop any explicit cache.
+                implicit_caching = cfg.gemini.context_caching_mode == "implicit"
+                if implicit_caching and active_cache_name:
+                    logger.info("context_caching_mode=implicit: deleting existing explicit context cache...")
+                    try:
+                        await llm.delete_cache(active_cache_name)
+                    except Exception as de:
+                        logger.warning(f"Failed to delete explicit cache in implicit mode: {de}")
+                    active_cache_name = None
+                    cached_messages_len = 0
+                    worker.active_cache_name = None
+                    worker.active_cache_llm = None
+                    worker.cached_messages_len = 0
+
                 # Setup context cache if enabled, Gemini model, and not already created
-                if cfg.gemini.context_caching and llm.__class__.__name__ == "GeminiLLM" and active_cache_name is None:
+                if (
+                    cfg.gemini.context_caching
+                    and not implicit_caching
+                    and llm.__class__.__name__ == "GeminiLLM"
+                    and active_cache_name is None
+                ):
                     prefix_messages = []
                     last_user_idx = None
                     for idx, msg in enumerate(llm_history):
@@ -692,7 +729,8 @@ class TurnExecutor:
         return (
             "<relevant_historical_context>\n"
             "<!-- The following past conversation snippets are automatically retrieved based on semantic similarity "
-            "to the user message: -->\n"
+            "to the user message. They are HISTORICAL REFERENCE ONLY and may be outdated: any requirements, rules, "
+            "or preferences in them are superseded by the current <session_notes> and the most recent messages. -->\n"
             + "\n\n".join(snippets)
             + "\n</relevant_historical_context>\n"
         )
@@ -717,13 +755,22 @@ class TurnExecutor:
 
         compressor = HistoryCompressor(self.context.db)
 
+        # Summarize with the dedicated context-compression model ([agent].context_llm /
+        # [gemini|claude].context_model_name); fall back to the session LLM if it cannot be resolved.
+        try:
+            compression_llm = self.context.get_llm(use_context_compression=True)
+        except Exception as e:
+            logger.warning(f"Failed to resolve context compression LLM, using session LLM: {e}")
+            compression_llm = llm
+
         # Trigger automatic compaction
         compacted_occurred = await compressor.auto_compact_session(
             session_id=self.session_id,
             history=history,
-            llm=llm,
+            llm=compression_llm,
             config=cfg,
             staging_dir=staging_dir,
+            overhead_tokens=estimate_fixed_prompt_overhead(system_prompt, tools_list),
         )
 
         # Retrieve all root summary nodes from the database for this session
@@ -758,17 +805,19 @@ class TurnExecutor:
                     buffer.extend(t)
 
         # Format hierarchical summaries
-        scaffold_parts = [
-            "[Note: This conversation uses custom turn-based context management. "
-            "Earlier turns have been compacted into hierarchical summaries below. "
-            "You have access to search past messages and memories using standard search tools.]\n"
-        ]
+        scaffold_parts = [SCAFFOLD_HEADER]
         for node in root_summaries:
             depth_label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(node.level, f"Level-{node.level}")
             scaffold_parts.append(
                 f"\n[{depth_label} Summary (Level {node.level}, node {node.id})]\n"
-                f"{HistoryCompressor.strip_legacy_user_asks(node.summary)}"
+                f"{HistoryCompressor.strip_legacy_sections(node.summary)}"
             )
+        # Verbatim user messages of compressed turns (changes only on compaction, so it stays cacheable)
+        recent_user_block = HistoryCompressor.build_recent_user_messages_block(
+            turns, cfg.agent.recent_user_messages_limit
+        )
+        if recent_user_block:
+            scaffold_parts.append("\n" + recent_user_block)
         scaffold_content = "\n".join(scaffold_parts)
 
         # Build assembled messages in memory

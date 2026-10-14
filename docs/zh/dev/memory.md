@@ -82,12 +82,15 @@ CREATE TABLE IF NOT EXISTS agent_memories (
 长对话历史如果以原始文本一直堆积，会极快耗尽上下文窗口。Kesoku 采用自定义的分层回合历史压缩器，实现历史压缩与无损找回的平衡。
 
 ### 4.1 分层回合历史压缩 (`HistoryCompressor`)
-1. 在每次发起 LLM 推理前，系统会自动评估当前的历史消息 Token 长度。
-2. 当除去受保护的头部回合（protected head turns）和尾部回合（protected tail turns）之后的中间回合累积了足够的未压缩 Token 数与回合数时，会触发自动压缩流程。
-3. 压缩管理器把需要压缩的中间回合打包，调用 LLM 生成结构化、高密度的 0 级**摘要节点（Level-0 Summary Node）**。摘要包含 Timeline、Tools & Skills、Learnings 三段，刻意不再包含 "User Asks"：冻结在摘要里的要求容易过时并与新指令冲突，当前规则只由 agent 维护在 `notes.md` 中（旧节点里的 "User Asks" 段在发送给 LLM 前会被剥离）。
-4. 在 SQLite 数据库中更新原消息记录，将其 `summary_node_id` 字段指向新创建 of 0 级摘要节点。
+1. 每次 LLM 推理前检查是否需要压缩。通过 `[agent].compression_strategy` 选择两种策略：
+    *   **`chunk`**（旧算法，默认）：中间回合（除受保护的头部和最后 `protect_tail_turns` 轮）一旦同时攒够 `base_node_turns` 轮和 `base_node_min_tokens` token（旧的 fallback 估算），立即压成 Level-0 节点。原文上下文在"受保护尾部"和"尾部 + 约 25K 估算 token"之间来回跳。
+    *   **`watermark`**（高低水位）：用校准后的估算器（ASCII 约 0.25 token/字，非 ASCII 约 0.9 token/字，按 Gemini `count_tokens` 拟合）估算整个 prompt（system prompt + 工具定义 + scaffold + 未压缩历史）。不超过 `context_high_watermark` 时什么都不做；超过后从最老的未保护回合开始，按约 `watermark_chunk_tokens`（至少 `watermark_chunk_min_turns` 轮）一块压成 L0，直到估算值低于 `context_low_watermark`。尾部同时受 `protect_tail_turns` 和 `protect_tail_min_tokens` 保护。可压缩内容不足一块时跳过（防抖动），配置校验要求 `protect_tail_min_tokens < context_low_watermark < context_high_watermark`。摘要长度按原文规模缩放（L0 约为原文 token 的 8%，1200–3000 字；合并时为子节点总长度的一半，上限 4000 字）。
+2. 摘要由专门的压缩模型生成（`[agent].context_llm` / `[gemini|claude].context_model_name`）。
+3. 摘要节点只有 **Timeline** 和 **Learnings**（仅工具与技能使用经验）两段，刻意不包含任何用户要求：原来的 "User Asks" 段和 Learnings 里的用户偏好会把要求冻结在摘要里，之后过时并与新指令冲突；"Tools & Skills" 段则大量重复。当前规则只由 agent 维护在 `notes.md`（`<session_notes>`）中。旧节点里的 "User Asks" / "Tools & Skills" 段在发送给 LLM 前会被剥离。
+4. 在 SQLite 数据库中更新原消息记录，将其 `summary_node_id` 字段指向新创建的 0 级摘要节点。
 5. 当 L 级摘要节点累积到 $2 \times K$ 个时，最老的 $K$ 个节点会被进一步合并并巩固为 Level-L+1 级的更高阶摘要节点（其中 $K$ 为配置的 `context_consolidation_k`）。
-6. 系统会动态拼装活跃历史上下文，拼装顺序为：受保护的头部回合 -> 指向各个摘要节点的骨架指示文本 -> 系统/助手层面的骨架确认应答消息 -> 剩余的未压缩中间回合缓冲区 -> 受保护的尾部回合。
+6. 动态拼装活跃上下文：受保护的头部回合 -> scaffold 消息 -> scaffold 确认应答 -> 未压缩的中间回合缓冲区 -> 受保护的尾部回合。scaffold 开头声明"摘要是历史记录，可能过时；与 `<session_notes>` 或最近消息冲突时以后者为准"，随后是摘要森林，以及 `<recent_user_messages>` 块：保留已压缩回合中最近 `recent_user_messages_limit` 条用户原话（用户消息只占约 1% token，保留原话成本很低）。scaffold 只在压缩时变化，便于缓存。
+7. 已完成回合中 `update_session_notes` / `update_file` 工具调用的长字符串参数截断到 300 字；工具结果仍沿用 500 字上限。
 
 ### 4.2 检索与还原工具
 如果大模型在推理过程中需要查阅已被压缩的细节或在当前角色下检索历史对话，它可以主动调用以下工具：

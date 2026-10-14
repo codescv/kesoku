@@ -643,7 +643,7 @@ class Chatbot(ABC):
 
         compressor = HistoryCompressor(self.gateway.db)
         cfg = self.gateway.context.config
-        llm = get_llm(provider=cfg.agent.llm, config=cfg)
+        llm = get_llm(provider=cfg.agent.context_llm or cfg.agent.llm, config=cfg, use_context_compression=True)
         staging_dir = self.get_session_staging_dir(session.workspace_name)
 
         try:
