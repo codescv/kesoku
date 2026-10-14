@@ -2022,9 +2022,8 @@ async def test_turn_executor_daily_facts_injection(temp_db: str, tmp_path: Any) 
 
 @pytest.mark.asyncio
 async def test_turn_executor_session_notes_injection_and_tool(temp_db: str, tmp_path: Any) -> None:
-    """Verify update_session_notes writes notes.md and TurnExecutor injects <session_notes> on every turn."""
-    from kesoku.agent.tools.memory import update_session_notes
-    from kesoku.agent.tools.registry import ToolContext
+    """Verify update_file writes/edits notes.md incrementally and TurnExecutor injects <session_notes> every turn."""
+    from kesoku.agent.tools.file import update_file
     from kesoku.agent.turn_executor import TurnExecutor
     from kesoku.constants import MessageRole
     from kesoku.db import DatabaseManager
@@ -2055,14 +2054,15 @@ async def test_turn_executor_session_notes_injection_and_tool(temp_db: str, tmp_
     await gw.create_session("sess_notes", title="Notes Session")
     await gw.db.set_active_session_for_channel("cli", "ch1", "sess_notes")
 
-    # 1. Use update_session_notes tool to write pinned session notes
-    tool_ctx = ToolContext(session_id="sess_notes", session_workspace="sess_notes", gateway=gw)
+    # 1. Create notes.md with update_file (old_content=None only for first creation)
+    notes_path = str(staging_dir / "notes.md")
     with patch("kesoku.utils.path.get_config", return_value=cfg):
-        res_str = update_session_notes(
-            content="- 本session只用纯日语交流\n- 当前场景：镰仓海边约会",
-            context=tool_ctx,
+        res_str = update_file(
+            notes_path,
+            None,
+            "- 本session只用纯日语交流\n- 当前场景：镰仓海边散步",
         )
-    assert "Success: Updated pinned session notes" in res_str
+    assert res_str.startswith("Success"), res_str
     assert (staging_dir / "notes.md").exists()
 
     class CaptureLLM(BaseLLM):
@@ -2118,14 +2118,12 @@ async def test_turn_executor_session_notes_injection_and_tool(temp_db: str, tmp_
         )
 
     last_user_1 = [m.content for m in llm.captured_history if m.role == MessageRole.USER][-1]
-    assert "<session_notes>\n- 本session只用纯日语交流\n- 当前场景：镰仓海边约会\n</session_notes>" in last_user_1
+    assert "<session_notes>\n- 本session只用纯日语交流\n- 当前场景：镰仓海边散步\n</session_notes>" in last_user_1
 
-    # 3. Turn 2 (same day): Update session notes and verify updated <session_notes> is still injected
+    # 3. Turn 2 (same day): edit ONLY the changed line; the unchanged rule must survive
     with patch("kesoku.utils.path.get_config", return_value=cfg):
-        update_session_notes(
-            content="- 本session使用中日双语\n- 当前场景：江之电车厢内",
-            context=tool_ctx,
-        )
+        res_edit = update_file(notes_path, "- 当前场景：镰仓海边散步", "- 当前场景：江之电车厢内")
+    assert res_edit.startswith("Success"), res_edit
 
     msg_2 = Message(
         session_id="sess_notes",
@@ -2147,7 +2145,7 @@ async def test_turn_executor_session_notes_injection_and_tool(temp_db: str, tmp_
         )
 
     last_user_2 = [m.content for m in llm.captured_history if m.role == MessageRole.USER][-1]
-    assert "<session_notes>\n- 本session使用中日双语\n- 当前场景：江之电车厢内\n</session_notes>" in last_user_2
+    assert "<session_notes>\n- 本session只用纯日语交流\n- 当前场景：江之电车厢内\n</session_notes>" in last_user_2
 
 
 

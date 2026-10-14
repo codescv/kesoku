@@ -4,9 +4,13 @@ import time
 
 import pytest
 
+import kesoku.agent.tools
+import kesoku.agent.tools.memory
+from kesoku.agent.history import TRUNCATED_ARG_TOOLS
 from kesoku.agent.tools import (
     ToolContext,
     chat_search,
+    default_registry,
     view_message,
 )
 from kesoku.config import KesokuConfig, WorkspaceConfig
@@ -310,3 +314,26 @@ async def test_chat_search_chunks_limit(tmp_path, monkeypatch) -> None:
 
     # Verify that the message ID is shown but only 3 times
     assert res.count("(ID: `m_multi`)") == 3
+
+
+# ---------------------------------------------------------------------------
+# Session notes: the full-overwrite tool is removed; update_file is the only writer
+# ---------------------------------------------------------------------------
+
+
+def test_update_session_notes_tool_removed() -> None:
+    """update_session_notes is no longer registered, exported, or defined; update_file remains."""
+    names = [f.__name__ for f in default_registry.get_tools_list()]
+    assert "update_session_notes" not in names
+    assert "update_file" in names
+    assert not hasattr(kesoku.agent.tools, "update_session_notes")
+    assert "update_session_notes" not in getattr(kesoku.agent.tools, "__all__", [])
+    assert not hasattr(kesoku.agent.tools.memory, "update_session_notes")
+    with pytest.raises(KeyError):
+        default_registry.get_tool("update_session_notes")
+
+
+def test_legacy_notes_tool_still_truncated_in_history() -> None:
+    """Old DB records that called update_session_notes keep having their arguments truncated."""
+    assert "update_session_notes" in TRUNCATED_ARG_TOOLS
+    assert "update_file" in TRUNCATED_ARG_TOOLS

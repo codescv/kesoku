@@ -197,3 +197,25 @@ def test_prepare_history_question_strip_skips_tool_messages() -> None:
     prepared = prepare_history_for_llm(history, strip_old_questions=True)
     tool_msgs = [m for m in prepared if m.role == MessageRole.TOOL]
     assert tool_msgs and "||" in tool_msgs[0].content
+
+
+def test_prepare_history_truncates_completed_update_file_args() -> None:
+    """Completed-turn update_file calls (notes edits) get old/new content truncated; the active turn is kept."""
+
+    def call(i: int) -> list[Message]:
+        return [
+            Message(session_id="s", chatbot_id="cb", channel_id="ch", sender="u", role=MessageRole.USER,
+                    type=MessageType.TEXT, content=f"turn {i}", status=MessageStatus.RESPONDED, timestamp=i * 10),
+            Message(session_id="s", chatbot_id="cb", channel_id="ch", sender="update_file",
+                    role=MessageRole.TOOL, type=MessageType.TOOL_CALL, content="Calling tool",
+                    status=MessageStatus.RESPONDED, timestamp=i * 10 + 1,
+                    metadata={"tool_name": "update_file", "tool_arguments": {
+                        "file_name": "/tmp/s/notes.md", "old_content": "o" * 2000, "new_content": "n" * 2000}}),
+        ]
+
+    prepared = prepare_history_for_llm(call(1) + call(2))
+    calls = [m for m in prepared if m.type == MessageType.TOOL_CALL]
+    old_args, new_args = calls[0].metadata["tool_arguments"], calls[1].metadata["tool_arguments"]
+    assert len(old_args["old_content"]) < 400 and len(old_args["new_content"]) < 400
+    assert old_args["file_name"] == "/tmp/s/notes.md"
+    assert len(new_args["old_content"]) == 2000 and len(new_args["new_content"]) == 2000

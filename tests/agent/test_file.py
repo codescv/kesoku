@@ -5,6 +5,7 @@ import os
 import pytest
 
 from kesoku.agent.tools.file import update_file
+from kesoku.agent.tools.registry import ToolContext
 from kesoku.config import get_config
 
 
@@ -145,3 +146,52 @@ def test_update_file_modify_fail_old_content_none(test_awd) -> None:
     # Content should not change
     with open(resolved_path, encoding="utf-8") as f:
         assert f.read() == initial_content
+
+
+@pytest.fixture
+def staging_cfg(tmp_path):
+    """AWD + sessions_dir under tmp_path, restored afterwards."""
+    cfg = get_config()
+    old_awd, old_sessions = cfg.agent_working_dir, cfg.workspace.sessions_dir
+    cfg.agent_working_dir = str(tmp_path / "awd")
+    cfg.workspace.sessions_dir = str(tmp_path / "sessions")
+    os.makedirs(cfg.agent_working_dir, exist_ok=True)
+    yield tmp_path
+    cfg.agent_working_dir, cfg.workspace.sessions_dir = old_awd, old_sessions
+
+
+@pytest.mark.parametrize("path", ["$STAGING_DIR/notes.md", "${STAGING_DIR}/notes.md"])
+def test_update_file_expands_staging_dir_for_session_notes(staging_cfg, path: str) -> None:
+    """The literal $STAGING_DIR path from the prompt lands in the session staging dir, not under AWD."""
+    ctx = ToolContext(session_id="sess_x", session_workspace="sess_x")
+    res = update_file(path, None, "- rule A\n- scene: park", context=ctx)
+    assert res.startswith("Success"), res
+    notes = staging_cfg / "sessions" / "sess_x" / "notes.md"
+    assert notes.read_text(encoding="utf-8") == "- rule A\n- scene: park"
+    assert not (staging_cfg / "awd" / "$STAGING_DIR").exists()
+    assert not (staging_cfg / "awd" / "${STAGING_DIR}").exists()
+
+    # Incremental edit: only the changed line is replaced, the other rule survives.
+    res2 = update_file(path, "- scene: park", "- scene: museum", context=ctx)
+    assert res2.startswith("Success"), res2
+    assert notes.read_text(encoding="utf-8") == "- rule A\n- scene: museum"
+
+
+def test_update_file_notes_edit_requires_existing_old_content(staging_cfg) -> None:
+    """Editing notes with stale old_content fails loudly instead of silently rewriting the file."""
+    ctx = ToolContext(session_id="sess_y", session_workspace="sess_y")
+    update_file("$STAGING_DIR/notes.md", None, "- rule A\n- rule B", context=ctx)
+    res = update_file("$STAGING_DIR/notes.md", "- rule Z", "- rule C", context=ctx)
+    assert "not found" in res
+    notes = staging_cfg / "sessions" / "sess_y" / "notes.md"
+    assert notes.read_text(encoding="utf-8") == "- rule A\n- rule B"
+
+
+def test_update_file_notes_create_twice_rejected(staging_cfg) -> None:
+    """old_content=None on an existing notes.md is rejected (no accidental full overwrite)."""
+    ctx = ToolContext(session_id="sess_z", session_workspace="sess_z")
+    update_file("$STAGING_DIR/notes.md", None, "- rule A", context=ctx)
+    res = update_file("$STAGING_DIR/notes.md", None, "- replaced everything", context=ctx)
+    assert res.startswith("Error")
+    notes = staging_cfg / "sessions" / "sess_z" / "notes.md"
+    assert notes.read_text(encoding="utf-8") == "- rule A"

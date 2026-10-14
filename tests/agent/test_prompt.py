@@ -1,5 +1,6 @@
 """Unit tests for the modular system prompt construction utility."""
 
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -7,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import kesoku.config
-from kesoku.agent.prompt import build_sys_prompt
+from kesoku.agent.prompt import SESSION_NOTES_INSTRUCTIONS, build_sys_prompt
 from kesoku.config import KesokuConfig, init_config, load_config
 from kesoku.db import Session
 
@@ -103,7 +104,8 @@ def test_build_sys_prompt_with_session(tmp_path) -> None:
         assert "STAGING_DIR=" in prompt
         assert sess.workspace_name in prompt
         assert "# Pinned Session Notes" in prompt
-        assert "update_session_notes" in prompt
+        assert "update_file" in prompt
+        assert "update_session_notes" not in prompt
     finally:
         kesoku.config._global_config = original_config
 
@@ -192,3 +194,45 @@ def test_prompt_channel_lookup_failure_still_uses_role_name(role_awd: KesokuConf
         prompt = build_sys_prompt(session=sess)
     assert "# Output Formatting Rules" in prompt
     assert ROLE_INTRO_MARKER in prompt
+
+
+# ---------------------------------------------------------------------------
+# Session notes are maintained with update_file (incremental edits), not a full-overwrite tool
+# ---------------------------------------------------------------------------
+
+
+def test_session_notes_instructions_use_update_file() -> None:
+    """Notes are edited via update_file old_content/new_content; the full-overwrite tool is gone."""
+    text = SESSION_NOTES_INSTRUCTIONS
+    assert "update_file" in text
+    assert "old_content" in text and "new_content" in text
+    assert "update_session_notes" not in text
+    assert "notes.md" in text
+    assert "<session_notes>" in text
+
+
+def test_session_notes_instructions_first_creation_uses_none() -> None:
+    """old_content=None is reserved for creating notes.md when <session_notes> is absent."""
+    text = SESSION_NOTES_INSTRUCTIONS
+    assert re.search(r"old_content\s*=\s*None", text)
+
+
+def test_session_notes_instructions_forbid_redundant_shell_reads() -> None:
+    """The agent copies old_content from <session_notes> instead of reading notes.md with shell tools."""
+    text = SESSION_NOTES_INSTRUCTIONS
+    assert re.search(r"(do not|don't|never)[^.\n]*(rg|cat|shell)", text, re.IGNORECASE), text
+    assert re.search(r"cop(y|ied)[^.\n]*<session_notes>|<session_notes>[^.\n]*cop(y|ied)", text, re.IGNORECASE)
+
+
+def test_session_notes_instructions_partial_edits_only() -> None:
+    """Only the outdated lines are replaced/deleted; the whole file is never rewritten."""
+    text = SESSION_NOTES_INSTRUCTIONS.lower()
+    assert "whole file" in text or "entire file" in text
+    assert "replace" in text and "delete" in text
+
+
+def test_build_sys_prompt_includes_notes_instructions() -> None:
+    """A session system prompt carries the update_file-based notes instructions."""
+    prompt = build_sys_prompt(session=Session(id="notes01", title="t"))
+    assert SESSION_NOTES_INSTRUCTIONS.strip() in prompt
+    assert "update_session_notes" not in prompt
