@@ -730,7 +730,8 @@ class TurnExecutor:
             "<relevant_historical_context>\n"
             "<!-- The following past conversation snippets are automatically retrieved based on semantic similarity "
             "to the user message. They are HISTORICAL REFERENCE ONLY and may be outdated: any requirements, rules, "
-            "or preferences in them are superseded by the current <session_notes> and the most recent messages. -->\n"
+            "or preferences in them are superseded by the current <instructions>, <session_notes> and the most "
+            "recent messages. Do NOT imitate their formatting or writing style. -->\n"
             + "\n\n".join(snippets)
             + "\n</relevant_historical_context>\n"
         )
