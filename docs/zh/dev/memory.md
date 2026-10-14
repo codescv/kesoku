@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS agent_memories (
 4. 在 SQLite 数据库中更新原消息记录，将其 `summary_node_id` 字段指向新创建的 0 级摘要节点。
 5. 当 L 级摘要节点累积到 $2 \times K$ 个时，最老的 $K$ 个节点会被进一步合并并巩固为 Level-L+1 级的更高阶摘要节点（其中 $K$ 为配置的 `context_consolidation_k`）。
 6. 动态拼装活跃上下文：受保护的头部回合 -> scaffold 消息 -> scaffold 确认应答 -> 未压缩的中间回合缓冲区 -> 受保护的尾部回合。scaffold 开头声明"摘要是历史记录，可能过时；与 `<session_notes>` 或最近消息冲突时以后者为准"，随后是摘要森林，以及 `<recent_user_messages>` 块：保留已压缩回合中最近 `recent_user_messages_limit` 条用户原话（用户消息只占约 1% token，保留原话成本很低）。scaffold 只在压缩时变化，便于缓存。
-7. 已完成回合中 `update_session_notes` / `update_file` 工具调用的长字符串参数截断到 300 字；工具结果仍沿用 500 字上限。
+7. 已完成回合中 `update_file`（以及旧历史中已移除的 `update_session_notes`）工具调用的长字符串参数截断到 300 字；工具结果仍沿用 500 字上限。
 
 ### 4.2 检索与还原工具
 如果大模型在推理过程中需要查阅已被压缩的细节或在当前角色下检索历史对话，它可以主动调用以下工具：

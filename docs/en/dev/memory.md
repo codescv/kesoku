@@ -90,7 +90,7 @@ Long conversational threads cannot be kept in their raw transcripts without hitt
 4. In SQLite, the source messages are updated to link to the new Level-0 summary node.
 5. If Level-L summary nodes accumulate to $2 \times K$ nodes, the oldest $K$ nodes are consolidated and merged into a Level-L+1 summary node (where $K$ is the configured `context_consolidation_k`).
 6. The active history context is assembled dynamically: protected head turns, a scaffold message, a scaffold acknowledgment, the uncompacted buffer, and the protected tail. The scaffold starts with a notice that summaries are historical and that `<session_notes>` and recent messages win on conflict, followed by the summary forest and a `<recent_user_messages>` block with the last `recent_user_messages_limit` verbatim user messages from compressed turns (user messages are ~1% of tokens, so keeping the user's own wording is cheap). The scaffold only changes on compaction, so it stays cache-friendly.
-7. Historical (completed-turn) tool calls of `update_session_notes` / `update_file` have long string arguments truncated to 300 characters; tool results keep the existing 500-character cap.
+7. Historical (completed-turn) tool calls of `update_file` (and the removed legacy `update_session_notes`, still present in old history) have long string arguments truncated to 300 characters; tool results keep the existing 500-character cap.
 
 ### 4.2 Search & Retrieval Tools
 To recall specific details of compacted sections or search across the history of the active role persona, the agent can call the following tools:

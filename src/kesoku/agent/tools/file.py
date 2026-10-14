@@ -1,9 +1,33 @@
 """File management tools for Kesoku AI Agent."""
 
 import os
+import re
 
 from kesoku.agent.tools.registry import ToolContext, default_registry
 from kesoku.utils.path import PathResolver
+
+# `$STAGING_DIR`, `${STAGING_DIR}`, `$AWD`, `${AWD}` placeholders used in prompts/skills.
+_PATH_VAR_RE = re.compile(r"\$(?:\{(STAGING_DIR|AWD)\}|(STAGING_DIR|AWD)\b)")
+
+
+def expand_path_variables(file_name: str, context: ToolContext | None = None) -> str:
+    """Expand `$STAGING_DIR` / `$AWD` placeholders (plain or braced) in a tool file path.
+
+    Prompts name files like `$STAGING_DIR/notes.md`; without expansion such a path would silently be created
+    literally under the AWD. `$STAGING_DIR` resolves from the session workspace in `context` and is left
+    untouched when no session context is available.
+    """
+    if not file_name or "$" not in file_name:
+        return file_name
+
+    def _replace(match: re.Match) -> str:
+        var = match.group(1) or match.group(2)
+        if var == "AWD":
+            return PathResolver.get_awd()
+        workspace = (context.session_workspace or context.session_id) if context else None
+        return PathResolver.get_session_staging_dir(workspace) if workspace else match.group(0)
+
+    return _PATH_VAR_RE.sub(_replace, file_name)
 
 
 @default_registry.register
@@ -20,7 +44,7 @@ def update_file(
     Otherwise, an error is returned.
 
     Args:
-        file_name: Path to the file (relative to AWD or absolute).
+        file_name: Path to the file (relative to AWD or absolute). `$STAGING_DIR` and `$AWD` are expanded.
         old_content: The content to be replaced. Must be None if file doesn't exist.
         new_content: The content to replace with.
         context: Optional tool execution context.
@@ -28,7 +52,7 @@ def update_file(
     Returns:
         A success message or error message.
     """
-    resolved_path = PathResolver.resolve(file_name)
+    resolved_path = PathResolver.resolve(expand_path_variables(file_name, context))
     file_exists = os.path.exists(resolved_path)
 
     if not file_exists:

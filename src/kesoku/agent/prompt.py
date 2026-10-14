@@ -46,13 +46,19 @@ If a command transitions to a background job:
 
 SESSION_NOTES_INSTRUCTIONS = """
 # Pinned Session Notes
-- Use `update_session_notes` (which manages `$STAGING_DIR/notes.md`) to maintain pinned notes for the current session.
-- The contents of `$STAGING_DIR/notes.md` are automatically injected into every turn as `<session_notes>`
-  right before `<current_message>`.
+- Maintain pinned notes for the current session in `$STAGING_DIR/notes.md` using the `update_file` tool
+  (`file_name` = the absolute `$STAGING_DIR/notes.md` path, `old_content` / `new_content`).
+- The exact current contents of `$STAGING_DIR/notes.md` are automatically injected into every turn as
+  `<session_notes>` right before `<current_message>`.
+- To edit, copy the exact lines to change from `<session_notes>` as `old_content`;
+  do NOT run shell commands (`cat`, `rg`, etc.) to read `notes.md` first.
+- Pass `old_content=None` only when creating `notes.md` for the first time (when `<session_notes>` is absent).
+- Edit only the specific lines that change: append a new rule by replacing an adjacent line with itself plus the
+  new line, replace an outdated line with its new version, or delete a line by replacing it with an empty
+  string. Never rewrite the whole file, and never drop unrelated existing entries.
 - Whenever the user states requirements, rules, formatting/language preferences, or ongoing scene/task states
-  that must remain consistent across this session, immediately call `update_session_notes` so you never forget them.
-- Keep session notes concise and up-to-date: merge new rules with existing ones, overwrite outdated rules
-  when the user changes their mind, and remove completed one-off tasks.
+  that must remain consistent across this session, immediately update the notes so you never forget them.
+- Keep session notes concise and up-to-date: merge new rules with existing ones and remove completed one-off tasks.
 - When the user changes or revokes a rule, REPLACE or DELETE the old entry in place; never keep the old and new
   versions side by side, and never re-add a rule the user has said is outdated.
 - Session notes and the most recent messages are the source of truth for current requirements. Compacted

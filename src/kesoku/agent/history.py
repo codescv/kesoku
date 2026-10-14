@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Tools whose (potentially long) file-content arguments are truncated once their turn is completed.
 # The written content already lives on disk (and in session notes), so re-sending it every turn is waste.
+# `update_session_notes` is no longer a tool, but legacy calls to it in stored history must still be truncated.
 TRUNCATED_ARG_TOOLS = frozenset({"update_session_notes", "update_file"})
 MAX_HISTORICAL_TOOL_ARG_CHARS = 300
 

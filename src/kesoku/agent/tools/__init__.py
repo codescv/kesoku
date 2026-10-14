@@ -6,7 +6,6 @@ from kesoku.agent.tools.memory import (
     chat_search,
     list_skills,
     skill_manager,
-    update_session_notes,
     use_skill,
     view_message,
 )
@@ -39,7 +38,6 @@ __all__ = [
     "use_skill",
     "chat_search",
     "view_message",
-    "update_session_notes",
     "skill_manager",
     "update_file",
 ]
