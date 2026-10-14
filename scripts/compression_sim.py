@@ -210,6 +210,10 @@ class SimConfig:
     summary_thinking_tokens: int = 1000  # thinking tokens per summarization call
     cache_ttl: float = 3600.0
     cache_min_tokens: int = 4096
+    cache_sliding_ttl: bool = False  # extend expiry to now + ttl on every turn that uses the cache
+    cache_mode: str = "explicit"  # "explicit" (Kesoku today) or "implicit" (no explicit cache)
+    implicit_ttl: float = 300.0  # max gap (s) between requests for an implicit cache hit
+    implicit_hit_ratio: float = 0.99  # fraction of the common prefix billed as cached
     prices: Prices = field(default_factory=Prices)
 
 
@@ -424,6 +428,7 @@ class Result:
     cache_storage_token_hours: float = 0.0
     prompt_sizes: list[int] = field(default_factory=list)
     raw_history_sizes: list[int] = field(default_factory=list)  # uncompressed history per call
+    raw_history_turns: list[int] = field(default_factory=list)  # uncompressed completed turns per call
     per_turn_last_prompt: list[int] = field(default_factory=list)
     per_turn_cached: list[int] = field(default_factory=list)
     per_turn_input: list[int] = field(default_factory=list)
@@ -449,6 +454,7 @@ def simulate(turns: list[Turn], policy: Policy, cfg: SimConfig) -> Result:
     res = Result(name=policy.name)
     cache_prefix: int | None = None  # cached history tokens (excluding sys/tools)
     cache_created = cache_expires = 0.0
+    prev: tuple[float, int] | None = None  # (timestamp, history tokens) of the previous request
 
     def close_cache(now: float) -> None:
         nonlocal cache_prefix
@@ -468,6 +474,7 @@ def simulate(turns: list[Turn], policy: Policy, cfg: SimConfig) -> Result:
 
         # Prepared history before the current turn: head + scaffold + uncompressed turns.
         raw_hist = sum(t.prepared_real for i, t in enumerate(turns[:cur]) if not state.compressed[i])
+        raw_turns = sum(1 for i in range(policy.protect_front, cur) if not state.compressed[i])
         scaffold = state.scaffold_tokens()
         hist = raw_hist + scaffold
 
@@ -475,22 +482,44 @@ def simulate(turns: list[Turn], policy: Policy, cfg: SimConfig) -> Result:
             close_cache(now)  # expired; Kesoku retries uncached and recreates it
         if cache_prefix is not None and policy.should_refresh_cache(hist - cache_prefix):
             close_cache(now)
-        if cache_prefix is None and cfg.sys_tools_tokens + hist >= cfg.cache_min_tokens and cur > 0:
+        can_cache = cfg.cache_mode == "explicit" and cfg.sys_tools_tokens + hist >= cfg.cache_min_tokens
+        if cache_prefix is None and can_cache and cur > 0:
             cache_prefix = hist
             cache_created, cache_expires = now, now + cfg.cache_ttl
             res.cache_creations += 1
             res.cache_create_tokens += cfg.sys_tools_tokens + hist
+        if cache_prefix is not None and cfg.cache_sliding_ttl:
+            # Model a TTL update (caches.update) after the turn finishes using the cache.
+            cache_expires = turn.end_ts + cfg.cache_ttl
 
         turn_input = 0
-        for call in turn.calls:
+        for j, call in enumerate(turn.calls):
             prompt = cfg.sys_tools_tokens + hist + cfg.inject_tokens + call.partial_in
-            cached = cfg.sys_tools_tokens + cache_prefix if cache_prefix is not None else 0
+            if cfg.cache_mode == "implicit":
+                # Implicit cache: hit = common prefix with the previous request, if recent enough.
+                call_ts = turn.start_ts if j == 0 else turn.end_ts
+                if prev is None or call_ts - prev[0] > cfg.implicit_ttl:
+                    common = 0
+                elif j > 0:
+                    common = cfg.sys_tools_tokens + hist + cfg.inject_tokens + turn.calls[j - 1].partial_in
+                elif compacted:
+                    # Scaffold changed: only system/tools + protected head survive.
+                    common = cfg.sys_tools_tokens + sum(t.prepared_real for t in turns[: policy.protect_front])
+                else:
+                    common = cfg.sys_tools_tokens + prev[1]  # previous turn's history prefix
+                cached = int(min(common, prompt) * cfg.implicit_hit_ratio)
+                if cached < cfg.cache_min_tokens:
+                    cached = 0
+                prev = (call_ts, hist)
+            else:
+                cached = cfg.sys_tools_tokens + cache_prefix if cache_prefix is not None else 0
             res.llm_calls += 1
             res.input_cached += cached
             res.input_uncached += prompt - cached
             res.output += int(call.visible_out * cfg.output_scale)
             res.prompt_sizes.append(prompt)
             res.raw_history_sizes.append(raw_hist)
+            res.raw_history_turns.append(raw_turns)
             turn_input += prompt
         res.per_turn_last_prompt.append(prompt)
         res.per_turn_cached.append(cached)
