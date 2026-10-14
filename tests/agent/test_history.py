@@ -37,3 +37,29 @@ def test_prepare_history_truncates_completed_notes_tool_call_args():
     calls = [m for m in prepared if m.type == MessageType.TOOL_CALL]
     assert len(calls[0].metadata["tool_arguments"]["content"]) < 400
     assert len(calls[1].metadata["tool_arguments"]["content"]) == 2000
+
+
+def test_prepare_history_truncation_is_deterministic(tmp_path):
+    """Truncated historical tool output must be byte-identical across calls (required for implicit caching)."""
+    import time as _time
+
+    from kesoku.agent.history import prepare_history_for_llm
+    from kesoku.constants import MessageRole, MessageStatus, MessageType
+    from kesoku.db import Message
+
+    def turn(i: int) -> list[Message]:
+        return [
+            Message(id=f"u{i}", session_id="s", chatbot_id="cb", channel_id="ch", sender="u", role=MessageRole.USER,
+                    type=MessageType.TEXT, content=f"q{i}", status=MessageStatus.RESPONDED, timestamp=i * 10),
+            Message(id=f"r{i}", session_id="s", chatbot_id="cb", channel_id="ch", sender="chat_search",
+                    role=MessageRole.TOOL, type=MessageType.TOOL_RESULT, content="x" * 2000,
+                    status=MessageStatus.RESPONDED, timestamp=i * 10 + 1,
+                    metadata={"tool_name": "chat_search", "tool_result": "x" * 2000}),
+        ]
+
+    history = turn(1) + turn(2)
+    first = prepare_history_for_llm(history, staging_dir=str(tmp_path))
+    _time.sleep(1.1)
+    second = prepare_history_for_llm(history, staging_dir=str(tmp_path))
+    assert [m.content for m in first] == [m.content for m in second]
+    assert "hist_tool_chat_search_r1.txt" in first[1].content

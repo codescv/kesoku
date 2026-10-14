@@ -5,7 +5,6 @@ import logging
 import os
 import re
 import tempfile
-import time
 import uuid
 from typing import Literal
 
@@ -22,6 +21,13 @@ logger = logging.getLogger(__name__)
 # The written content already lives on disk (and in session notes), so re-sending it every turn is waste.
 TRUNCATED_ARG_TOOLS = frozenset({"update_session_notes", "update_file"})
 MAX_HISTORICAL_TOOL_ARG_CHARS = 300
+
+
+def _hist_filename(kind: str, tool_name: str, msg: Message) -> str:
+    """Stable staging filename for a truncated historical tool output, derived from the message id."""
+    safe_tool = re.sub(r"[^A-Za-z0-9_.-]", "_", str(tool_name))
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(msg.id or uuid.uuid5(uuid.NAMESPACE_OID, msg.content or "")))
+    return f"hist_{kind}_{safe_tool}_{safe_id}.txt"
 
 
 def truncate_tool_call_arguments(tool_name: str | None, args: dict) -> dict:
@@ -191,9 +197,9 @@ def prepare_history_for_llm(
                         if file_match and os.path.exists(file_match.group(1)):
                             err_filepath = file_match.group(1)
                         else:
-                            timestamp = int(time.time())
-                            err_filename = f"hist_err_{tool_name}_{timestamp}_{uuid.uuid4().hex[:8]}.txt"
-                            err_filepath = os.path.join(target_dir, err_filename)
+                            # Deterministic name (per message) keeps the truncated preview text byte-identical
+                            # across calls, which implicit prefix caching depends on.
+                            err_filepath = os.path.join(target_dir, _hist_filename("err", tool_name, m))
                             try:
                                 with open(err_filepath, "w", encoding="utf-8") as f:
                                     f.write(tool_error)
@@ -218,9 +224,9 @@ def prepare_history_for_llm(
                         if file_match and os.path.exists(file_match.group(1)):
                             filepath = file_match.group(1)
                         else:
-                            timestamp = int(time.time())
-                            filename = f"hist_tool_{tool_name}_{timestamp}_{uuid.uuid4().hex[:8]}.txt"
-                            filepath = os.path.join(target_dir, filename)
+                            # Deterministic name (per message) keeps the truncated preview text byte-identical
+                            # across calls, which implicit prefix caching depends on.
+                            filepath = os.path.join(target_dir, _hist_filename("tool", tool_name, m))
                             try:
                                 with open(filepath, "w", encoding="utf-8") as f:
                                     f.write(raw_res)
