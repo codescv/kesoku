@@ -13,6 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from kesoku.agent.context_dir import build_context_prefix
 from kesoku.agent.history import build_history
 from kesoku.agent.prompt import build_sys_prompt
 from kesoku.agent.tools.registry import ToolContext
@@ -764,6 +765,14 @@ class Chatbot(ABC):
                     last_metrics = m.metadata.get("turn_metrics")
                     break
 
+            # Per-turn context blocks (notes.md + context/*.md) the agent injects into the latest user message
+            turn_context = ""
+            try:
+                staging_dir = self.get_session_staging_dir(session.workspace_name)
+                turn_context = await build_context_prefix(staging_dir, cfg.agent.context_dir_max_chars)
+            except Exception as ce:
+                logger.warning(f"Failed to build context blocks for /context report: {ce}")
+
             return ContextHtmlReporter.render_to_temp_file(
                 session=session,
                 root_summaries=root_summaries,
@@ -773,6 +782,7 @@ class Chatbot(ABC):
                 protected_tail=protected_tail,
                 sys_msg=sys_msg,
                 last_metrics=last_metrics,
+                turn_context=turn_context,
             )
         except Exception as e:
             logger.error(f"Failed to get active context by channel: {e}")

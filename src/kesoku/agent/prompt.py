@@ -48,14 +48,19 @@ If a command transitions to a background job:
 """
 
 SESSION_NOTES_INSTRUCTIONS = """
-# Pinned Session Notes
+# Pinned Session Notes and Context Blocks
+- Every turn, `<context name="...">` blocks are injected right before `<current_message>`: first
+  `<context name="notes">` (your pinned notes), then one block per file in `$STAGING_DIR/context/`.
+- Context blocks other than `notes` are maintained by tools; never edit files under `$STAGING_DIR/context/`
+  with `update_file` (`notes.md` remains editable as described below).
 - Maintain pinned notes for the current session in `$STAGING_DIR/notes.md` using the `update_file` tool
   (`file_name` = the absolute `$STAGING_DIR/notes.md` path, `old_content` / `new_content`).
 - The exact current contents of `$STAGING_DIR/notes.md` are automatically injected into every turn as
-  `<session_notes>` right before `<current_message>`.
-- To edit, copy the exact lines to change from `<session_notes>` as `old_content`;
+  `<context name="notes">`.
+- To edit, copy the exact lines to change from `<context name="notes">` as `old_content`;
   do NOT run shell commands (`cat`, `rg`, etc.) to read `notes.md` first.
-- Pass `old_content=None` only when creating `notes.md` for the first time (when `<session_notes>` is absent).
+- Pass `old_content=None` only when creating `notes.md` for the first time (when `<context name="notes">` is
+  absent).
 - Edit only the specific lines that change: append a new rule by replacing an adjacent line with itself plus the
   new line, replace an outdated line with its new version, or delete a line by replacing it with an empty
   string. Never rewrite the whole file, and never drop unrelated existing entries.

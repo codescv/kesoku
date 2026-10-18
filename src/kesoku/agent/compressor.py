@@ -92,8 +92,8 @@ DEFAULT_SUMMARY_MAX_CHARS = 1200
 SCAFFOLD_HEADER = (
     "[Note: This conversation uses custom turn-based context management. Earlier turns have been compacted "
     "into the hierarchical summaries below. These summaries are HISTORICAL and may be outdated: whenever they "
-    "conflict with <session_notes> or with more recent messages, follow <session_notes> and the most recent "
-    "messages. You can search past messages and memories using standard search tools.]\n"
+    "conflict with <context name=\"notes\"> or with more recent messages, follow <context name=\"notes\"> and "
+    "the most recent messages. You can search past messages and memories using standard search tools.]\n"
 )
 
 # Matches deprecated summary sections ("User Asks", "Tools & Skills") up to the next section header or end.

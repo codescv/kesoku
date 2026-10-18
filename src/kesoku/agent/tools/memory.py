@@ -17,7 +17,7 @@ skill_manager = SkillManager()
 HISTORICAL_RESULT_NOTICE = (
     "⚠️ Note: these are historical messages for reference only. Their content may be outdated and their "
     "formatting/style may follow rules that have since been changed. Do NOT imitate their formatting; follow "
-    "the current <instructions>, <session_notes> and the most recent user messages instead."
+    "the current <instructions>, <context name=\"notes\"> and the most recent user messages instead."
 )
 
 

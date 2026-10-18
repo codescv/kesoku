@@ -1,5 +1,6 @@
 """Unit tests for the ContextHtmlReporter utility."""
 
+import html
 import os
 
 from kesoku.db import Message, Session, SummaryNode
@@ -166,3 +167,29 @@ def test_render_to_temp_file() -> None:
     finally:
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
+
+
+def test_render_to_temp_file_shows_turn_context_on_latest_user_message() -> None:
+    """Per-turn <context> blocks are shown prepended to the latest user message."""
+    session = Session(id="session_ctx", title="Ctx")
+    tail = [
+        Message(session_id="session_ctx", chatbot_id="cli", channel_id="c", sender="u", role="user", content="Q1"),
+        Message(
+            session_id="session_ctx", chatbot_id="cli", channel_id="c", sender="a", role="assistant",
+            type="text", content="A1",
+        ),
+    ]
+    block = '<context name="test">\n今天的暗号是🍊\n</context>\n'
+    path = ContextHtmlReporter.render_to_temp_file(
+        session=session, root_summaries=[], all_summaries=[], protected_head=[], buffer=[],
+        protected_tail=tail, sys_msg="", turn_context=block,
+    )
+    try:
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+        assert html.escape('<context name="test">') in content
+        assert "今天的暗号是🍊" in content
+        # Source messages are not mutated.
+        assert tail[0].content == "Q1"
+    finally:
+        os.remove(path)

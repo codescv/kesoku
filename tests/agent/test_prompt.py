@@ -208,20 +208,22 @@ def test_session_notes_instructions_use_update_file() -> None:
     assert "old_content" in text and "new_content" in text
     assert "update_session_notes" not in text
     assert "notes.md" in text
-    assert "<session_notes>" in text
+    assert '<context name="notes">' in text
+    assert "<session_notes>" not in text
 
 
 def test_session_notes_instructions_first_creation_uses_none() -> None:
-    """old_content=None is reserved for creating notes.md when <session_notes> is absent."""
+    """old_content=None is reserved for creating notes.md when <context name=\"notes\"> is absent."""
     text = SESSION_NOTES_INSTRUCTIONS
     assert re.search(r"old_content\s*=\s*None", text)
 
 
 def test_session_notes_instructions_forbid_redundant_shell_reads() -> None:
-    """The agent copies old_content from <session_notes> instead of reading notes.md with shell tools."""
+    """The agent copies old_content from <context name="notes"> instead of reading notes.md with shell tools."""
     text = SESSION_NOTES_INSTRUCTIONS
     assert re.search(r"(do not|don't|never)[^.\n]*(rg|cat|shell)", text, re.IGNORECASE), text
-    assert re.search(r"cop(y|ied)[^.\n]*<session_notes>|<session_notes>[^.\n]*cop(y|ied)", text, re.IGNORECASE)
+    tag = re.escape('<context name="notes">')
+    assert re.search(rf"cop(y|ied)[^.\n]*{tag}|{tag}[^.\n]*cop(y|ied)", text, re.IGNORECASE)
 
 
 def test_session_notes_instructions_partial_edits_only() -> None:
@@ -236,3 +238,11 @@ def test_build_sys_prompt_includes_notes_instructions() -> None:
     prompt = build_sys_prompt(session=Session(id="notes01", title="t"))
     assert SESSION_NOTES_INSTRUCTIONS.strip() in prompt
     assert "update_session_notes" not in prompt
+
+
+def test_context_blocks_instructions_forbid_editing_context_dir() -> None:
+    """Context blocks are tool-maintained: files under $STAGING_DIR/context/ must not be edited."""
+    text = SESSION_NOTES_INSTRUCTIONS
+    assert "$STAGING_DIR/context/" in text
+    assert re.search(r"never edit files under `\$STAGING_DIR/context/`", text)
+    assert "maintained by tools" in text

@@ -157,6 +157,13 @@ class AgentConfig(BaseModel):
         default=3,
         description="Maximum number of historical dialogue snippets to inject into context",
     )
+    context_dir_max_chars: int = Field(
+        default=20000,
+        description=(
+            "Maximum total characters of per-turn <context> blocks (notes.md + $STAGING_DIR/context/*.md); "
+            "files at the end of the sorted list are dropped when exceeded"
+        ),
+    )
     strip_historical_question_options: bool = Field(
         default=True,
         description=(

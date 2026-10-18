@@ -59,6 +59,7 @@
 *   **`QUESTION_INSTRUCTION`**：指导模型发送多项选择按钮的特殊语法：`[question: <标题> | 选项1 | 选项2]`。
 *   **隐藏文本**：`<spoiler>…</spoiler>` 行内隐藏文本（用户点击才显示）。由各平台适配器的 `format_text` 渲染：Discord 转为原生 `||…||`；不支持隐藏文本的平台（CLI、微信、Google Chat）去掉标签、内容直接可见。实现见 `kesoku.utils.text.render_spoilers`。
 *   **`MEMORY_AND_HISTORY_INSTRUCTIONS`**：指导模型如何读写 SQLite 数据库中的结构化记忆条目。
+*   **`SESSION_NOTES_INSTRUCTIONS`**：说明每回合注入的 `<context name="...">` 块（见第 7 节）、如何用 `update_file` 维护 `$STAGING_DIR/notes.md`，以及 `$STAGING_DIR/context/` 下的文件由工具维护、禁止用 `update_file` 编辑。
 *   **`BACKGROUND_EXECUTION_INSTRUCTIONS`**：指导模型在遇到耗时较长的 background 终端命令时，如何优雅地向用户发送中间提示并立即结束本回合，等待系统后台完成通知。
 
 ### 5. 全局配置提示词 (User Prompts)
@@ -74,3 +75,19 @@
 ### 6. 适配器动态注入上下文 (Adapter Custom Prompts)
 *   **解析规则**：各个平台的 Chatbot 适配器在调用网关时，可以通过 `custom_prompt` 参数动态传入上下文。
 *   **目的**：例如 Discord 适配器会读取当前服务器频道的成员列表、频道 ID 和用户代号，并将其拼入提示词，让 Agent 能够准确识别是在对谁说话。
+
+---
+
+## 🧩 7. 每回合注入的上下文（不属于系统提示词）
+
+除了被缓存的系统提示词外，`TurnExecutor` 每回合会把以下内容拼到最新一条用户消息前面（这样系统提示词保持不变，利于前缀缓存）。顺序为：
+
+1.  `<instructions>`：当前角色的 `roles/{role}/preferences.md`（每回合）。
+2.  `<context name="...">` 块（每回合，见 `kesoku.agent.context_dir`）：
+    *   `<context name="notes">`：会话置顶笔记，读取自 `$STAGING_DIR/notes.md`（Agent 可用 `update_file` 编辑）。
+    *   `$STAGING_DIR/context/*.md` 中每个文件一个块，按文件名排序。块名为去掉开头数字序号（`20-`、`05_`）和 `.md` 后的文件名，例如 `20-scene.md` → `<context name="scene">`。这些文件由工具/技能写入，Agent 不得编辑。
+    *   预算：单文件上限 6000 字符（截断尾部并追加 `[truncated]`）；总量上限为 `agent.context_dir_max_chars`（默认 20000），超出时从排序列表末尾开始丢弃文件并记录 warning。
+3.  `<facts>`：角色的 `facts.md`（仅当天第一条消息）。
+4.  启动引导 / 自动检索的历史片段，然后是 `<current_message ...>`。
+
+`/context` 命令会把同样的 `<context>` 块显示在最新尾部回合的用户消息前。

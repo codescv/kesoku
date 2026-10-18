@@ -1,0 +1,132 @@
+"""Unit tests for per-turn context directory injection (kesoku.agent.context_dir)."""
+
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from kesoku.agent import context_dir
+from kesoku.agent.context_dir import (
+    CONTEXT_FILE_MAX_CHARS,
+    TRUNCATED_MARKER,
+    ContextEntry,
+    apply_total_budget,
+    build_context_prefix,
+    collect_context_entries,
+    context_block_name,
+    render_context_blocks,
+    truncate_context_content,
+)
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("20-scene.md", "scene"),
+        ("99-test.md", "test"),
+        ("05_todo.md", "todo"),
+        ("notes.md", "notes"),
+        ("plain.md", "plain"),
+        ("10-multi-part-name.md", "multi-part-name"),
+        ("2024.md", "2024"),
+        ("42-.md", "42-"),
+    ],
+)
+def test_context_block_name(filename: str, expected: str) -> None:
+    """Leading numeric prefixes and the .md extension are stripped."""
+    assert context_block_name(filename) == expected
+
+
+def test_context_block_name_escapes_quotes() -> None:
+    """Double quotes are replaced so the name attribute stays well-formed."""
+    assert '"' not in context_block_name('10-a"b.md')
+
+
+def test_truncate_context_content() -> None:
+    """Content over the per-file cap is cut at the tail and marked."""
+    assert truncate_context_content("short") == "short"
+    long = "x" * (CONTEXT_FILE_MAX_CHARS + 100)
+    out = truncate_context_content(long)
+    assert out.endswith(TRUNCATED_MARKER)
+    assert out.startswith("x" * CONTEXT_FILE_MAX_CHARS)
+    assert len(out) == CONTEXT_FILE_MAX_CHARS + 1 + len(TRUNCATED_MARKER)
+
+
+@pytest.mark.asyncio
+async def test_collect_empty_or_missing(tmp_path: Path) -> None:
+    """No notes and no context dir (or an empty one) yield no entries."""
+    assert await collect_context_entries(str(tmp_path)) == []
+    (tmp_path / "context").mkdir()
+    assert await collect_context_entries(str(tmp_path)) == []
+    assert await build_context_prefix(str(tmp_path)) == ""
+    assert await collect_context_entries("") == []
+
+
+@pytest.mark.asyncio
+async def test_collect_sorted_with_notes_first(tmp_path: Path) -> None:
+    """notes.md comes first, then context/*.md sorted by filename; non-md and empty files are skipped."""
+    (tmp_path / "notes.md").write_text("  - rule A  \n")
+    ctx = tmp_path / "context"
+    ctx.mkdir()
+    (ctx / "30-todo.md").write_text("todo list")
+    (ctx / "10-rules.md").write_text("rule text")
+    (ctx / "20-scene.md").write_text("scene text")
+    (ctx / "40-empty.md").write_text("   \n")
+    (ctx / "data.json").write_text("{}")
+    (ctx / "sub.md").mkdir()
+
+    entries = await collect_context_entries(str(tmp_path))
+    assert [e.name for e in entries] == ["notes", "rules", "scene", "todo"]
+    assert entries[0].content == "- rule A"
+
+
+@pytest.mark.asyncio
+async def test_collect_truncates_each_file(tmp_path: Path) -> None:
+    """Each file is individually capped."""
+    ctx = tmp_path / "context"
+    ctx.mkdir()
+    (ctx / "big.md").write_text("y" * (CONTEXT_FILE_MAX_CHARS * 2))
+    entries = await collect_context_entries(str(tmp_path))
+    assert entries[0].content.endswith(TRUNCATED_MARKER)
+    assert len(entries[0].content) < CONTEXT_FILE_MAX_CHARS + 20
+
+
+def test_apply_total_budget_drops_from_end() -> None:
+    """Entries at the end of the sorted list are dropped first, with a warning."""
+    entries = [ContextEntry("notes", "a" * 10), ContextEntry("b", "b" * 10), ContextEntry("c", "c" * 10)]
+    with patch.object(context_dir.logger, "warning") as warn:
+        kept = apply_total_budget(entries, 25)
+    assert [e.name for e in kept] == ["notes", "b"]
+    warn.assert_called_once()
+    assert "dropped" in warn.call_args[0][0]
+    assert apply_total_budget(entries, 30) == entries
+    assert apply_total_budget(entries, 5) == []
+
+
+def test_render_context_blocks() -> None:
+    """Entries render as consecutive <context name="..."> blocks."""
+    out = render_context_blocks([ContextEntry("notes", "n"), ContextEntry("test", "今天的暗号是🍊")])
+    assert out == '<context name="notes">\nn\n</context>\n<context name="test">\n今天的暗号是🍊\n</context>\n'
+    assert render_context_blocks([]) == ""
+
+
+@pytest.mark.asyncio
+async def test_build_context_prefix_end_to_end(tmp_path: Path) -> None:
+    """Full pipeline: notes compatibility, sorting and the total budget."""
+    (tmp_path / "notes.md").write_text("note")
+    ctx = tmp_path / "context"
+    ctx.mkdir()
+    (ctx / "99-test.md").write_text("今天的暗号是🍊")
+    (ctx / "50-big.md").write_text("z" * 5000)
+
+    prefix = await build_context_prefix(str(tmp_path), 20000)
+    assert prefix.index('<context name="notes">') < prefix.index('<context name="big">')
+    assert prefix.index('<context name="big">') < prefix.index('<context name="test">')
+    assert "<session_notes>" not in prefix
+
+    # A tight budget drops the last file in sort order first (test), then big.
+    prefix_small = await build_context_prefix(str(tmp_path), 5010)
+    assert '<context name="test">' not in prefix_small
+    assert '<context name="big">' in prefix_small
+    prefix_tiny = await build_context_prefix(str(tmp_path), 10)
+    assert prefix_tiny == '<context name="notes">\nnote\n</context>\n'

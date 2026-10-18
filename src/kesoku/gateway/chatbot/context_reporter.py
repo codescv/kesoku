@@ -7,6 +7,7 @@ import tempfile
 from typing import Any
 
 from kesoku.agent.history import prepare_history_for_llm
+from kesoku.constants import MessageRole
 from kesoku.db import Message, Session, SummaryNode
 
 logger = logging.getLogger(__name__)
@@ -151,6 +152,7 @@ class ContextHtmlReporter:
         protected_tail: list[Message],
         sys_msg: str,
         last_metrics: dict[str, Any] | None = None,
+        turn_context: str = "",
     ) -> str:
         """Render the custom context state into a temporary HTML file.
 
@@ -163,6 +165,8 @@ class ContextHtmlReporter:
             protected_tail: Messages in the protected tail (fresh tail).
             sys_msg: Resolved system prompt instructions.
             last_metrics: Extracted turn metrics of last assistant execution.
+            turn_context: Per-turn injected blocks (e.g. `<context name="...">`) shown prepended to the latest
+                user message, mirroring what the agent injects on the next turn.
 
         Returns:
             The absolute path of the generated temporary HTML file.
@@ -199,6 +203,13 @@ class ContextHtmlReporter:
             for m in segment:
                 if m.metadata:
                     m.metadata.pop("_context_group", None)
+
+        # Show per-turn injected context blocks on the latest user message (what the LLM sees next turn).
+        if turn_context:
+            for m in reversed(protected_tail):
+                if m.role == MessageRole.USER:
+                    m.content = f"{turn_context}{m.content or ''}"
+                    break
 
         # Estimate active context tokens
         total_tokens = (

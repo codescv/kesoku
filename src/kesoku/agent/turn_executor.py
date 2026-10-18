@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import tzlocal
 
 from kesoku.agent.compressor import SCAFFOLD_HEADER, HistoryCompressor, estimate_tokens_calibrated
+from kesoku.agent.context_dir import build_context_prefix
 from kesoku.agent.history import (
     build_history,
     prepare_history_for_llm,
@@ -644,8 +645,9 @@ class TurnExecutor:
                     except Exception as e:
                         logger.warning(f"Failed to read facts.md for role '{active_role}': {e}")
 
-        # 2.2. Read pinned session notes (notes.md) from session staging directory every turn
-        session_notes_prefix = ""
+        # 2.2. Read per-turn context blocks every turn: pinned notes ($STAGING_DIR/notes.md) first, then
+        # every $STAGING_DIR/context/*.md in filename order, each rendered as <context name="...">.
+        context_blocks_prefix = ""
         target_staging_dir = session_staging_dir
         if not target_staging_dir and self.context and self.context.config:
             sessions_dir = self.context.config.workspace.sessions_dir
@@ -654,15 +656,12 @@ class TurnExecutor:
             target_staging_dir = os.path.join(sessions_dir, self.session_id)
 
         if target_staging_dir:
-            notes_path = os.path.join(target_staging_dir, "notes.md")
-            if await async_exists(notes_path):
-                try:
-                    notes_content = await async_read_text_file(notes_path)
-                    notes_content = notes_content.strip()
-                    if notes_content:
-                        session_notes_prefix = f"<session_notes>\n{notes_content}\n</session_notes>\n"
-                except Exception as e:
-                    logger.warning(f"Failed to read notes.md for session '{self.session_id}': {e}")
+            try:
+                context_blocks_prefix = await build_context_prefix(
+                    target_staging_dir, self.context.config.agent.context_dir_max_chars
+                )
+            except Exception as e:
+                logger.warning(f"Failed to build context blocks for session '{self.session_id}': {e}")
 
         # 3. Prepend Consolidated Passive Synchronization, Preferences, and Context Compression Guidelines
         # (if Bootstrap)
@@ -714,7 +713,7 @@ class TurnExecutor:
 
         copied_msg.content = (
             f"{instructions_prefix}"
-            f"{session_notes_prefix}"
+            f"{context_blocks_prefix}"
             f"{facts_prefix}"
             f"{full_prefix}"
             f"{augmented_context_prefix}"
@@ -826,8 +825,8 @@ class TurnExecutor:
             "<relevant_historical_context>\n"
             "<!-- The following past conversation snippets are automatically retrieved based on semantic similarity "
             "to the user message. They are HISTORICAL REFERENCE ONLY and may be outdated: any requirements, rules, "
-            "or preferences in them are superseded by the current <instructions>, <session_notes> and the most "
-            "recent messages. Do NOT imitate their formatting or writing style. -->\n"
+            "or preferences in them are superseded by the current <instructions>, <context name=\"notes\"> and the "
+            "most recent messages. Do NOT imitate their formatting or writing style. -->\n"
             + "\n\n".join(snippets)
             + "\n</relevant_historical_context>\n"
         )

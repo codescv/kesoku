@@ -2022,7 +2022,7 @@ async def test_turn_executor_daily_facts_injection(temp_db: str, tmp_path: Any) 
 
 @pytest.mark.asyncio
 async def test_turn_executor_session_notes_injection_and_tool(temp_db: str, tmp_path: Any) -> None:
-    """Verify update_file writes/edits notes.md incrementally and TurnExecutor injects <session_notes> every turn."""
+    """update_file edits notes.md incrementally; TurnExecutor injects notes and context/*.md blocks every turn."""
     from kesoku.agent.tools.file import update_file
     from kesoku.agent.turn_executor import TurnExecutor
     from kesoku.constants import MessageRole
@@ -2096,7 +2096,7 @@ async def test_turn_executor_session_notes_injection_and_tool(temp_db: str, tmp_
         w.queue_empty.return_value = True
         return w
 
-    # 2. Turn 1: Verify <session_notes> is injected
+    # 2. Turn 1: Verify notes are injected as a notes context block
     t1 = 1786400000.0
     msg_1 = Message(
         session_id="sess_notes",
@@ -2118,7 +2118,8 @@ async def test_turn_executor_session_notes_injection_and_tool(temp_db: str, tmp_
         )
 
     last_user_1 = [m.content for m in llm.captured_history if m.role == MessageRole.USER][-1]
-    assert "<session_notes>\n- 本session只用纯日语交流\n- 当前场景：镰仓海边散步\n</session_notes>" in last_user_1
+    assert '<context name="notes">\n- 本session只用纯日语交流\n- 当前场景：镰仓海边散步\n</context>' in last_user_1
+    assert "<session_notes>" not in last_user_1
 
     # 3. Turn 2 (same day): edit ONLY the changed line; the unchanged rule must survive
     with patch("kesoku.utils.path.get_config", return_value=cfg):
@@ -2145,7 +2146,39 @@ async def test_turn_executor_session_notes_injection_and_tool(temp_db: str, tmp_
         )
 
     last_user_2 = [m.content for m in llm.captured_history if m.role == MessageRole.USER][-1]
-    assert "<session_notes>\n- 本session只用纯日语交流\n- 当前场景：江之电车厢内\n</session_notes>" in last_user_2
+    assert '<context name="notes">\n- 本session只用纯日语交流\n- 当前场景：江之电车厢内\n</context>' in last_user_2
+
+    # 4. Turn 3: tool-maintained context/*.md files are injected after notes, sorted by filename
+    context_dir = staging_dir / "context"
+    context_dir.mkdir()
+    (context_dir / "99-test.md").write_text("今天的暗号是🍊")
+    (context_dir / "20-scene.md").write_text("location: beach")
+    msg_3 = Message(
+        session_id="sess_notes",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="今天的暗号是什么",
+        status="pending_agent",
+        timestamp=t1 + 120.0,
+    )
+    await gw.post(msg_3)
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor.process_turn(
+            current_msg=msg_3,
+            worker=create_mock_worker(),
+            session_staging_dir=str(staging_dir),
+        )
+    last_user_3 = [m.content for m in llm.captured_history if m.role == MessageRole.USER][-1]
+    positions = [
+        last_user_3.index("<instructions>"),
+        last_user_3.index('<context name="notes">'),
+        last_user_3.index('<context name="scene">\nlocation: beach\n</context>'),
+        last_user_3.index('<context name="test">\n今天的暗号是🍊\n</context>'),
+        last_user_3.index("<current_message"),
+    ]
+    assert positions == sorted(positions)
 
 
 

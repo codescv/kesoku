@@ -59,6 +59,7 @@ These are static, hardcoded instructions inside `prompt.py` that train the agent
 *   **`QUESTION_INSTRUCTION`**: Teaches the agent the multiple-choice button markup syntax: `[question: <title> | choice1 | choice2]`.
 *   **Hidden text**: `<spoiler>…</spoiler>` marks inline text the user must click to reveal. Each adapter's `format_text` renders it: Discord emits native `||…||`; platforms without hidden-text support (CLI, WeChat, Google Chat) strip the tags and show the content. See `kesoku.utils.text.render_spoilers`.
 *   **`MEMORY_AND_HISTORY_INSTRUCTIONS`**: Guides the agent on how to access and modify structured memories in SQLite.
+*   **`SESSION_NOTES_INSTRUCTIONS`**: Explains the per-turn `<context name="...">` blocks (see section 7), how to maintain `$STAGING_DIR/notes.md` with `update_file`, and that files under `$STAGING_DIR/context/` are tool-maintained and must never be edited with `update_file`.
 *   **`BACKGROUND_EXECUTION_INSTRUCTIONS`**: Instructs the agent on how to handle long-running background shell executions and yield the conversational turn.
 
 ### 5. Configured User Prompts
@@ -74,3 +75,19 @@ These are static, hardcoded instructions inside `prompt.py` that train the agent
 ### 6. Adapter Custom Prompts
 *   **Resolution**: Chatbot adapters can pass a `custom_prompt` parameter to `build_sys_prompt()`.
 *   **Purpose**: Injects real-time workspace metadata. For example, the Discord chatbot fetches the list of server channel members, active user IDs, and channel names, and appends it to the prompt so the agent is aware of who it is talking to.
+
+---
+
+## 🧩 7. Per-Turn Injected Context (not part of the system prompt)
+
+Besides the cached system prompt, `TurnExecutor` prepends per-turn blocks to the latest user message (so the system prompt stays stable for prefix caching). The order is:
+
+1.  `<instructions>`: the active role's `roles/{role}/preferences.md` (every turn).
+2.  `<context name="...">` blocks (every turn, see `kesoku.agent.context_dir`):
+    *   `<context name="notes">`: the session's pinned notes, read from `$STAGING_DIR/notes.md` (editable by the agent via `update_file`).
+    *   One block per `$STAGING_DIR/context/*.md` file, sorted by filename. The block name is the filename without a leading numeric prefix (`20-`, `05_`) and without `.md`, e.g. `20-scene.md` → `<context name="scene">`. These files are written by tools/skills; the agent must not edit them.
+    *   Budget: each file is capped at 6000 characters (tail truncated, `[truncated]` appended); the total is capped by `agent.context_dir_max_chars` (default 20000). When exceeded, files are dropped from the end of the sorted list and a warning is logged.
+3.  `<facts>`: the role's `facts.md` (first message of the day only).
+4.  Bootstrap guidelines / auto-retrieved history, then `<current_message ...>`.
+
+The `/context` command shows the same `<context>` blocks prepended to the latest user message of the fresh tail.
