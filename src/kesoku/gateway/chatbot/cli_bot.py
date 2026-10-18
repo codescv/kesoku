@@ -6,12 +6,14 @@ import time
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.text import Text
 
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot, parse_message_content
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
+from kesoku.utils.ui_markup import render_details_as_text
 
 logger = setup_logger(__name__)
 
@@ -119,13 +121,24 @@ class CLIChatbot(Chatbot):
                     elif segment["type"] == "question":
                         question_text = segment["question"]
                         choices = segment["choices"]
-                        choices_str = " | ".join(choices)
+                        if segment.get("multi"):
+                            question_text += f" (select up to {segment.get('max', len(choices))})"
+                        choices_str = "\n".join(f"{idx}. {choice}" for idx, choice in enumerate(choices, start=1))
                         self.console.print(
                             Panel(
-                                f"{question_text}\n\n[bold cyan]Choices:[/bold cyan] {choices_str}",
+                                Text(f"{question_text}\n\n{choices_str}"),
                                 title=f"[bold blue]{message.sender} (Question)[/bold blue]",
                                 title_align="left",
                                 border_style="cyan",
+                            )
+                        )
+                    elif segment["type"] == "details":
+                        self.console.print(
+                            Panel(
+                                Markdown(render_details_as_text(segment["title"], segment["body"])),
+                                title=f"[bold blue]{message.sender}[/bold blue]",
+                                title_align="left",
+                                border_style="blue",
                             )
                         )
                 await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)

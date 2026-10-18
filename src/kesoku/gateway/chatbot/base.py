@@ -33,6 +33,13 @@ from kesoku.utils.path import PathResolver
 from kesoku.utils.service import restart_service as utils_restart_service
 from kesoku.utils.table import parse_markdown_tables, render_table_to_image
 from kesoku.utils.text import format_text, render_spoilers, split_text_into_chunks
+from kesoku.utils.ui_markup import (
+    DETAILS_RE,
+    UI_BLOCK_RE,
+    find_first_ui_block,
+    render_details_as_text,
+    render_question_as_text,
+)
 
 PATH_RESOLUTION_CONFIDENCE_THRESHOLD = 0.9
 """Similarity score threshold for auto path resolution of misspelled absolute paths."""
@@ -40,54 +47,77 @@ PATH_RESOLUTION_CONFIDENCE_THRESHOLD = 0.9
 logger = setup_logger(__name__)
 
 
+_LEGACY_TAG_RE = re.compile(r"\[(file|voice|question):\s*([^\]]+)\s*\]")
+
+
+def _legacy_tag_segment(match: re.Match[str]) -> dict[str, Any]:
+    """Build a segment from a `[file:]`, `[voice:]` or legacy `[question:]` tag match."""
+    block_type = match.group(1)
+    inner_val = match.group(2).strip()
+    if block_type != "question":
+        return {"type": block_type, "path": inner_val}
+    if "||" in inner_val:
+        q_part, choices_part = inner_val.split("||", 1)
+        question_text = q_part.strip()
+        choices = [c.strip() for c in choices_part.split("|") if c.strip()]
+    else:
+        parts = [p.strip() for p in inner_val.split("|")]
+        question_text = parts[0]
+        choices = parts[1:]
+    return {"type": "question", "question": question_text, "choices": choices, "multi": False, "max": 1}
+
+
 def parse_message_content(content: str) -> list[dict[str, Any]]:
     """Parse message content to extract zero or more blocks.
 
-    Recognizes `[file: /path]`, `[voice: /path]`, or `[question: <question> | choice1 | ...]`.
+    Recognizes:
+    * the first fenced ```ui block (YAML `type: select|multiselect`, `prompt`, `options`, optional `max`);
+      further ```ui blocks, and invalid ones, stay plain text;
+    * `<details><summary>TITLE</summary>BODY</details>` collapsible sections;
+    * `[file: /path]`, `[voice: /path]` and the legacy `[question: <question> || choice1 | ...]`.
 
     Args:
         content: Raw message text content to parse.
 
     Returns:
-        A list of segment dictionaries. Text segments have format:
-        {"type": "text", "content": "..."}, file segments have format:
-        {"type": "file", "path": "..."}, voice segments have format:
-        {"type": "voice", "path": "..."}, and question segments have format:
-        {"type": "question", "question": "...", "choices": [...]}.
+        A list of segment dictionaries:
+        {"type": "text", "content": "..."}, {"type": "file", "path": "..."}, {"type": "voice", "path": "..."},
+        {"type": "question", "question": "...", "choices": [...], "multi": bool, "max": int} and
+        {"type": "details", "title": "...", "body": "..."}.
     """
-    # Regex matches [file: <path>], [voice: <path>], or [question: <text>]
-    # where <text> is any character except closed bracket
-    pattern = re.compile(r"\[(file|voice|question):\s*([^\]]+)\s*\]")
+    # Collect candidate spans from every syntax, then keep non-overlapping ones by start position, so a tag
+    # inside a ```ui block or a <details> body is treated as part of that block.
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+
+    ui_match, ui_question = find_first_ui_block(content)
+    if ui_match is not None:
+        if ui_question is not None:
+            candidates.append((ui_match.start(), ui_match.end(), ui_question.to_segment()))
+        else:
+            logger.warning("Invalid ```ui block (bad YAML or missing type/prompt/options); rendering as text")
+
+    for m in DETAILS_RE.finditer(content):
+        details = {"type": "details", "title": m.group("title").strip(), "body": m.group("body").strip()}
+        candidates.append((m.start(), m.end(), details))
+
+    for m in _LEGACY_TAG_RE.finditer(content):
+        candidates.append((m.start(), m.end(), _legacy_tag_segment(m)))
+
+    # Any ```ui block (including non-interactive ones) masks tags inside it.
+    masks = [(m.start(), m.end()) for m in UI_BLOCK_RE.finditer(content)] if "```ui" in content else []
+
     segments: list[dict[str, Any]] = []
     last_idx = 0
-
-    for match in pattern.finditer(content):
-        text_before = content[last_idx : match.start()]
+    for start, end, segment in sorted(candidates, key=lambda c: c[0]):
+        if start < last_idx:
+            continue
+        if any(ms <= start < me and (ms, me) != (start, end) for ms, me in masks):
+            continue
+        text_before = content[last_idx:start]
         if text_before:
             segments.append({"type": "text", "content": text_before})
-
-        block_type = match.group(1)
-        inner_val = match.group(2).strip()
-
-        if block_type == "question":
-            if "||" in inner_val:
-                q_part, choices_part = inner_val.split("||", 1)
-                question_text = q_part.strip()
-                choices = [c.strip() for c in choices_part.split("|") if c.strip()]
-            else:
-                parts = [p.strip() for p in inner_val.split("|")]
-                question_text = parts[0]
-                choices = parts[1:]
-            segments.append(
-                {
-                    "type": "question",
-                    "question": question_text,
-                    "choices": choices,
-                }
-            )
-        else:
-            segments.append({"type": block_type, "path": inner_val})
-        last_idx = match.end()
+        segments.append(segment)
+        last_idx = end
 
     text_after = content[last_idx:]
     if text_after:
@@ -1091,8 +1121,16 @@ class Chatbot(ABC):
 
                 elif segment["type"] == "question":
                     await self.send_question_segment(
-                        message.channel_id, segment["question"], segment["choices"], message
+                        message.channel_id,
+                        segment["question"],
+                        segment["choices"],
+                        message,
+                        multi=segment.get("multi", False),
+                        max_choices=segment.get("max", 1),
                     )
+
+                elif segment["type"] == "details":
+                    await self.send_details_segment(message.channel_id, segment["title"], segment["body"], message)
 
             # 4. Update Gateway status to DELIVERED
             await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
@@ -1350,9 +1388,35 @@ class Chatbot(ABC):
             f"for failed attachment {raw_path}."
         )
 
-    async def send_question_segment(self, channel_id: str, question: str, choices: list[str], message: Message) -> None:
-        """Send a multiple choice question to the specified channel."""
+    async def send_question_segment(
+        self,
+        channel_id: str,
+        question: str,
+        choices: list[str],
+        message: Message,
+        multi: bool = False,
+        max_choices: int = 1,
+    ) -> None:
+        """Send a single- or multi-select question to the specified channel."""
         pass
+
+    async def send_details_segment(self, channel_id: str, title: str, body: str, message: Message) -> None:
+        """Send a collapsible `<details>` section; the default renders it as `**TITLE**` followed by BODY."""
+        await self.send_formatted_text(render_details_as_text(title, body), message)
+
+    async def send_formatted_text(self, text: str, message: Message) -> None:
+        """Format, chunk and send plain text through the adapter's `send_text_chunks`."""
+        if not text.strip():
+            return
+        formatted_text = self.format_text(text)
+        chunks = self.split_text_into_chunks(formatted_text, max_length=self.get_max_text_length())
+        await self.send_text_chunks(message.channel_id, chunks, message)
+
+    async def send_question_as_text(
+        self, question: str, choices: list[str], message: Message, multi: bool = False, max_choices: int = 1
+    ) -> None:
+        """Fallback for platforms without interactive components: send the question as a numbered list."""
+        await self.send_formatted_text(render_question_as_text(question, choices, multi, max_choices), message)
 
     async def on_message_delivered(self, message: Message) -> None:
         """Lifecycle hook triggered after a message is successfully delivered."""

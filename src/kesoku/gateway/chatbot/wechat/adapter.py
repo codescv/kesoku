@@ -1114,9 +1114,17 @@ You are interacting with the user via WeChat (Weixin).
         """Deliver a voice segment, routing it directly as a generic file attachment."""
         await self.send_file_segment(channel_id, file_path, message)
 
-    async def send_question_segment(self, channel_id: str, question: str, choices: list[str], message: Message) -> None:
-        """Log warning since WeChat doesn't support native multiple-choice question UI."""
-        logger.warning("WeChat chatbot does not support multiple-choice question UI components.")
+    async def send_question_segment(
+        self,
+        channel_id: str,
+        question: str,
+        choices: list[str],
+        message: Message,
+        multi: bool = False,
+        max_choices: int = 1,
+    ) -> None:
+        """WeChat has no native choice UI: send the question as a numbered text list."""
+        await self.send_question_as_text(question, choices, message, multi, max_choices)
 
     async def on_message_delivered(self, message: Message) -> None:
         """Lifecycle hook: stop the typing indicator spinner when the final text is delivered."""

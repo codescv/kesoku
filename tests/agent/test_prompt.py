@@ -8,9 +8,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import kesoku.config
-from kesoku.agent.prompt import SESSION_NOTES_INSTRUCTIONS, build_sys_prompt
+from kesoku.agent.prompt import OUTPUT_FORMATTING_INSTRUCTIONS, SESSION_NOTES_INSTRUCTIONS, build_sys_prompt
 from kesoku.config import KesokuConfig, init_config, load_config
 from kesoku.db import Session
+from kesoku.utils.ui_markup import find_first_ui_block
 
 
 def test_build_sys_prompt_with_custom_context() -> None:
@@ -246,3 +247,22 @@ def test_context_blocks_instructions_forbid_editing_context_dir() -> None:
     assert "$STAGING_DIR/context/" in text
     assert re.search(r"never edit files under `\$STAGING_DIR/context/`", text)
     assert "maintained by tools" in text
+
+
+def test_output_formatting_teaches_ui_block_and_details_only() -> None:
+    """The prompt teaches the fenced ```ui block and <details>, not the legacy [question:] tag."""
+    text = OUTPUT_FORMATTING_INSTRUCTIONS
+    assert "```ui" in text
+    assert "type: select" in text and "multiselect" in text
+    assert "prompt:" in text and "options:" in text and "max:" in text
+    assert "<details><summary>" in text
+    assert "[question:" not in text
+    assert "选择：A；B" in text
+
+
+def test_output_formatting_example_parses_as_question() -> None:
+    """The example block in the prompt is itself a valid ui block."""
+    example = "\n".join(line[2:] for line in OUTPUT_FORMATTING_INSTRUCTIONS.splitlines() if line.startswith("  "))
+    _, question = find_first_ui_block(example)
+    assert question is not None
+    assert question.options == ["Option 1", "Option 2"]

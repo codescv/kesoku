@@ -93,7 +93,12 @@ async for msg in self.gateway.listen(
 *   `{"type": "text", "content": "..."}`
 *   `{"type": "file", "path": "..."}`
 *   `{"type": "voice", "path": "..."}`
-*   `{"type": "question", "question": "...", "choices": [...]}`
+*   `{"type": "question", "question": "...", "choices": [...], "multi": bool, "max": int}`：来自第一个
+    ```` ```ui ```` YAML 代码块（`type: select|multiselect`、`prompt`、`options`、可选 `max`），或旧的
+    `[question: 题干 || a | b]`（`multi=false`）。只有第一个 ```` ```ui ```` 块可交互；其余或无效的块保留为文本
+    （记录 warning）。解析工具位于 `kesoku.utils.ui_markup`。
+*   `{"type": "details", "title": "...", "body": "..."}`：来自 `<details><summary>标题</summary>正文</details>`。
+    默认的 `send_details_segment` 以文本发送 `**标题**` + 正文；Discord 覆盖为带展开按钮的消息。
 
 其中，普通文本段落会依据各平台的字数上限约束（通过 `get_max_text_length()` 获取，默认采用 Discord 的 2000 字符限制）进行安全的行切块和代码块标签重补齐，再行分批投递。
 
@@ -124,7 +129,10 @@ class SlackChatbot(Chatbot):
         # 调用 Slack Web API 上传本地文件
         await self.slack_client.files_upload_v2(channel=channel_id, file=file_path)
 
-    async def send_question_segment(self, channel_id: str, question: str, choices: list[str], message: Message) -> None:
+    async def send_question_segment(
+        self, channel_id: str, question: str, choices: list[str], message: Message,
+        multi: bool = False, max_choices: int = 1,
+    ) -> None:
         # 发送 Slack Interactive Blocks 交互式单选按钮卡片
         ...
 

@@ -22,6 +22,56 @@ logger = setup_logger(__name__)
 MAX_BUTTON_LABEL_LEN = 80
 """Maximum allowed length for a Discord button label."""
 
+DISCORD_MESSAGE_LIMIT = 2000
+DETAILS_EXPAND_LABEL = "展开"
+DETAILS_COLLAPSE_LABEL = "收起"
+
+
+def render_details_content(title: str, body: str, expanded: bool) -> str:
+    """Render the Discord message content of a collapsible details section.
+
+    Collapsed: `▸ TITLE`. Expanded: `▾ TITLE` followed by BODY, truncated to Discord's message limit.
+    """
+    if not expanded:
+        return f"▸ **{title}**"[:DISCORD_MESSAGE_LIMIT]
+    content = f"▾ **{title}**\n{body}"
+    if len(content) > DISCORD_MESSAGE_LIMIT:
+        content = content[: DISCORD_MESSAGE_LIMIT - 1] + "…"
+    return content
+
+
+class DetailsView(discord.ui.View):
+    """A view with a single toggle button that expands/collapses a details section in place."""
+
+    def __init__(self, title: str, body: str, expanded: bool = False) -> None:
+        """Initialize the view.
+
+        Args:
+            title: The section title (summary).
+            body: The (already formatted) section body.
+            expanded: Initial state.
+        """
+        super().__init__(timeout=None)
+        self.title = title
+        self.body = body
+        self.expanded = expanded
+        self.toggle_button = discord.ui.Button(
+            style=discord.ButtonStyle.secondary,
+            label=DETAILS_COLLAPSE_LABEL if expanded else DETAILS_EXPAND_LABEL,
+        )
+        self.toggle_button.callback = self.toggle
+        self.add_item(self.toggle_button)
+
+    def content(self) -> str:
+        """Current message content for the view state."""
+        return render_details_content(self.title, self.body, self.expanded)
+
+    async def toggle(self, interaction: discord.Interaction) -> None:
+        """Flip the expanded state and edit the message in place."""
+        self.expanded = not self.expanded
+        self.toggle_button.label = DETAILS_COLLAPSE_LABEL if self.expanded else DETAILS_EXPAND_LABEL
+        await interaction.response.edit_message(content=self.content(), view=self)
+
 
 class MessageHeaderView(discord.ui.View):
     """Persistent Discord view representing the conversation header with interactive trajectory viewer."""

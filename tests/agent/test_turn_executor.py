@@ -13,6 +13,7 @@ from kesoku.agent.turn_executor import (
     TurnExecutor,
     extract_question_options,
     is_clicked_option,
+    sanitize_rag_snippet_line,
 )
 from kesoku.agent.turn_logger import TurnLogger
 from kesoku.config import KesokuConfig, WorkspaceConfig
@@ -2461,3 +2462,36 @@ async def test_inject_default_session_role_falls_back_to_channel(tmp_path: Path)
     ex = await _inject_executor(tmp_path, session_role=None, channel_role="role_a")
     out = await _run_inject(ex, tmp_path, "还记得上次我们在浅草吃的那家鲷鱼烧吗", AsyncMock(return_value=""))
     assert out is not None and "ROLE_A_PREFS" in out.content
+
+
+UI_REPLY = "好的。\n```ui\ntype: select\nprompt: 去哪？\noptions:\n  - 海边 [远]\n  - 公园\n```"
+UI_MULTI_REPLY = "```ui\ntype: multiselect\nprompt: 带什么？\noptions: [水, 地图, 雨伞]\n```"
+
+
+def test_extract_question_options_prefers_ui_block() -> None:
+    """The first ```ui block provides the interactive options."""
+    assert extract_question_options(UI_REPLY) == ["海边 [远]", "公园"]
+    assert extract_question_options(f"[question: A? || x | y]\n{UI_REPLY}") == ["海边 [远]", "公园"]
+
+
+@pytest.mark.parametrize(
+    ("user_text", "reply", "expected"),
+    [
+        ("海边 [远]", UI_REPLY, True),
+        ("公园", UI_REPLY, True),
+        ("公园然后去海边", UI_REPLY, False),
+        ("选择：水；雨伞", UI_MULTI_REPLY, True),
+        ("选择：水", UI_MULTI_REPLY, True),
+        ("选择：水；火", UI_MULTI_REPLY, False),
+        ("选择：水；雨伞", UI_REPLY, False),
+    ],
+)
+def test_is_clicked_option_ui_blocks(user_text: str, reply: str, expected: bool) -> None:
+    """Clicks on ```ui select options and multiselect answers are detected."""
+    assert is_clicked_option(user_text, reply) is expected
+
+
+def test_sanitize_rag_snippet_line_collapses_ui_block() -> None:
+    """Retrieved snippets lose ```ui options."""
+    out = sanitize_rag_snippet_line("Agent", UI_REPLY)
+    assert "海边" not in out and "prompt: 去哪？" in out

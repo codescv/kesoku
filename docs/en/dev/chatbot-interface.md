@@ -93,7 +93,12 @@ Using `parse_message_content()`, the template splits the content into segment bl
 *   `{"type": "text", "content": "..."}`
 *   `{"type": "file", "path": "..."}`
 *   `{"type": "voice", "path": "..."}`
-*   `{"type": "question", "question": "...", "choices": [...]}`
+*   `{"type": "question", "question": "...", "choices": [...], "multi": bool, "max": int}`: from the first fenced
+    ```` ```ui ```` YAML block (`type: select|multiselect`, `prompt`, `options`, optional `max`) or the legacy
+    `[question: stem || a | b]` tag (`multi=false`). Only the first ```` ```ui ```` block is interactive; further or
+    invalid blocks stay text (a warning is logged). Parsing helpers live in `kesoku.utils.ui_markup`.
+*   `{"type": "details", "title": "...", "body": "..."}`: from `<details><summary>TITLE</summary>BODY</details>`.
+    The default `send_details_segment` sends `**TITLE**` + BODY as text; Discord overrides it with a toggle button.
 
 The text segments are automatically formatted (markdown optimization) and chunked to fit the platform's maximum message lengths (retrieved via `get_max_text_length()`, which defaults to 2000 for Discord compatibility).
 
@@ -124,7 +129,10 @@ class SlackChatbot(Chatbot):
         # Upload file using Slack Web API
         await self.slack_client.files_upload_v2(channel=channel_id, file=file_path)
 
-    async def send_question_segment(self, channel_id: str, question: str, choices: list[str], message: Message) -> None:
+    async def send_question_segment(
+        self, channel_id: str, question: str, choices: list[str], message: Message,
+        multi: bool = False, max_choices: int = 1,
+    ) -> None:
         # Send interactive Slack block buttons representing choices
         ...
 

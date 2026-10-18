@@ -14,6 +14,7 @@ from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
 from kesoku.utils.path import PathResolver
+from kesoku.utils.ui_markup import collapse_ui_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +156,8 @@ def prepare_history_for_llm(
         max_historical_tool_chars: Maximum character limit for tool results in historical turns.
             Defaults to 500 characters.
         staging_dir: Optional session staging directory to write full outputs to.
-        strip_old_questions: When True, collapse `[question: ...]` blocks in assistant messages of
+        strip_old_questions: When True, collapse `[question: ...]` and ```ui blocks (keeping the prompt and the
+            user's answer when determinable) in assistant messages of
             completed turns older than the last completed turn. The last completed turn keeps its
             options so short/numeric replies ("选2") and clicked-option detection still work.
     """
@@ -171,6 +173,11 @@ def prepare_history_for_llm(
         is_latest = idx == num_turns - 1
         # Turns strictly older than the last completed turn (idx == num_turns - 2) get their options elided.
         strip_questions_here = strip_old_questions and idx < num_turns - 2
+        # The user's reply to this turn's question (first message of the next turn), used to keep the answer.
+        next_turn_first = turns[idx + 1][0] if idx + 1 < num_turns and turns[idx + 1] else None
+        next_user_text = None
+        if next_turn_first is not None and next_turn_first.role == MessageRole.USER:
+            next_user_text = next_turn_first.content
 
         if is_latest:
             # Keep all thoughts and details in the latest/active turn
@@ -185,7 +192,7 @@ def prepare_history_for_llm(
 
                 # Elide question stems/options of older completed turns (anti self-imitation)
                 if strip_questions_here and m.role == MessageRole.ASSISTANT and m.content:
-                    stripped_content = strip_question_options(m.content)
+                    stripped_content = collapse_ui_blocks(strip_question_options(m.content), next_user_text)
                     if stripped_content != m.content:
                         m = m.model_copy()
                         m.content = stripped_content

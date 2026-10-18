@@ -59,8 +59,11 @@ This persistent view is attached to the very first message header of each sessio
 *   **Clear Session (`♻️`)**: Stops the worker task, deletes the session SQLite history, recursively removes the session directory from the disk, and deletes the thread from the channel.
 
 ### 2. `QuestionView` (Dynamic Choices Buttons)
-When the adapter encounters the syntax `[question: What is 1+1? || 2 | 3]`, it splits the content:
+When the parsed content contains a question segment (a ```` ```ui ```` `type: select` block, or the legacy `[question: What is 1+1? || 2 | 3]`), it splits the content:
 
 *   Renders the text block.
 *   Appends a `QuestionView` containing buttons representing `"2"` and `"3"`.
 *   Once a button is clicked, it disables all options to prevent duplicate responses, posts a confirmation message, and submits the choice directly to the Gateway Broker as a new `ROLE_USER` prompt.
+
+### 3. `DetailsView` (Collapsible Sections)
+A `<details><summary>TITLE</summary>BODY</details>` segment is sent as a message `▸ **TITLE**` with a `展开` button. Clicking it edits the message in place to show `▾ **TITLE**` and BODY (truncated to Discord's 2000-character limit) and relabels the button `收起`; clicking again collapses it.

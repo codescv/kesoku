@@ -23,6 +23,7 @@ from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot, InboundMessageDTO, parse_message_content
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
+from kesoku.utils.ui_markup import render_details_as_text, render_question_as_text
 
 from .cards import GoogleChatCardBuilder
 
@@ -663,6 +664,13 @@ class GoogleChatChatbot(Chatbot):
             for seg in segments:
                 if seg["type"] == "text":
                     text_reply += seg["content"]
+                elif seg["type"] == "details":
+                    text_reply += "\n" + render_details_as_text(seg["title"], seg["body"]) + "\n"
+                elif seg["type"] == "question" and seg.get("multi"):
+                    # Card buttons can only submit one choice; show multiselect questions as a text list.
+                    text_reply += "\n" + render_question_as_text(
+                        seg["question"], seg["choices"], True, seg.get("max", len(seg["choices"]))
+                    ) + "\n"
                 elif seg["type"] == "question":
                     question_text = seg["question"]
                     choices = seg["choices"]

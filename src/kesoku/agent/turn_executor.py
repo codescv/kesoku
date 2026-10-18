@@ -26,6 +26,7 @@ from kesoku.config import KesokuConfig
 from kesoku.context import KesokuContext
 from kesoku.utils.async_fs import async_exists, async_read_text_file, async_write_text_file
 from kesoku.utils.text import truncate_middle
+from kesoku.utils.ui_markup import collapse_ui_blocks, extract_ui_options, parse_multi_selection
 
 if TYPE_CHECKING:
     from kesoku.agent.agent import SessionWorker
@@ -55,9 +56,16 @@ _NUMERIC_PICK_RE = re.compile(
 
 
 def extract_question_options(text: str | None) -> list[str]:
-    """Return the options of the LAST `[question: ...]` block in text (empty list if none)."""
+    """Return the options of the interactive question in text (empty list if none).
+
+    The first ```ui block wins (it is the one rendered as interactive components); otherwise the options
+    of the LAST legacy `[question: ...]` block are returned.
+    """
     if not text:
         return []
+    ui_options, _ = extract_ui_options(text)
+    if ui_options:
+        return ui_options
     matches = _QUESTION_BLOCK_CAPTURE_RE.findall(text)
     if not matches:
         return []
@@ -77,8 +85,9 @@ def _normalize_choice(text: str) -> str:
 def is_clicked_option(user_text: str | None, last_assistant_text: str | None) -> bool:
     """Detect whether the user message is a selection of the previous assistant turn's question options.
 
-    True when the message exactly equals one of the options of the last `[question: ...]` block in the
-    previous assistant message, or when it is a short numeric pick ("2", "选2", "2.").
+    True when the message exactly equals one of the options of the interactive question (first ```ui block, or
+    the last legacy `[question: ...]` block) in the previous assistant message, when it is a multiselect answer
+    (`选择：A；B`) whose parts are all options, or when it is a short numeric pick ("2", "选2", "2.").
     """
     if not user_text or not user_text.strip():
         return False
@@ -87,12 +96,16 @@ def is_clicked_option(user_text: str | None, last_assistant_text: str | None) ->
     normalized_user = _normalize_choice(user_text)
     if not normalized_user:
         return False
-    return any(normalized_user == _normalize_choice(opt) for opt in extract_question_options(last_assistant_text))
+    options = {_normalize_choice(opt) for opt in extract_question_options(last_assistant_text)}
+    if normalized_user in options:
+        return True
+    parts = parse_multi_selection(user_text)
+    return bool(parts) and all(_normalize_choice(p) in options for p in parts)
 
 
 def sanitize_rag_snippet_line(speaker: str, content: str, max_agent_chars: int = MAX_RAG_AGENT_LINE_CHARS) -> str:
-    """Strip `[question: ...]` blocks and truncate long Agent lines of a retrieved historical message."""
-    cleaned = strip_question_options(content.strip())
+    """Strip `[question: ...]` / ```ui options and truncate long Agent lines of a retrieved historical message."""
+    cleaned = collapse_ui_blocks(strip_question_options(content.strip()))
     if speaker == "Agent" and len(cleaned) > max_agent_chars:
         cleaned = cleaned[:max_agent_chars] + "…[truncated]"
     return cleaned

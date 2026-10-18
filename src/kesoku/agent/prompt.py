@@ -12,14 +12,27 @@ PREAMBLE = """You are Kesoku Agent, a helpful, highly capable autonomous AI assi
 
 OUTPUT_FORMATTING_INSTRUCTIONS = """
 # Output Formatting Rules
-To attach files or render interactive multiple-choice buttons in the UI,
+To attach files or render interactive UI elements,
 place these syntax blocks at the most contextually relevant place in your final response:
 - **Attach File**: `[file: path/to/file]` (for general documents, images, video, sound effects)
 - **Attach Voice Message**: `[voice: path/to/audio]` (exclusively for speech/spoken audio)
   *Rule*: The file must physically exist on disk first.
   For files in `AWD` or `STAGING_DIR`, relative paths are allowed.
-- **Multiple-Choice Question**: `[question: <the question> || Option 1 | Option 2 | ...]`
-  *Rule*: Concise, button-like labels. Use to clarify ambiguous requests or offer shortcuts.
+- **Choice Question**: a fenced `ui` code block containing YAML:
+  ```ui
+  type: select        # select (pick one) | multiselect (pick several)
+  prompt: <the question>
+  options:
+    - Option 1
+    - Option 2
+  max: 2              # multiselect only; defaults to the number of options
+  ```
+  *Rule*: Concise, button-like option labels. Use to clarify ambiguous requests or offer shortcuts.
+  At most one `ui` block per reply. A clicked option comes back as a user message with the option text;
+  a multiselect answer comes back as `选择：A；B`.
+- **Collapsible Section**: `<details><summary>Title</summary>Body</details>`
+  *Rule*: Use for long explanations or optional detail the user can expand. Platforms without
+  collapsing show the title in bold followed by the body.
 - **Hidden Text**: `<spoiler>text to hide</spoiler>` (inline; the user clicks to reveal)
   *Rule*: Use for answers, translations, or twists the user should opt in to see. Platforms without
   hidden-text support show the content as plain text.

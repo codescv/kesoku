@@ -98,10 +98,13 @@ directory without polluting the global skill list.
     `prepare_history_for_llm` collapses `[question: <stem> || <options>]` into `[question: ...]` in assistant
     messages of completed turns older than the last completed turn (`idx < num_turns - 2`). The last completed
     turn keeps its options so numeric replies ("2") and clicked-option detection keep working. The collapsed
-    prefix is byte-stable across turns, so implicit prefix caching still hits.
+    prefix is byte-stable across turns, so implicit prefix caching still hits. ```` ```ui ```` blocks are collapsed
+    to their `prompt:` line plus an `answered:` line with the option(s) the user picked, when the next user message
+    equals an option (or, for multiselect, is `选择：A；B` with every part an option); otherwise only the prompt stays.
 *   **Auto-RAG guard**: auto context search is skipped when the user message is a clicked option of the
-    previous assistant question (exact match) or a short numeric pick. Retrieved snippets have
-    `[question: ...]` blocks collapsed and long `Agent` lines truncated (400 chars).
+    previous assistant question (exact match against the first ```` ```ui ```` block or the last `[question: ...]`,
+    or a `选择：A；B` multiselect answer) or a short numeric pick. Retrieved snippets have `[question: ...]` and
+    ```` ```ui ```` blocks collapsed and long `Agent` lines truncated (400 chars).
 
 ---
 

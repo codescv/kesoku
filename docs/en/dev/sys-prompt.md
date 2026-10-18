@@ -56,7 +56,8 @@ These are static, hardcoded instructions inside `prompt.py` that train the agent
 
 *   **`SKILLS_INSTRUCTIONS`**: Guides the agent on how to discover custom instruction files by calling `list_skills()` and `use_skill(name)`.
 *   **`FILE_SENDING_INSTRUCTIONS`**: Teaches the agent the file-sending markup syntax: `[file: /absolute/path/to/file]`. If this string is matched in outgoing text, chatbot adapters will upload the file as a native attachment.
-*   **`QUESTION_INSTRUCTION`**: Teaches the agent the multiple-choice button markup syntax: `[question: <title> | choice1 | choice2]`.
+*   **Choice questions** (in `OUTPUT_FORMATTING_INSTRUCTIONS`): a fenced ```` ```ui ```` YAML block with `type: select | multiselect`, `prompt`, `options` and optional `max`. At most one per reply; clicked options come back as the option text, multiselect answers as `选择：A；B`. The legacy `[question: ...]` tag is still parsed but no longer taught.
+*   **Collapsible sections**: `<details><summary>Title</summary>Body</details>` (Discord: `▸ Title` + 展开 button; other platforms: bold title followed by the body).
 *   **Hidden text**: `<spoiler>…</spoiler>` marks inline text the user must click to reveal. Each adapter's `format_text` renders it: Discord emits native `||…||`; platforms without hidden-text support (CLI, WeChat, Google Chat) strip the tags and show the content. See `kesoku.utils.text.render_spoilers`.
 *   **`MEMORY_AND_HISTORY_INSTRUCTIONS`**: Guides the agent on how to access and modify structured memories in SQLite.
 *   **`SESSION_NOTES_INSTRUCTIONS`**: Explains the per-turn `<context name="...">` blocks (see section 7), how to maintain `$STAGING_DIR/notes.md` with `update_file`, and that files under `$STAGING_DIR/context/` are tool-maintained and must never be edited with `update_file`.

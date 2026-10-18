@@ -28,7 +28,7 @@ from kesoku.utils.async_fs import (
 from kesoku.utils.text import clean_latex, format_text, render_spoilers
 
 from .command import setup_discord_commands
-from .ui import MessageHeaderView, QuestionView
+from .ui import DetailsView, MessageHeaderView, QuestionView
 from .voice import send_voice_message
 
 logger = setup_logger(__name__)
@@ -1111,7 +1111,32 @@ class DiscordChatbot(Chatbot):
                 logger.error(f"Failed to send voice file fallback for {file_path}: {fe}", exc_info=True)
                 raise
 
-    async def send_question_segment(self, channel_id: str, question: str, choices: list[str], message: Message) -> None:
+    async def send_details_segment(self, channel_id: str, title: str, body: str, message: Message) -> None:
+        """Deliver a `<details>` section as `▸ TITLE` with a toggle button that expands it in place."""
+        channel = await self._get_discord_channel_with_abort(message)
+        if not channel:
+            return
+        view = DetailsView(title=self.format_text(title), body=self.format_text(body))
+        try:
+            await self._call_with_timeout(
+                channel.send(view.content(), view=view),
+                error_msg="Timeout sending details view",
+            )
+        except DeliveryAbortedError:
+            raise
+        except Exception as de:
+            logger.error(f"Failed to send details view to Discord: {de}", exc_info=True)
+            await super().send_details_segment(channel_id, title, body, message)
+
+    async def send_question_segment(
+        self,
+        channel_id: str,
+        question: str,
+        choices: list[str],
+        message: Message,
+        multi: bool = False,
+        max_choices: int = 1,
+    ) -> None:
         """Deliver a multiple choice question block as a dynamic action button view embed."""
         channel = await self._get_discord_channel_with_abort(message)
         if not channel:
