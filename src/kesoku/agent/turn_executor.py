@@ -680,12 +680,14 @@ class TurnExecutor:
         # (if Bootstrap)
         full_prefix = ""
         if is_bootstrap:
-            lines = [
-                '<background_context type="sync_guidelines">',
-                "- Use `chat_search(query)` to search past chat messages for this role.",
-                "- Use `view_message(message_id)` to inspect full historical messages when needed.",
-                "</background_context>",
-            ]
+            # Only advertise history tools that are not disabled via agent.disabled_tools.
+            disabled_tools = set(self.context.config.agent.disabled_tools)
+            hints = []
+            if "chat_search" not in disabled_tools:
+                hints.append("- Use `chat_search(query)` to search past chat messages for this role.")
+            if "view_message" not in disabled_tools:
+                hints.append("- Use `view_message(message_id)` to inspect full historical messages when needed.")
+            lines = ['<background_context type="sync_guidelines">', *hints, "</background_context>"] if hints else []
             full_prefix = "\n".join(lines) + "\n" if lines else ""
 
         # 4. Prepend Auto Context Search (if enabled)

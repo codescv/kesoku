@@ -62,13 +62,26 @@ class ToolRegistry:
         logger.info(f"Registered tool: {func.__name__}")
         return func
 
+    @staticmethod
+    def _disabled_names() -> set[str]:
+        """Tool names disabled via `agent.disabled_tools`; empty if config is unavailable."""
+        try:
+            from kesoku.config import get_config
+
+            return set(get_config().agent.disabled_tools)
+        except Exception:  # noqa: BLE001 - registry must work without a loaded config (tests, tooling)
+            return set()
+
     def get_tools_list(self) -> list[Callable]:
         """Retrieve the list of registered tool callables formatted for LLM schema generation.
+
+        Tools listed in `agent.disabled_tools` are omitted so the LLM never sees them.
 
         Returns:
             A list of callable functions with context arguments stripped.
         """
-        return list(self._schema_tools.values())
+        disabled = self._disabled_names()
+        return [f for name, f in self._schema_tools.items() if name not in disabled]
 
     def get_tool(self, name: str) -> Callable:
         """Retrieve a specific tool function by name for execution.
@@ -84,6 +97,8 @@ class ToolRegistry:
         """
         if name not in self._tools:
             raise KeyError(f"Tool '{name}' is not registered.")
+        if name in self._disabled_names():
+            raise KeyError(f"Tool '{name}' is disabled by configuration (agent.disabled_tools).")
         return self._tools[name]
 
 

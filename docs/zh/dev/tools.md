@@ -85,3 +85,6 @@ if is_interrupted and is_interrupted():
 Kesoku 内置了利用大模型多模态能力分析本地多媒体文件（图片、音频、视频）的工具：
 
 *   **`analyze_media(path, prompt)`**：解析媒体文件路径（绝对路径或相对于 AWD/Staging 的相对路径），自动检测其 MIME 类型，并将其作为原生多模态数据块（`ImageBlock`、`DocumentBlock` 或 `MediaBlock`）附加到推理请求中，对该文件执行问答分析。
+
+### `disabled_tools`
+`agent.disabled_tools = ["chat_search", "view_message"]` 会把列出的工具从发给 LLM 的工具列表中移除，并拒绝执行（`ToolRegistry.get_tools_list` / `get_tool`）。首回合的 `sync_guidelines` 提示也只会提到未被禁用的历史检索工具。配合 `auto_context_search = false` 可以完全关闭历史聊天检索。

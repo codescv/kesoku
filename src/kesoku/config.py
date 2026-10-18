@@ -141,6 +141,13 @@ class AgentConfig(BaseModel):
         default=100,
         description="Max number of verbatim user messages from compressed turns kept in the scaffold (0 disables)",
     )
+    disabled_tools: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Names of registered tools to hide from the LLM and refuse to execute "
+            "(e.g. ['chat_search', 'view_message'])."
+        ),
+    )
     auto_context_search: bool = Field(
         default=True,
         description="Whether to automatically search historical conversations and augment context for relevant queries",

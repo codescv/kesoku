@@ -86,3 +86,5 @@ Kesoku provides built-in support for analyzing local multimedia files (images, a
 
 *   **`analyze_media(path, prompt)`**: Resolves a media file path (absolute or relative to AWD/staging), detects its MIME type, and attaches it as a native multimodal block (`ImageBlock`, `DocumentBlock`, or `MediaBlock`) to execute QA against the file.
 
+### `disabled_tools`
+`agent.disabled_tools = ["chat_search", "view_message"]` removes the listed tools from the schema sent to the LLM and refuses to execute them (`ToolRegistry.get_tools_list` / `get_tool`). The bootstrap `sync_guidelines` hint only mentions history tools that are not disabled. Together with `auto_context_search = false` this fully turns off past-chat retrieval.

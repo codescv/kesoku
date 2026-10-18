@@ -510,3 +510,48 @@ async def test_run_shell_command_forbidden_patterns(tmp_path) -> None:
 
     finally:
         kesoku.config._global_config = original_config
+
+
+# --- agent.disabled_tools -------------------------------------------------------------------
+from unittest.mock import patch  # noqa: E402
+
+from kesoku.agent.tools.registry import ToolRegistry  # noqa: E402
+
+
+def _registry_with_two_tools() -> ToolRegistry:
+    reg = ToolRegistry()
+
+    @reg.register
+    def alpha(x: int) -> int:
+        """Return x."""
+        return x
+
+    @reg.register
+    def beta(x: int) -> int:
+        """Return x."""
+        return x
+
+    return reg
+
+
+def test_disabled_tools_hidden_from_schema_and_execution() -> None:
+    reg = _registry_with_two_tools()
+    cfg = MagicMock()
+    cfg.agent.disabled_tools = ["beta"]
+    with patch("kesoku.config.get_config", return_value=cfg):
+        assert [f.__name__ for f in reg.get_tools_list()] == ["alpha"]
+        assert reg.get_tool("alpha")(1) == 1
+        try:
+            reg.get_tool("beta")
+        except KeyError as e:
+            assert "disabled" in str(e)
+        else:
+            raise AssertionError("disabled tool must not be executable")
+
+
+def test_disabled_tools_default_empty_keeps_everything() -> None:
+    reg = _registry_with_two_tools()
+    cfg = MagicMock()
+    cfg.agent.disabled_tools = []
+    with patch("kesoku.config.get_config", return_value=cfg):
+        assert [f.__name__ for f in reg.get_tools_list()] == ["alpha", "beta"]
