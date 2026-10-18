@@ -260,6 +260,17 @@ def build_question_view(
     return view
 
 
+async def _edit_interaction_message(interaction: discord.Interaction, **kwargs: Any) -> None:
+    """Update the component's original message after `interaction.response.defer()`."""
+    try:
+        await interaction.edit_original_response(**kwargs)
+    except Exception:
+        if interaction.message is not None:
+            await interaction.message.edit(**kwargs)
+        else:
+            raise
+
+
 async def handle_question_answer(
     interaction: discord.Interaction, session_id: str, message_id: str, indices: list[int]
 ) -> None:
@@ -267,35 +278,44 @@ async def handle_question_answer(
 
     Single-select posts the option text; multiselect posts one `选择：A；B` message.
     """
-    chatbot = chatbot_for(interaction)
-    db = chatbot.gateway.db if chatbot else None
-    spec = await db.get_ui_prompt(session_id, message_id) if db else None
-    if chatbot is None or spec is None:
-        await interaction.response.send_message("⚠️ This question is no longer available.", ephemeral=True)
-        return
-    if spec.get("answered"):
-        await interaction.response.send_message(f"✓ Already answered: {spec['answered']}", ephemeral=True)
-        return
-    options: list[str] = list(spec.get("options", []))
-    valid = [i for i in dict.fromkeys(indices) if 0 <= i < len(options)]
-    if not valid:
-        await interaction.response.send_message("⚠️ Invalid selection.", ephemeral=True)
-        return
-    if spec.get("multi"):
-        valid = sorted(valid)[: int(spec.get("max", len(options)))]
-        content = format_multi_selection([options[i] for i in valid])
-    else:
-        valid = valid[:1]
-        content = options[valid[0]]
+    try:
+        await interaction.response.defer()
+        chatbot = chatbot_for(interaction)
+        db = chatbot.gateway.db if chatbot else None
+        spec = await db.get_ui_prompt(session_id, message_id) if db else None
+        if chatbot is None or spec is None:
+            await interaction.followup.send("⚠️ This question is no longer available.", ephemeral=True)
+            return
+        if spec.get("answered"):
+            await interaction.followup.send(f"✓ Already answered: {spec['answered']}", ephemeral=True)
+            return
+        options: list[str] = list(spec.get("options", []))
+        valid = [i for i in dict.fromkeys(indices) if 0 <= i < len(options)]
+        if not valid:
+            await interaction.followup.send("⚠️ Invalid selection.", ephemeral=True)
+            return
+        if spec.get("multi"):
+            valid = sorted(valid)[: int(spec.get("max", len(options)))]
+            content = format_multi_selection([options[i] for i in valid])
+        else:
+            valid = valid[:1]
+            content = options[valid[0]]
 
-    # Persist the answer first so concurrent clicks see it, then disable the components.
-    spec["answered"] = content
-    spec["chosen"] = valid
-    await db.save_ui_prompt(session_id, message_id, spec)
-    await interaction.response.edit_message(
-        embed=build_question_embed(spec), view=build_question_view(session_id, message_id, spec)
-    )
-    await post_simulated_choice(chatbot.gateway, chatbot, interaction, session_id, content)
+        # Persist the answer first so concurrent clicks see it, then disable the components.
+        spec["answered"] = content
+        spec["chosen"] = valid
+        await db.save_ui_prompt(session_id, message_id, spec)
+        await _edit_interaction_message(
+            interaction,
+            embed=build_question_embed(spec),
+            view=build_question_view(session_id, message_id, spec),
+        )
+        await post_simulated_choice(chatbot.gateway, chatbot, interaction, session_id, content)
+    except Exception as exc:
+        logger.error(
+            f"Failed to handle question answer for session={session_id} message={message_id}: {exc}",
+            exc_info=True,
+        )
 
 
 class DetailsToggle(
@@ -326,17 +346,25 @@ class DetailsToggle(
 
     async def callback(self, interaction: discord.Interaction) -> None:
         """Toggle the section, deriving the current state from the message content."""
-        chatbot = chatbot_for(interaction)
-        spec = await chatbot.gateway.db.get_ui_prompt(self.session_id, self.details_key) if chatbot else None
-        if spec is None:
-            await interaction.response.send_message("⚠️ This section is no longer available.", ephemeral=True)
-            return
-        content = interaction.message.content if interaction.message else ""
-        expanded = not content.startswith("▾")
-        await interaction.response.edit_message(
-            content=render_details_content(spec.get("title", ""), spec.get("body", ""), expanded),
-            view=build_details_view(self.session_id, self.details_key, expanded),
-        )
+        try:
+            await interaction.response.defer()
+            chatbot = chatbot_for(interaction)
+            spec = await chatbot.gateway.db.get_ui_prompt(self.session_id, self.details_key) if chatbot else None
+            if spec is None:
+                await interaction.followup.send("⚠️ This section is no longer available.", ephemeral=True)
+                return
+            content = interaction.message.content if interaction.message else ""
+            expanded = not content.startswith("▾")
+            await _edit_interaction_message(
+                interaction,
+                content=render_details_content(spec.get("title", ""), spec.get("body", ""), expanded),
+                view=build_details_view(self.session_id, self.details_key, expanded),
+            )
+        except Exception as exc:
+            logger.error(
+                f"Failed to toggle details for session={self.session_id} key={self.details_key}: {exc}",
+                exc_info=True,
+            )
 
 
 def build_details_view(session_id: str, details_key: str, expanded: bool = False) -> discord.ui.View:

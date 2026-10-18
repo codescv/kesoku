@@ -48,8 +48,11 @@ def _interaction(client: Any, values: list[str] | None = None, content: str = ""
     interaction = MagicMock()
     interaction.client = client
     interaction.data = {"values": values} if values is not None else {}
+    interaction.response.defer = AsyncMock()
     interaction.response.edit_message = AsyncMock()
     interaction.response.send_message = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    interaction.edit_original_response = AsyncMock()
     interaction.channel_id = "chan"
     interaction.user.id = 42
     interaction.user.display_name = "User"
@@ -58,6 +61,7 @@ def _interaction(client: Any, values: list[str] | None = None, content: str = ""
     sent.created_at.timestamp.return_value = 123.0
     interaction.channel.send = AsyncMock(return_value=sent)
     interaction.message.content = content
+    interaction.message.edit = AsyncMock()
     return interaction
 
 
@@ -196,18 +200,19 @@ async def test_from_custom_id_rebuilds_items() -> None:
 
 @pytest.mark.asyncio
 async def test_button_click_posts_option_and_disables(registered: tuple[object, _MemoryDB, MagicMock]) -> None:
-    """A button click posts the option text as a user message and disables the components."""
+    """A button click defers immediately, posts the option text as a user message, and disables the components."""
     client, db, chatbot = registered
     await db.save_ui_prompt("s", "m", pui.build_question_spec("Q", ["a", "b [x]"], False, 1))
     interaction = _interaction(client)
     await pui.QuestionButton("s", "m", 1, label="b [x]").callback(interaction)
 
+    interaction.response.defer.assert_awaited_once_with()
     posted = chatbot.gateway.post.call_args.args[0]
     assert posted.content == "b [x]"
     assert posted.role == MessageRole.USER and posted.session_id == "s"
     assert posted.metadata["discord_message_id"] == "777"
     interaction.channel.send.assert_awaited_once_with("<@42> selected: **b [x]**")
-    view = interaction.response.edit_message.call_args.kwargs["view"]
+    view = interaction.edit_original_response.call_args.kwargs["view"]
     assert all(c.item.disabled for c in view.children)
     assert db.rows[("s", "m")]["answered"] == "b [x]"
 
@@ -219,9 +224,10 @@ async def test_multiselect_submit_posts_joined_answer(registered: tuple[object, 
     await db.save_ui_prompt("s", "m", pui.build_question_spec("Q", ["A", "B", "C"], True, 2))
     interaction = _interaction(client, values=["2", "0"])
     await pui.QuestionSelect("s", "m").callback(interaction)
+    interaction.response.defer.assert_awaited_once_with()
     chatbot.gateway.post.assert_awaited_once()
     assert chatbot.gateway.post.call_args.args[0].content == "选择：A；C"
-    select = interaction.response.edit_message.call_args.kwargs["view"].children[0].item
+    select = interaction.edit_original_response.call_args.kwargs["view"].children[0].item
     assert select.disabled
     assert [o.default for o in select.options] == [True, False, True]
 
@@ -237,37 +243,41 @@ async def test_single_dropdown_submit_posts_option(registered: tuple[object, _Me
 
 @pytest.mark.asyncio
 async def test_answered_or_missing_spec_is_rejected(registered: tuple[object, _MemoryDB, MagicMock]) -> None:
-    """Second answers and unknown prompts get an ephemeral notice and post nothing."""
+    """Second answers and unknown prompts get an ephemeral notice via followup and post nothing."""
     client, db, chatbot = registered
     spec = pui.build_question_spec("Q", ["a"], False, 1)
     spec["answered"] = "a"
     await db.save_ui_prompt("s", "m", spec)
     interaction = _interaction(client)
     await pui.QuestionButton("s", "m", 0).callback(interaction)
-    assert interaction.response.send_message.call_args.kwargs == {"ephemeral": True}
+    interaction.response.defer.assert_awaited_once_with()
+    assert interaction.followup.send.call_args.kwargs == {"ephemeral": True}
     interaction = _interaction(client)
     await pui.QuestionButton("s", "unknown", 0).callback(interaction)
-    interaction.response.send_message.assert_awaited_once()
+    interaction.response.defer.assert_awaited_once_with()
+    interaction.followup.send.assert_awaited_once()
     interaction = _interaction(client)
     await db.save_ui_prompt("s", "m2", pui.build_question_spec("Q", ["a"], False, 1))
     await pui.QuestionButton("s", "m2", 9).callback(interaction)
-    interaction.response.send_message.assert_awaited_once()
+    interaction.response.defer.assert_awaited_once_with()
+    interaction.followup.send.assert_awaited_once()
     chatbot.gateway.post.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_details_toggle_expands_and_collapses(registered: tuple[object, _MemoryDB, MagicMock]) -> None:
-    """The details toggle derives state from the message and edits it in place."""
+    """The details toggle defers immediately, derives state from the message, and edits it in place."""
     client, db, _ = registered
     await db.save_ui_prompt("s", "m-d0", {"type": "details", "title": "T", "body": "B"})
     interaction = _interaction(client, content="▸ **T**")
     await pui.DetailsToggle("s", "m-d0").callback(interaction)
-    kwargs = interaction.response.edit_message.call_args.kwargs
+    interaction.response.defer.assert_awaited_once_with()
+    kwargs = interaction.edit_original_response.call_args.kwargs
     assert kwargs["content"] == "▾ **T**\nB"
     assert kwargs["view"].children[0].item.label == DETAILS_COLLAPSE_LABEL
     interaction = _interaction(client, content="▾ **T**\nB")
     await pui.DetailsToggle("s", "m-d0").callback(interaction)
-    assert interaction.response.edit_message.call_args.kwargs["content"] == "▸ **T**"
+    assert interaction.edit_original_response.call_args.kwargs["content"] == "▸ **T**"
 
 
 # ---------------------------------------------------------------------------
