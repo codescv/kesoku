@@ -25,7 +25,7 @@ from kesoku.logger import setup_logger
 from kesoku.utils.async_fs import (
     async_exists,
 )
-from kesoku.utils.text import clean_latex
+from kesoku.utils.text import clean_latex, format_text, render_spoilers
 
 from .command import setup_discord_commands
 from .ui import MessageHeaderView, QuestionView
@@ -474,8 +474,9 @@ class DiscordChatbot(Chatbot):
             asyncio.create_task(self.bot.close())
 
     def format_text(self, text: str) -> str:
-        """Clean, normalize, and apply LaTeX filter for Discord compatibility."""
-        formatted = super().format_text(text)
+        """Clean, normalize, render `<spoiler>` as native `||...||`, and apply LaTeX filter."""
+        # Render spoilers before the base formatter strips the tags.
+        formatted = format_text(render_spoilers(text, "||", "||"))
         return clean_latex(formatted)
 
     async def _keep_typing(

@@ -103,6 +103,34 @@ def format_text(text: str) -> str:
     return "".join(formatted_lines)
 
 
+SPOILER_PATTERN = re.compile(r"<spoiler>(.*?)</spoiler>", re.DOTALL | re.IGNORECASE)
+
+
+def render_spoilers(text: str, open_tag: str = "", close_tag: str = "") -> str:
+    """Render `<spoiler>...</spoiler>` hidden-text markup for a target platform.
+
+    Platforms with native hidden text pass their own delimiters (Discord: `||`). Platforms
+    without support call this with the default empty delimiters so the tags are stripped and
+    the content stays visible. Nested or unmatched tags are left untouched.
+
+    Args:
+        text: Text possibly containing `<spoiler>` markup.
+        open_tag: Platform opening delimiter for hidden text.
+        close_tag: Platform closing delimiter for hidden text.
+
+    Returns:
+        Text with spoiler markup replaced by platform delimiters.
+    """
+    if not text or "<spoiler" not in text.lower():
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        inner = match.group(1).strip()
+        return f"{open_tag}{inner}{close_tag}" if inner else ""
+
+    return SPOILER_PATTERN.sub(_replace, text)
+
+
 def _close_chunk(chunk: str) -> str:
     """Append closing backticks to the chunk, ensuring proper newline.
 

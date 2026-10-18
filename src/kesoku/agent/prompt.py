@@ -20,6 +20,9 @@ place these syntax blocks at the most contextually relevant place in your final 
   For files in `AWD` or `STAGING_DIR`, relative paths are allowed.
 - **Multiple-Choice Question**: `[question: <the question> || Option 1 | Option 2 | ...]`
   *Rule*: Concise, button-like labels. Use to clarify ambiguous requests or offer shortcuts.
+- **Hidden Text**: `<spoiler>text to hide</spoiler>` (inline; the user clicks to reveal)
+  *Rule*: Use for answers, translations, or twists the user should opt in to see. Platforms without
+  hidden-text support show the content as plain text.
 """
 
 

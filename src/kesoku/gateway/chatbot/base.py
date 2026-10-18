@@ -31,7 +31,7 @@ from kesoku.utils.async_fs import (
 from kesoku.utils.path import PathResolver
 from kesoku.utils.service import restart_service as utils_restart_service
 from kesoku.utils.table import parse_markdown_tables, render_table_to_image
-from kesoku.utils.text import format_text, split_text_into_chunks
+from kesoku.utils.text import format_text, render_spoilers, split_text_into_chunks
 
 PATH_RESOLUTION_CONFIDENCE_THRESHOLD = 0.9
 """Similarity score threshold for auto path resolution of misspelled absolute paths."""
@@ -985,7 +985,8 @@ class Chatbot(ABC):
         Returns:
             The formatted and cleaned text.
         """
-        return format_text(text)
+        # Platforms without native hidden text keep spoiler content visible (tags stripped).
+        return render_spoilers(format_text(text))
 
     def get_max_text_length(self) -> int:
         """Maximum text length allowed per message chunk for the platform."""

@@ -57,6 +57,7 @@
 *   **`SKILLS_INSTRUCTIONS`**：指导模型如何使用 `list_skills()` 检索可用技能，以及使用 `use_skill(name)` 加载特定技能说明。
 *   **`FILE_SENDING_INSTRUCTIONS`**：指导模型发送文件的特殊语法：`[file: /绝对/文件/路径]`。如果回复文本中包含此格式，聊天平台适配器会自动将其捕获并作为文件附件上传给最终用户。
 *   **`QUESTION_INSTRUCTION`**：指导模型发送多项选择按钮的特殊语法：`[question: <标题> | 选项1 | 选项2]`。
+*   **隐藏文本**：`<spoiler>…</spoiler>` 行内隐藏文本（用户点击才显示）。由各平台适配器的 `format_text` 渲染：Discord 转为原生 `||…||`；不支持隐藏文本的平台（CLI、微信、Google Chat）去掉标签、内容直接可见。实现见 `kesoku.utils.text.render_spoilers`。
 *   **`MEMORY_AND_HISTORY_INSTRUCTIONS`**：指导模型如何读写 SQLite 数据库中的结构化记忆条目。
 *   **`BACKGROUND_EXECUTION_INSTRUCTIONS`**：指导模型在遇到耗时较长的 background 终端命令时，如何优雅地向用户发送中间提示并立即结束本回合，等待系统后台完成通知。
 

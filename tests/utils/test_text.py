@@ -218,3 +218,31 @@ def test_parse_search_keywords() -> None:
     # 7. Wildcard string
     assert parse_search_keywords("*") == ["*"]
 
+
+
+
+# --- <spoiler> hidden-text markup -------------------------------------------------------------
+from kesoku.utils.text import render_spoilers  # noqa: E402
+
+
+def test_render_spoilers_default_strips_tags_and_keeps_content() -> None:
+    text = "> 今日は早く起きなさいよ\n<spoiler>今天给我早点起床啊</spoiler>"
+    assert render_spoilers(text) == "> 今日は早く起きなさいよ\n今天给我早点起床啊"
+
+
+def test_render_spoilers_with_platform_delimiters() -> None:
+    assert render_spoilers("答案是 <spoiler>42</spoiler>。", "||", "||") == "答案是 ||42||。"
+
+
+def test_render_spoilers_multiline_and_case_insensitive() -> None:
+    text = "A <SPOILER>line1\nline2</SPOILER> B"
+    assert render_spoilers(text, "||", "||") == "A ||line1\nline2|| B"
+
+
+def test_render_spoilers_leaves_unmatched_tags_and_plain_text_alone() -> None:
+    assert render_spoilers("no markup here") == "no markup here"
+    assert render_spoilers("<spoiler>unterminated") == "<spoiler>unterminated"
+
+
+def test_render_spoilers_drops_empty_spoiler() -> None:
+    assert render_spoilers("x <spoiler>  </spoiler> y", "||", "||") == "x  y"

@@ -57,6 +57,7 @@ These are static, hardcoded instructions inside `prompt.py` that train the agent
 *   **`SKILLS_INSTRUCTIONS`**: Guides the agent on how to discover custom instruction files by calling `list_skills()` and `use_skill(name)`.
 *   **`FILE_SENDING_INSTRUCTIONS`**: Teaches the agent the file-sending markup syntax: `[file: /absolute/path/to/file]`. If this string is matched in outgoing text, chatbot adapters will upload the file as a native attachment.
 *   **`QUESTION_INSTRUCTION`**: Teaches the agent the multiple-choice button markup syntax: `[question: <title> | choice1 | choice2]`.
+*   **Hidden text**: `<spoiler>…</spoiler>` marks inline text the user must click to reveal. Each adapter's `format_text` renders it: Discord emits native `||…||`; platforms without hidden-text support (CLI, WeChat, Google Chat) strip the tags and show the content. See `kesoku.utils.text.render_spoilers`.
 *   **`MEMORY_AND_HISTORY_INSTRUCTIONS`**: Guides the agent on how to access and modify structured memories in SQLite.
 *   **`BACKGROUND_EXECUTION_INSTRUCTIONS`**: Instructs the agent on how to handle long-running background shell executions and yield the conversational turn.
 
