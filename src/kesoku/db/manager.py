@@ -226,6 +226,18 @@ class DatabaseManager:
                     """
                 )
                 conn.execute("DROP TABLE IF EXISTS agent_memories;")
+                # Ensure ui_prompts table exists (interactive UI specs, keyed by rendered message)
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS ui_prompts (
+                        session_id TEXT NOT NULL,
+                        message_id TEXT NOT NULL,
+                        spec_json TEXT NOT NULL,
+                        created_at REAL NOT NULL,
+                        PRIMARY KEY (session_id, message_id)
+                    );
+                    """
+                )
                 # Ensure cross_session_contexts table exists
                 conn.execute(
                     """
@@ -406,6 +418,17 @@ class DatabaseManager:
                             content TEXT NOT NULL,
                             updated_at REAL NOT NULL,
                             status TEXT NOT NULL DEFAULT 'idle'
+                        );
+                        """
+                    )
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS ui_prompts (
+                            session_id TEXT NOT NULL,
+                            message_id TEXT NOT NULL,
+                            spec_json TEXT NOT NULL,
+                            created_at REAL NOT NULL,
+                            PRIMARY KEY (session_id, message_id)
                         );
                         """
                     )
@@ -634,6 +657,8 @@ class DatabaseManager:
             with conn:
                 # Delete all messages belonging to this session
                 conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+                # Delete interactive UI prompt specs of this session
+                conn.execute("DELETE FROM ui_prompts WHERE session_id = ?", (session_id,))
                 # Delete the session itself
                 conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
 
@@ -1344,6 +1369,37 @@ class DatabaseManager:
                 )
 
 
+
+    def save_ui_prompt(self, session_id: str, message_id: str, spec: dict[str, Any]) -> None:
+        """Insert or update the spec of an interactive UI prompt (created_at is kept on update)."""
+        with self.connection_provider.connection() as conn:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO ui_prompts (session_id, message_id, spec_json, created_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(session_id, message_id) DO UPDATE SET spec_json = excluded.spec_json
+                    """,
+                    (session_id, message_id, json.dumps(spec, ensure_ascii=False), time.time()),
+                )
+
+    def get_ui_prompt(self, session_id: str, message_id: str) -> dict[str, Any] | None:
+        """Load the spec of an interactive UI prompt, or None if unknown."""
+        with self.connection_provider.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT spec_json FROM ui_prompts WHERE session_id = ? AND message_id = ?",
+                (session_id, message_id),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            try:
+                spec = json.loads(row["spec_json"])
+            except (TypeError, ValueError):
+                logger.warning(f"Corrupt ui_prompts spec for session={session_id} message={message_id}")
+                return None
+            return spec if isinstance(spec, dict) else None
 
     def set_channel_role(self, chatbot_id: str, channel_id: str, role: str) -> None:
         """Bind a roleplay persona to a chatbot channel/thread."""
@@ -2150,6 +2206,14 @@ class AsyncDatabaseManager:
             window_before,
             window_after,
         )
+
+    async def save_ui_prompt(self, session_id: str, message_id: str, spec: dict[str, Any]) -> None:
+        """Insert or update the spec of an interactive UI prompt."""
+        await asyncio.to_thread(self.sync_db.save_ui_prompt, session_id, message_id, spec)
+
+    async def get_ui_prompt(self, session_id: str, message_id: str) -> dict[str, Any] | None:
+        """Load the spec of an interactive UI prompt, or None if unknown."""
+        return await asyncio.to_thread(self.sync_db.get_ui_prompt, session_id, message_id)
 
     async def set_channel_role(self, chatbot_id: str, channel_id: str, role: str) -> None:
         """Set the role for a specific channel.

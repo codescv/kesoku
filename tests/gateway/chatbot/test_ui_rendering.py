@@ -135,8 +135,11 @@ async def test_discord_sends_details_with_toggle_view(tmp_path: Any, gateway: Ma
             args, kwargs = channel.send.call_args
             assert args[0] == "▸ **Explain**"
             view = kwargs["view"]
-            assert isinstance(view, DetailsView)
-            assert view.body == "Long text"
+            assert view.children[0].item.custom_id == "kud:s1:m1-d0"
+            assert view.children[0].item.label == DETAILS_EXPAND_LABEL
+            gateway.db.save_ui_prompt.assert_awaited_once_with(
+                "s1", "m1-d0", {"type": "details", "title": "Explain", "body": "Long text"}
+            )
 
 
 @pytest.mark.asyncio

@@ -1500,29 +1500,19 @@ async def test_handle_message_with_question(mock_config: KesokuConfig, mock_gate
                 content=content,
             )
 
-            with patch("kesoku.gateway.chatbot.discord.adapter.QuestionView") as mock_question_view_class:
-                mock_view = MagicMock()
-                mock_question_view_class.return_value = mock_view
+            await bot.handle_message(msg)
 
-                with patch("discord.Embed") as mock_embed_class:
-                    mock_embed = MagicMock()
-                    mock_embed_class.return_value = mock_embed
-
-                    await bot.handle_message(msg)
-
-                    mock_question_view_class.assert_called_once_with(
-                        gateway=mock_gateway,
-                        session_id="thread123",
-                        chatbot=bot,
-                        question="Choose?",
-                        choices=["Yes", "No"],
-                    )
-                    mock_embed_class.assert_called_once_with(
-                        title="❓ Choose?",
-                        color=discord.Color.blurple(),
-                    )
-                    mock_channel.send.assert_called_once_with(embed=mock_embed, view=mock_view)
-                    mock_gateway.db.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
+            mock_gateway.db.save_ui_prompt.assert_awaited_once_with(
+                "thread123",
+                "msg123",
+                {"type": "question", "prompt": "Choose?", "options": ["Yes", "No"], "multi": False, "max": 1},
+            )
+            mock_channel.send.assert_called_once()
+            kwargs = mock_channel.send.call_args.kwargs
+            assert kwargs["embed"].title == "❓ Choose?"
+            custom_ids = [child.item.custom_id for child in kwargs["view"].children]
+            assert custom_ids == ["kui:thread123:msg123:0", "kui:thread123:msg123:1"]
+            mock_gateway.db.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
 
 @pytest.mark.asyncio
@@ -1862,8 +1852,8 @@ async def test_send_question_segment_short_choices(mock_config: KesokuConfig, mo
 
             assert view is not None
             assert len(view.children) == 2
-            assert view.children[0].label == "Short 1"
-            assert view.children[1].label == "Short 2"
+            assert view.children[0].item.label == "Short 1"
+            assert view.children[1].item.label == "Short 2"
 
 
 @pytest.mark.asyncio
@@ -1906,8 +1896,8 @@ async def test_send_question_segment_long_choices(mock_config: KesokuConfig, moc
 
             assert view is not None
             assert len(view.children) == 2
-            assert view.children[0].label == "A"
-            assert view.children[1].label == "B"
+            assert view.children[0].item.label == "A"
+            assert view.children[1].item.label == "B"
 
 
 @pytest.mark.asyncio

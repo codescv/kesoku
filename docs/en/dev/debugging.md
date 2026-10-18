@@ -60,7 +60,8 @@ sqlite3 kesoku.db
     ```
 4.  **`channel_roles`**: Maps channels to character personas.
 5.  **`cross_session_contexts`**: Stores lock-guarded summaries per persona scope for cross-session knowledge sharing.
-6.  **`agent_memories`**: Stores key-value persistent memories for the agent.
+6.  **`ui_prompts`**: Specs of interactive Discord questions / `<details>` sections keyed by `(session_id, message_id)`, read when a persistent button or select menu is clicked (also after a restart).
+7.  **`agent_memories`**: Stores key-value persistent memories for the agent.
 
 ---
 

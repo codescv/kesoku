@@ -709,33 +709,47 @@ class QuestionView(discord.ui.View):
             # Edit the interaction message to show updated buttons
             await interaction.message.edit(view=self)
 
-            # Send a visible confirmation message to the channel
-            response_msg = await interaction.channel.send(f"<@{interaction.user.id}> selected: **{choice}**")
-
-            # Construct and post the user message to the Gateway
-            discord_msg_content = choice
-            msg = Message(
-                session_id=self.session_id,
-                chatbot_id=self.chatbot.chatbot_id,
-                channel_id=str(interaction.channel_id),
-                sender=interaction.user.display_name,
-                role=MessageRole.USER,
-                type=MessageType.TEXT,
-                content=discord_msg_content,
-                timestamp=response_msg.created_at.timestamp(),
-                status=MessageStatus.PENDING_AGENT,
-                metadata={
-                    "discord_message_id": str(response_msg.id),
-                    "discord_author_id": str(interaction.user.id),
-                },
-            )
-            await self.gateway.post(msg)
-
-            # Trigger typing task since a new user message was posted
-            channel_id_str = str(interaction.channel_id)
-            if channel_id_str not in self.chatbot._typing_tasks:
-                self.chatbot._typing_tasks[channel_id_str] = asyncio.create_task(
-                    self.chatbot._keep_typing(interaction.channel)
-                )
+            await post_simulated_choice(self.gateway, self.chatbot, interaction, self.session_id, choice)
 
         return callback
+
+
+async def post_simulated_choice(
+    gateway: Gateway, chatbot: Any, interaction: discord.Interaction, session_id: str, content: str
+) -> None:
+    """Post a UI selection as a simulated user message into the gateway (same session), like typing it.
+
+    Sends a visible confirmation to the channel, posts the user message, and starts the typing indicator.
+
+    Args:
+        gateway: The Kesoku Gateway instance.
+        chatbot: The Discord chatbot adapter (for chatbot_id and typing tasks).
+        interaction: The component interaction.
+        session_id: Target session ID.
+        content: The user message content (option text or multiselect answer).
+    """
+    # Send a visible confirmation message to the channel
+    response_msg = await interaction.channel.send(f"<@{interaction.user.id}> selected: **{content}**")
+
+    # Construct and post the user message to the Gateway
+    msg = Message(
+        session_id=session_id,
+        chatbot_id=chatbot.chatbot_id,
+        channel_id=str(interaction.channel_id),
+        sender=interaction.user.display_name,
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content=content,
+        timestamp=response_msg.created_at.timestamp(),
+        status=MessageStatus.PENDING_AGENT,
+        metadata={
+            "discord_message_id": str(response_msg.id),
+            "discord_author_id": str(interaction.user.id),
+        },
+    )
+    await gateway.post(msg)
+
+    # Trigger typing task since a new user message was posted
+    channel_id_str = str(interaction.channel_id)
+    if channel_id_str not in chatbot._typing_tasks:
+        chatbot._typing_tasks[channel_id_str] = asyncio.create_task(chatbot._keep_typing(interaction.channel))

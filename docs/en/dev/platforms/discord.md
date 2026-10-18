@@ -10,6 +10,7 @@ The Discord chatbot adapter is implemented inside `src/kesoku/gateway/chatbot/di
 
 *   **`adapter.py`**: The core `DiscordChatbot` class inheriting from `Chatbot` and managing event hooks.
 *   **`ui.py`**: UI components like `MessageHeaderView` (stop/clear/trajectory buttons) and `QuestionView` (multiple-choice buttons).
+*   **`persistent_ui.py`**: Restart-persistent `DynamicItem` components for questions (buttons / select menus) and `<details>` toggles, backed by the `ui_prompts` table.
 *   **`command.py`**: Slash commands management (`/restart`).
 *   **`voice.py`**: Voice channel integrations.
 
@@ -67,3 +68,13 @@ When the parsed content contains a question segment (a ```` ```ui ```` `type: se
 
 ### 3. `DetailsView` (Collapsible Sections)
 A `<details><summary>TITLE</summary>BODY</details>` segment is sent as a message `▸ **TITLE**` with a `展开` button. Clicking it edits the message in place to show `▾ **TITLE**` and BODY (truncated to Discord's 2000-character limit) and relabels the button `收起`; clicking again collapses it.
+
+### 4. Restart-Persistent Question Components (`persistent_ui.py`)
+Questions and `<details>` toggles are rendered with `discord.ui.DynamicItem`s, so clicks keep working after `kesoku service restart`:
+
+*   **custom_id templates**: `kui:<session_id>:<message_id>:<idx>` (option button), `kuis:<session_id>:<message_id>` (select menu) and `kud:<session_id>:<message_id>-d<n>` (details toggle). `<message_id>` is the kesoku id of the rendered assistant message.
+*   **Storage**: the spec (`prompt`, `options`, `multi`, `max`, later `answered`/`chosen`; or `title`/`body` for details) is saved in the `ui_prompts(session_id, message_id, spec_json, created_at)` table when the message is sent and loaded on click. Rows are deleted with their session.
+*   **Registration**: `DiscordChatbot._setup_hook` calls `Client.add_dynamic_items(QuestionButton, QuestionSelect, DetailsToggle)`; the client → adapter mapping (`register_chatbot`) gives callbacks access to the gateway.
+*   **Layout**: single-select with ≤5 options → buttons on row 0 (letters A/B/… plus a list in the embed when an option is longer than 15 chars); more than 5 options → single-select dropdown; multiselect → `Select(min_values=1, max_values=max)` on row 1. `_row` is set explicitly because `discord.ui.Select(row=...)` does not set it.
+*   **Answering**: a click posts the option text (multiselect: one message `选择：A；B；C`) into the same session exactly like `QuestionView` (confirmation message + simulated user message + typing indicator), stores the answer, and edits the message so every component is disabled (chosen option highlighted). Later clicks get an ephemeral notice.
+*   If a custom_id would exceed Discord's 100-character limit, the adapter falls back to the in-memory `QuestionView` / `DetailsView`.

@@ -10,6 +10,7 @@ Discord 适配器代码均存放于 `src/kesoku/gateway/chatbot/discord/` 路径
 
 *   **`adapter.py`**：核心 `DiscordChatbot` 适配器类，继承自 `Chatbot` 基类，管理出站事件与入站消息。
 *   **`ui.py`**：UI 交互视图组件，包含 `MessageHeaderView`（状态与控制栏按钮）及 `QuestionView`（动态单选问题按钮）。
+*   **`persistent_ui.py`**：重启后仍有效的 `DynamicItem` 组件（选择题按钮/下拉菜单、`<details>` 折叠按钮），数据存于 `ui_prompts` 表。
 *   **`command.py`**：斜杠（`/`）应用命令的注册与绑定管理（如重启 `/restart`）。
 *   **`voice.py`**：语音与音频流通道绑定。
 
@@ -66,3 +67,13 @@ Discord 适配器代码均存放于 `src/kesoku/gateway/chatbot/discord/` 路径
 
 ### 3. 折叠段落 (`DetailsView`)
 `<details><summary>标题</summary>正文</details>` 段会发送为一条 `▸ **标题**` 消息并附「展开」按钮。点击后原地编辑消息，显示 `▾ **标题**` 和正文（按 Discord 2000 字符上限截断），按钮变为「收起」；再次点击收起。
+
+### 4. 重启后仍有效的选择组件 (`persistent_ui.py`)
+选择题和 `<details>` 的展开按钮使用 `discord.ui.DynamicItem` 渲染，`kesoku service restart` 之后点击仍然有效：
+
+*   **custom_id 模板**：`kui:<session_id>:<message_id>:<idx>`（选项按钮）、`kuis:<session_id>:<message_id>`（下拉菜单）、`kud:<session_id>:<message_id>-d<n>`（折叠按钮）。`<message_id>` 是被渲染的助手消息在 kesoku 中的 id。
+*   **存储**：发送时把 spec（`prompt`、`options`、`multi`、`max`，回答后加 `answered`/`chosen`；折叠段为 `title`/`body`）写入 `ui_prompts(session_id, message_id, spec_json, created_at)` 表，点击时读取；删除会话时一并删除。
+*   **注册**：`DiscordChatbot._setup_hook` 调用 `Client.add_dynamic_items(QuestionButton, QuestionSelect, DetailsToggle)`；`register_chatbot` 记录 client → 适配器映射，回调借此访问网关。
+*   **布局**：单选且 ≤5 个选项 → 第 0 行按钮（任一选项超过 15 字时按钮显示 A/B/…，完整文字列在 embed 中）；超过 5 个选项 → 单选下拉；多选 → 第 1 行 `Select(min_values=1, max_values=max)`。因为 `discord.ui.Select(row=...)` 不会设置 `_row`，代码中显式赋值。
+*   **回答**：点击后把选项原文（多选为一条 `选择：A；B；C`）作为模拟用户消息发到同一会话，行为与 `QuestionView` 一致（确认消息 + 用户消息 + 输入中提示）；同时记录答案并编辑消息，禁用全部组件（高亮所选项）。之后的点击只会收到仅自己可见的提示。
+*   若 custom_id 会超过 Discord 的 100 字符上限，则退回到内存中的 `QuestionView` / `DetailsView`。

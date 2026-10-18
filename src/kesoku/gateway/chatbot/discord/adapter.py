@@ -28,7 +28,16 @@ from kesoku.utils.async_fs import (
 from kesoku.utils.text import clean_latex, format_text, render_spoilers
 
 from .command import setup_discord_commands
-from .ui import DetailsView, MessageHeaderView, QuestionView
+from .persistent_ui import (
+    PERSISTENT_ITEMS,
+    build_details_view,
+    build_question_embed,
+    build_question_spec,
+    build_question_view,
+    ids_fit,
+    register_chatbot,
+)
+from .ui import DetailsView, MessageHeaderView, QuestionView, render_details_content
 from .voice import send_voice_message
 
 logger = setup_logger(__name__)
@@ -436,6 +445,9 @@ class DiscordChatbot(Chatbot):
         self.bot = discord.Client(intents=intents, proxy=proxy)
         self.bot.event(self.on_ready)
         self.bot.event(self.on_message)
+        # Restart-persistent question/details components are rebuilt from their custom_id on click.
+        register_chatbot(self.bot, self)
+        self.bot.setup_hook = self._setup_hook  # type: ignore[method-assign]
         setup_discord_commands(self)
         self._subscriber_task: asyncio.Task[None] | None = None
         self._sent_tool_calls: dict[str, discord.Message] = {}
@@ -444,6 +456,7 @@ class DiscordChatbot(Chatbot):
         self._intermediate_messages: defaultdict[str, list[discord.Message]] = defaultdict(list)
         self._turn_special_items: dict[str, list[dict[str, Any]]] = {}
         self._turn_special_msg: dict[str, discord.Message] = {}
+        self._details_seq: dict[str, int] = {}
 
     def _resolve_channel_override(
         self,
@@ -526,6 +539,10 @@ class DiscordChatbot(Chatbot):
         tool_args = message.metadata.get("tool_arguments")
         arg_str = format_tool_arguments(tool_name, tool_args, max_len=120)
         return f": `{arg_str}`" if arg_str else ""
+
+    async def _setup_hook(self) -> None:
+        """Register persistent DynamicItem components so clicks on old messages work after a restart."""
+        self.bot.add_dynamic_items(*PERSISTENT_ITEMS)
 
     async def on_ready(self) -> None:
         """Callback invoked when Discord bot successfully connects and logs in."""
@@ -1112,14 +1129,26 @@ class DiscordChatbot(Chatbot):
                 raise
 
     async def send_details_segment(self, channel_id: str, title: str, body: str, message: Message) -> None:
-        """Deliver a `<details>` section as `▸ TITLE` with a toggle button that expands it in place."""
+        """Deliver a `<details>` section as `▸ TITLE` with a persistent toggle button that expands it in place."""
         channel = await self._get_discord_channel_with_abort(message)
         if not channel:
             return
-        view = DetailsView(title=self.format_text(title), body=self.format_text(body))
+        title_fmt = self.format_text(title)
+        body_fmt = self.format_text(body)
+        seq = self._details_seq.get(message.id, 0)
+        self._details_seq[message.id] = seq + 1
+        details_key = f"{message.id}-d{seq}"
         try:
+            view: discord.ui.View
+            if ids_fit(message.session_id, details_key):
+                await self.gateway.db.save_ui_prompt(
+                    message.session_id, details_key, {"type": "details", "title": title_fmt, "body": body_fmt}
+                )
+                view = build_details_view(message.session_id, details_key)
+            else:
+                view = DetailsView(title=title_fmt, body=body_fmt)
             await self._call_with_timeout(
-                channel.send(view.content(), view=view),
+                channel.send(render_details_content(title_fmt, body_fmt, expanded=False), view=view),
                 error_msg="Timeout sending details view",
             )
         except DeliveryAbortedError:
@@ -1137,28 +1166,32 @@ class DiscordChatbot(Chatbot):
         multi: bool = False,
         max_choices: int = 1,
     ) -> None:
-        """Deliver a multiple choice question block as a dynamic action button view embed."""
+        """Deliver a question as an embed with restart-persistent components.
+
+        Single-select with <=5 options renders buttons; more options or multiselect render a select menu. The
+        spec is stored in the `ui_prompts` table so clicks keep working after a restart.
+        """
         channel = await self._get_discord_channel_with_abort(message)
         if not channel:
             return
 
         try:
-            question_view = QuestionView(
-                gateway=self.gateway,
-                session_id=message.session_id,
-                chatbot=self,
-                question=question,
-                choices=choices,
-            )
-            embed = discord.Embed(
-                title=f"❓ {question}",
-                color=discord.Color.blurple(),
-            )
-            if question_view.use_short_labels:
-                description_lines = [f"**{chr(ord('A') + idx)}.** {choice}" for idx, choice in enumerate(choices)]
-                embed.description = "\n".join(description_lines)
+            spec = build_question_spec(question, choices, multi, max_choices)
+            view: discord.ui.View
+            if ids_fit(message.session_id, message.id):
+                await self.gateway.db.save_ui_prompt(message.session_id, message.id, spec)
+                view = build_question_view(message.session_id, message.id, spec)
+            else:
+                logger.warning("Session/message id too long for persistent components; using in-memory buttons")
+                view = QuestionView(
+                    gateway=self.gateway,
+                    session_id=message.session_id,
+                    chatbot=self,
+                    question=question,
+                    choices=choices,
+                )
             await self._call_with_timeout(
-                channel.send(embed=embed, view=question_view),
+                channel.send(embed=build_question_embed(spec), view=view),
                 error_msg="Timeout sending question view"
             )
         except DeliveryAbortedError:
@@ -1175,6 +1208,7 @@ class DiscordChatbot(Chatbot):
 
     async def on_message_delivered(self, message: Message) -> None:
         """Post-delivery lifecycle callback: clean up typing indicator, intermediate lists, and update metrics."""
+        self._details_seq.pop(message.id, None)
         if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT:
             task = self._typing_tasks.pop(message.channel_id, None)
             if task:

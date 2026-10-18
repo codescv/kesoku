@@ -60,7 +60,8 @@ sqlite3 kesoku.db
     ```
 4.  **`channel_roles`**：维护频道/子线程与绑定人设角色的映射。
 5.  **`cross_session_contexts`**：维护角色多会话同步摘要及锁状态。
-6.  **`agent_memories`**：存储 Agent 的持久化结构化记忆条目。
+6.  **`ui_prompts`**：Discord 交互式选择题 / `<details>` 折叠段的 spec，以 `(session_id, message_id)` 为键，点击持久化按钮或下拉菜单时读取（重启后同样有效）。
+7.  **`agent_memories`**：存储 Agent 的持久化结构化记忆条目。
 
 ---
 
