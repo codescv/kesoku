@@ -141,6 +141,8 @@ async def test_on_message_ignore_self(mock_config: KesokuConfig, mock_gateway: M
         with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
             mock_msg = MagicMock(spec=discord.Message)
+            mock_msg.type = discord.MessageType.default
+            mock_msg.is_system.return_value = False
             mock_msg.author = mock_client_user
 
             await bot.on_message(mock_msg)
@@ -157,6 +159,8 @@ async def test_on_message_allowlist(mock_config: KesokuConfig, mock_gateway: Mag
 
             # Unallowed user, not mentioning bot -> ignored
             msg_unallowed = MagicMock(spec=discord.Message)
+            msg_unallowed.type = discord.MessageType.default
+            msg_unallowed.is_system.return_value = False
             unallowed_author = MagicMock(spec=discord.Member, id=111, display_name="unallowed")
             unallowed_author.name = "unallowed"
             msg_unallowed.author = unallowed_author
@@ -184,6 +188,8 @@ async def test_on_message_allowlist(mock_config: KesokuConfig, mock_gateway: Mag
 
             # Allowed user -> accepted
             msg_allowed = MagicMock(spec=discord.Message)
+            msg_allowed.type = discord.MessageType.default
+            msg_allowed.is_system.return_value = False
             allowed_author = MagicMock(spec=discord.Member, id=222, display_name="Allowed")
             allowed_author.name = "allowed_user"
             msg_allowed.author = allowed_author
@@ -212,6 +218,8 @@ async def test_on_message_concurrent_thread_creation(mock_config: KesokuConfig, 
             bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
 
             msg = MagicMock(spec=discord.Message)
+            msg.type = discord.MessageType.default
+            msg.is_system.return_value = False
             allowed_author = MagicMock(spec=discord.Member, id=222, display_name="Allowed")
             allowed_author.name = "allowed_user"
             msg.author = allowed_author
@@ -502,6 +510,8 @@ async def test_on_message_timestamp_formatting(mock_config: KesokuConfig, mock_g
             mock_thread.join = AsyncMock()
 
             msg = MagicMock(spec=discord.Message)
+            msg.type = discord.MessageType.default
+            msg.is_system.return_value = False
             msg.author = MagicMock(spec=discord.Member, id=222, display_name="Allowed")
             msg.author.name = "allowed_user"
             msg.mentions = []
@@ -599,6 +609,8 @@ async def test_typing_status_lifecycle(mock_config: KesokuConfig, mock_gateway: 
 
             # Simulate incoming message to trigger typing task
             msg = MagicMock(spec=discord.Message)
+            msg.type = discord.MessageType.default
+            msg.is_system.return_value = False
             allowed_author = MagicMock(spec=discord.Member, id=222, display_name="Allowed")
             allowed_author.name = "allowed_user"
             msg.author = allowed_author
@@ -1138,6 +1150,8 @@ async def test_on_message_no_auto_thread_by_channel_id(mock_gateway: MagicMock) 
             mock_text_channel.typing.return_value = MagicMock(__aenter__=AsyncMock(), __aexit__=AsyncMock())
 
             msg = MagicMock(spec=discord.Message)
+            msg.type = discord.MessageType.default
+            msg.is_system.return_value = False
             msg.author = MagicMock(spec=discord.Member, id=222, display_name="Allowed")
             msg.author.name = "allowed_user"
             msg.mentions = []
@@ -1183,6 +1197,8 @@ async def test_on_message_no_auto_thread_by_channel_name(mock_gateway: MagicMock
             mock_text_channel.typing.return_value = MagicMock(__aenter__=AsyncMock(), __aexit__=AsyncMock())
 
             msg = MagicMock(spec=discord.Message)
+            msg.type = discord.MessageType.default
+            msg.is_system.return_value = False
             msg.author = MagicMock(spec=discord.Member, id=222, display_name="Allowed")
             msg.author.name = "allowed_user"
             msg.mentions = []
@@ -1236,6 +1252,8 @@ async def test_on_message_in_existing_thread_inside_no_thread_channel(mock_gatew
             mock_thread.typing.return_value = MagicMock(__aenter__=AsyncMock(), __aexit__=AsyncMock())
 
             msg = MagicMock(spec=discord.Message)
+            msg.type = discord.MessageType.default
+            msg.is_system.return_value = False
             msg.author = MagicMock(spec=discord.Member, id=222, display_name="Allowed")
             msg.author.name = "allowed_user"
             msg.mentions = []
@@ -1544,6 +1562,8 @@ async def test_on_message_with_attachments(mock_config: KesokuConfig, mock_gatew
             mock_thread.join = AsyncMock()
 
             msg = MagicMock(spec=discord.Message)
+            msg.type = discord.MessageType.default
+            msg.is_system.return_value = False
             allowed_author = MagicMock(spec=discord.Member, id=222, display_name="Allowed")
             allowed_author.name = "allowed_user"
             msg.author = allowed_author
@@ -1609,6 +1629,8 @@ async def test_on_message_resolves_and_passes_role(mock_config: KesokuConfig, mo
 
             # Setup incoming message in the thread channel
             msg = MagicMock(spec=discord.Message)
+            msg.type = discord.MessageType.default
+            msg.is_system.return_value = False
             allowed_author = MagicMock(spec=discord.Member, id=222, display_name="Allowed")
             allowed_author.name = "allowed_user"
             msg.author = allowed_author

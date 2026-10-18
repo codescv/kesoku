@@ -24,6 +24,9 @@ Discord 适配器代码均存放于 `src/kesoku/gateway/chatbot/discord/` 路径
 *   该 **子线程 ID** 直接在数据库中被映射绑定为 `channel_id` 和唯一的 `session_id`。
 *   此后该子线程内的所有后续对话都共享此唯一的会话上下文。
 
+### 1.1 忽略系统消息
+`on_message` 只接收用户真正发出的聊天消息：`message.is_system()` 为真，或 `message.type` 不是 `MessageType.default` / `MessageType.reply` 的消息一律丢弃（见 `is_user_chat_message`）。这样线程改名（`channel_name_change`）、置顶（`pins_add`）、创建线程提示（`thread_created`）、成员加入（`recipient_add`）等事件不会触发 Agent 回合。
+
 ### 2. 消息长文本切分与附件转换
 *   **出站字数限制**：适配器覆盖基类 `get_max_text_length()` 并返回 2000（对应 Discord 的消息字数物理限制）。
 *   **出站附件解析**：当出站消息文本匹配 `[file: /绝对/路径/文件]` 时，适配器会捕获该路径，校验文件是否存在，并实例化 `discord.File` 对象，将其作为物理附件随文本消息一同发送。

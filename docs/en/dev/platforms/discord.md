@@ -25,6 +25,9 @@ To avoid conversation collisions in multi-user environments:
 *   All subsequent messages within that thread share the same session ID.
 *   Uptime and session creation timestamps are synchronized to keep ordering consistent.
 
+### 1.1 Ignoring System Messages
+`on_message` only ingests user-authored chat messages: anything for which `message.is_system()` is true or whose `message.type` is not `MessageType.default` / `MessageType.reply` is dropped (see `is_user_chat_message`). This prevents thread renames (`channel_name_change`), pins (`pins_add`), thread creation notices (`thread_created`), member adds (`recipient_add`) and similar events from triggering an agent turn.
+
 ### 2. File and Message Splitting
 *   **Length Clamping**: The adapter overrides `get_max_text_length()` to return 2000 (Discord's maximum text length constraint).
 *   **Attachments parser**: When rendering outbound messages containing `[file: /abs/path/to/file]`, the adapter intercepts the block, checks if the file exists on disk, instantiates `discord.File`, and transmits it alongside the text block as a native attachment.

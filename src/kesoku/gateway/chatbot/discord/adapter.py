@@ -50,6 +50,23 @@ TOOL_EMOJI_MAP: dict[str, str] = {
 DEFAULT_TOOL_EMOJI = "🛠️"
 MAX_VISIBLE_TOOL_CALLS = 12
 
+# Discord message types that represent an actual user-authored chat message.
+USER_CHAT_MESSAGE_TYPES: tuple[discord.MessageType, ...] = (
+    discord.MessageType.default,
+    discord.MessageType.reply,
+)
+
+
+def is_user_chat_message(message: discord.Message) -> bool:
+    """Return True if a Discord message is a user-authored chat message.
+
+    System messages (channel/thread renames, pins, thread creation notices,
+    recipient adds, ...) must never trigger an agent turn.
+    """
+    if message.type not in USER_CHAT_MESSAGE_TYPES:
+        return False
+    return not message.is_system()
+
 
 def get_tool_emoji(tool_name: str) -> str:
     """Get representative emoji for the given tool name.
@@ -616,6 +633,10 @@ class DiscordChatbot(Chatbot):
         """
         # Ignore bot's own messages
         if message.author == self.bot.user:
+            return
+
+        # Ignore Discord system messages (thread renames, pins, thread creation, member adds, ...)
+        if not is_user_chat_message(message):
             return
 
         # Check user_allowlist filtering
