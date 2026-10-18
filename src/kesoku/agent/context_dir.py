@@ -18,6 +18,8 @@ logger = setup_logger(__name__)
 CONTEXT_DIR_NAME = "context"
 NOTES_FILE_NAME = "notes.md"
 NOTES_BLOCK_NAME = "notes"
+# Block name used for a tool-written context file that would otherwise collide with the reserved "notes" name.
+RESERVED_NAME_RENAME = "notes-1"
 CONTEXT_FILE_MAX_CHARS = 6000
 DEFAULT_CONTEXT_TOTAL_MAX_CHARS = 20000
 TRUNCATED_MARKER = "[truncated]"
@@ -105,7 +107,12 @@ async def collect_context_entries(staging_dir: str) -> list[ContextEntry]:
     for filename in filenames:
         content = await _read_stripped(os.path.join(context_dir, filename))
         if content:
-            entries.append(ContextEntry(context_block_name(filename), truncate_context_content(content)))
+            name = context_block_name(filename)
+            if name == NOTES_BLOCK_NAME:
+                # "notes" is reserved for the agent-editable $STAGING_DIR/notes.md block.
+                name = RESERVED_NAME_RENAME
+                logger.warning(f"Context file '{filename}' uses the reserved name 'notes'; rendering as '{name}'")
+            entries.append(ContextEntry(name, truncate_context_content(content)))
     return entries
 
 

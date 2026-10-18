@@ -85,7 +85,7 @@
 1.  `<instructions>`：当前角色的 `roles/{role}/preferences.md`（每回合）。
 2.  `<context name="...">` 块（每回合，见 `kesoku.agent.context_dir`）：
     *   `<context name="notes">`：会话置顶笔记，读取自 `$STAGING_DIR/notes.md`（Agent 可用 `update_file` 编辑）。
-    *   `$STAGING_DIR/context/*.md` 中每个文件一个块，按文件名排序。块名为去掉开头数字序号（`20-`、`05_`）和 `.md` 后的文件名，例如 `20-scene.md` → `<context name="scene">`。这些文件由工具/技能写入，Agent 不得编辑。
+    *   `$STAGING_DIR/context/*.md` 中每个文件一个块，按文件名排序。块名为去掉开头数字序号（`20-`、`05_`）和 `.md` 后的文件名，例如 `20-scene.md` → `<context name="scene">`。这些文件由工具/技能写入，Agent 不得编辑。 块名 `notes` 保留给置顶笔记：`context/notes.md`（或 `NN-notes.md`）会被渲染为 `<context name="notes-1">` 并记录 warning。
     *   预算：单文件上限 6000 字符（截断尾部并追加 `[truncated]`）；总量上限为 `agent.context_dir_max_chars`（默认 20000），超出时从排序列表末尾开始丢弃文件并记录 warning。
 3.  `<facts>`：角色的 `facts.md`（仅当天第一条消息）。
 4.  启动引导 / 自动检索的历史片段，然后是 `<current_message ...>`。

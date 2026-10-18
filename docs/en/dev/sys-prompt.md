@@ -85,7 +85,7 @@ Besides the cached system prompt, `TurnExecutor` prepends per-turn blocks to the
 1.  `<instructions>`: the active role's `roles/{role}/preferences.md` (every turn).
 2.  `<context name="...">` blocks (every turn, see `kesoku.agent.context_dir`):
     *   `<context name="notes">`: the session's pinned notes, read from `$STAGING_DIR/notes.md` (editable by the agent via `update_file`).
-    *   One block per `$STAGING_DIR/context/*.md` file, sorted by filename. The block name is the filename without a leading numeric prefix (`20-`, `05_`) and without `.md`, e.g. `20-scene.md` → `<context name="scene">`. These files are written by tools/skills; the agent must not edit them.
+    *   One block per `$STAGING_DIR/context/*.md` file, sorted by filename. The block name is the filename without a leading numeric prefix (`20-`, `05_`) and without `.md`, e.g. `20-scene.md` → `<context name="scene">`. These files are written by tools/skills; the agent must not edit them. The name `notes` is reserved for the pinned notes: a `context/notes.md` (or `NN-notes.md`) is rendered as `<context name="notes-1">` with a warning.
     *   Budget: each file is capped at 6000 characters (tail truncated, `[truncated]` appended); the total is capped by `agent.context_dir_max_chars` (default 20000). When exceeded, files are dropped from the end of the sorted list and a warning is logged.
 3.  `<facts>`: the role's `facts.md` (first message of the day only).
 4.  Bootstrap guidelines / auto-retrieved history, then `<current_message ...>`.

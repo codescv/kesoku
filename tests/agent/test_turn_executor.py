@@ -2148,7 +2148,11 @@ async def test_turn_executor_session_notes_injection_and_tool(temp_db: str, tmp_
     last_user_2 = [m.content for m in llm.captured_history if m.role == MessageRole.USER][-1]
     assert '<context name="notes">\n- 本session只用纯日语交流\n- 当前场景：江之电车厢内\n</context>' in last_user_2
 
-    # 4. Turn 3: tool-maintained context/*.md files are injected after notes, sorted by filename
+    # 4. Turn 3 (next day, so facts.md is injected): tool-maintained context/*.md files are injected after
+    # instructions and notes, sorted by filename, and before facts.
+    # The single role directory created above.
+    role_dir = next(roles_dir.iterdir())
+    (role_dir / "facts.md").write_text("fact line")
     context_dir = staging_dir / "context"
     context_dir.mkdir()
     (context_dir / "99-test.md").write_text("今天的暗号是🍊")
@@ -2161,7 +2165,7 @@ async def test_turn_executor_session_notes_injection_and_tool(temp_db: str, tmp_
         role=MessageRole.USER,
         content="今天的暗号是什么",
         status="pending_agent",
-        timestamp=t1 + 120.0,
+        timestamp=t1 + 86400.0,
     )
     await gw.post(msg_3)
     with patch("kesoku.context.get_config", return_value=cfg):
@@ -2176,9 +2180,35 @@ async def test_turn_executor_session_notes_injection_and_tool(temp_db: str, tmp_
         last_user_3.index('<context name="notes">'),
         last_user_3.index('<context name="scene">\nlocation: beach\n</context>'),
         last_user_3.index('<context name="test">\n今天的暗号是🍊\n</context>'),
+        last_user_3.index("<facts>\nfact line\n</facts>"),
         last_user_3.index("<current_message"),
     ]
     assert positions == sorted(positions)
+
+    # 5. Turn 4: agent.context_dir_max_chars is honoured (files at the end of the sorted list are dropped)
+    notes_len = len("- 本session只用纯日语交流\n- 当前场景：江之电车厢内")
+    cfg.agent.context_dir_max_chars = notes_len + len("location: beach")
+    msg_4 = Message(
+        session_id="sess_notes",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="再说一次",
+        status="pending_agent",
+        timestamp=t1 + 86460.0,
+    )
+    await gw.post(msg_4)
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor.process_turn(
+            current_msg=msg_4,
+            worker=create_mock_worker(),
+            session_staging_dir=str(staging_dir),
+        )
+    last_user_4 = [m.content for m in llm.captured_history if m.role == MessageRole.USER][-1]
+    assert '<context name="notes">' in last_user_4
+    assert '<context name="scene">' in last_user_4
+    assert '<context name="test">' not in last_user_4
 
 
 

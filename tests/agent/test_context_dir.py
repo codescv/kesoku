@@ -130,3 +130,20 @@ async def test_build_context_prefix_end_to_end(tmp_path: Path) -> None:
     assert '<context name="big">' in prefix_small
     prefix_tiny = await build_context_prefix(str(tmp_path), 10)
     assert prefix_tiny == '<context name="notes">\nnote\n</context>\n'
+
+
+@pytest.mark.asyncio
+async def test_context_file_named_notes_is_renamed(tmp_path: Path) -> None:
+    """A tool-written context/notes.md (or NN-notes.md) never renders as a second notes block."""
+    (tmp_path / "notes.md").write_text("pinned")
+    ctx = tmp_path / "context"
+    ctx.mkdir()
+    (ctx / "10-notes.md").write_text("tool data")
+    (ctx / "notes.md").write_text("more tool data")
+    with patch.object(context_dir.logger, "warning") as warn:
+        entries = await collect_context_entries(str(tmp_path))
+    assert [e.name for e in entries] == ["notes", "notes-1", "notes-1"]
+    assert entries[0].content == "pinned"
+    assert warn.call_count == 2
+    prefix = render_context_blocks(entries)
+    assert prefix.count('<context name="notes">') == 1
