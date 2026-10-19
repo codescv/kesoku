@@ -1,0 +1,24 @@
+[task]
+id = "B1_cascading_pool_crash"
+suite = "B"
+title = "Cascading worker pool crash masking initial partition ValueError"
+config_profile = "default"
+turn_timeout_s = 900
+continue_on_timeout = false
+
+[[turns]]
+kind = "user"
+text = """Running `uv run python -m pipeline.run --config pipeline.toml` crashes and fails to produce the output file. Diagnose and fix the bug in the pipeline package so the batch run completes cleanly and all tests pass."""
+
+[grading]
+fail_to_pass = [
+    "tests/test_holdout_pipeline.py::test_partition_ragged_tail",
+    "tests/test_holdout_pipeline.py::test_pipeline_completes_1000_rows",
+    "tests/test_holdout_pipeline.py::test_no_worker_crash_messages",
+]
+pass_to_pass = [
+    "tests/test_pipeline.py::test_config_load",
+    "tests/test_pipeline.py::test_partition_even_division",
+    "tests/test_pipeline.py::test_sink_writes_ordered_records",
+    "tests/test_pipeline.py::test_pipeline_small_even_batch",
+]
