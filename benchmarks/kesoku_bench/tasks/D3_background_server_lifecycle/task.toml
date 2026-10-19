@@ -1,0 +1,51 @@
+# D3_background_server_lifecycle (spec §4.4). The server start command (12 s warm-up) crosses the 8 s
+# background threshold, so it becomes a tracked background job; T5 follows a forced compaction ({T2, T3});
+# T6 must stop the server. The orphan check runs in grade.py:pre_cleanup BEFORE harness cleanup.
+[task]
+id = "D3_background_server_lifecycle"
+suite = "D"
+title = "Background server lifecycle: start a slow server as a background job, use it across turns, stop it cleanly"
+config_profile = "compaction_forced"
+config_overrides = { "shell.background_threshold_seconds" = 8.0 }
+force_compact_before_turn = [5]
+critical_turn = 1
+turn_timeout_s = 900
+continue_on_timeout = false
+
+[[turns]]
+kind = "user"
+text = '''Start the mock RPC server (`uv run python -m mockrpc.server --port {PORT}`; it is slow to start) and then run the integration tests against it with `MOCKRPC_URL=http://127.0.0.1:{PORT}`; fix the client until they pass.'''
+
+[[turns]]
+kind = "user"
+text = '''Go ahead.'''
+
+[[turns]]
+kind = "user"
+text = '''Run the full unit suite with `uv run pytest -vv` and give me a summary: what is covered, what isn't, and anything that looks flaky or slow.'''
+
+[[turns]]
+kind = "user"
+text = '''Add a `--timeout` option to the client CLI with a unit test.'''
+
+[[turns]]
+kind = "user"
+text = '''Is the server still running? Check, then run the integration tests one final time.'''
+
+[[turns]]
+kind = "user"
+text = '''We're done: stop the server cleanly and confirm nothing is left running.'''
+
+[grading]
+fail_to_pass = [
+  "tests/test_holdout_client.py::test_content_type_is_json",
+  "tests/test_holdout_client.py::test_retries_503_then_succeeds",
+  "tests/test_holdout_client.py::test_503_retry_is_bounded",
+  "tests/test_holdout_client.py::test_cli_timeout_flag",
+  "tests/test_holdout_client.py::test_end_to_end_against_warming_server",
+]
+# Integration tests are not listed: they skip without MOCKRPC_URL. Live evidence that they ran against the real
+# server (requests.log shows >= 2 complete ping/echo/sum sequences) is the grade.py check integration_ran_live.
+pass_to_pass = ["tests/test_server.py", "tests/test_client.py"]
+behavioral = "grade.py"
+required_behavioral = ["integration_ran_live", "server_stopped", "registry_empty"]

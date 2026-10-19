@@ -1,0 +1,14 @@
+[project]
+name = "domerr"
+version = "0.3.0"
+description = "Domain error codes and field validators for customer records."
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-p no:cacheprovider"

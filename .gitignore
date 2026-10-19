@@ -29,3 +29,4 @@ lcm-large-outputs/
 
 # MkDocs build directory
 site/
+benchmarks/kesoku_bench/results/

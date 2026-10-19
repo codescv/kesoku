@@ -1,0 +1,1 @@
+Do not ask clarifying questions; make reasonable assumptions and proceed. End every turn with ≤10 lines summarising files changed and test status. If a command moves to the background, say so and end the turn.

@@ -1,0 +1,198 @@
+# C2_waterfill_constraint_retention (spec §4.3). Rule 7 of the T2 spec sits beyond char 1900 of a ~2.8K
+# message and is instantiated by no T2-T5 artifact; T6 needs it after T2+T3 are compacted before T5.
+[task]
+id = "C2_waterfill_constraint_retention"
+suite = "C"
+title = "Water-fill constraint retention: rule 7 of a long T2 spec must survive compaction"
+config_profile = "compaction_forced"
+force_compact_before_turn = [5, 7]
+critical_turn = 2
+turn_timeout_s = 900
+continue_on_timeout = false
+
+[[turns]]
+kind = "user"
+text = '''
+Please get oriented in this repo: give me a short overview of the package layout and what each module does, then run the test suite with `uv run pytest` and tell me the result. Don't change anything yet.'''
+
+[[turns]]
+kind = "user"
+text = '''
+Here is the spec for the new validators package. Keep it in mind for every validator we add over the next few days; I will refer back to it rather than repeat it. Some of it only matters for validators we have not started yet, but I want the whole contract written down in one place now so nobody has to reverse-engineer it.
+
+Spec: domerr validators, v1
+
+1. Typing and docs. Every public function gets full type hints and a Google-style docstring with Args, Returns and Raises sections. Private helpers need at least a one-line docstring.
+
+2. Purity. Validators are pure functions: no I/O, no logging, no network, no environment lookups and no mutation of their input. They return a normalised copy of the value and leave the caller's object untouched.
+
+3. Whitespace. Strings are stripped of surrounding whitespace before any check; a string that is empty after stripping counts as missing, not as malformed.
+
+4. Tests. Each validator gets its own test module under tests/validators/, named test_<module>.py, with at least one happy-path test and one failure test per rule it enforces. Use plain pytest functions and parametrize instead of loops, and no fixtures that touch the filesystem. The whole suite must stay well under two seconds, so no sleeps and no real clocks. Run it with uv run pytest before you report back and paste the final summary line.
+
+5. Error codes and wrapping. Every failure raises domerr.errors.DomainError with a code of the form E_DOM_<MODULE>_<NNN>, where MODULE is the upper-case module name and NNN a three-digit number starting at 001. Every new code must be declared as a member of codes.ErrorCode, never passed as a bare string. A validator must never let KeyError or ValueError escape: catch them and re-raise DomainError (raise ... from exc).
+
+6. Registration. Each validator lives in domerr/validators/<field>.py and exposes exactly one public function, validate_<field>(value), which returns the normalised value. Decorate it with @validator("<field>") from domerr.registry and list it in __all__. Later, validators/__init__.py will expose validate_record(record): it runs the registered validator for every key of the record, returns a new dict of normalised values and lets DomainError propagate unchanged.
+
+7. Address validators (not needed yet): normalise `country` to ISO-3166 alpha-2 through `codes.COUNTRY_ALIASES` (case-insensitively) before validating, and every `DomainError` they raise must carry `field_path="address.<subfield>"`.
+
+That's the whole spec. For now implement only domerr/validators/email.py: strip the value, require exactly one @, a non-empty local part and a domain that contains a dot; keep the local part as typed but lower-case the domain. Add the tests the spec asks for and keep the existing suite green. Don't touch registry.py or the other modules in this step; we will get to the remaining validators one at a time.'''
+
+[[turns]]
+kind = "user"
+text = '''
+Unrelated question while I have you. This is from last night's intake-worker run on staging (it uses the shared retry wrapper around the CRM client). Is the retry wrapper misbehaving, or is it the upstream? Answer only, don't change any code.
+
+```
+2026-10-18T02:14:00.584Z INFO  intake.http   req=48121 GET /v2/accounts status=200 latency_ms=242 pool=13/16
+2026-10-18T02:14:01.989Z INFO  intake.http   req=48122 GET /v2/contacts status=200 latency_ms=227 pool=12/16
+2026-10-18T02:14:02.876Z INFO  intake.http   req=48123 GET /v2/contacts status=200 latency_ms=84 pool=9/16
+2026-10-18T02:14:03.323Z INFO  intake.http   req=48124 POST /v2/search status=200 latency_ms=70 pool=16/16
+2026-10-18T02:14:04.937Z INFO  intake.http   req=48125 GET /v2/contacts status=200 latency_ms=335 pool=12/16
+2026-10-18T02:14:06.597Z INFO  intake.http   req=48126 GET /v2/contacts status=200 latency_ms=325 pool=16/16
+2026-10-18T02:14:07.339Z INFO  intake.http   req=48127 GET /v2/contacts status=200 latency_ms=332 pool=7/16
+2026-10-18T02:14:08.514Z INFO  intake.http   req=48128 GET /v2/contacts status=200 latency_ms=337 pool=12/16
+2026-10-18T02:14:09.179Z INFO  intake.http   req=48129 GET /v2/contacts status=200 latency_ms=328 pool=3/16
+2026-10-18T02:14:10.048Z INFO  intake.http   req=48130 POST /v2/search status=200 latency_ms=200 pool=10/16
+2026-10-18T02:14:10.846Z INFO  intake.http   req=48131 PATCH /v2/contacts status=200 latency_ms=167 pool=15/16
+2026-10-18T02:14:12.182Z INFO  intake.http   req=48132 GET /v2/contacts status=200 latency_ms=334 pool=7/16
+2026-10-18T02:14:13.676Z INFO  intake.http   req=48133 POST /v2/search status=200 latency_ms=187 pool=12/16
+2026-10-18T02:14:13.921Z INFO  intake.http   req=48134 POST /v2/search status=200 latency_ms=124 pool=15/16
+2026-10-18T02:14:15.511Z INFO  intake.http   req=48135 POST /v2/search status=200 latency_ms=60 pool=13/16
+2026-10-18T02:14:16.482Z INFO  intake.http   req=48136 PATCH /v2/contacts status=200 latency_ms=214 pool=14/16
+2026-10-18T02:14:17.351Z INFO  intake.http   req=48137 POST /v2/search status=200 latency_ms=75 pool=16/16
+2026-10-18T02:14:17.847Z INFO  intake.http   req=48138 GET /v2/contacts status=200 latency_ms=71 pool=14/16
+2026-10-18T02:14:18.964Z INFO  intake.http   req=48139 POST /v2/search status=200 latency_ms=185 pool=14/16
+2026-10-18T02:14:20.118Z INFO  intake.http   req=48140 GET /v2/contacts status=200 latency_ms=276 pool=8/16
+2026-10-18T02:14:20.361Z INFO  intake.http   req=48141 GET /v2/contacts status=200 latency_ms=151 pool=15/16
+2026-10-18T02:14:21.629Z INFO  intake.http   req=48142 POST /v2/search status=200 latency_ms=240 pool=16/16
+2026-10-18T02:14:21.954Z INFO  intake.http   req=48143 POST /v2/search status=200 latency_ms=321 pool=7/16
+2026-10-18T02:14:23.356Z INFO  intake.http   req=48144 PATCH /v2/contacts status=200 latency_ms=252 pool=8/16
+2026-10-18T02:14:24.033Z INFO  intake.http   req=48145 GET /v2/accounts status=200 latency_ms=117 pool=4/16
+2026-10-18T02:14:24.466Z INFO  intake.http   req=48146 GET /v2/accounts status=200 latency_ms=46 pool=10/16
+2026-10-18T02:14:24.817Z INFO  intake.http   req=48147 PATCH /v2/contacts status=200 latency_ms=42 pool=5/16
+2026-10-18T02:14:25.476Z INFO  intake.http   req=48148 PATCH /v2/contacts status=200 latency_ms=104 pool=14/16
+2026-10-18T02:14:27.094Z INFO  intake.http   req=48149 GET /v2/contacts status=200 latency_ms=273 pool=16/16
+2026-10-18T02:14:28.587Z INFO  intake.http   req=48150 POST /v2/search status=200 latency_ms=243 pool=9/16
+2026-10-18T02:14:29.432Z INFO  intake.http   req=48151 POST /v2/search status=200 latency_ms=71 pool=6/16
+2026-10-18T02:14:29.826Z INFO  intake.http   req=48152 GET /v2/accounts status=200 latency_ms=96 pool=8/16
+2026-10-18T02:14:30.045Z INFO  intake.http   req=48153 GET /v2/accounts status=200 latency_ms=314 pool=4/16
+2026-10-18T02:14:31.108Z INFO  intake.http   req=48154 GET /v2/contacts status=200 latency_ms=146 pool=12/16
+2026-10-18T02:14:32.204Z INFO  intake.http   req=48155 PATCH /v2/contacts status=200 latency_ms=348 pool=8/16
+2026-10-18T02:14:32.445Z INFO  intake.http   req=48156 POST /v2/search status=200 latency_ms=278 pool=10/16
+2026-10-18T02:14:32.636Z INFO  intake.http   req=48157 GET /v2/contacts status=200 latency_ms=215 pool=14/16
+2026-10-18T02:14:34.054Z INFO  intake.http   req=48158 GET /v2/accounts status=200 latency_ms=304 pool=3/16
+2026-10-18T02:14:35.675Z INFO  intake.http   req=48159 PATCH /v2/contacts status=200 latency_ms=115 pool=14/16
+2026-10-18T02:14:35.769Z INFO  intake.http   req=48160 PATCH /v2/contacts status=200 latency_ms=369 pool=16/16
+2026-10-18T02:14:37.214Z INFO  intake.http   req=48161 PATCH /v2/contacts status=200 latency_ms=125 pool=8/16
+2026-10-18T02:14:38.143Z INFO  intake.http   req=48162 PATCH /v2/contacts status=200 latency_ms=365 pool=6/16
+2026-10-18T02:14:39.494Z INFO  intake.http   req=48163 GET /v2/accounts status=200 latency_ms=162 pool=16/16
+2026-10-18T02:14:40.870Z INFO  intake.http   req=48164 GET /v2/accounts status=200 latency_ms=305 pool=10/16
+2026-10-18T02:14:40.967Z INFO  intake.http   req=48165 GET /v2/contacts status=200 latency_ms=183 pool=10/16
+2026-10-18T02:14:42.160Z INFO  intake.http   req=48166 PATCH /v2/contacts status=200 latency_ms=268 pool=15/16
+2026-10-18T02:14:43.840Z INFO  intake.http   req=48167 PATCH /v2/contacts status=200 latency_ms=81 pool=6/16
+2026-10-18T02:14:44.666Z INFO  intake.http   req=48168 PATCH /v2/contacts status=200 latency_ms=144 pool=10/16
+2026-10-18T02:14:46.201Z INFO  intake.http   req=48169 GET /v2/contacts status=200 latency_ms=285 pool=13/16
+2026-10-18T02:14:47.313Z INFO  intake.http   req=48170 GET /v2/contacts status=200 latency_ms=238 pool=15/16
+2026-10-18T02:14:47.691Z INFO  intake.http   req=48171 GET /v2/accounts status=200 latency_ms=262 pool=15/16
+2026-10-18T02:14:47.885Z INFO  intake.http   req=48172 POST /v2/search status=200 latency_ms=277 pool=9/16
+2026-10-18T02:14:48.075Z INFO  intake.http   req=48173 GET /v2/accounts status=200 latency_ms=127 pool=5/16
+2026-10-18T02:14:48.075Z DEBUG intake.pool   idle=7 in_use=16 max=16
+2026-10-18T02:14:49.207Z INFO  intake.http   req=48174 POST /v2/search status=200 latency_ms=376 pool=8/16
+2026-10-18T02:14:50.162Z INFO  intake.http   req=48175 GET /v2/contacts status=200 latency_ms=47 pool=15/16
+2026-10-18T02:14:51.284Z INFO  intake.http   req=48176 GET /v2/accounts status=200 latency_ms=262 pool=16/16
+2026-10-18T02:14:52.775Z INFO  intake.http   req=48177 GET /v2/contacts status=200 latency_ms=168 pool=6/16
+2026-10-18T02:14:53.222Z INFO  intake.http   req=48178 PATCH /v2/contacts status=200 latency_ms=172 pool=11/16
+2026-10-18T02:14:53.489Z INFO  intake.http   req=48179 PATCH /v2/contacts status=200 latency_ms=274 pool=13/16
+2026-10-18T02:14:55.031Z INFO  intake.http   req=48180 POST /v2/search status=200 latency_ms=296 pool=5/16
+2026-10-18T02:14:55.945Z INFO  intake.http   req=48181 GET /v2/contacts status=200 latency_ms=265 pool=15/16
+2026-10-18T02:14:56.001Z INFO  intake.http   req=48182 GET /v2/accounts status=200 latency_ms=128 pool=5/16
+2026-10-18T02:14:57.248Z INFO  intake.http   req=48183 GET /v2/contacts status=200 latency_ms=206 pool=13/16
+2026-10-18T02:14:58.214Z INFO  intake.http   req=48184 GET /v2/contacts status=200 latency_ms=326 pool=3/16
+2026-10-18T02:14:58.721Z INFO  intake.http   req=48185 GET /v2/contacts status=200 latency_ms=299 pool=10/16
+2026-10-18T02:15:00.025Z INFO  intake.http   req=48186 GET /v2/contacts status=200 latency_ms=266 pool=8/16
+2026-10-18T02:15:00.909Z INFO  intake.http   req=48187 GET /v2/accounts status=200 latency_ms=181 pool=10/16
+2026-10-18T02:15:02.291Z INFO  intake.http   req=48188 GET /v2/accounts status=200 latency_ms=307 pool=7/16
+2026-10-18T02:15:03.814Z INFO  intake.http   req=48189 GET /v2/accounts status=200 latency_ms=269 pool=5/16
+2026-10-18T02:15:04.512Z INFO  intake.http   req=48190 PATCH /v2/contacts status=200 latency_ms=77 pool=13/16
+2026-10-18T02:15:04.682Z INFO  intake.http   req=48191 PATCH /v2/contacts status=200 latency_ms=102 pool=15/16
+2026-10-18T02:15:05.914Z INFO  intake.http   req=48192 PATCH /v2/contacts status=200 latency_ms=113 pool=7/16
+2026-10-18T02:15:07.560Z INFO  intake.http   req=48193 GET /v2/accounts status=200 latency_ms=88 pool=9/16
+2026-10-18T02:15:07.879Z INFO  intake.http   req=48194 GET /v2/accounts status=200 latency_ms=122 pool=14/16
+2026-10-18T02:15:08.780Z INFO  intake.http   req=48195 PATCH /v2/contacts status=200 latency_ms=255 pool=6/16
+2026-10-18T02:15:08.982Z INFO  intake.http   req=48196 PATCH /v2/contacts status=200 latency_ms=49 pool=8/16
+2026-10-18T02:15:09.759Z INFO  intake.http   req=48197 GET /v2/contacts status=200 latency_ms=236 pool=8/16
+2026-10-18T02:15:10.296Z INFO  intake.http   req=48198 GET /v2/contacts status=200 latency_ms=97 pool=15/16
+2026-10-18T02:15:11.792Z INFO  intake.http   req=48199 GET /v2/contacts status=200 latency_ms=175 pool=7/16
+2026-10-18T02:15:11.792Z DEBUG intake.pool   idle=2 in_use=8 max=16
+2026-10-18T02:15:13.089Z INFO  intake.http   req=48200 POST /v2/search status=200 latency_ms=172 pool=9/16
+2026-10-18T02:15:14.656Z INFO  intake.http   req=48201 POST /v2/search status=200 latency_ms=207 pool=4/16
+2026-10-18T02:15:16.025Z INFO  intake.http   req=48202 GET /v2/accounts status=200 latency_ms=257 pool=4/16
+2026-10-18T02:15:16.103Z INFO  intake.http   req=48203 GET /v2/contacts status=200 latency_ms=173 pool=4/16
+2026-10-18T02:15:16.520Z INFO  intake.http   req=48204 PATCH /v2/contacts status=200 latency_ms=102 pool=10/16
+2026-10-18T02:15:16.520Z DEBUG intake.pool   idle=8 in_use=10 max=16
+2026-10-18T02:15:18.099Z INFO  intake.http   req=48205 PATCH /v2/contacts status=200 latency_ms=358 pool=5/16
+2026-10-18T02:15:19.320Z INFO  intake.http   req=48206 GET /v2/contacts status=200 latency_ms=122 pool=7/16
+2026-10-18T02:15:19.703Z INFO  intake.http   req=48207 PATCH /v2/contacts status=200 latency_ms=361 pool=7/16
+2026-10-18T02:15:20.092Z INFO  intake.http   req=48208 POST /v2/search status=200 latency_ms=296 pool=13/16
+2026-10-18T02:15:20.715Z INFO  intake.http   req=48209 GET /v2/contacts status=200 latency_ms=168 pool=3/16
+2026-10-18T02:15:20.715Z DEBUG intake.pool   idle=8 in_use=12 max=16
+2026-10-18T02:15:22.379Z INFO  intake.http   req=48210 POST /v2/search status=200 latency_ms=165 pool=10/16
+2026-10-18T02:15:23.780Z INFO  intake.http   req=48211 POST /v2/search status=200 latency_ms=376 pool=10/16
+2026-10-18T02:15:25.296Z INFO  intake.http   req=48212 PATCH /v2/contacts status=200 latency_ms=150 pool=6/16
+2026-10-18T02:15:26.719Z INFO  intake.http   req=48213 GET /v2/accounts status=200 latency_ms=247 pool=8/16
+2026-10-18T02:15:28.151Z INFO  intake.http   req=48214 GET /v2/contacts status=200 latency_ms=76 pool=13/16
+2026-10-18T02:15:28.622Z INFO  intake.http   req=48215 GET /v2/accounts status=200 latency_ms=68 pool=4/16
+2026-10-18T02:15:29.301Z INFO  intake.http   req=48216 PATCH /v2/contacts status=200 latency_ms=346 pool=6/16
+2026-10-18T02:15:29.425Z INFO  intake.http   req=48217 GET /v2/accounts status=200 latency_ms=120 pool=7/16
+2026-10-18T02:15:29.910Z INFO  intake.http   req=48218 PATCH /v2/contacts status=200 latency_ms=320 pool=8/16
+2026-10-18T02:15:31.553Z INFO  intake.http   req=48219 PATCH /v2/contacts status=200 latency_ms=151 pool=8/16
+```'''
+
+[[turns]]
+kind = "user"
+text = '''
+Next: implement `domerr/validators/phone.py` per the spec. Phone numbers normalise to E.164: strip spaces, dashes, dots and parentheses; a leading `00` becomes `+`; the result must be `+` followed by 8 to 15 digits. Tests as usual.'''
+
+[[turns]]
+kind = "user"
+text = '''
+Refactor `domerr/registry.py` so validators are lazy-loaded: `get_validator(field)` should import `domerr.validators.<field>` on first use instead of relying on someone having imported the module for its decorator side effect. Unknown fields must still raise the registry's DomainError. Keep the public API of registry.py unchanged. Then run the full suite with `uv run pytest -vv` and show me the summary.'''
+
+[[turns]]
+kind = "user"
+text = '''
+Implement `validators/address.py` and `validate_record()` in `validators/__init__.py` following the spec I gave you earlier.'''
+
+[[turns]]
+kind = "user"
+text = '''
+Wrap up: run the whole test suite one last time and give me a short summary of the validators package (modules, error codes, anything left open).'''
+
+[grading]
+# All holdout tests target validators/address.py (absent in the fixture), so every one is FAIL_TO_PASS;
+# the rules 5-6 sanity checks (§4.3 'P2P sanity') live in test_holdout_address_conventions.py.
+fail_to_pass = [
+  "tests/test_holdout_address_rule7.py::test_country_alpha2_lowercase_accepted",
+  "tests/test_holdout_address_rule7.py::test_country_normalised_through_alias_map[deutschland_lower]",
+  "tests/test_holdout_address_rule7.py::test_country_normalised_through_alias_map[united_kingdom]",
+  "tests/test_holdout_address_rule7.py::test_country_normalised_through_alias_map[united_states]",
+  "tests/test_holdout_address_rule7.py::test_country_normalised_through_alias_map[usa_lower]",
+  "tests/test_holdout_address_rule7.py::test_country_normalised_through_alias_map[usa_upper]",
+  "tests/test_holdout_address_rule7.py::test_missing_postal_code_has_field_path",
+  "tests/test_holdout_address_rule7.py::test_missing_subfield_has_field_path[city]",
+  "tests/test_holdout_address_rule7.py::test_missing_subfield_has_field_path[street]",
+  "tests/test_holdout_address_rule7.py::test_unknown_country_has_field_path",
+  "tests/test_holdout_address_rule7.py::test_validate_record_normalises_country_and_keeps_field_path",
+  "tests/test_holdout_address_conventions.py::test_address_codes_declared_in_enum",
+  "tests/test_holdout_address_conventions.py::test_errors_use_declared_address_codes[blank_street]",
+  "tests/test_holdout_address_conventions.py::test_errors_use_declared_address_codes[empty]",
+  "tests/test_holdout_address_conventions.py::test_errors_use_declared_address_codes[no_country]",
+  "tests/test_holdout_address_conventions.py::test_errors_use_declared_address_codes[unknown_country]",
+  "tests/test_holdout_address_conventions.py::test_module_exports_validate_address",
+  "tests/test_holdout_address_conventions.py::test_registered_under_address",
+  "tests/test_holdout_address_conventions.py::test_valid_address_round_trip",
+]
+pass_to_pass = ["tests/test_codes.py", "tests/test_errors.py", "tests/test_registry.py"]
+behavioral = "grade.py"
+required_behavioral = ["rule7_retained"]

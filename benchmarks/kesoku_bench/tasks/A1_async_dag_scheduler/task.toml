@@ -1,0 +1,28 @@
+[task]
+id = "A1_async_dag_scheduler"
+suite = "A"
+title = "Async DAG scheduler: hang + wrong cause + retried skips on concurrent join failure"
+config_profile = "default"
+force_compact_before_turn = []
+turn_timeout_s = 900
+continue_on_timeout = false
+
+[[turns]]
+kind = "user"
+text = """Running `examples/diamond_fail.py` hangs forever when both branches fail at the same time; the event log also shows the skipped join task retried 3 times and its `cause` points at the second failure. Please fix the scheduler without changing retry/backoff behaviour for real tasks."""
+
+[grading]
+fail_to_pass = [
+    "tests/test_holdout_scheduler.py::test_diamond_concurrent_failure_terminates",
+    "tests/test_holdout_scheduler.py::test_diamond_concurrent_failure_without_retries",
+    "tests/test_holdout_scheduler.py::test_skipped_cause_is_first_failure",
+    "tests/test_holdout_scheduler.py::test_skipped_cause_with_retries",
+    "tests/test_holdout_scheduler.py::test_skipped_nodes_are_not_retried",
+    "tests/test_holdout_scheduler.py::test_skipped_nodes_do_not_sleep_backoff",
+    "tests/test_holdout_scheduler.py::test_three_way_fanin_concurrent_failures",
+]
+pass_to_pass = [
+    "tests/test_graph.py",
+    "tests/test_single_failure.py",
+    "tests/test_retry.py",
+]

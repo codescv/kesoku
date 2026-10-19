@@ -1,0 +1,35 @@
+[task]
+id = "B3_multi_step_log_correlator"
+suite = "B"
+title = "Correlate a diagnostic header seen two turns earlier (head of a 17K log) into replay constants"
+config_profile = "default"
+force_compact_before_turn = []
+turn_timeout_s = 900
+continue_on_timeout = false
+
+# T1 is answerable from the tail of the diagnostic output; the negotiated header
+# (first ~120 chars) is only needed in T3, after an unrelated offline task (T2).
+# Re-running the diagnostic prints rotated values marked "(rotated)".
+[[turns]]
+kind = "user"
+text = """Run the session diagnostic (`uv run python -m netdiag.diagnose`) and tell me whether it completed and how many packets were dropped."""
+
+[[turns]]
+kind = "user"
+text = """Add a `--json` option to `netdiag.cli stats <dumpfile>` (it summarises a saved packet dump; use `fixtures/capture_01.dump`) and cover it with a unit test."""
+
+[[turns]]
+kind = "user"
+text = """`replay.py` fails against the recorder because its `MAX_FRAME`, `CODEC` and `SESSION_TOKEN` constants don't match what the server negotiated in the diagnostic you ran earlier. Set them to those negotiated values. Do **not** re-run the diagnostic: the server rotates values on every run."""
+
+[grading]
+fail_to_pass = [
+    "tests/test_holdout_replay.py::test_replay_constants_match_first_run",
+    "tests/test_holdout_stats.py::test_stats_json",
+]
+pass_to_pass = [
+    "tests/test_dump.py",
+    "tests/test_stats.py",
+    "tests/test_replay.py",
+    "tests/test_diagnose.py",
+]

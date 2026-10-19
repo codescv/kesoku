@@ -43,6 +43,7 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = ""
+markers = ["slow: slow tests (kesoku-bench verify-gold over every task)"]
 
 
 [dependency-groups]
@@ -75,6 +76,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["D", "F841", "ASYNC"]
+"benchmarks/kesoku_bench/tasks/**" = ["D", "ASYNC"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

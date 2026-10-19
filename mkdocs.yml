@@ -66,6 +66,7 @@ plugins:
             Google Chat Adapter: Google Chat 适配器
             WeChat Adapter: 微信适配器
             Testing & Debugging: 测试与调试
+            Evaluation Suite (kesoku-bench): 评测套件 (kesoku-bench)
 
 # Navigation Structure
 nav:
@@ -100,6 +101,7 @@ nav:
           - Google Chat Adapter: dev/platforms/gchat.md
           - WeChat Adapter: dev/platforms/wechat.md
       - Testing & Debugging: dev/debugging.md
+      - Evaluation Suite (kesoku-bench): dev/kesoku-bench.md
 
 markdown_extensions:
   - pymdownx.superfences:
