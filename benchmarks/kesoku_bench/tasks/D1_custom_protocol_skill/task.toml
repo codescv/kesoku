@@ -1,0 +1,27 @@
+[task]
+id = "D1_custom_protocol_skill"
+suite = "D"
+title = "Repair a corrupted .pcb binary capture using the proto-codec workspace skill"
+config_profile = "default"
+force_compact_before_turn = []
+turn_timeout_s = 900
+continue_on_timeout = false
+
+[[turns]]
+kind = "user"
+text = "`fixtures/session_17.pcb` fails to load in the recorder with a CRC error. Produce a repaired copy at `fixtures/session_17.fixed.pcb` (keep the original untouched) and tell me which frame was corrupted."
+
+[grading]
+fail_to_pass = [
+    "tests/test_holdout_pcb.py::test_repaired_file_exists_and_original_untouched",
+    "tests/test_holdout_pcb.py::test_repaired_parses_24_frames_with_valid_crcs",
+    "tests/test_holdout_pcb.py::test_repaired_preserves_header_seq_base_4100",
+    "tests/test_holdout_pcb.py::test_repaired_frame_9_payload_recovered",
+]
+pass_to_pass = [
+    "tests/test_models.py::test_summarize_contiguous_samples",
+    "tests/test_models.py::test_summarize_detects_sequence_gap",
+    "tests/test_models.py::test_summarize_empty_raises",
+]
+behavioral = "grade.py"
+required_behavioral = []

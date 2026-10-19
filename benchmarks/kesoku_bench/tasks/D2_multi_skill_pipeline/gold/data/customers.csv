@@ -1,0 +1,10 @@
+customer_id,email,country,signup_date,credit_limit,loyalty_tier,notes
+1001,alice.chen@example.com,US,2025-01-10,5000.00,GOLD,enterprise account
+1002,bob.smith@example.com,CA,2025-01-12,2500.00,STANDARD,
+1003,carol.jones@example.co.uk,GB,2025-01-18,12000.00,PLATINUM,priority support
+1004,david.kim@example.com,US,2025-01-25,1500.00,STANDARD,
+1005,eva.mueller@example.de,DE,2025-02-02,8000.00,SILVER,annual billing
+1007,frank.wright@example.com,US,2025-02-19,3500.00,SILVER,
+1008,grace.hopper@example.com,US,2025-02-22,25000.00,PLATINUM,gov contract
+1009,hiro.tanaka@example.jp,JP,2025-02-27,6000.00,GOLD,
+1010,irene.adler@example.co.uk,GB,2025-03-01,9500.00,GOLD,verified partner

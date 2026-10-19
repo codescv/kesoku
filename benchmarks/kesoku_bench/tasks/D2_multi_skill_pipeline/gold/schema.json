@@ -1,0 +1,111 @@
+{
+  "schema_version": "2.0",
+  "generator": "schema-gen/1.1.0",
+  "strict_dates": true,
+  "schema_digest": "005144b11f93ec59",
+  "tables": {
+    "customers": {
+      "source_file": "data/customers.csv",
+      "columns": [
+        {
+          "name": "customer_id",
+          "position": 0,
+          "type": "integer",
+          "nullable": false
+        },
+        {
+          "name": "email",
+          "position": 1,
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "country",
+          "position": 2,
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "signup_date",
+          "position": 3,
+          "type": "date",
+          "nullable": false,
+          "date_format": "YYYY-MM-DD"
+        },
+        {
+          "name": "credit_limit",
+          "position": 4,
+          "type": "float",
+          "nullable": false
+        },
+        {
+          "name": "loyalty_tier",
+          "position": 5,
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "notes",
+          "position": 6,
+          "type": "string",
+          "nullable": true
+        }
+      ]
+    },
+    "orders": {
+      "source_file": "data/orders.csv",
+      "columns": [
+        {
+          "name": "order_id",
+          "position": 0,
+          "type": "integer",
+          "nullable": false
+        },
+        {
+          "name": "customer_id",
+          "position": 1,
+          "type": "integer",
+          "nullable": false
+        },
+        {
+          "name": "order_date",
+          "position": 2,
+          "type": "date",
+          "nullable": false,
+          "date_format": "YYYY-MM-DD"
+        },
+        {
+          "name": "shipped_at",
+          "position": 3,
+          "type": "date",
+          "nullable": true,
+          "date_format": "YYYY-MM-DD"
+        },
+        {
+          "name": "status",
+          "position": 4,
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "amount",
+          "position": 5,
+          "type": "float",
+          "nullable": false
+        },
+        {
+          "name": "discount_pct",
+          "position": 6,
+          "type": "integer",
+          "nullable": false
+        },
+        {
+          "name": "coupon_code",
+          "position": 7,
+          "type": "string",
+          "nullable": true
+        }
+      ]
+    }
+  }
+}

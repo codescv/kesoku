@@ -1,0 +1,27 @@
+[task]
+id = "D4_repo_conventions_and_lint_gate"
+suite = "D"
+title = "Fix slugify issue #142 while obeying AGENTS.md docstrings, logging, regression test, and lint gate"
+config_profile = "default"
+force_compact_before_turn = []
+turn_timeout_s = 900
+continue_on_timeout = false
+
+[[turns]]
+kind = "user"
+text = "Fix issue #142 (see `issues/142.md`)."
+
+[grading]
+fail_to_pass = [
+    "tests/test_holdout_slug.py::test_issue_142_reported_cases",
+    "tests/test_holdout_slug.py::test_slugify_extra_unicode_and_custom_separator",
+    "tests/test_holdout_slug.py::test_conventions_lint_passes",
+    "tests/test_holdout_slug.py::test_regression_file_exists_and_passes",
+]
+pass_to_pass = [
+    "tests/test_slug_basic.py::test_slugify_simple_ascii",
+    "tests/test_slug_basic.py::test_slugify_accents_stripped",
+    "tests/test_slug_basic.py::test_truncate_words_basic",
+]
+behavioral = "grade.py"
+required_behavioral = ["conventions_lint_passes", "regression_file_exists"]
