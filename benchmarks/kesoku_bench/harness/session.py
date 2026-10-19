@@ -153,8 +153,13 @@ class BenchSession:
         cfg = load_config(str(self.config_path))
         self.cfg = cfg
         DatabaseManager(cfg.workspace.db_path).init_tables()
-        inner = self.llm_factory(cfg) if self.llm_factory else kesoku_llm.get_llm("gemini", cfg)
-        self.llm = MeteredLLM(inner, self.ledger, call_timeout_s=self.llm_call_timeout_s)
+        real_get_llm = kesoku_llm.get_llm  # captured before the patch below
+
+        def _build_inner() -> BaseLLM:
+            return self.llm_factory(cfg) if self.llm_factory else real_get_llm("gemini", cfg)
+
+        self.llm = MeteredLLM(_build_inner(), self.ledger, call_timeout_s=self.llm_call_timeout_s,
+                              inner_factory=_build_inner)
         metered = self.llm
 
         def _metered_get_llm(*args: Any, **kwargs: Any) -> BaseLLM:

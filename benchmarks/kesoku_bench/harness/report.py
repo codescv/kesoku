@@ -34,29 +34,32 @@ def _mean(values: list[float]) -> float | None:
 
 
 def _survived(res: dict[str, Any]) -> bool | None:
-    """Compaction-survival outcome for Suite C / D3 runs (None = not applicable / not countable)."""
+    """Compaction-survival outcome for Suite C / D3 runs (None = not applicable / not countable).
+
+    Uses the task's own `compaction_survival` (or `survival`) check when its grader reports one; D3 is
+    `server_stopped ∧ registry_empty`; otherwise (C2) survival is the resolved rule-retention outcome. C1 runs
+    only count when the dead end was actually encountered (spec M2).
+    """
     task = res["task_id"]
     if not (res.get("suite") == "C" or task.startswith("D3")) or task in LIFT_EXCLUDED:
         return None
     if not (res.get("totals") or {}).get("forced_compaction_turns"):
         return None
     behavioral = (res.get("grading") or {}).get("behavioral") or {}
-    if task.startswith("C1"):
-        diag = res.get("diagnostics") or {}
-        encountered = behavioral.get("dead_end_encountered", diag.get("dead_end_encountered"))
-        if encountered is False:
-            return None
-        repeated = behavioral.get("dead_end_repeated", diag.get("dead_end_repeated"))
-        return None if repeated is None else not repeated
+    diag = res.get("diagnostics") or {}
+    if behavioral.get("dead_end_encountered", diag.get("dead_end_encountered")) is False:
+        return None
     if task.startswith("D3"):
-        stopped = behavioral.get("server_stopped")
-        empty = behavioral.get("registry_empty")
+        stopped, empty = behavioral.get("server_stopped"), behavioral.get("registry_empty")
         if stopped is None or empty is None:
             return None
         return bool(stopped and empty)
-    if task.startswith("C3"):
-        value = behavioral.get("resume_correct")
-        return None if value is None else bool(value)
+    for key in ("compaction_survival", "survival"):
+        if behavioral.get(key) is not None:
+            return bool(behavioral[key])
+    if "dead_end_repeated" in behavioral or "dead_end_repeated" in diag:
+        repeated = behavioral.get("dead_end_repeated", diag.get("dead_end_repeated"))
+        return None if repeated is None else not repeated
     return bool(res.get("resolved"))
 
 

@@ -98,7 +98,8 @@ def grade(ctx: Any, gold_mode: bool = False) -> dict[str, Any]:
             continue
         t_idx = int(ev.get("turn_idx") or 0)
         args = ev.get("args") or {}
-        path_str = str(args.get("path") or "")
+        # kesoku's update_file names its path argument `file_name`; `path` kept for forward compatibility.
+        path_str = str(args.get("file_name") or args.get("path") or "")
         if t_idx == 5:
             t5_paths.append(path_str)
         if t_idx in (5, 6, 7):

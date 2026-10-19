@@ -22,6 +22,7 @@ benchmarks/kesoku_bench/
     runner.py     # run_task(): fixture -> turns -> grade -> TaskResult; run_suite(): child processes
     verify_gold.py# $0 fixture validation
     report.py     # scorecard (Markdown + JSON), stages side by side
+    regrade.py    # $0 re-run of grade.py on saved results (after a grader fix), keeps <name>.json.orig
   common/         # config.template.toml (profiles), roles/eval_engineer, auto_reply.md, distractor_skills/
   tasks/<id>/     # task.toml, repo/, holdout/tests (+ref), gold/ (+apply.py), grade.py, skills/ (Suite D)
   results/        # gitignored: <stage>/<run_id>/<task_id>[.rN].json + scorecard.md/json
@@ -49,6 +50,9 @@ tests/benchmarks/ # harness unit tests (MockLLM end-to-end) + verify-gold gate (
    `uv run pytest --junitxml` on the declared F2P/P2P ids, then `grade.py` behavioural checks.
    `resolved = F2P ∧ P2P ∧ ¬tampered ∧ required behavioural checks`.
 
+Timed-out or TLS-poisoned LLM calls (`Context has already been used to create a Connection`) are retried on a
+freshly built SDK client (`MeteredLLM.inner_factory`), because the orphaned call keeps running in its thread.
+
 Breakers: `--max-tool-iters 25` agent calls per scripted turn (proxy returns a stop response),
 `--max-task-cost-usd 2.00`, `--max-suite-cost-usd 50.00` (a breach in a summarize call raises
 `BudgetExceeded` so no bogus summary is persisted).
@@ -75,6 +79,7 @@ uv run python scripts/eval_bench.py run --tasks A1,B3,C2,D3 --stage baseline
 uv run python scripts/eval_bench.py run --stage baseline --recommended-repeats --jobs 2
 uv run python scripts/eval_bench.py run --suites C --natural-compaction   # diagnostic pass, never graded
 uv run python scripts/eval_bench.py report --stage baseline --stage p0 --out /tmp/scorecard
+uv run python scripts/eval_bench.py regrade --results benchmarks/kesoku_bench/results/baseline/<run_id> --tasks C3
 uv run pytest tests/benchmarks/            # harness tests + verify-gold gate (-m "not slow" to skip it)
 ```
 

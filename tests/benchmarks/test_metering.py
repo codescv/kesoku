@@ -194,3 +194,52 @@ def test_cross_check_llm_logs(tmp_path: Any) -> None:
     assert cc.log_files == 1 and cc.within_1pct is True
     log.write_text("response:\n  metrics:\n    prompt_tokens: 5000\n")
     assert cross_check_llm_logs([log], led).within_1pct is False
+
+
+@pytest.mark.asyncio
+async def test_timeout_rebuilds_inner_client_before_retry() -> None:
+    """A timed-out call may still own the SDK client in its thread: the retry must use a fresh client."""
+    first = _Scripted(["sleep"])
+    second = _Scripted([_res()])
+    second.model_name = "fresh-model"
+    built: list[_Scripted] = []
+
+    def factory() -> BaseLLM:
+        built.append(second)
+        return second
+
+    led = CostLedger(PRICES)
+    llm = MeteredLLM(first, led, call_timeout_s=0.01, max_retries=2, sleep=_nosleep, inner_factory=factory)
+    res = await llm.generate(history=_hist())
+    assert res.content == "ok"
+    assert built == [second] and llm.inner is second and llm.client_rebuilds == 1
+    assert first.calls == 1 and second.calls == 1
+    assert llm.model_name == "fresh-model"
+    assert led.records[-1].retries == 1
+
+
+@pytest.mark.asyncio
+async def test_poisoned_tls_context_rebuilds_and_retries() -> None:
+    poisoned = ValueError("Context has already been used to create a Connection, it cannot be mutated again")
+    first = _Scripted([poisoned])
+    second = _Scripted([_res()])
+    led = CostLedger(PRICES)
+    llm = MeteredLLM(first, led, sleep=_nosleep, inner_factory=lambda: second)
+    res = await llm.generate(history=_hist())
+    assert res.content == "ok" and llm.inner is second and llm.client_rebuilds == 1
+
+
+@pytest.mark.asyncio
+async def test_poisoned_context_without_factory_is_raised() -> None:
+    poisoned = ValueError("Context has already been used to create a Connection")
+    llm = MeteredLLM(_Scripted([poisoned]), CostLedger(PRICES), sleep=_nosleep)
+    with pytest.raises(ValueError, match="Context has already been used"):
+        await llm.generate(history=_hist())
+
+
+@pytest.mark.asyncio
+async def test_transient_429_does_not_rebuild_client() -> None:
+    first = _Scripted([RuntimeError("429 RESOURCE_EXHAUSTED"), _res()])
+    llm = MeteredLLM(first, CostLedger(PRICES), sleep=_nosleep, inner_factory=lambda: _Scripted([_res()]))
+    res = await llm.generate(history=_hist())
+    assert res.content == "ok" and llm.inner is first and llm.client_rebuilds == 0

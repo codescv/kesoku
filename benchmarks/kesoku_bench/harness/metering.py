@@ -22,6 +22,9 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 COMPRESSION_SIM_PATH = REPO_ROOT / "scripts" / "compression_sim.py"
 BUDGET_STOP_TEXT = "⚠️ [kesoku-bench] budget exhausted; stopping this turn."
 _RETRYABLE_MARKERS = ("429", "503", "RESOURCE_EXHAUSTED", "ResourceExhausted", "UNAVAILABLE", "Too Many Requests")
+# A timed-out SDK call keeps running in its worker thread and may still own the client's TLS session; reusing
+# that client for the retry fails with pyopenssl's "Context has already been used to create a Connection".
+_CLIENT_POISONED_MARKERS = ("Context has already been used",)
 
 
 @dataclass(frozen=True)
@@ -248,6 +251,14 @@ def _is_retryable(exc: BaseException) -> bool:
     return any(marker in text for marker in _RETRYABLE_MARKERS)
 
 
+def _needs_fresh_client(exc: BaseException) -> bool:
+    """Whether the wrapped LLM's client must be rebuilt before retrying (timeout or poisoned TLS context)."""
+    if isinstance(exc, TimeoutError):
+        return True
+    text = f"{type(exc).__name__}: {exc}"
+    return any(marker in text for marker in _CLIENT_POISONED_MARKERS)
+
+
 class MeteredLLM(BaseLLM):
     """BaseLLM proxy that meters every call and enforces the ledger's breakers.
 
@@ -264,6 +275,7 @@ class MeteredLLM(BaseLLM):
         max_retries: int = 3,
         backoff_s: float = 2.0,
         sleep: Callable[[float], Any] | None = None,
+        inner_factory: Callable[[], BaseLLM] | None = None,
     ) -> None:
         """Wrap an LLM.
 
@@ -271,11 +283,15 @@ class MeteredLLM(BaseLLM):
             inner: The real LLM (GeminiLLM, MockLLM, ...).
             ledger: Shared cost ledger.
             call_timeout_s: Per-call timeout.
-            max_retries: Retries for transient 429/503 errors.
+            max_retries: Retries for transient 429/503 errors, timeouts and poisoned clients.
             backoff_s: Base backoff (exponential).
             sleep: Injectable async sleep (tests).
+            inner_factory: Builds a fresh wrapped LLM (new SDK client). Used before retrying a timed-out call or
+                a call that failed on a TLS context still held by an orphaned worker thread.
         """
         self._inner = inner
+        self._inner_factory = inner_factory
+        self.client_rebuilds = 0
         self.ledger = ledger
         self.call_timeout_s = call_timeout_s
         self.max_retries = max_retries
@@ -291,7 +307,7 @@ class MeteredLLM(BaseLLM):
 
     def __getattr__(self, name: str) -> Any:
         """Forward any other attribute (config, client, ...) to the wrapped LLM."""
-        if name.startswith("__") or name == "_inner":
+        if name.startswith("__") or name in ("_inner", "_inner_factory"):
             raise AttributeError(name)
         return getattr(self._inner, name)
 
@@ -333,14 +349,25 @@ class MeteredLLM(BaseLLM):
             except BudgetExceeded:
                 raise
             except Exception as exc:  # noqa: BLE001 - re-raised below unless transient
-                retryable = _is_retryable(exc) or isinstance(exc, TimeoutError)
+                fresh = _needs_fresh_client(exc) and self._inner_factory is not None
+                retryable = _is_retryable(exc) or isinstance(exc, TimeoutError) or fresh
                 if retryable and retries < self.max_retries:
                     retries += 1
+                    if fresh:
+                        self._rebuild_inner()
                     await self._sleep(self.backoff_s * (2 ** (retries - 1)))
                     continue
                 self.ledger.book(kind, None, time.monotonic() - start, retries=retries,
                                  error=f"{type(exc).__name__}: {exc}"[:500])
                 raise
+
+    def _rebuild_inner(self) -> None:
+        """Replace the wrapped LLM with a fresh instance so the retry never shares the orphaned call's client."""
+        assert self._inner_factory is not None
+        self._inner = self._inner_factory()
+        self.client_rebuilds += 1
+        self.model_name = getattr(self._inner, "model_name", self.model_name)
+        self.context_window_limit = getattr(self._inner, "context_window_limit", self.context_window_limit)
 
     # --- explicit forwards (BaseLLM defines these, so __getattr__ would not reach the inner LLM) ----
     async def create_cache(

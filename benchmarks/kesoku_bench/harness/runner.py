@@ -340,7 +340,8 @@ async def run_task(spec: TaskSpec, opts: RunOptions, llm_factory: LLMFactory | N
             "tokens": led.tokens() if led else {}, "cost_usd": round(led.cost_usd, 6) if led else 0.0,
             "duration_s": round(rec.get("end_ts", rec["start_ts"]) - rec["begin_ts"], 2),
             "compactions": per_turn_nodes.get(rec["idx"], 0), "forced_nodes": rec["compactions_before"],
-            "command_reply": rec["command_reply"],
+            "command_reply": rec["command_reply"], "begin_ts": rec["begin_ts"], "start_ts": rec["start_ts"],
+            "end_ts": rec.get("end_ts"),
         })
     totals.update({
         "tool_calls": len(events), "duration_s": round(time.time() - t0, 2),
@@ -358,7 +359,8 @@ async def run_task(spec: TaskSpec, opts: RunOptions, llm_factory: LLMFactory | N
         "budget_exceeded_reason": ledger.budget_exceeded,
         "log_cross_check": asdict(cross),
         "uv_sync_rc": fixture.extras.get("uv_sync_rc"),
-        **{k: v for k, v in extras.items() if k not in ("active_jobs_for_session",)},
+        "llm_client_rebuilds": session.llm.client_rebuilds if session.llm else 0,
+        **extras,
         **result["behavioral_diagnostics"],
     }
     return {

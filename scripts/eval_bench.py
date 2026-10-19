@@ -1,4 +1,4 @@
-"""kesoku-bench CLI: run | verify-gold | report | _run_one (internal child entry).
+"""kesoku-bench CLI: run | verify-gold | report | regrade | _run_one (internal child entry).
 
 Examples:
     uv run python scripts/eval_bench.py verify-gold --tasks A1,B3
@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from benchmarks.kesoku_bench.harness.fixture import DEFAULT_WORK_ROOT  # noqa: E402
+from benchmarks.kesoku_bench.harness.regrade import collect_result_files, regrade_result  # noqa: E402
 from benchmarks.kesoku_bench.harness.report import build_report, default_stage_dir  # noqa: E402
 from benchmarks.kesoku_bench.harness.runner import RunOptions, result_path, run_suite, run_task  # noqa: E402
 from benchmarks.kesoku_bench.harness.taskspec import RESULTS_DIR, TASKS_DIR, load_task, select_tasks  # noqa: E402
@@ -136,6 +137,27 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_regrade(args: argparse.Namespace) -> int:
+    """$0 re-run of grade.py on saved results (after a grader fix); regenerates each run's scorecard."""
+    files = collect_result_files([Path(p) for p in args.results], _split(args.tasks))
+    if not files:
+        print("no result files selected", file=sys.stderr)
+        return 2
+    run_dirs: set[Path] = set()
+    for f in files:
+        before = json.loads(f.read_text(encoding="utf-8"))
+        after = regrade_result(f, write=not args.dry_run)
+        print(f"{after['task_id']}: {before.get('status')} -> {after['status']}  "
+              f"behavioral={after['grading'].get('behavioral')}")
+        run_dirs.add(f.parent)
+    if not args.dry_run:
+        for run_dir in sorted(run_dirs):
+            stage = run_dir.parent.name
+            build_report({stage: run_dir}, out_dir=run_dir)
+            print(f"scorecard regenerated: {run_dir / 'scorecard.md'}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """CLI parser."""
     parser = argparse.ArgumentParser(prog="eval_bench", description=__doc__,
@@ -166,6 +188,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_gold.add_argument("--keep", action="store_true", help="keep throw-away fixtures")
     p_gold.add_argument("--json-out", default=None)
     p_gold.set_defaults(func=cmd_verify_gold)
+
+    p_reg = sub.add_parser("regrade", help="$0: re-run grade.py on saved results and regenerate scorecards")
+    p_reg.add_argument("--results", nargs="+", required=True, help="result JSON files or run directories")
+    p_reg.add_argument("--tasks", default=None, help="comma-separated task ids or prefixes to re-grade")
+    p_reg.add_argument("--dry-run", action="store_true")
+    p_reg.set_defaults(func=cmd_regrade)
 
     p_rep = sub.add_parser("report", help="scorecard for one or more stages")
     p_rep.add_argument("--stage", action="append", required=True, help="stage name or label=path (repeatable)")
