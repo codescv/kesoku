@@ -3,11 +3,10 @@
 from kesoku.agent.tools.file import read_file, update_file
 from kesoku.agent.tools.media import analyze_media
 from kesoku.agent.tools.memory import (
-    chat_search,
     list_skills,
+    memory_search,
     skill_manager,
     use_skill,
-    view_message,
 )
 from kesoku.agent.tools.registry import (
     ToolContext,
@@ -39,8 +38,7 @@ __all__ = [
     "analyze_media",
     "list_skills",
     "use_skill",
-    "chat_search",
-    "view_message",
+    "memory_search",
     "skill_manager",
     "update_file",
     "read_file",

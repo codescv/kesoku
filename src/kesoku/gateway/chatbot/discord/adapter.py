@@ -51,8 +51,7 @@ TOOL_EMOJI_MAP: dict[str, str] = {
     "update_file": "📝",
     "read_file": "📖",
     "analyze_media": "🖼️",
-    "chat_search": "🧠",
-    "view_message": "📜",
+    "memory_search": "🧠",
     "use_skill": "🧩",
     "list_skills": "🧩",
     "skill_manager": "🧩",
@@ -152,7 +151,7 @@ def format_tool_arguments(tool_name: str, tool_args: dict[str, Any] | None, max_
         if isinstance(cmd, str):
             arg_str = cmd.strip()
 
-    elif tool_name in {"web_search", "chat_search"}:
+    elif tool_name in {"web_search", "memory_search"}:
         query = filtered.get("query") or filtered.get("q") or ""
         if isinstance(query, str):
             arg_str = query.strip()
@@ -195,11 +194,6 @@ def format_tool_arguments(tool_name: str, tool_args: dict[str, Any] | None, max_
             arg_str = f"{skill_name} ({args_payload})"
         elif skill_name:
             arg_str = str(skill_name)
-
-    elif tool_name == "view_message":
-        msg_id = filtered.get("message_id") or filtered.get("id") or filtered.get("query") or ""
-        if msg_id:
-            arg_str = str(msg_id)
 
     elif tool_name == "manage_job":
         action = filtered.get("action") or ""

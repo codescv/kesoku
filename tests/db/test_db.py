@@ -1,6 +1,5 @@
 """Unit tests for DatabaseManager and models in kesoku.db."""
 
-import math
 import os
 import time
 
@@ -8,7 +7,6 @@ import pytest
 
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import DatabaseManager, Message, Session
-from kesoku.db.manager import calculate_time_score
 
 
 @pytest.fixture
@@ -166,34 +164,13 @@ def test_message_crud(db_manager):
     db_manager.save_message(msg2)
     db_manager.save_message(msg_thought)
 
-    # Verify embeddings are populated correctly in message_chunks
+    # Verify messages are saved cleanly without per-message embedding overhead
     saved_msg1 = db_manager.get_messages_by_filters(filters={"id": "msg_1"})[0]
     saved_msg2 = db_manager.get_messages_by_filters(filters={"id": "msg_2"})[0]
     saved_thought = db_manager.get_messages_by_filters(filters={"id": "msg_thought"})[0]
-
-    with db_manager.connection_provider.connection() as conn:
-        cursor = conn.cursor()
-        # msg1 is a user text message: should have 1 chunk and main message embedding None
-        cursor.execute("SELECT content, embedding FROM message_chunks WHERE message_id = 'msg_1'")
-        chunks1 = cursor.fetchall()
-        assert len(chunks1) == 1
-        assert chunks1[0]["content"] == "Hello AI"
-        assert chunks1[0]["embedding"] is not None
-        assert saved_msg1.embedding is None
-
-        # msg2 is an assistant text message: should have 1 chunk and main message embedding None
-        cursor.execute("SELECT content, embedding FROM message_chunks WHERE message_id = 'msg_2'")
-        chunks2 = cursor.fetchall()
-        assert len(chunks2) == 1
-        assert chunks2[0]["content"] == "Hello Human"
-        assert chunks2[0]["embedding"] is not None
-        assert saved_msg2.embedding is None
-
-        # msg_thought is a thought message: should have no chunks and main message embedding None
-        cursor.execute("SELECT content FROM message_chunks WHERE message_id = 'msg_thought'")
-        chunks_thought = cursor.fetchall()
-        assert len(chunks_thought) == 0
-        assert saved_thought.embedding is None
+    assert saved_msg1.embedding is None
+    assert saved_msg2.embedding is None
+    assert saved_thought.embedding is None
 
     # Turn count (counting only User messages)
     assert db_manager.get_session_turns_count("sess_msg_test") == 1
@@ -332,160 +309,76 @@ def test_cronjob_thread_aware_stats_and_timestamp(db_manager):
     assert abs(last_msg_ts - (now - 30)) < 1e-3
 
 
-def test_search_role_data(db_manager):
-    """Tests search_role_memories and search_role_messages."""
-    # Set up role 'coder' on channel 'chan_1'
-    db_manager.set_channel_role("discord", "chan_1", "coder")
+def test_memory_files_and_chunks_crud(db_manager):
+    """Tests upserting, querying, cascade deleting, and clearing role memory files and chunks."""
+    now = time.time()
+    emb_bytes = b"\x00\x00\x80?" * 4
 
-    session1 = Session(id="sess_1", title="Sess 1", created_at=time.time(), updated_at=time.time())
-    db_manager.create_session(session1)
-    db_manager.set_active_session_for_channel("discord", "chan_1", "sess_1")
-
-    # Save messages for sess_1 (role 'coder')
-    msg1 = Message(
-        id="m1",
-        session_id="sess_1",
-        chatbot_id="discord",
-        channel_id="chan_1",
-        sender="user",
-        role=MessageRole.USER,
-        type=MessageType.TEXT,
-        content="I love python coding",
-        timestamp=time.time(),
-        status=MessageStatus.PROCESSED,
+    file_id_1 = db_manager.upsert_memory_file(
+        role="coder",
+        rel_path="topics/python.md",
+        description="Python style guide",
+        content_hash="hash_v1",
+        mtime=now - 60,
+        updated_at=now - 60,
+        chunks=[
+            (0, "# topics/python.md\nPython style guide", emb_bytes),
+            (1, "# topics/python.md (Python style guide)\n- Use uv run", emb_bytes),
+        ],
     )
-    msg2 = Message(
-        id="m2",
-        session_id="sess_1",
-        chatbot_id="discord",
-        channel_id="chan_1",
-        sender="assistant",
-        role=MessageRole.ASSISTANT,
-        type=MessageType.THOUGHT,
-        content="Thinking about python",
-        timestamp=time.time() + 1,
-        status=MessageStatus.RESPONDED,
+    assert file_id_1 > 0
+
+    # Upsert another file for 'coder' and one for 'writer'
+    file_id_2 = db_manager.upsert_memory_file(
+        role="coder",
+        rel_path="projects/kesoku.md",
+        description="Kesoku architecture",
+        content_hash="hash_k1",
+        mtime=now,
+        updated_at=now,
+        chunks=[(0, "# projects/kesoku.md\nKesoku architecture", emb_bytes)],
     )
-    msg3 = Message(
-        id="m3",
-        session_id="sess_1",
-        chatbot_id="discord",
-        channel_id="chan_1",
-        sender="assistant",
-        role=MessageRole.ASSISTANT,
-        type=MessageType.TEXT,
-        content="Here is python code",
-        timestamp=time.time() + 2,
-        status=MessageStatus.DELIVERED,
+    db_manager.upsert_memory_file(
+        role="writer",
+        rel_path="pets/neon.md",
+        description="Neon the cat",
+        content_hash="hash_n1",
+        mtime=now,
+        updated_at=now,
+        chunks=[(0, "# pets/neon.md\nNeon the cat", emb_bytes)],
     )
-    db_manager.save_message(msg1)
-    db_manager.save_message(msg2)
-    db_manager.save_message(msg3)
 
-    # Set up role 'helper' on channel 'chan_2'
-    db_manager.set_channel_role("discord", "chan_2", "helper")
-    session2 = Session(id="sess_2", title="Sess 2", created_at=time.time(), updated_at=time.time())
-    db_manager.create_session(session2)
-    db_manager.set_active_session_for_channel("discord", "chan_2", "sess_2")
+    coder_files = db_manager.get_memory_files_by_role("coder")
+    assert len(coder_files) == 2
+    assert coder_files[0]["rel_path"] == "projects/kesoku.md"
+    assert coder_files[1]["rel_path"] == "topics/python.md"
 
-    msg4 = Message(
-        id="m4",
-        session_id="sess_2",
-        chatbot_id="discord",
-        channel_id="chan_2",
-        sender="user",
-        role=MessageRole.USER,
-        type=MessageType.TEXT,
-        content="Help me with python please",
-        timestamp=time.time(),
-        status=MessageStatus.PROCESSED,
+    coder_chunks = db_manager.get_memory_chunks_for_role("coder")
+    assert len(coder_chunks) == 3
+
+    # Updating an existing file replaces its old chunks cleanly
+    db_manager.upsert_memory_file(
+        role="coder",
+        rel_path="topics/python.md",
+        description="Updated Python style guide",
+        content_hash="hash_v2",
+        mtime=now + 10,
+        updated_at=now + 10,
+        chunks=[(0, "# topics/python.md\nUpdated Python style guide", emb_bytes)],
     )
-    db_manager.save_message(msg4)
+    coder_chunks_after_update = db_manager.get_memory_chunks_for_role("coder")
+    assert len(coder_chunks_after_update) == 2
 
+    # Deleting a file by ID cascades to its chunks
+    db_manager.delete_memory_files_by_ids([file_id_2])
+    assert len(db_manager.get_memory_files_by_role("coder")) == 1
+    assert len(db_manager.get_memory_chunks_for_role("coder")) == 1
 
-    # Search messages for 'coder'
-    coder_msgs = db_manager.search_role_messages_semantic("coder", "python", threshold=0.1)
-    assert len(coder_msgs) == 2
-    assert {m.id for m in coder_msgs} == {"m1", "m3"}
-
-
-
-def test_search_role_data_wildcard_and_filters(db_manager):
-    """Tests search_role_memories and search_role_messages_semantic with wildcard and filters."""
-    # Set up role 'coder' on channel 'chan_1'
-    db_manager.set_channel_role("discord", "chan_1", "coder")
-
-    session1 = Session(id="sess_1", title="Sess 1", created_at=1700000000, updated_at=1700000000)
-    db_manager.create_session(session1)
-    db_manager.set_active_session_for_channel("discord", "chan_1", "sess_1")
-
-    # Save messages with specific timestamps
-    # 2026-06-15 12:00:00 UTC (1781534400.0)
-    base_ts = 1781534400.0
-
-    msg1 = Message(
-        id="m1",
-        session_id="sess_1",
-        chatbot_id="discord",
-        channel_id="chan_1",
-        sender="user",
-        role=MessageRole.USER,
-        type=MessageType.TEXT,
-        content="First python msg",
-        timestamp=base_ts,
-        status=MessageStatus.PROCESSED,
-    )
-    msg2 = Message(
-        id="m2",
-        session_id="sess_1",
-        chatbot_id="discord",
-        channel_id="chan_1",
-        sender="assistant",
-        role=MessageRole.ASSISTANT,
-        type=MessageType.TEXT,
-        content="Second python msg",
-        timestamp=base_ts + 3600,
-        status=MessageStatus.RESPONDED,  # +1 hr
-    )
-    msg3 = Message(
-        id="m3",
-        session_id="sess_1",
-        chatbot_id="discord",
-        channel_id="chan_1",
-        sender="user",
-        role=MessageRole.USER,
-        type=MessageType.TEXT,
-        content="Third java msg",
-        timestamp=base_ts + 7200,
-        status=MessageStatus.PROCESSED,  # +2 hr
-    )
-    db_manager.save_message(msg1)
-    db_manager.save_message(msg2)
-    db_manager.save_message(msg3)
-
-
-    # Test 1: Wildcard content search for messages (returns all messages)
-    msgs = db_manager.search_role_messages_semantic("coder", "*")
-    assert len(msgs) == 3
-    assert {m.id for m in msgs} == {"m1", "m2", "m3"}
-
-    msgs_empty = db_manager.search_role_messages_semantic("coder", "")
-    assert len(msgs_empty) == 3
-    assert {m.id for m in msgs_empty} == {"m1", "m2", "m3"}
-
-
-    # Test 3: Time range filtering for messages
-    msgs_time = db_manager.search_role_messages_semantic("coder", "*", start_time=base_ts, end_time=base_ts + 4000)
-    assert len(msgs_time) == 2
-    assert {m.id for m in msgs_time} == {"m1", "m2"}
-
-
-    # Test 5: Limit filtering
-    msgs_limit = db_manager.search_role_messages_semantic("coder", "*", limit=2)
-    assert len(msgs_limit) == 2
-    # Should return latest first
-    assert msgs_limit[0].id == "m3"
-    assert msgs_limit[1].id == "m2"
+    # Clearing role memory index removes all files/chunks for that role without touching other roles
+    db_manager.clear_role_memory_index("coder")
+    assert db_manager.get_memory_files_by_role("coder") == []
+    assert db_manager.get_memory_chunks_for_role("coder") == []
+    assert len(db_manager.get_memory_files_by_role("writer")) == 1
 
 
 def test_thread_session_role_inheritance(db_manager):
@@ -518,169 +411,6 @@ def test_thread_session_role_inheritance(db_manager):
     assert retrieved is not None
     assert retrieved.role_name == "asuka"
 
-
-def test_calculate_time_score():
-    """Tests the calculate_time_score function for literal and non-literal matches with 8h boost and decay."""
-    now = 1000000.0
-
-    # 1. Literal match within 8 hours: brand new (0h) -> 1.2, 2h ago -> 1.15, exactly 8h ago -> 1.0
-    ts_0h_ago = now
-    ts_2h_ago = now - 2 * 3600
-    ts_4h_ago = now - 4 * 3600
-    ts_8h_ago = now - 8 * 3600
-
-    score_0h = calculate_time_score(ts_0h_ago, is_literal_match=True, now=now)
-    score_2h = calculate_time_score(ts_2h_ago, is_literal_match=True, now=now)
-    score_4h = calculate_time_score(ts_4h_ago, is_literal_match=True, now=now)
-    score_8h = calculate_time_score(ts_8h_ago, is_literal_match=True, now=now)
-
-    assert math.isclose(score_0h, 1.20, rel_tol=1e-4)
-    assert math.isclose(score_2h, 1.15, rel_tol=1e-4)
-    assert math.isclose(score_4h, 1.10, rel_tol=1e-4)
-    assert math.isclose(score_8h, 1.00, rel_tol=1e-4)
-    assert score_0h > score_2h > score_4h > score_8h
-
-    # 2. Literal match after 8 hours (32 hours ago = 8 + 24 hours -> half-life of 24h) -> 0.5
-    ts_32h_ago = now - 32 * 3600
-    score_32h = calculate_time_score(ts_32h_ago, is_literal_match=True, now=now)
-    assert math.isclose(score_32h, 0.5, rel_tol=1e-4)
-
-    # 3. Non-literal match within 8 hours: brand new (0h) -> 0.60, 2h ago -> 0.575, exactly 8h ago -> 0.50
-    non_lit_0h = calculate_time_score(ts_0h_ago, is_literal_match=False, now=now)
-    non_lit_2h = calculate_time_score(ts_2h_ago, is_literal_match=False, now=now)
-    non_lit_8h = calculate_time_score(ts_8h_ago, is_literal_match=False, now=now)
-
-    assert math.isclose(non_lit_0h, 0.60, rel_tol=1e-4)
-    assert math.isclose(non_lit_2h, 0.575, rel_tol=1e-4)
-    assert math.isclose(non_lit_8h, 0.50, rel_tol=1e-4)
-    assert non_lit_0h > non_lit_2h > non_lit_8h
-
-    # 4. Non-literal match after 8 hours (32 hours ago = 8 + 24 hours) -> 0.25
-    score_non_lit_32h = calculate_time_score(ts_32h_ago, is_literal_match=False, now=now)
-    assert math.isclose(score_non_lit_32h, 0.25, rel_tol=1e-4)
-
-
-def test_search_role_messages_semantic_time_ranking(db_manager):
-    """Tests search_role_messages_semantic with literal match and time decay scoring."""
-    db_manager.set_channel_role("discord", "chan_sem", "coder")
-    session = Session(id="sess_sem", title="Semantic Search Test", created_at=1000000.0, updated_at=1000000.0)
-    db_manager.create_session(session)
-    db_manager.set_active_session_for_channel("discord", "chan_sem", "sess_sem")
-
-    now = 1000000.0
-
-    # m_recent_lit: literal match 'python', 2 hours ago
-    msg_recent_lit = Message(
-        id="m_recent_lit",
-        session_id="sess_sem",
-        chatbot_id="discord",
-        channel_id="chan_sem",
-        sender="user",
-        role=MessageRole.USER,
-        type=MessageType.TEXT,
-        content="I love writing python scripts today",
-        timestamp=now - 2 * 3600,
-        status=MessageStatus.PROCESSED,
-    )
-    # m_old_lit: literal match 'python', 80 hours ago (8 + 72h = 3 half-lives -> 1.0 * (1/8) = 0.125)
-    msg_old_lit = Message(
-        id="m_old_lit",
-        session_id="sess_sem",
-        chatbot_id="discord",
-        channel_id="chan_sem",
-        sender="user",
-        role=MessageRole.USER,
-        type=MessageType.TEXT,
-        content="I also wrote python scripts last month",
-        timestamp=now - 80 * 3600,
-        status=MessageStatus.PROCESSED,
-    )
-    db_manager.save_message(msg_recent_lit)
-    db_manager.save_message(msg_old_lit)
-
-    results = db_manager.search_role_messages_semantic("coder", "python", now=now, threshold=0.1)
-    assert len(results) >= 2
-    # Recent literal match should rank higher than old literal match
-    assert results[0].id == "m_recent_lit"
-    assert results[0].metadata["similarity_score"] > results[1].metadata["similarity_score"]
-    # Recent literal match should have score around 1.0 (or 1.0 + semantic)
-    assert results[0].metadata["similarity_score"] >= 1.0
-
-
-def test_search_role_messages_semantic_multi_keyword_or(db_manager):
-    """Tests search_role_messages_semantic with multi-keyword OR syntax, space separation, and quotes."""
-    db_manager.set_channel_role("discord", "chan_or", "developer")
-    session = Session(id="sess_or", title="Multi-keyword OR Test", created_at=1000000.0, updated_at=1000000.0)
-    db_manager.create_session(session)
-    db_manager.set_active_session_for_channel("discord", "chan_or", "sess_or")
-
-    now = 1000000.0
-
-    msg_python = Message(
-        id="m_py",
-        session_id="sess_or",
-        chatbot_id="discord",
-        channel_id="chan_or",
-        sender="user",
-        role=MessageRole.USER,
-        type=MessageType.TEXT,
-        content="Working with Python async programming",
-        timestamp=now - 100,
-        status=MessageStatus.PROCESSED,
-    )
-    msg_rust = Message(
-        id="m_rs",
-        session_id="sess_or",
-        chatbot_id="discord",
-        channel_id="chan_or",
-        sender="assistant",
-        role=MessageRole.ASSISTANT,
-        type=MessageType.TEXT,
-        content="Rust memory safety and concurrency",
-        timestamp=now - 200,
-        status=MessageStatus.PROCESSED,
-    )
-    msg_phrase = Message(
-        id="m_phrase",
-        session_id="sess_or",
-        chatbot_id="discord",
-        channel_id="chan_or",
-        sender="user",
-        role=MessageRole.USER,
-        type=MessageType.TEXT,
-        content="Here is a deep learning neural network tutorial",
-        timestamp=now - 300,
-        status=MessageStatus.PROCESSED,
-    )
-    db_manager.save_message(msg_python)
-    db_manager.save_message(msg_rust)
-    db_manager.save_message(msg_phrase)
-
-    # 1. Space-separated multi-keyword (implicit OR) -> matches both python and rust messages
-    res_space = db_manager.search_role_messages_semantic("developer", "Python Rust", now=now, threshold=0.1)
-    matched_ids_space = {m.id for m in res_space}
-    assert "m_py" in matched_ids_space
-    assert "m_rs" in matched_ids_space
-
-    # 2. Explicit OR keyword -> matches python or rust
-    res_or = db_manager.search_role_messages_semantic("developer", "Python OR Rust", now=now, threshold=0.1)
-    matched_ids_or = {m.id for m in res_or}
-    assert "m_py" in matched_ids_or
-    assert "m_rs" in matched_ids_or
-
-    # 3. Explicit pipe | keyword -> matches python or rust
-    res_pipe = db_manager.search_role_messages_semantic("developer", "Python | Rust", now=now, threshold=0.1)
-    matched_ids_pipe = {m.id for m in res_pipe}
-    assert "m_py" in matched_ids_pipe
-    assert "m_rs" in matched_ids_pipe
-
-    # 4. Quoted exact phrase -> matches "deep learning"
-    res_quoted = db_manager.search_role_messages_semantic(
-        "developer", '"deep learning" OR Rust', now=now, threshold=0.1
-    )
-    matched_ids_quoted = {m.id for m in res_quoted}
-    assert "m_phrase" in matched_ids_quoted
-    assert "m_rs" in matched_ids_quoted
 
 
 

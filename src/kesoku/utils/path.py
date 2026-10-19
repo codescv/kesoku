@@ -53,3 +53,19 @@ class PathResolver:
         staging_dir = os.path.join(sessions_base, workspace_name)
         os.makedirs(staging_dir, exist_ok=True)
         return os.path.abspath(staging_dir)
+
+    @classmethod
+    def get_role_memories_dir(cls, role_name: str = "default") -> str:
+        """Resolve the memories directory for a given role (`$AWD/roles/<role>/memories`).
+
+        Args:
+            role_name: Role persona identifier (defaults to 'default').
+
+        Returns:
+            Absolute path to the role's memories directory.
+        """
+        cfg = get_config()
+        roles_base = cls.resolve(cfg.workspace.roles_dir)
+        safe_role = role_name or "default"
+        return os.path.abspath(os.path.join(roles_base, safe_role, "memories"))
+

@@ -311,7 +311,7 @@ class Chatbot(ABC):
                     channel_id=channel_id,
                 )
 
-            from kesoku.agent.tools.memory import chat_search
+            from kesoku.agent.tools.memory import memory_search
 
             ctx = ToolContext(
                 session_id=session.id,
@@ -319,7 +319,7 @@ class Chatbot(ABC):
                 gateway=self.gateway,
             )
             try:
-                res = await chat_search(query=query, context=ctx)
+                res = await memory_search(query=query, context=ctx)
                 await reply_func(res)
             except Exception as e:
                 logger.error(f"Failed grep execution: {e}")
@@ -327,12 +327,12 @@ class Chatbot(ABC):
 
         self.commands.register(
             "grep",
-            "Search past chat messages for the current bound role.",
+            "Search role Markdown memories ($MEMORY_DIR) for the current bound role.",
             handle_grep,
         )
         self.commands.register(
             "chat-grep",
-            "Search past chat messages for the current bound role.",
+            "Search role Markdown memories ($MEMORY_DIR) for the current bound role.",
             handle_grep,
         )
 
@@ -354,7 +354,7 @@ class Chatbot(ABC):
                     channel_id=channel_id,
                 )
 
-            from kesoku.agent.tools.memory import chat_search
+            from kesoku.agent.tools.memory import memory_search
 
             ctx = ToolContext(
                 session_id=session.id,
@@ -362,7 +362,7 @@ class Chatbot(ABC):
                 gateway=self.gateway,
             )
             try:
-                res = await chat_search(query=query, context=ctx)
+                res = await memory_search(query=query, context=ctx)
                 await reply_func(res)
             except Exception as e:
                 logger.error(f"Failed search execution: {e}")
@@ -370,12 +370,12 @@ class Chatbot(ABC):
 
         self.commands.register(
             "search",
-            "Perform semantic RAG search on past chat messages for the current bound role.",
+            "Perform semantic search on role Markdown memories ($MEMORY_DIR) for the current bound role.",
             handle_search,
         )
         self.commands.register(
             "chat-search",
-            "Perform semantic RAG search on past chat messages for the current bound role.",
+            "Perform semantic search on role Markdown memories ($MEMORY_DIR) for the current bound role.",
             handle_search,
         )
 

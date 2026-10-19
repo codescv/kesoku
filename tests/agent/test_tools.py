@@ -416,21 +416,34 @@ async def test_analyze_media_tool_not_found() -> None:
 
 
 @pytest.mark.asyncio
-async def test_grep_slash_command(tmp_path) -> None:
+async def test_grep_slash_command(tmp_path, monkeypatch) -> None:
     """Verify that chatbot /grep command triggers memory_search tool under the hood."""
     import time
 
     from kesoku.config import KesokuConfig, WorkspaceConfig
-    from kesoku.constants import MessageRole, MessageStatus, MessageType
     from kesoku.context import KesokuContext
     from kesoku.db import DatabaseManager, Message, Session
     from kesoku.gateway.chatbot.base import Chatbot
     from kesoku.gateway.gateway import Gateway
 
+    monkeypatch.setattr("kesoku.utils.embedding.get_embedding", lambda text: [1.0] + [0.0] * 383)
+    monkeypatch.setattr(
+        "kesoku.utils.embedding.get_embeddings",
+        lambda texts: [[1.0] + [0.0] * 383 for _ in texts],
+    )
+
     temp_db = str(tmp_path / "test_slash_grep.db")
+    roles_dir = tmp_path / "roles"
+    mem_dir = roles_dir / "default" / "memories"
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "grep_test.md").write_text(
+        "---\ndescription: Testing grep keyword match.\n---\n- Details about keyword\n",
+        encoding="utf-8",
+    )
+
     db_mgr = DatabaseManager(temp_db)
     db_mgr.init_tables()
-    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db, roles_dir=str(roles_dir)))
     ctx = KesokuContext(config=cfg, db=db_mgr)
     gw = Gateway(context=ctx)
 
@@ -444,21 +457,6 @@ async def test_grep_slash_command(tmp_path) -> None:
     db_mgr.set_channel_role("cli", "ch_slash", "default")
     db_mgr.set_active_session_for_channel("cli", "ch_slash", "sess_slash")
 
-    # Save a message that matches
-    msg = Message(
-        id="m1",
-        session_id="sess_slash",
-        chatbot_id="cli",
-        channel_id="ch_slash",
-        sender="user",
-        role=MessageRole.USER,
-        type=MessageType.TEXT,
-        content="Testing grep keyword match.",
-        timestamp=time.time(),
-        status=MessageStatus.PROCESSED,
-    )
-    db_mgr.save_message(msg)
-
     class DummyChatbot(Chatbot):
         async def handle_message(self, message: Message) -> None:
             pass
@@ -470,10 +468,12 @@ async def test_grep_slash_command(tmp_path) -> None:
         nonlocal reply_msg
         reply_msg = content
 
-    await bot.execute_command_from_text("/grep keyword", mock_reply, channel_id="ch_slash")
+    with monkeypatch.context() as m:
+        m.setattr("kesoku.utils.path.get_config", lambda: cfg)
+        await bot.execute_command_from_text("/grep keyword", mock_reply, channel_id="ch_slash")
 
     assert reply_msg is not None
-    assert "Search Results for 'keyword'" in reply_msg
+    assert "Memory Search Results for 'keyword'" in reply_msg
     assert "Testing grep keyword match." in reply_msg
 
 

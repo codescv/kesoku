@@ -2,7 +2,6 @@ import asyncio
 import datetime
 import json
 import logging
-import math
 import os
 import shutil
 import sqlite3
@@ -16,62 +15,12 @@ from kesoku.agent.history_sorter import sort_session_messages
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db.connection import ConnectionProvider
 from kesoku.db.models import CrossSessionContext, Message, Session, SummaryNode
-from kesoku.utils import embedding as embedding_utils
-from kesoku.utils.text import chunk_message_text, parse_search_keywords
 
 logger = logging.getLogger(__name__)
 
 # Number of candidate chunks scored per batch during semantic search. Bounds how many
 # embedding BLOBs are resident at once, keeping peak memory flat regardless of corpus size.
 SEARCH_SCORE_BATCH_SIZE = 2048
-
-
-
-def calculate_time_score(
-    timestamp: float,
-    is_literal_match: bool,
-    now: float | None = None,
-    half_life_hours: float = 24.0,
-    recent_boost: float = 0.2,
-) -> float:
-    """Calculate time-decay score for a search result message.
-
-    If the query literally matches the message content:
-        - Base score is 1.0.
-        - Within 8 hours: receives a recency boost up to (1.0 + recent_boost) for the newest messages,
-          decreasing linearly to 1.0 at 8 hours.
-        - After 8 hours: exponentially decays from 1.0.
-    If the query does not literally match:
-        - Base score is 0.5.
-        - Within 8 hours: receives a recency boost up to 0.5 * (1.0 + recent_boost),
-          decreasing linearly to 0.5 at 8 hours.
-        - After 8 hours: exponentially decays from 0.5.
-
-    Args:
-        timestamp: Unix epoch timestamp of the message.
-        is_literal_match: True if query text is literally in message content.
-        now: Reference timestamp (defaults to time.time()).
-        half_life_hours: Half-life in hours for exponential decay after 8 hours (default: 24.0).
-        recent_boost: Fraction of boost given to brand new messages within 8h (default: 0.2, i.e., +20%).
-
-    Returns:
-        Time bonus score as a float.
-    """
-    if now is None:
-        now = time.time()
-
-    age_seconds = max(0.0, now - timestamp)
-    age_hours = age_seconds / 3600.0
-
-    base_score = 1.0 if is_literal_match else 0.5
-    if age_hours <= 8.0:
-        # Give a slight boost for more recent messages within 8 hours (from (1 + recent_boost) * base down to base)
-        boost_ratio = 1.0 + recent_boost * (1.0 - (age_hours / 8.0))
-        return base_score * boost_ratio
-
-    decay_hours = age_hours - 8.0
-    # Exponential decay using half-life: base_score * 0.5^(decay_hours / half_life)
-    return base_score * math.exp(-math.log(2) * (decay_hours / half_life_hours))
 
 
 def _batch_semantic_scores(
@@ -186,21 +135,39 @@ class DatabaseManager:
                     conn.execute("ALTER TABLE sessions ADD COLUMN role_name TEXT")
                 # Clean up redundant single-column session index since idx_messages_session_timestamp supersedes it
                 conn.execute("DROP INDEX IF EXISTS idx_messages_session")
-                # Ensure message_chunks table exists
+                conn.execute("DROP TABLE IF EXISTS message_chunks;")
+                # Ensure memory_files and memory_chunks tables exist
                 conn.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS message_chunks (
+                    CREATE TABLE IF NOT EXISTS memory_files (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        message_id TEXT NOT NULL,
-                        chunk_index INTEGER NOT NULL,
-                        content TEXT NOT NULL,
-                        embedding BLOB NOT NULL,
-                        FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+                        role TEXT NOT NULL,
+                        rel_path TEXT NOT NULL,
+                        description TEXT NOT NULL DEFAULT '',
+                        content_hash TEXT NOT NULL,
+                        mtime REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        UNIQUE(role, rel_path)
                     );
                     """
                 )
                 conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_message_chunks_message_id ON message_chunks(message_id);"
+                    "CREATE INDEX IF NOT EXISTS idx_memory_files_role ON memory_files(role);"
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS memory_chunks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        file_id INTEGER NOT NULL,
+                        chunk_index INTEGER NOT NULL,
+                        content TEXT NOT NULL,
+                        embedding BLOB NOT NULL,
+                        FOREIGN KEY (file_id) REFERENCES memory_files(id) ON DELETE CASCADE
+                    );
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_memory_chunks_file_id ON memory_chunks(file_id);"
                 )
                 # Ensure channel_sessions table exists
                 conn.execute(
@@ -365,18 +332,35 @@ class DatabaseManager:
                     )
                     conn.execute(
                         """
-                        CREATE TABLE IF NOT EXISTS message_chunks (
+                        CREATE TABLE IF NOT EXISTS memory_files (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            message_id TEXT NOT NULL,
-                            chunk_index INTEGER NOT NULL,
-                            content TEXT NOT NULL,
-                            embedding BLOB NOT NULL,
-                            FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+                            role TEXT NOT NULL,
+                            rel_path TEXT NOT NULL,
+                            description TEXT NOT NULL DEFAULT '',
+                            content_hash TEXT NOT NULL,
+                            mtime REAL NOT NULL,
+                            updated_at REAL NOT NULL,
+                            UNIQUE(role, rel_path)
                         );
                         """
                     )
                     conn.execute(
-                        "CREATE INDEX IF NOT EXISTS idx_message_chunks_message_id ON message_chunks(message_id);"
+                        "CREATE INDEX IF NOT EXISTS idx_memory_files_role ON memory_files(role);"
+                    )
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS memory_chunks (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            file_id INTEGER NOT NULL,
+                            chunk_index INTEGER NOT NULL,
+                            content TEXT NOT NULL,
+                            embedding BLOB NOT NULL,
+                            FOREIGN KEY (file_id) REFERENCES memory_files(id) ON DELETE CASCADE
+                        );
+                        """
+                    )
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_memory_chunks_file_id ON memory_chunks(file_id);"
                     )
                     conn.execute(
                         """
@@ -715,23 +699,6 @@ class DatabaseManager:
         Args:
             msg: The Message object to store.
         """
-        chunks_to_insert = []
-        if msg.role in ("user", "assistant") and msg.type == "text" and msg.content:
-            try:
-                chunks = chunk_message_text(msg.content, threshold=80)
-                for idx, chunk_content in enumerate(chunks):
-                    try:
-                        emb = embedding_utils.get_embedding(chunk_content)
-                        emb_bytes = embedding_utils.vector_to_bytes(emb)
-                        chunks_to_insert.append((msg.id, idx, chunk_content, emb_bytes))
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to generate embedding for chunk {idx} of message {msg.id}: {e}",
-                            exc_info=True,
-                        )
-            except Exception as e:
-                logger.error(f"Failed to chunk message {msg.id}: {e}", exc_info=True)
-
         with self.connection_provider.connection() as conn:
             with conn:
                 conn.execute(
@@ -757,15 +724,6 @@ class DatabaseManager:
                         msg.summary_node_id,
                     ),
                 )
-                if chunks_to_insert:
-                    conn.execute("DELETE FROM message_chunks WHERE message_id = ?", (msg.id,))
-                    conn.executemany(
-                        """
-                        INSERT INTO message_chunks (message_id, chunk_index, content, embedding)
-                        VALUES (?, ?, ?, ?)
-                        """,
-                        chunks_to_insert,
-                    )
 
     def update_message_status(self, message_id: str, status: str) -> None:
         """Update the operational lifecycle status of a message.
@@ -1055,320 +1013,146 @@ class DatabaseManager:
 
             return all_msgs
 
-
-
-    def search_role_messages_semantic(
-        self,
-        role: str,
-        query_text: str,
-        start_time: float | None = None,
-        end_time: float | None = None,
-        limit: int = 20,
-        threshold: float = 0.55,
-        now: float | None = None,
-    ) -> list[Message]:
-        """Search user/assistant text messages for a role using semantic chunk search.
-
-        Supports multi-keyword OR matching, wildcard searches, and time range filters.
-        """
-        is_wildcard = not query_text or query_text.strip() == "*"
-
-        if is_wildcard:
-            with self.connection_provider.connection() as conn:
-                cursor = conn.cursor()
-                conditions = [
-                    "COALESCE(s.role_name, 'default') = ?",
-                    "m.role IN ('user', 'assistant')",
-                    "m.type = 'text'",
-                ]
-                args: list[Any] = [role]
-
-                if start_time is not None:
-                    conditions.append("m.timestamp >= ?")
-                    args.append(start_time)
-                if end_time is not None:
-                    conditions.append("m.timestamp <= ?")
-                    args.append(end_time)
-
-                where_clause = " AND ".join(conditions)
-                sql = f"""
-                    SELECT m.* FROM messages m
-                    JOIN sessions s ON m.session_id = s.id
-                    WHERE {where_clause}
-                    ORDER BY m.timestamp DESC
-                    LIMIT ?
-                """
-                args.append(limit)
-                cursor.execute(sql, tuple(args))
-                rows = cursor.fetchall()
-                return [self._row_to_message(row) for row in rows]
-
-        keywords = parse_search_keywords(query_text)
-
-        # Semantic chunk-based search
-        query_emb = None
-        try:
-            query_emb = embedding_utils.get_embedding(query_text)
-        except Exception as e:
-            logger.error(f"Failed to generate embedding for query: {e}", exc_info=True)
-
-        query_vec: np.ndarray | None = None
-        query_norm = 0.0
-        if query_emb:
-            query_vec = np.asarray(query_emb, dtype=np.float32)
-            query_norm = float(np.linalg.norm(query_vec))
-            if query_norm == 0.0:
-                query_vec = None
-
-        current_time = now if now is not None else time.time()
-
-        conditions = [
-            "COALESCE(s.role_name, 'default') = ?",
-            "m.role IN ('user', 'assistant')",
-            "m.type = 'text'",
-        ]
-        # SQLite binds positionally, so SELECT-clause params must precede WHERE-clause params.
-        select_args: list[Any] = []
-        where_args: list[Any] = [role]
-
-        # Match chunks where embedding exists or content literally matches any keyword
-        if keywords:
-            like_clauses = " OR ".join(["mc.content LIKE ?" for _ in keywords])
-            # Evaluate the literal match in SQL so chunk text never has to be loaded.
-            literal_expr = f"CASE WHEN {like_clauses} THEN 1 ELSE 0 END"
-            select_args.extend(f"%{kw}%" for kw in keywords)
-            conditions.append(f"(mc.embedding IS NOT NULL OR {like_clauses})")
-            where_args.extend(f"%{kw}%" for kw in keywords)
-        else:
-            literal_expr = "0"
-            conditions.append("mc.embedding IS NOT NULL")
-
-        if start_time is not None:
-            conditions.append("m.timestamp >= ?")
-            where_args.append(start_time)
-        if end_time is not None:
-            conditions.append("m.timestamp <= ?")
-            where_args.append(end_time)
-
-        where_clause = " AND ".join(conditions)
-
-        # Phase 1: score every candidate chunk while loading only what scoring needs
-        # (embedding, timestamp, literal-match flag). Message and chunk text are left in
-        # the database until the winners are known.
-        sql = f"""
-            SELECT mc.message_id AS message_id, mc.chunk_index AS chunk_index,
-                   mc.embedding AS chunk_embedding, m.timestamp AS timestamp,
-                   {literal_expr} AS literal_match
-            FROM message_chunks mc
-            JOIN messages m ON mc.message_id = m.id
-            JOIN sessions s ON m.session_id = s.id
-            WHERE {where_clause}
-        """
-
-        # Each entry: (message_id, chunk_index, total_score, semantic_score, time_score)
-        candidates: list[tuple[str, int, float, float, float]] = []
-        with self.connection_provider.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql, tuple(select_args + where_args))
-            while True:
-                batch = cursor.fetchmany(SEARCH_SCORE_BATCH_SIZE)
-                if not batch:
-                    break
-                semantic_scores = _batch_semantic_scores(batch, query_vec, query_norm)
-                for row, semantic_score in zip(batch, semantic_scores, strict=True):
-                    # Time score: 1.0 (literal) or 0.5 (semantic only) within 8h, decaying after
-                    time_score = calculate_time_score(
-                        row["timestamp"],
-                        is_literal_match=bool(row["literal_match"]),
-                        now=current_time,
-                    )
-                    candidates.append(
-                        (
-                            row["message_id"],
-                            row["chunk_index"],
-                            semantic_score + time_score,
-                            semantic_score,
-                            time_score,
-                        )
-                    )
-                # Release this batch's embedding BLOBs before fetching the next one.
-                del batch, semantic_scores
-
-        # Sort candidates globally by similarity score descending. Sorting indices keeps the
-        # sort stable on the original row order for ties, matching the previous behaviour.
-        order = sorted(range(len(candidates)), key=lambda i: -candidates[i][2])
-
-        # Apply message contribution limit (max 3 chunks per message) and filter score > threshold
-        selected: list[tuple[str, int, float, float, float]] = []
-        msg_counts: dict[str, int] = {}
-        for idx in order:
-            candidate = candidates[idx]
-            if candidate[2] <= threshold:
-                continue
-            count = msg_counts.get(candidate[0], 0)
-            if count < 3:
-                selected.append(candidate)
-                msg_counts[candidate[0]] = count + 1
-                if len(selected) >= limit:
-                    break
-
-        if not selected:
-            return []
-
-        # Phase 2: hydrate only the winning chunks with their message row and neighbours.
-        msg_ids = list({candidate[0] for candidate in selected})
-        placeholders = ",".join("?" for _ in msg_ids)
-        with self.connection_provider.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(f"SELECT * FROM messages WHERE id IN ({placeholders})", tuple(msg_ids))
-            message_rows = {row["id"]: row for row in cursor.fetchall()}
-            cursor.execute(
-                "SELECT message_id, chunk_index, content, embedding FROM message_chunks "
-                f"WHERE message_id IN ({placeholders})",
-                tuple(msg_ids),
-            )
-            chunks_map = {(row["message_id"], row["chunk_index"]): row for row in cursor.fetchall()}
-
-        results: list[Message] = []
-        for message_id, chunk_index, total_score, semantic_score, time_score in selected:
-            message_row = message_rows.get(message_id)
-            chunk_row = chunks_map.get((message_id, chunk_index))
-            if message_row is None or chunk_row is None:
-                continue
-
-            msg = Message(
-                id=message_row["id"],
-                session_id=message_row["session_id"],
-                chatbot_id=message_row["chatbot_id"],
-                channel_id=message_row["channel_id"],
-                sender=message_row["sender"],
-                role=message_row["role"],
-                type=message_row["type"],
-                content=chunk_row["content"],
-                metadata=json.loads(message_row["metadata"]),
-                timestamp=message_row["timestamp"],
-                status=message_row["status"],
-                parent_id=message_row["parent_id"],
-                summary_node_id=message_row["summary_node_id"],
-                embedding=chunk_row["embedding"],
-            )
-            msg.metadata["original_content"] = message_row["content"]
-            msg.metadata["chunk_index"] = chunk_index
-            msg.metadata["similarity_score"] = total_score
-            msg.metadata["semantic_score"] = semantic_score
-            msg.metadata["time_score"] = time_score
-
-            prev_chunk = chunks_map.get((message_id, chunk_index - 1))
-            post_chunk = chunks_map.get((message_id, chunk_index + 1))
-            msg.metadata["prev_chunk"] = prev_chunk["content"] if prev_chunk else None
-            msg.metadata["post_chunk"] = post_chunk["content"] if post_chunk else None
-            results.append(msg)
-
-        return results
-
-
-    def get_surrounding_messages(
-        self,
-        session_id: str,
-        target_timestamp: float,
-        window_before: int = 1,
-        window_after: int = 1,
-    ) -> list[Message]:
-        """Fetch surrounding text messages around a target message within the same session.
+    def get_memory_files_by_role(self, role: str) -> list[dict[str, Any]]:
+        """Retrieve all indexed memory file metadata rows for a role.
 
         Args:
-            session_id: Session identifier.
-            target_timestamp: Timestamp of the target message.
-            window_before: Number of preceding messages to fetch.
-            window_after: Number of succeeding messages to fetch.
+            role: Role persona identifier.
 
         Returns:
-            List of surrounding messages ordered chronologically.
+            List of dictionaries representing rows from ``memory_files``.
         """
         with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT * FROM messages
-                WHERE session_id = ? AND timestamp <= ? AND role IN ('user', 'assistant') AND type = 'text'
-                ORDER BY timestamp DESC
-                LIMIT ?
+                SELECT id, role, rel_path, description, content_hash, mtime, updated_at
+                FROM memory_files
+                WHERE role = ?
+                ORDER BY mtime DESC, rel_path ASC
                 """,
-                (session_id, target_timestamp, window_before + 1),
+                (role,),
             )
-            rows_before = cursor.fetchall()
-            before_msgs = [self._row_to_message(r) for r in reversed(rows_before)]
+            return [dict(row) for row in cursor.fetchall()]
 
-            cursor.execute(
-                """
-                SELECT * FROM messages
-                WHERE session_id = ? AND timestamp > ? AND role IN ('user', 'assistant') AND type = 'text'
-                ORDER BY timestamp ASC
-                LIMIT ?
-                """,
-                (session_id, target_timestamp, window_after),
-            )
-            rows_after = cursor.fetchall()
-            after_msgs = [self._row_to_message(r) for r in rows_after]
-
-        return before_msgs + after_msgs
-
-
-
-    def get_unindexed_messages(self) -> list[dict[str, Any]]:
-        """Retrieve all user/assistant text messages that do not have chunks in message_chunks yet."""
-        with self.connection_provider.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT m.id, m.content FROM messages m
-                LEFT JOIN message_chunks mc ON m.id = mc.message_id
-                WHERE m.role IN ('user', 'assistant')
-                  AND m.type = 'text'
-                  AND TRIM(m.content) != ''
-                  AND mc.message_id IS NULL
-                """
-            )
-            rows = cursor.fetchall()
-            return [dict(row) for row in rows]
-
-
-
-    def update_message_embedding(self, message_id: str, embedding: bytes) -> None:
-        """Update the embedding BLOB of a message."""
-        with self.connection_provider.connection() as conn:
-            with conn:
-                conn.execute(
-                    "UPDATE messages SET embedding = ? WHERE id = ?",
-                    (embedding, message_id),
-                )
-
-    def save_message_chunks_batch(self, chunks: list[tuple[str, int, str, bytes]]) -> None:
-        """Saves multiple message chunks to the database in a single transaction.
+    def upsert_memory_file(
+        self,
+        role: str,
+        rel_path: str,
+        description: str,
+        content_hash: str,
+        mtime: float,
+        updated_at: float,
+        chunks: list[tuple[int, str, bytes]],
+    ) -> int:
+        """Insert or update a memory file entry and replace its chunk embeddings atomically.
 
         Args:
-            chunks: A list of tuples containing (message_id, chunk_index, content, embedding_bytes).
+            role: Role persona identifier.
+            rel_path: Path relative to the role's memories directory (normalized with '/').
+            description: Single-line summary from frontmatter or first heading.
+            content_hash: SHA-256 hex digest of the raw file content.
+            mtime: Filesystem modification timestamp.
+            updated_at: Index update timestamp.
+            chunks: List of ``(chunk_index, content, embedding_bytes)`` tuples.
+
+        Returns:
+            The ``memory_files.id`` primary key of the upserted row.
         """
-        if not chunks:
-            return
         with self.connection_provider.connection() as conn:
             with conn:
-                # Group by message_id and clean up existing chunks first to avoid duplicates
-                unique_message_ids = {c[0] for c in chunks}
-                placeholders = ",".join("?" for _ in unique_message_ids)
                 conn.execute(
-                    f"DELETE FROM message_chunks WHERE message_id IN ({placeholders})",
-                    tuple(unique_message_ids)
-                )
-                conn.executemany(
                     """
-                    INSERT INTO message_chunks (message_id, chunk_index, content, embedding)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO memory_files (role, rel_path, description, content_hash, mtime, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(role, rel_path) DO UPDATE SET
+                        description = excluded.description,
+                        content_hash = excluded.content_hash,
+                        mtime = excluded.mtime,
+                        updated_at = excluded.updated_at
                     """,
-                    chunks,
+                    (role, rel_path, description, content_hash, mtime, updated_at),
+                )
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT id FROM memory_files WHERE role = ? AND rel_path = ?",
+                    (role, rel_path),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    raise RuntimeError(f"Failed to retrieve memory_files id for {role}/{rel_path}")
+                file_id = int(row["id"])
+
+                conn.execute("DELETE FROM memory_chunks WHERE file_id = ?", (file_id,))
+                if chunks:
+                    conn.executemany(
+                        """
+                        INSERT INTO memory_chunks (file_id, chunk_index, content, embedding)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        [(file_id, idx, text, emb) for idx, text, emb in chunks],
+                    )
+                return file_id
+
+    def delete_memory_files_by_ids(self, file_ids: list[int]) -> None:
+        """Delete memory file entries (and their cascaded chunks) by ID.
+
+        Args:
+            file_ids: List of ``memory_files.id`` values to delete.
+        """
+        if not file_ids:
+            return
+        placeholders = ",".join("?" for _ in file_ids)
+        with self.connection_provider.connection() as conn:
+            with conn:
+                conn.execute(
+                    f"DELETE FROM memory_files WHERE id IN ({placeholders})",
+                    tuple(file_ids),
                 )
 
+    def clear_role_memory_index(self, role: str | None = None) -> None:
+        """Delete all indexed memory files and chunks (for a specific role or all roles).
 
+        Args:
+            role: Optional role name. If None, clears all roles.
+        """
+        with self.connection_provider.connection() as conn:
+            with conn:
+                if role:
+                    conn.execute("DELETE FROM memory_files WHERE role = ?", (role,))
+                else:
+                    conn.execute("DELETE FROM memory_files")
+
+    def get_memory_chunks_for_role(self, role: str) -> list[sqlite3.Row]:
+        """Fetch all memory chunks joined with their parent file metadata for a role.
+
+        Args:
+            role: Role persona identifier.
+
+        Returns:
+            List of sqlite3.Row objects with file and chunk fields.
+        """
+        with self.connection_provider.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    mf.id AS file_id,
+                    mf.rel_path AS rel_path,
+                    mf.description AS description,
+                    mf.mtime AS mtime,
+                    mf.updated_at AS updated_at,
+                    mc.chunk_index AS chunk_index,
+                    mc.content AS content,
+                    mc.embedding AS chunk_embedding
+                FROM memory_chunks mc
+                JOIN memory_files mf ON mc.file_id = mf.id
+                WHERE mf.role = ?
+                ORDER BY mf.id ASC, mc.chunk_index ASC
+                """,
+                (role,),
+            )
+            return cursor.fetchall()
 
     def save_ui_prompt(self, session_id: str, message_id: str, spec: dict[str, Any]) -> None:
         """Insert or update the spec of an interactive UI prompt (created_at is kept on update)."""
@@ -2151,61 +1935,43 @@ class AsyncDatabaseManager:
         """
         return await asyncio.to_thread(self.sync_db.get_session_history_by_ranges, session_id, ranges, order)
 
+    async def get_memory_files_by_role(self, role: str) -> list[dict[str, Any]]:
+        """Retrieve all indexed memory file metadata rows for a role."""
+        return await asyncio.to_thread(self.sync_db.get_memory_files_by_role, role)
 
-
-    async def search_role_messages_semantic(
+    async def upsert_memory_file(
         self,
         role: str,
-        query_text: str,
-        start_time: float | None = None,
-        end_time: float | None = None,
-        limit: int = 20,
-        threshold: float = 0.55,
-        now: float | None = None,
-    ) -> list[Message]:
-        """Search user/assistant text messages for a role using semantic similarity of embeddings."""
+        rel_path: str,
+        description: str,
+        content_hash: str,
+        mtime: float,
+        updated_at: float,
+        chunks: list[tuple[int, str, bytes]],
+    ) -> int:
+        """Insert or update a memory file entry and replace its chunk embeddings atomically."""
         return await asyncio.to_thread(
-            self.sync_db.search_role_messages_semantic,
+            self.sync_db.upsert_memory_file,
             role,
-            query_text,
-            start_time,
-            end_time,
-            limit,
-            threshold,
-            now,
+            rel_path,
+            description,
+            content_hash,
+            mtime,
+            updated_at,
+            chunks,
         )
 
+    async def delete_memory_files_by_ids(self, file_ids: list[int]) -> None:
+        """Delete memory file entries (and their cascaded chunks) by ID."""
+        await asyncio.to_thread(self.sync_db.delete_memory_files_by_ids, file_ids)
 
+    async def clear_role_memory_index(self, role: str | None = None) -> None:
+        """Delete all indexed memory files and chunks (for a specific role or all roles)."""
+        await asyncio.to_thread(self.sync_db.clear_role_memory_index, role)
 
-    async def get_unindexed_messages(self) -> list[dict[str, Any]]:
-        """Retrieve all user/assistant text messages that do not have an embedding computed yet."""
-        return await asyncio.to_thread(self.sync_db.get_unindexed_messages)
-
-
-
-    async def update_message_embedding(self, message_id: str, embedding: bytes) -> None:
-        """Update the embedding BLOB of a message."""
-        await asyncio.to_thread(self.sync_db.update_message_embedding, message_id, embedding)
-
-    async def save_message_chunks_batch(self, chunks: list[tuple[str, int, str, bytes]]) -> None:
-        """Saves multiple message chunks to the database."""
-        await asyncio.to_thread(self.sync_db.save_message_chunks_batch, chunks)
-
-    async def get_surrounding_messages(
-        self,
-        session_id: str,
-        target_timestamp: float,
-        window_before: int = 1,
-        window_after: int = 1,
-    ) -> list[Message]:
-        """Fetch surrounding text messages around a target message within the same session."""
-        return await asyncio.to_thread(
-            self.sync_db.get_surrounding_messages,
-            session_id,
-            target_timestamp,
-            window_before,
-            window_after,
-        )
+    async def get_memory_chunks_for_role(self, role: str) -> list[sqlite3.Row]:
+        """Fetch all memory chunks joined with their parent file metadata for a role."""
+        return await asyncio.to_thread(self.sync_db.get_memory_chunks_for_role, role)
 
     async def save_ui_prompt(self, session_id: str, message_id: str, spec: dict[str, Any]) -> None:
         """Insert or update the spec of an interactive UI prompt."""

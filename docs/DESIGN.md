@@ -58,6 +58,11 @@ For detailed user and developer guides, see [`docs/en/dev/architecture.md`](en/d
 3. **Sub-Agent Delegation (`src/kesoku/agent/tools/subagent.py`, `src/kesoku/agent/subagent.py`)**:
    - `delegate_subagent(task, context_hint="", tools=None, max_turns=8)` runs an isolated `SubagentRunner` loop with its own ephemeral message list, read-only tool subset (`read_file`, `run_shell_command`, `list_skills`, `use_skill` by default), foreground-only shell execution (`subagent_shell_timeout_seconds = 120`), and a `<= 1,500`-char report cap.
    - Full sub-agent trajectories are written to `$STAGING_DIR/subagent_<id>.log.yaml`.
+4. **Role-Isolated Markdown Memory & Progressive Disclosure (`src/kesoku/agent/memory_store.py`, `src/kesoku/agent/tools/memory.py`)**:
+   - **Per-Role Isolation (`$MEMORY_DIR`)**: Durable facts, decisions, and references are curated as self-contained `.md` files with YAML frontmatter `description` under `$AWD/roles/<role>/memories/` (exposed to `read_file` and `update_file` via `$MEMORY_DIR`).
+   - **Structural Breadcrumb Chunking & Incremental SQLite Index (`memory_files`, `memory_chunks`)**: Each `.md` file is incrementally synchronized by `mtime` + SHA-256 `content_hash` and split by Markdown headings with ancestor breadcrumbs (`# rel_path (description)` + `# H1 > ## H2 ...`).
+   - **Hybrid File-Level Ranking**: `search_role_memories` ranks files by `MAX(chunk_cosine_similarity) + lexical_boost` over a multi-turn context query (`render_context_query` on the last 2 user turns).
+   - **Progressive Disclosure (`<memory>`) & `memory_search`**: `TurnExecutor` injects only matched file paths and 1-line descriptions (`<memory>...</memory>`), and the `memory_search(query, limit)` tool returns file paths + descriptions so the agent calls `read_file("$MEMORY_DIR/...")` on demand.
 
 ---
 

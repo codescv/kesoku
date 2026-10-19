@@ -7,8 +7,8 @@ import re
 from kesoku.agent.tools.registry import ToolContext, default_registry
 from kesoku.utils.path import PathResolver
 
-# `$STAGING_DIR`, `${STAGING_DIR}`, `$AWD`, `${AWD}` placeholders used in prompts/skills.
-_PATH_VAR_RE = re.compile(r"\$(?:\{(STAGING_DIR|AWD)\}|(STAGING_DIR|AWD)\b)")
+# `$STAGING_DIR`, `$AWD`, and `$MEMORY_DIR` (plain or braced) placeholders used in prompts/skills.
+_PATH_VAR_RE = re.compile(r"\$(?:\{(STAGING_DIR|AWD|MEMORY_DIR)\}|(STAGING_DIR|AWD|MEMORY_DIR)\b)")
 
 # `read_file` line-number prefixes as models copy them into old_content: `  12: text`, `12:` (empty line whose
 # trailing space was stripped) or the `cat -n` style `    12\ttext`.
@@ -33,12 +33,35 @@ _MATCH_CONTEXT_MAX = 3
 _MATCH_CONTEXT_LINES = 2
 
 
-def expand_path_variables(file_name: str, context: ToolContext | None = None) -> str:
-    """Expand `$STAGING_DIR` / `$AWD` placeholders (plain or braced) in a tool file path.
+def _resolve_role_sync(context: ToolContext | None) -> str:
+    """Resolve the active role synchronously from `ToolContext` (defaults to `'default'`)."""
+    if not context or not context.gateway or not context.session_id:
+        return "default"
+    try:
+        db = getattr(context.gateway, "db", None)
+        sync_db = getattr(db, "_sync", getattr(db, "sync_db", db))
+        if sync_db is None:
+            return "default"
+        sess = sync_db.get_session(context.session_id)
+        if sess and sess.role_name and sess.role_name != "default":
+            return sess.role_name
+        mapping = sync_db.get_channel_by_session(context.session_id)
+        if mapping:
+            chatbot_id, channel_id = mapping
+            return sync_db.get_channel_role_with_inheritance(chatbot_id, channel_id, context.session_id)
+        if sess and sess.role_name:
+            return sess.role_name
+    except Exception:
+        pass
+    return "default"
 
-    Prompts name files like `$STAGING_DIR/notes.md`; without expansion such a path would silently be created
-    literally under the AWD. `$STAGING_DIR` resolves from the session workspace in `context` and is left
-    untouched when no session context is available.
+
+def expand_path_variables(file_name: str, context: ToolContext | None = None) -> str:
+    """Expand `$STAGING_DIR`, `$AWD`, and `$MEMORY_DIR` placeholders (plain or braced) in a tool file path.
+
+    Prompts name files like `$STAGING_DIR/notes.md` or `$MEMORY_DIR/topics/foo.md`; without expansion such a path
+    would silently be created literally under the AWD. `$STAGING_DIR` resolves from the session workspace in
+    `context` and is left untouched when no session context is available.
     """
     if not file_name or "$" not in file_name:
         return file_name
@@ -47,6 +70,8 @@ def expand_path_variables(file_name: str, context: ToolContext | None = None) ->
         var = match.group(1) or match.group(2)
         if var == "AWD":
             return PathResolver.get_awd()
+        if var == "MEMORY_DIR":
+            return PathResolver.get_role_memories_dir(_resolve_role_sync(context))
         workspace = (context.session_workspace or context.session_id) if context else None
         return PathResolver.get_session_staging_dir(workspace) if workspace else match.group(0)
 

@@ -58,10 +58,40 @@ which is still SERIAL.
 FILE_TOOL_INSTRUCTIONS = """
 # File Tools
 - Read source files with `read_file(file_name, start_line, end_line)` instead of `cat`/`head`/`sed -n`; page large
-  files with `start_line`.
+  files with `start_line`. `$AWD`, `$STAGING_DIR`, and `$MEMORY_DIR` expand automatically.
 - Create a file with `update_file(file_name, new_content=...)` (omit `old_content`). Edit by passing a short, unique
   block (3-15 lines) copied verbatim from `read_file` output as `old_content`, without the `N: ` line-number prefixes.
 - When a shell output is truncated and saved to a file, page through that file with `read_file`.
+"""
+
+MEMORY_INSTRUCTIONS = """
+# Long-Term Role Memory ($MEMORY_DIR)
+- Long-term knowledge across sessions for the active role lives as Markdown (`.md`) files under `$MEMORY_DIR`
+  (which expands to `$AWD/roles/<role>/memories`).
+- Every memory file MUST start with YAML frontmatter containing a single-line `description`:
+  ```markdown
+  ---
+  description: <one crisp sentence stating what the memory contains and when it is useful>
+  ---
+
+  - <concise, durable fact or rule>
+  ```
+- **Progressive Disclosure (`<memory>`)**: When relevant memories exist, the system injects a `<memory>` block
+  before `<current_message>` showing ONLY each file's `$MEMORY_DIR/...` path and its `description` (never its
+  body). Do NOT guess or assume a memory's contents from its description alone — call `read_file` on its path
+  first when the description is relevant.
+- **Searching Memories (`memory_search`)**: To look up memories not shown in the ambient `<memory>` block, or
+  to check whether a topic already exists before creating a new memory file, call `memory_search(query)` (pass
+  `query="*"` to list all memories for this role).
+- **In-Place Updates & De-duplication**:
+  - Before creating a new file under `$MEMORY_DIR`, check `<memory>` or call `memory_search` to see if a file
+    for that topic already exists.
+  - When facts, decisions, or user preferences change, use `update_file` on the existing `$MEMORY_DIR/...` file
+    to REPLACE or DELETE outdated entries in place. Never append contradicting facts without removing the old
+    ones, and never create duplicate files for the same topic.
+- **Durability Bar**: Only record durable, cross-session knowledge (user profile, stable preferences, project
+  architecture, recurring workflows, non-obvious gotchas). Ephemeral single-session scratch state belongs in
+  `$STAGING_DIR/notes.md`, not `$MEMORY_DIR`.
 """
 
 # Skills index limits (system prompt size control).
@@ -262,6 +292,7 @@ Unless the user explicitly instructs otherwise, do not refer to any file outside
             FILE_TOOL_INSTRUCTIONS.strip(),
             BACKGROUND_EXECUTION_INSTRUCTIONS.strip(),
             SESSION_NOTES_INSTRUCTIONS.strip(),
+            MEMORY_INSTRUCTIONS.strip(),
         ]
     )
 

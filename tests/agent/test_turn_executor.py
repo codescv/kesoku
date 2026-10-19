@@ -536,8 +536,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
 
     # MUST contain Consolidated Sync Guidelines and Preferences
     assert '<background_context type="sync_guidelines">' in content1
-    assert "view_message(message_id)" in content1
-    assert "chat_search(query)" in content1
+    assert "memory_search(query)" in content1
     assert "User Preferences:" not in content1
     assert "<instructions>\nPython\n</instructions>" in content1
     assert 'from="u1"' in content1
@@ -566,7 +565,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
 
     # MUST NOT contain Sync Guidelines, but MUST contain Preferences
     assert '<background_context type="sync_guidelines">' not in content2
-    assert "view_message(message_id)" not in content2
+    assert "memory_search(query)" not in content2
     assert "User Preferences:" not in content2
     assert "<instructions>\nPython\n</instructions>" in content2
     assert 'from="u1"' in content2
@@ -595,8 +594,7 @@ async def test_turn_executor_dynamic_context_injection_bootstrap_vs_normal(temp_
 
     # MUST contain Consolidated Sync Guidelines and Preferences again due to idle resumption
     assert '<background_context type="sync_guidelines">' in content3
-    assert "view_message(message_id)" in content3
-    assert "chat_search(query)" in content3
+    assert "memory_search(query)" in content3
     assert "User Preferences:" not in content3
     assert "<instructions>\nPython\n</instructions>" in content3
     assert 'from="u1"' in content3
@@ -1745,63 +1743,37 @@ async def test_history_compressor_in_place_update(temp_db: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_turn_executor_auto_context_search_injection(temp_db: str) -> None:
-    """Verify that auto context search retrieves and injects past dialogue snippets."""
+async def test_turn_executor_auto_context_search_injection(temp_db: str, tmp_path: Any, monkeypatch: Any) -> None:
+    """Verify that auto context search retrieves and injects progressive disclosure <memory> blocks."""
     from kesoku.agent.turn_executor import TurnExecutor
     from kesoku.constants import MessageRole
     from kesoku.db import DatabaseManager
 
     DatabaseManager(temp_db).init_tables()
 
-    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    monkeypatch.setattr("kesoku.utils.embedding.get_embedding", lambda text: [1.0] + [0.0] * 383)
+    monkeypatch.setattr(
+        "kesoku.utils.embedding.get_embeddings",
+        lambda texts: [[1.0] + [0.0] * 383 for _ in texts],
+    )
+
+    roles_dir = tmp_path / "roles"
+    mem_dir = roles_dir / "role_a" / "memories"
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    (mem_dir / "psyduck.md").write_text(
+        "---\ndescription: 可达鸭头越痛念力越强！\n---\n- 念力攻击说明\n",
+        encoding="utf-8",
+    )
+
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db, roles_dir=str(roles_dir)))
     cfg.agent.auto_context_search = True
-    cfg.agent.auto_context_search_threshold = 1.0
     cfg.agent.auto_context_search_semantic_min = 0.5
 
     gw = Gateway(context=KesokuContext(config=cfg))
-    await gw.db.set_channel_role("cli", "ch1", "asuka")
-
-    # Create past session for role 'asuka'
-    await gw.create_session("sess_past", title="Past Session")
-    await gw.db.set_active_session_for_channel("cli", "ch1", "sess_past")
-    past_msg1 = Message(
-        session_id="sess_past",
-        chatbot_id="cli",
-        channel_id="ch1",
-        sender="u1",
-        role=MessageRole.USER,
-        content="刚才可达鸭的念力攻击很厉害",
-        status="processed",
-        timestamp=time.time() - 3600,
-    )
-    await gw.post(past_msg1)
-    past_msg2 = Message(
-        session_id="sess_past",
-        chatbot_id="cli",
-        channel_id="ch1",
-        sender="Kesoku",
-        role=MessageRole.ASSISTANT,
-        content="可达鸭头越痛念力越强！",
-        status="delivered",
-        timestamp=time.time() - 3590,
-    )
-    await gw.post(past_msg2)
-
-    # Index chunks in message_chunks
-    dummy_emb = b"\x00" * 64
-    with DatabaseManager(temp_db).connection_provider.connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO message_chunks (message_id, chunk_index, content, embedding) VALUES (?, ?, ?, ?)",
-            (past_msg1.id, 0, past_msg1.content, dummy_emb),
-        )
-        cursor.execute(
-            "INSERT INTO message_chunks (message_id, chunk_index, content, embedding) VALUES (?, ?, ?, ?)",
-            (past_msg2.id, 0, past_msg2.content, dummy_emb),
-        )
+    await gw.db.set_channel_role("cli", "ch1", "role_a")
 
     # Active session
-    await gw.create_session("sess_active", title="Active Session")
+    await gw.create_session("sess_active", title="Active Session", role="role_a")
     await gw.db.set_active_session_for_channel("cli", "ch1", "sess_active")
     active_msg = Message(
         session_id="sess_active",
@@ -1845,7 +1817,10 @@ async def test_turn_executor_auto_context_search_injection(temp_db: str) -> None
     worker.drain_queue_and_pivot.side_effect = mock_pivot
     worker.queue_empty.return_value = True
 
-    with patch("kesoku.context.get_config", return_value=cfg):
+    with (
+        patch("kesoku.context.get_config", return_value=cfg),
+        patch("kesoku.utils.path.get_config", return_value=cfg),
+    ):
         await executor.process_turn(
             current_msg=active_msg,
             worker=worker,
@@ -1853,38 +1828,37 @@ async def test_turn_executor_auto_context_search_injection(temp_db: str) -> None
         )
 
     captured_contents = [m.content for m in llm.captured_history]
-    # Verify <relevant_historical_context> was injected with dialogue snippet
-    assert any("<relevant_historical_context>" in c for c in captured_contents)
+    # Verify <memory> progressive disclosure block was injected with $MEMORY_DIR path and description
+    assert any("<memory>" in c for c in captured_contents)
+    assert any("$MEMORY_DIR/psyduck.md" in c for c in captured_contents)
     assert any("可达鸭" in c for c in captured_contents)
 
 
 @pytest.mark.asyncio
 async def test_turn_executor_daily_facts_injection(temp_db: str, tmp_path: Any) -> None:
-    """Verify that role facts.md is injected only on the first user message of each day per session."""
+    """Verify that legacy facts.md is no longer injected into user messages."""
     from kesoku.agent.turn_executor import TurnExecutor
     from kesoku.constants import MessageRole
     from kesoku.db import DatabaseManager
 
     DatabaseManager(temp_db).init_tables()
 
-    # Create role directory with preferences.md and facts.md
     roles_dir = tmp_path / "roles"
-    asuka_dir = roles_dir / "asuka"
-    asuka_dir.mkdir(parents=True, exist_ok=True)
-    (asuka_dir / "preferences.md").write_text("Asuka preferences")
-    (asuka_dir / "facts.md").write_text("Asuka重大事件时间表：领养了猫咪Neon")
+    role_dir = roles_dir / "role_a"
+    role_dir.mkdir(parents=True, exist_ok=True)
+    (role_dir / "preferences.md").write_text("Role A preferences")
+    (role_dir / "facts.md").write_text("Legacy facts content that should not be injected")
 
     cfg = KesokuConfig(
         workspace=WorkspaceConfig(db_path=temp_db, roles_dir=str(roles_dir)),
     )
-    cfg.agent.auto_context_search = False  # Isolate facts test
+    cfg.agent.auto_context_search = False
 
     gw = Gateway(context=KesokuContext(config=cfg))
-    await gw.db.set_channel_role("cli", "ch1", "asuka")
-    await gw.create_session("sess_facts", title="Facts Session")
+    await gw.db.set_channel_role("cli", "ch1", "role_a")
+    await gw.create_session("sess_facts", title="Facts Session", role="role_a")
     await gw.db.set_active_session_for_channel("cli", "ch1", "sess_facts")
 
-    # Mock LLM to capture history
     class CaptureLLM(BaseLLM):
         async def generate(
             self,
@@ -1906,20 +1880,15 @@ async def test_turn_executor_daily_facts_injection(temp_db: str, tmp_path: Any) 
     executor = TurnExecutor("sess_facts", gw, tool_runner, turn_logger, context=context)
 
     (tmp_path / "staging").mkdir(parents=True, exist_ok=True)
+    w = MagicMock()
+    type(w).running = PropertyMock(side_effect=[True, False])
 
-    def create_mock_worker() -> MagicMock:
-        w = MagicMock()
-        type(w).running = PropertyMock(side_effect=[True, False])
+    async def mock_pivot(m: Message) -> Message:
+        return m
 
-        async def mock_pivot(m: Message) -> Message:
-            return m
+    w.drain_queue_and_pivot.side_effect = mock_pivot
+    w.queue_empty.return_value = True
 
-        w.drain_queue_and_pivot.side_effect = mock_pivot
-        w.queue_empty.return_value = True
-        return w
-
-    # --- Turn 1: Day 1 (Morning) ---
-    day1_morning = 1786400000.0  # Unix timestamp on Day 1
     msg_day1_1 = Message(
         session_id="sess_facts",
         chatbot_id="cli",
@@ -1928,97 +1897,20 @@ async def test_turn_executor_daily_facts_injection(temp_db: str, tmp_path: Any) 
         role=MessageRole.USER,
         content="早上好！",
         status="pending_agent",
-        timestamp=day1_morning,
+        timestamp=1786400000.0,
     )
     await gw.post(msg_day1_1)
 
     with patch("kesoku.context.get_config", return_value=cfg):
         await executor.process_turn(
             current_msg=msg_day1_1,
-            worker=create_mock_worker(),
+            worker=w,
             session_staging_dir=str(tmp_path / "staging"),
         )
 
     captured_day1_1 = [m.content for m in llm.captured_history]
-    # Verify <facts> was injected on the first turn of Day 1
-    assert any("<facts>\nAsuka重大事件时间表：领养了猫咪Neon\n</facts>" in c for c in captured_day1_1)
-
-    # Post assistant reply for Turn 1
-    reply_1 = Message(
-        session_id="sess_facts",
-        chatbot_id="cli",
-        channel_id="ch1",
-        sender="Kesoku",
-        role=MessageRole.ASSISTANT,
-        content="早安笨蛋！",
-        status="delivered",
-        timestamp=day1_morning + 10,
-    )
-    await gw.post(reply_1)
-
-    # --- Turn 2: Day 1 (Afternoon, same day) ---
-    day1_afternoon = day1_morning + 7200.0  # +2 hours on same day
-    msg_day1_2 = Message(
-        session_id="sess_facts",
-        chatbot_id="cli",
-        channel_id="ch1",
-        sender="u1",
-        role=MessageRole.USER,
-        content="中午吃什么？",
-        status="pending_agent",
-        timestamp=day1_afternoon,
-    )
-    await gw.post(msg_day1_2)
-
-    with patch("kesoku.context.get_config", return_value=cfg):
-        await executor.process_turn(
-            current_msg=msg_day1_2,
-            worker=create_mock_worker(),
-            session_staging_dir=str(tmp_path / "staging"),
-        )
-
-    captured_day1_2 = [m.content for m in llm.captured_history]
-    # Verify the NEW active message in Turn 2 does NOT have <facts> injected
-    last_user_content = [m.content for m in llm.captured_history if m.role == MessageRole.USER][-1]
-    assert "<facts>" not in last_user_content
-
-    # Post assistant reply for Turn 2
-    reply_2 = Message(
-        session_id="sess_facts",
-        chatbot_id="cli",
-        channel_id="ch1",
-        sender="Kesoku",
-        role=MessageRole.ASSISTANT,
-        content="吃便当啦！",
-        status="delivered",
-        timestamp=day1_afternoon + 10,
-    )
-    await gw.post(reply_2)
-
-    # --- Turn 3: Day 2 (Next calendar day) ---
-    day2_morning = day1_morning + 86400.0  # +24 hours, next calendar day
-    msg_day2_1 = Message(
-        session_id="sess_facts",
-        chatbot_id="cli",
-        channel_id="ch1",
-        sender="u1",
-        role=MessageRole.USER,
-        content="第二天早上好！",
-        status="pending_agent",
-        timestamp=day2_morning,
-    )
-    await gw.post(msg_day2_1)
-
-    with patch("kesoku.context.get_config", return_value=cfg):
-        await executor.process_turn(
-            current_msg=msg_day2_1,
-            worker=create_mock_worker(),
-            session_staging_dir=str(tmp_path / "staging"),
-        )
-
-    last_user_content_day2 = [m.content for m in llm.captured_history if m.role == MessageRole.USER][-1]
-    # Verify <facts> WAS injected on the first turn of Day 2
-    assert "<facts>\nAsuka重大事件时间表：领养了猫咪Neon\n</facts>" in last_user_content_day2
+    assert not any("<facts>" in c for c in captured_day1_1)
+    assert not any("Legacy facts content" in c for c in captured_day1_1)
 
 
 @pytest.mark.asyncio
@@ -2149,11 +2041,7 @@ async def test_turn_executor_session_notes_injection_and_tool(temp_db: str, tmp_
     last_user_2 = [m.content for m in llm.captured_history if m.role == MessageRole.USER][-1]
     assert '<context name="notes">\n- 本session只用纯日语交流\n- 当前场景：江之电车厢内\n</context>' in last_user_2
 
-    # 4. Turn 3 (next day, so facts.md is injected): tool-maintained context/*.md files are injected after
-    # instructions and notes, sorted by filename, and before facts.
-    # The single role directory created above.
-    role_dir = next(roles_dir.iterdir())
-    (role_dir / "facts.md").write_text("fact line")
+    # 4. Turn 3: tool-maintained context/*.md files are injected after instructions and notes, sorted by filename.
     context_dir = staging_dir / "context"
     context_dir.mkdir()
     (context_dir / "99-test.md").write_text("今天的暗号是🍊")
@@ -2181,7 +2069,6 @@ async def test_turn_executor_session_notes_injection_and_tool(temp_db: str, tmp_
         last_user_3.index('<context name="notes">'),
         last_user_3.index('<context name="scene">\nlocation: beach\n</context>'),
         last_user_3.index('<context name="test">\n今天的暗号是🍊\n</context>'),
-        last_user_3.index("<facts>\nfact line\n</facts>"),
         last_user_3.index("<current_message"),
     ]
     assert positions == sorted(positions)
@@ -2335,46 +2222,19 @@ def test_is_clicked_option_without_question_block() -> None:
     assert not is_clicked_option("去浅草看花火", "普通回复，没有按钮")
 
 
-def _rag_executor(surrounding: list[Message]) -> TurnExecutor:
-    """TurnExecutor whose DB returns one semantic hit from another session with the given neighbours."""
-    hit = _tmsg(MessageRole.ASSISTANT, "命中消息", 1000.0, session_id="oldsess1")
-    hit.metadata = {"semantic_score": 0.95, "similarity_score": 1.2}
-    ctx = MagicMock()
-    ctx.db.search_role_messages_semantic = AsyncMock(return_value=[hit])
-    ctx.db.get_surrounding_messages = AsyncMock(return_value=surrounding)
-    return TurnExecutor("cursess1", gateway=MagicMock(), tool_runner=MagicMock(), context=ctx)
-
-
 async def test_rag_snippets_strip_question_blocks() -> None:
-    """Retrieved snippets never re-inject historical question stems/options."""
-    ex = _rag_executor(
-        [
-            _tmsg(MessageRole.USER, "今天去哪里玩", 990.0, session_id="oldsess1"),
-            _tmsg(MessageRole.ASSISTANT, f"去神社吧！\n{OLD_Q_BLOCK}", 1000.0, session_id="oldsess1"),
-        ]
-    )
-    out = await ex._retrieve_auto_search_context(
-        role="role_a", query_text="今天去哪里玩", current_session_id="cursess1"
-    )
-    assert "<relevant_historical_context>" in out
+    """sanitize_rag_snippet_line never re-injects historical question stems/options."""
+    out = sanitize_rag_snippet_line("Agent", f"去神社吧！\n{OLD_Q_BLOCK}")
+    assert "去神社吧！" in out
     assert "香槟软木塞" not in out and "下一步怎么做" not in out and "||" not in out
 
 
 async def test_rag_snippets_truncate_long_agent_lines() -> None:
     """Long Agent lines are truncated; user lines stay readable."""
-    ex = _rag_executor(
-        [
-            _tmsg(MessageRole.USER, "今天去哪里玩", 990.0, session_id="oldsess1"),
-            _tmsg(MessageRole.ASSISTANT, "像爆米花一样膨胀起来，" * 300, 1000.0, session_id="oldsess1"),
-        ]
-    )
-    out = await ex._retrieve_auto_search_context(
-        role="role_a", query_text="今天去哪里玩", current_session_id="cursess1"
-    )
-    agent_lines = [ln for ln in out.splitlines() if ln.strip().startswith("Agent")]
-    assert agent_lines
-    assert all(len(ln) <= 500 for ln in agent_lines)
-    assert "今天去哪里玩" in out and len(out) < 2000
+    agent_out = sanitize_rag_snippet_line("Agent", "像爆米花一样膨胀起来，" * 300)
+    user_out = sanitize_rag_snippet_line("User", "今天去哪里玩")
+    assert len(agent_out) <= 500
+    assert "今天去哪里玩" in user_out
 
 
 async def _inject_executor(tmp_path: Path, session_role: str | None, channel_role: str | None) -> TurnExecutor:

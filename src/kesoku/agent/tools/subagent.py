@@ -3,7 +3,7 @@
 from kesoku.agent.tools.registry import ToolContext, default_registry
 from kesoku.config import get_config
 
-_NEVER_ALLOWED = frozenset({"delegate_subagent", "chat_search", "view_message"})
+_NEVER_ALLOWED = frozenset({"delegate_subagent"})
 
 
 @default_registry.register

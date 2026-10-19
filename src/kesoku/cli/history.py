@@ -1,6 +1,7 @@
 """History and context inspection CLI commands for Kesoku."""
 
 import asyncio
+import os
 import sys
 import time
 from typing import Annotated
@@ -8,7 +9,6 @@ from typing import Annotated
 import typer
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from kesoku.agent.history import build_history
@@ -112,131 +112,90 @@ def history_search(
     config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
     limit: Annotated[int, typer.Option("-l", "--limit", help="Max results to return")] = 20,
 ) -> None:
-    """Search chat history semantically or with keywords."""
+    """Search role Markdown memories ($MEMORY_DIR) semantically or with keywords."""
+    from kesoku.agent.memory_store import search_role_memories
+
     cfg = load_config(config)
     db = DatabaseManager(cfg.workspace.db_path)
+    db.verify_db()
 
-    async def run():
-        from kesoku.context import KesokuContext
-        from kesoku.gateway.gateway import Gateway
-        gw = Gateway(context=KesokuContext(config=cfg, db=db))
+    threshold = min(0.45, cfg.agent.search_threshold)
+    matches = search_role_memories(
+        db,
+        role,
+        query,
+        limit=limit,
+        min_score=threshold,
+    )
 
-        threshold = cfg.agent.search_threshold
-        messages = await gw.db.search_role_messages_semantic(
-            role,
-            query,
-            limit=limit,
-            threshold=threshold,
-        )
+    if not matches:
+        console.print(f"[yellow]No memory files matching '{query}' found for role '{role}'.[/yellow]")
+        return
 
-        if not messages:
-            console.print(f"[yellow]No messages matching '{query}' found for role '{role}'.[/yellow]")
-            return
+    is_wildcard = not query or query.strip() == "*"
+    title = f"Memory Search Results for '{query}' (Role: {role})"
+    table = Table(title=title, show_header=True, header_style="bold cyan")
+    table.add_column("Updated", style="dim")
+    table.add_column("Path", style="bold green")
+    if not is_wildcard:
+        table.add_column("Score", style="yellow")
+    table.add_column("Description")
 
-        is_wildcard = not query or query.strip() == "*"
-        title = f"Search Results for '{query}' (Role: {role})"
-        table = Table(title=title, show_header=True, header_style="bold cyan")
-        table.add_column("Time", style="dim")
-        table.add_column("Session ID", style="bold green")
-        table.add_column("Sender", style="magenta")
+    for m in matches:
+        time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m.mtime))
+        row_data = [time_str, m.memory_path]
         if not is_wildcard:
-            table.add_column("Score", style="yellow")
-        table.add_column("Content")
+            row_data.append(f"{m.score:.4f}")
+        row_data.append(m.description)
+        table.add_row(*row_data)
 
-        from kesoku.utils.text import truncate_middle
-        for m in messages:
-            time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m.timestamp))
-            score_str = ""
-            if "similarity_score" in m.metadata and not is_wildcard:
-                score_str = f"{m.metadata['similarity_score']:.4f}"
-
-            # Extract content context if available
-            parts = []
-            if m.metadata.get("prev_chunk"):
-                parts.append(f"... {m.metadata['prev_chunk']}")
-            parts.append(m.content)
-            if m.metadata.get("post_chunk"):
-                parts.append(f"{m.metadata['post_chunk']} ...")
-            combined_content = " ".join(parts)
-            truncated_content = truncate_middle(combined_content, 150).replace("\n", " ")
-
-            row_data = [time_str, m.session_id, f"{m.sender} ({m.role})"]
-            if not is_wildcard:
-                row_data.append(score_str)
-            row_data.append(truncated_content)
-            table.add_row(*row_data)
-
-        console.print(table)
-
-    asyncio.run(run())
+    console.print(table)
 
 
 @history_app.command("rebuild-index")
 def history_rebuild_index(
     config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
+    role: Annotated[str | None, typer.Option("-r", "--role", help="Optional specific role to re-index")] = None,
     force: Annotated[
-        bool, typer.Option("--force", help="Force rebuild of all embeddings, not just missing ones")
+        bool, typer.Option("--force", help="Force rebuild of all memory embeddings, not just modified files")
     ] = False,
 ) -> None:
-    """Generate and store embeddings for all unindexed messages."""
+    """Synchronize and generate embeddings for role Markdown memory files ($MEMORY_DIR)."""
+    from kesoku.agent.memory_store import sync_role_memories
+    from kesoku.utils.path import PathResolver
+
     cfg = load_config(config)
     db = DatabaseManager(cfg.workspace.db_path)
     db.verify_db()
 
     try:
         if force:
-            console.print("[bold yellow]Force mode enabled. Clearing all existing message embeddings...[/bold yellow]")
-            with db.connection_provider.connection() as conn:
-                with conn:
-                    conn.execute("DELETE FROM message_chunks")
-            console.print("[bold green]Existing message embeddings cleared.[/bold green]")
+            console.print("[bold yellow]Force mode enabled. Clearing existing memory embeddings...[/bold yellow]")
+            db.clear_role_memory_index(role)
+            console.print("[bold green]Existing memory embeddings cleared.[/bold green]")
 
-        unindexed_messages = db.get_unindexed_messages()
-        total_msg = len(unindexed_messages)
+        roles_dir = PathResolver.resolve(cfg.workspace.roles_dir)
+        roles_to_sync: list[str] = []
+        if role:
+            roles_to_sync = [role]
+        elif os.path.isdir(roles_dir):
+            roles_to_sync = sorted(
+                entry.name
+                for entry in os.scandir(roles_dir)
+                if entry.is_dir() and not entry.name.startswith(".")
+            )
+        if not roles_to_sync:
+            roles_to_sync = ["default"]
 
-        if total_msg == 0:
-            console.print("[bold green]All messages are already fully indexed![/bold green]")
-            return
+        total_updated = 0
+        for r_name in roles_to_sync:
+            total_updated += sync_role_memories(db, r_name, force=False)
 
-        console.print(f"Found [bold]{total_msg}[/bold] unindexed messages.")
-        console.print("Initializing local embedding model (fastembed)...")
-        from kesoku.utils import embedding
-        embedding.get_embedding_model()
-
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            TextColumn("({task.completed}/{task.total})"),
-        ) as progress:
-            task_msg = progress.add_task("[green]Indexing messages...", total=total_msg)
-            batch_size = 32
-            for i in range(0, total_msg, batch_size):
-                batch = unindexed_messages[i : i + batch_size]
-                chunks_to_embed = []
-                for msg in batch:
-                    from kesoku.utils.text import chunk_message_text
-                    chunks = chunk_message_text(msg["content"], threshold=80)
-                    for idx, chunk_content in enumerate(chunks):
-                        chunks_to_embed.append((msg["id"], idx, chunk_content))
-
-                if chunks_to_embed:
-                    texts = [c[2] for c in chunks_to_embed]
-                    embs = embedding.get_embeddings(texts)
-
-                    chunks_data = []
-                    for (msg_id, idx, content), emb in zip(chunks_to_embed, embs):
-                        emb_bytes = embedding.vector_to_bytes(emb)
-                        chunks_data.append((msg_id, idx, content, emb_bytes))
-
-                    db.save_message_chunks_batch(chunks_data)
-
-                progress.advance(task_msg, advance=len(batch))
-
-        console.print("[bold green]✓ Index rebuilding completed successfully![/bold green]")
+        console.print(
+            f"[bold green]✓ Memory index rebuild completed ({total_updated} file(s) updated)![/bold green]"
+        )
     except Exception as e:
-        console.print(f"[bold red]Error rebuilding index: {e}[/bold red]")
+        console.print(f"[bold red]Error rebuilding memory index: {e}[/bold red]")
         sys.exit(1)
 
 

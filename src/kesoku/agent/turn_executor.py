@@ -21,6 +21,7 @@ from kesoku.agent.history import (
 )
 from kesoku.agent.hooks import run_post_tool_use_hooks, run_stop_hooks
 from kesoku.agent.llm import BaseLLM, LLMResponse
+from kesoku.agent.memory_store import format_ambient_memory_block, render_context_query, search_role_memories
 from kesoku.agent.repo_rules import RepoRulesManager
 from kesoku.agent.state_snapshot import render_repo_rules, render_running_jobs, render_staging_artifacts
 from kesoku.agent.tool_runner import ToolRunner
@@ -192,21 +193,6 @@ class TurnExecutor:
         else:
             return True
         return False
-
-    async def _is_first_message_of_day(self, history: list[Message], current_msg: Message) -> bool:
-        """Determine if current_msg is the first user message of the calendar day for this session."""
-        prior_user_msgs = [
-            m for m in history
-            if m.id != current_msg.id and m.role == MessageRole.USER
-        ]
-        if not prior_user_msgs:
-            return True
-
-        last_user_msg = prior_user_msgs[-1]
-        current_date = datetime.datetime.fromtimestamp(current_msg.timestamp).astimezone().date()
-        last_date = datetime.datetime.fromtimestamp(last_user_msg.timestamp).astimezone().date()
-
-        return current_date != last_date
 
     def _resolve_llm(self, current_msg: Message) -> BaseLLM:
         """Resolve the appropriate LLM instance for the current message, applying overrides.
@@ -650,7 +636,6 @@ class TurnExecutor:
         # 2. Read role-based preferences.md every turn
         inject_preferences = True
         instructions_prefix = ""
-        facts_prefix = ""
         if active_role:
             roles_dir = self.context.config.workspace.roles_dir
             if not os.path.isabs(roles_dir) and self.context.config.agent_working_dir:
@@ -665,23 +650,6 @@ class TurnExecutor:
                             instructions_prefix = f"<instructions>\n{role_prefs_content}\n</instructions>\n"
                     except Exception as e:
                         logger.warning(f"Failed to read preferences.md for role '{active_role}': {e}")
-
-            # 2.1. Read role-based facts.md for the first message of the day in this session
-            is_first_msg_of_day = await self._is_first_message_of_day(history, current_msg)
-            if is_first_msg_of_day:
-                facts_path = os.path.join(roles_dir, active_role, "facts.md")
-                if await async_exists(facts_path):
-                    try:
-                        role_facts_content = await async_read_text_file(facts_path)
-                        role_facts_content = role_facts_content.strip()
-                        if role_facts_content:
-                            facts_prefix = f"<facts>\n{role_facts_content}\n</facts>\n"
-                            logger.info(
-                                f"Injected facts.md for role '{active_role}' into session '{self.session_id}' "
-                                f"(first message of the day)"
-                            )
-                    except Exception as e:
-                        logger.warning(f"Failed to read facts.md for role '{active_role}': {e}")
 
         # 2.2. Read per-turn context blocks every turn: pinned notes ($STAGING_DIR/notes.md) first, then
         # every $STAGING_DIR/context/*.md in filename order, each rendered as <context name="...">.
@@ -707,39 +675,35 @@ class TurnExecutor:
         # (if Bootstrap)
         full_prefix = ""
         if is_bootstrap:
-            # Only advertise history tools that are not disabled via agent.disabled_tools.
             disabled_tools = set(self.context.config.agent.disabled_tools)
             hints = []
-            if "chat_search" not in disabled_tools:
-                hints.append("- Use `chat_search(query)` to search past chat messages for this role.")
-            if "view_message" not in disabled_tools:
-                hints.append("- Use `view_message(message_id)` to inspect full historical messages when needed.")
+            if "memory_search" not in disabled_tools:
+                hints.append(
+                    "- Use `memory_search(query)` to search long-term Markdown memories in `$MEMORY_DIR` for this role."
+                )
             lines = ['<background_context type="sync_guidelines">', *hints, "</background_context>"] if hints else []
             full_prefix = "\n".join(lines) + "\n" if lines else ""
 
-        # 4. Prepend Auto Context Search (if enabled)
+        # 4. Prepend Ambient Progressive-Disclosure Memory Index (if enabled)
         augmented_context_prefix = ""
         cfg = self.context.config
         if cfg.agent.auto_context_search and active_role:
             raw_query = latest_user_msg.content or ""
-            # Guardrails: skip very short queries, empty strings, or pure greetings. Also skip when the user
-            # merely clicked/picked an option of the previous question: retrieval on model-written option text
-            # only re-injects old look-alike scenes (self-imitation loop).
+            # Skip when the user merely clicked/picked an option of the previous question.
             clicked_option = is_clicked_option(raw_query, last_assistant_text)
             if clicked_option:
-                logger.info("Skipping auto context search: user message is a clicked option of the last question")
-            if len(raw_query.strip()) >= 6 and not clicked_option:
+                logger.info("Skipping ambient memory search: user message is a clicked option of the last question")
+            elif len(raw_query.strip()) >= 2:
                 try:
+                    context_query = render_context_query(history, latest_user_msg, max_turns=2, max_chars=2000)
                     augmented_context_prefix = await self._retrieve_auto_search_context(
                         role=active_role,
-                        query_text=raw_query.strip(),
-                        current_session_id=self.session_id,
-                        threshold=cfg.agent.auto_context_search_threshold,
+                        query_text=context_query or raw_query.strip(),
                         semantic_min=cfg.agent.auto_context_search_semantic_min,
                         limit=cfg.agent.auto_context_search_limit,
                     )
                 except Exception as se:
-                    logger.warning(f"Failed to retrieve auto search context: {se}")
+                    logger.warning(f"Failed to retrieve ambient memory context: {se}")
 
         msg_idx = history.index(latest_user_msg)
         copied_msg = latest_user_msg.model_copy()
@@ -756,7 +720,6 @@ class TurnExecutor:
         copied_msg.content = (
             f"{instructions_prefix}"
             f"{context_blocks_prefix}"
-            f"{facts_prefix}"
             f"{full_prefix}"
             f"{augmented_context_prefix}"
             f'<current_message from="{sender_name}" time="{time_str}" timezone="{tz_name}">\n'
@@ -792,86 +755,45 @@ class TurnExecutor:
             self.session_id,
         )
 
+    def _resolve_memories_dir(self, role: str) -> str:
+        """Resolve the memories directory path for `role` synchronously."""
+        roles_dir = self.context.config.workspace.roles_dir
+        if not os.path.isabs(roles_dir) and self.context.config.agent_working_dir:
+            roles_dir = os.path.join(self.context.config.agent_working_dir, roles_dir)
+        return os.path.abspath(os.path.join(roles_dir, role or "default", "memories"))
+
     async def _retrieve_auto_search_context(
         self,
         role: str,
         query_text: str,
         current_session_id: str | None = None,
-        threshold: float = 1.13,
-        semantic_min: float = 0.58,
-        limit: int = 3,
+        threshold: float = 0.50,
+        semantic_min: float = 0.50,
+        limit: int = 5,
         window_size: int = 1,
     ) -> str:
-        """Search relevant past messages for role and build augmented context snippet."""
-        raw_hits = await self.context.db.search_role_messages_semantic(
-            role=role,
-            query_text=query_text,
-            limit=limit * 2,
-            threshold=threshold,
+        """Search relevant Markdown memories for the active role and render a `<memory>` block."""
+        _ = (current_session_id, threshold, window_size)
+        sync_db = getattr(self.context.db, "_sync", getattr(self.context.db, "sync_db", self.context.db))
+        memories_dir = self._resolve_memories_dir(role)
+
+        matches = await asyncio.to_thread(
+            search_role_memories,
+            sync_db,
+            role,
+            query_text,
+            limit=limit,
+            min_score=semantic_min,
+            memories_dir=memories_dir,
         )
-
-        if not raw_hits:
-            return ""
-
-        valid_hits = []
-        for hit in raw_hits:
-            if current_session_id and hit.session_id == current_session_id:
-                continue
-            sem_score = hit.metadata.get("semantic_score", 0.0)
-            is_literal = query_text.lower() in hit.content.lower()
-            if is_literal or sem_score >= semantic_min:
-                valid_hits.append(hit)
-
-        if not valid_hits:
-            return ""
-
-        valid_hits = valid_hits[:limit]
-        snippets: list[str] = []
-        seen_msg_ids: set[str] = set()
-
-        for hit in valid_hits:
-            score = hit.metadata.get("similarity_score", 0.0)
-            context_msgs = await self.context.db.get_surrounding_messages(
-                session_id=hit.session_id,
-                target_timestamp=hit.timestamp,
-                window_before=window_size,
-                window_after=window_size,
-            )
-
-            dialogue_lines: list[str] = []
-            for msg in context_msgs:
-                if msg.id in seen_msg_ids:
-                    continue
-                seen_msg_ids.add(msg.id)
-                speaker = "User" if msg.role == MessageRole.USER else "Agent"
-                msg_time = datetime.datetime.fromtimestamp(msg.timestamp).astimezone()
-                time_str = msg_time.strftime("%Y-%m-%d %H:%M:%S")
-                snippet_text = sanitize_rag_snippet_line(speaker, msg.content or "")
-                dialogue_lines.append(f"  {speaker} [{time_str}]: {snippet_text}")
-
-            if dialogue_lines:
-                snippet_block = (
-                    f'<dialogue_snippet session_id="{hit.session_id[:8]}" relevance_score="{score:.2f}">\n'
-                    + "\n".join(dialogue_lines)
-                    + "\n</dialogue_snippet>"
-                )
-                snippets.append(snippet_block)
-
-        if not snippets:
+        if not matches:
             return ""
 
         logger.info(
-            f"Auto-injected {len(snippets)} historical dialogue snippets for query: '{query_text[:40]}...'"
+            f"Ambient-injected {len(matches)} memory file descriptions for role '{role}' "
+            f"(query: '{query_text[:40]}...')"
         )
-        return (
-            "<relevant_historical_context>\n"
-            "<!-- The following past conversation snippets are automatically retrieved based on semantic similarity "
-            "to the user message. They are HISTORICAL REFERENCE ONLY and may be outdated: any requirements, rules, "
-            "or preferences in them are superseded by the current <instructions>, <context name=\"notes\"> and the "
-            "most recent messages. Do NOT imitate their formatting or writing style. -->\n"
-            + "\n\n".join(snippets)
-            + "\n</relevant_historical_context>\n"
-        )
+        return format_ambient_memory_block(matches)
 
     def _ensure_repo_rules_manager(
         self,

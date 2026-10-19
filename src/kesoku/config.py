@@ -157,24 +157,27 @@ class AgentConfig(BaseModel):
         default_factory=list,
         description=(
             "Names of registered tools to hide from the LLM and refuse to execute "
-            "(e.g. ['chat_search', 'view_message'])."
+            "(e.g. ['memory_search', 'web_search'])."
         ),
     )
     auto_context_search: bool = Field(
         default=True,
-        description="Whether to automatically search historical conversations and augment context for relevant queries",
+        description=(
+            "Whether to automatically search role Markdown memories ($MEMORY_DIR) and inject a progressive-disclosure "
+            "<memory> block (paths and descriptions only) before <current_message>"
+        ),
     )
     auto_context_search_threshold: float = Field(
-        default=1.13,
-        description="Total score threshold (similarity + recency) for auto context retrieval",
+        default=0.50,
+        description="Deprecated alias; kept for config.toml compatibility",
     )
     auto_context_search_semantic_min: float = Field(
-        default=0.58,
-        description="Minimum pure semantic similarity score threshold for auto context retrieval",
+        default=0.50,
+        description="Minimum relevance score (MAX chunk cosine + lexical boost) for ambient <memory> disclosure",
     )
     auto_context_search_limit: int = Field(
-        default=3,
-        description="Maximum number of historical dialogue snippets to inject into context",
+        default=5,
+        description="Maximum number of memory file descriptions to inject in the ambient <memory> block",
     )
     context_dir_max_chars: int = Field(
         default=20000,

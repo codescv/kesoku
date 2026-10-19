@@ -294,8 +294,8 @@ async def test_resolve_or_create_session_updates_prompt(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_role_switching_session_isolation(tmp_path) -> None:
-    """Test that switching roles in a channel isolates the session contexts and grep searches."""
-    from kesoku.agent.tools import chat_search
+    """Test that switching roles in a channel isolates the session contexts and memory searches."""
+    from kesoku.agent.tools import memory_search
     from kesoku.agent.tools.registry import ToolContext
     from kesoku.config import AgentConfig, KesokuConfig, WorkspaceConfig
     from kesoku.constants import MessageRole, MessageStatus, MessageType
@@ -310,12 +310,18 @@ async def test_role_switching_session_isolation(tmp_path) -> None:
     # Create dummy roles dir
     roles_dir = tmp_path / "roles"
     roles_dir.mkdir()
-    (roles_dir / "default").mkdir()
-    (roles_dir / "asuka").mkdir()
+    (roles_dir / "default" / "memories").mkdir(parents=True)
+    (roles_dir / "writer" / "memories").mkdir(parents=True)
 
-    # Create intro.md for each
+    # Create intro.md and a role-specific memory file for each
     (roles_dir / "default" / "intro.md").write_text("Default role description")
-    (roles_dir / "asuka" / "intro.md").write_text("Asuka role description")
+    (roles_dir / "writer" / "intro.md").write_text("Writer role description")
+    (roles_dir / "default" / "memories" / "def.md").write_text(
+        "---\ndescription: Hello default memory content\n---\n- Default fact\n"
+    )
+    (roles_dir / "writer" / "memories" / "wri.md").write_text(
+        "---\ndescription: Hello writer memory content\n---\n- Writer fact\n"
+    )
 
     mock_cfg = KesokuConfig(
         workspace=WorkspaceConfig(sessions_dir=str(tmp_path / "sessions"), db_path=temp_db, roles_dir=str(roles_dir)),
@@ -326,6 +332,7 @@ async def test_role_switching_session_isolation(tmp_path) -> None:
     with (
         patch("kesoku.gateway.chatbot.base.get_config", return_value=mock_cfg),
         patch("kesoku.agent.prompt.get_config", return_value=mock_cfg),
+        patch("kesoku.utils.path.get_config", return_value=mock_cfg),
     ):
         mock_gateway = Gateway(context=KesokuContext(config=mock_cfg, db=db_mgr))
         chatbot = MockChatbot(chatbot_id="mock_bot", gateway=mock_gateway)
@@ -356,33 +363,33 @@ async def test_role_switching_session_isolation(tmp_path) -> None:
         )
         await mock_gateway.post(msg1)
 
-        # 2. Switch role to 'asuka'
-        status_msg = await chatbot.update_role_by_channel("c1", "asuka")
-        assert "changed to **`asuka`**" in status_msg
+        # 2. Switch role to 'writer'
+        status_msg = await chatbot.update_role_by_channel("c1", "writer")
+        assert "changed to **`writer`**" in status_msg
 
-        # Resolve session under the new channel role 'asuka'
+        # Resolve session under the new channel role 'writer'
         dto2 = InboundMessageDTO(
             sender_id="user1",
             channel_id="c1",
-            text="Hello asuka",
+            text="Hello writer",
             timestamp=1005.0,
         )
-        session_asuka, created2 = await chatbot._resolve_or_create_session(dto2)
+        session_writer, created2 = await chatbot._resolve_or_create_session(dto2)
         # Because update_role_by_channel already created and bound the session, created2 should be False
         assert created2 is False
-        assert session_asuka.id != session_default.id
-        assert session_asuka.role_name == "asuka"
+        assert session_writer.id != session_default.id
+        assert session_writer.role_name == "writer"
 
-        # Save a message to asuka session
+        # Save a message to writer session
         msg2 = Message(
             id="m2",
-            session_id=session_asuka.id,
+            session_id=session_writer.id,
             chatbot_id="mock_bot",
             channel_id="c1",
             sender="user1",
             role=MessageRole.USER,
             type=MessageType.TEXT,
-            content="Hello asuka message content",
+            content="Hello writer message content",
             timestamp=1005.0,
             status=MessageStatus.PROCESSED,
         )
@@ -390,11 +397,11 @@ async def test_role_switching_session_isolation(tmp_path) -> None:
 
         # 3. Simulate role switch directly in DB (Scenario B: e.g. third party tool updates channel role)
         # We manually change c1 role to 'default' in DB, but do NOT update channel_sessions
-        # (so active session remains session_asuka)
+        # (so active session remains session_writer)
         await mock_gateway.db.set_channel_role("mock_bot", "c1", "default")
 
         # Resolve session under 'default' channel role.
-        # Since active session is session_asuka (role: 'asuka'), it should detect mismatch
+        # Since active session is session_writer (role: 'writer'), it should detect mismatch
         # and switch to last default session (session_default)!
         dto3 = InboundMessageDTO(
             sender_id="user1",
@@ -414,19 +421,19 @@ async def test_role_switching_session_isolation(tmp_path) -> None:
             session_workspace="test_ws",
             gateway=mock_gateway,
         )
-        res_default = await chat_search(query="*", context=ctx_default)
-        assert "Hello default message content" in res_default
-        assert "Hello asuka message content" not in res_default  # Isolate check!
+        res_default = await memory_search(query="*", context=ctx_default)
+        assert "Hello default memory content" in res_default
+        assert "Hello writer memory content" not in res_default  # Isolate check!
 
-        # 5. Perform memory_search under 'asuka' role
-        ctx_asuka = ToolContext(
-            session_id=session_asuka.id,
+        # 5. Perform memory_search under 'writer' role
+        ctx_writer = ToolContext(
+            session_id=session_writer.id,
             session_workspace="test_ws",
             gateway=mock_gateway,
         )
-        res_asuka = await chat_search(query="*", context=ctx_asuka)
-        assert "Hello asuka message content" in res_asuka
-        assert "Hello default message content" not in res_asuka  # Isolate check!
+        res_writer = await memory_search(query="*", context=ctx_writer)
+        assert "Hello writer memory content" in res_writer
+        assert "Hello default memory content" not in res_writer  # Isolate check!
 
 
 @pytest.mark.asyncio

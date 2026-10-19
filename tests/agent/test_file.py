@@ -596,3 +596,36 @@ def test_update_file_notes_create_twice_rejected(staging_cfg) -> None:
     assert res.startswith("Error")
     notes = staging_cfg / "sessions" / "sess_z" / "notes.md"
     assert notes.read_text(encoding="utf-8") == "- rule A"
+
+
+@pytest.mark.parametrize("path", ["$MEMORY_DIR/topics/python.md", "${MEMORY_DIR}/topics/python.md"])
+def test_read_and_update_file_expands_memory_dir(tmp_path, path: str) -> None:
+    """$MEMORY_DIR expands to the active role's memories directory for both update_file and read_file."""
+    from unittest.mock import MagicMock
+
+    cfg = get_config()
+    old_awd, old_roles = cfg.agent_working_dir, cfg.workspace.roles_dir
+    cfg.agent_working_dir = str(tmp_path / "awd")
+    cfg.workspace.roles_dir = str(tmp_path / "roles")
+    os.makedirs(cfg.agent_working_dir, exist_ok=True)
+    try:
+        mock_gw = MagicMock()
+        mock_sess = MagicMock()
+        mock_sess.role_name = "coder"
+        mock_gw.db._sync.get_session.return_value = mock_sess
+
+        ctx = ToolContext(session_id="sess_mem", session_workspace="sess_mem", gateway=mock_gw)
+        content = "---\ndescription: Python conventions\n---\n- Use uv run\n"
+        res = update_file(path, None, content, context=ctx)
+        assert res.startswith("Success"), res
+
+        target = tmp_path / "roles" / "coder" / "memories" / "topics" / "python.md"
+        assert target.exists()
+        assert target.read_text(encoding="utf-8") == content
+
+        read_out = read_file(path, context=ctx)
+        assert "description: Python conventions" in read_out
+        assert "- Use uv run" in read_out
+    finally:
+        cfg.agent_working_dir, cfg.workspace.roles_dir = old_awd, old_roles
+

@@ -808,75 +808,54 @@ def test_cli_history_show(tmp_path: Any) -> None:
 
 
 def test_cli_history_search(tmp_path: Any, monkeypatch: Any) -> None:
-    """Test 'kesoku history search' subcommand."""
-    from kesoku.constants import MessageRole, MessageStatus, MessageType
-    from kesoku.db import DatabaseManager, Message, Session
+    """Test 'kesoku history search' subcommand on role Markdown memories."""
     runner.invoke(app, ["init", "-w", str(tmp_path)])
     config_path = tmp_path / "config.toml"
-    db_path = tmp_path / "kesoku.db"
-
-    db = DatabaseManager(str(db_path))
 
     # Mock embedding to return dummy vector
     def mock_get_embedding(text: str) -> list[float]:
         return [0.1] * 384
+
     monkeypatch.setattr("kesoku.utils.embedding.get_embedding", mock_get_embedding)
     monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", lambda texts: [[0.1] * 384 for _ in texts])
 
-    sess = Session(id="sess_123", title="Test Session", created_at=100.0, updated_at=200.0, role_name="coder")
-    db.create_session(sess)
-    msg = Message(
-        id="m1",
-        session_id="sess_123",
-        chatbot_id="cli",
-        channel_id="cli_local",
-        sender="User",
-        role=MessageRole.USER,
-        type=MessageType.TEXT,
-        content="findme",
-        timestamp=150.0,
-        status=MessageStatus.PROCESSED,
+    mem_dir = tmp_path / "roles" / "coder" / "memories"
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    (mem_dir / "note_123.md").write_text(
+        "---\ndescription: Special findme note\n---\n- Content with findme\n",
+        encoding="utf-8",
     )
-    db.save_message(msg) # This will index it because of mock
 
     # Search for "findme"
     result = runner.invoke(app, ["history", "search", "findme", "-r", "coder", "-c", str(config_path)])
     assert result.exit_code == 0
     output = strip_ansi(result.stdout)
     assert "findme" in output
-    assert "sess_123" in output
+    assert "note_123.md" in output
 
 
 def test_cli_history_rebuild_index(tmp_path: Any, monkeypatch: Any) -> None:
-    """Test 'kesoku history rebuild-index' subcommand."""
+    """Test 'kesoku history rebuild-index' subcommand for role Markdown memories."""
     from kesoku.db import DatabaseManager
+
     runner.invoke(app, ["init", "-w", str(tmp_path)])
     config_path = tmp_path / "config.toml"
     db_path = tmp_path / "kesoku.db"
 
+    mem_dir = tmp_path / "roles" / "coder" / "memories"
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    (mem_dir / "unindexed.md").write_text(
+        "---\ndescription: Unindexed memory file\n---\n- Some fact\n",
+        encoding="utf-8",
+    )
+
     db = DatabaseManager(str(db_path))
-
-    # Insert a message directly via SQL to bypass automatic indexing
-    with db.connection_provider.connection() as conn:
-        with conn:
-            conn.execute(
-                """
-                INSERT INTO messages (
-                    id, session_id, chatbot_id, channel_id, sender, role, type,
-                    content, metadata, timestamp, status
-                ) VALUES (
-                    'm_unindexed', 'sess_123', 'cli', 'cli_local', 'User', 'user', 'text',
-                    'Unindexed message content', '{}', 150.0, 'processed'
-                )
-                """
-            )
-
-    # Verify it is unindexed
-    assert len(db.get_unindexed_messages()) == 1
+    assert len(db.get_memory_files_by_role("coder")) == 0
 
     # Mock embedding
     def mock_get_embedding(text: str) -> list[float]:
         return [0.1] * 384
+
     monkeypatch.setattr("kesoku.utils.embedding.get_embedding", mock_get_embedding)
     monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", lambda texts: [[0.1] * 384 for _ in texts])
 
@@ -884,15 +863,14 @@ def test_cli_history_rebuild_index(tmp_path: Any, monkeypatch: Any) -> None:
     result = runner.invoke(app, ["history", "rebuild-index", "-c", str(config_path)])
     assert result.exit_code == 0
     output = strip_ansi(result.stdout)
-    assert "Found 1 unindexed messages" in output
-    assert "Index rebuilding completed successfully" in output
+    assert "Memory index rebuild completed" in output
 
     # Verify it is now indexed
-    assert len(db.get_unindexed_messages()) == 0
+    assert len(db.get_memory_files_by_role("coder")) == 1
 
     # Test force rebuild
     result_force = runner.invoke(app, ["history", "rebuild-index", "-c", str(config_path), "--force"])
     assert result_force.exit_code == 0
-    assert "Force mode enabled" in strip_ansi(result_force.stdout)
+    assert "Memory index rebuild completed" in strip_ansi(result_force.stdout)
 
 

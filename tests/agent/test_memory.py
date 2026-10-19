@@ -1,4 +1,4 @@
-"""Unit tests for the Chat History Search and Message tools."""
+"""Unit tests for the Markdown Role Memory Store, Progressive Disclosure, and memory_search tool."""
 
 import time
 
@@ -7,330 +7,314 @@ import pytest
 import kesoku.agent.tools
 import kesoku.agent.tools.memory
 from kesoku.agent.history import TRUNCATED_ARG_TOOLS
+from kesoku.agent.memory_store import (
+    MemoryMatch,
+    chunk_memory_markdown,
+    format_ambient_memory_block,
+    parse_memory_frontmatter,
+    render_context_query,
+    search_role_memories,
+    sync_role_memories,
+)
 from kesoku.agent.tools import (
     ToolContext,
-    chat_search,
     default_registry,
-    view_message,
+    memory_search,
 )
 from kesoku.config import KesokuConfig, WorkspaceConfig
-from kesoku.constants import MessageRole, MessageStatus, MessageType
+from kesoku.constants import MessageRole, MessageType
 from kesoku.context import KesokuContext
 from kesoku.db import DatabaseManager, Message, Session
 
 
-@pytest.mark.asyncio
-async def test_view_message_tool(tmp_path) -> None:
-    """Test that view_message retrieves full message details successfully."""
-    from kesoku.gateway.gateway import Gateway
+def test_parse_memory_frontmatter() -> None:
+    """Verify frontmatter description extraction and body fallbacks."""
+    raw_with_fm = (
+        "---\n"
+        "description: Neon the cat adoption date and favorite snacks\n"
+        "---\n\n"
+        "# Pet Profile\n"
+        "- Adopted on 2026-05-01\n"
+    )
+    desc, body = parse_memory_frontmatter(raw_with_fm)
+    assert desc == "Neon the cat adoption date and favorite snacks"
+    assert body.startswith("# Pet Profile")
 
-    temp_db = str(tmp_path / "test_view_msg.db")
-    db = DatabaseManager(temp_db)
+    # Multi-line YAML block scalar
+    raw_multiline = (
+        "---\n"
+        "description: >-\n"
+        "  Multi-line description\n"
+        "  for testing\n"
+        "---\n"
+        "Body text"
+    )
+    desc_multi, body_multi = parse_memory_frontmatter(raw_multiline)
+    assert desc_multi == "Multi-line description for testing"
+    assert body_multi == "Body text"
+
+    # Fallback to first Markdown heading when frontmatter is absent
+    raw_no_fm = "# Kamakura Trip Notes\n\nVisited Enoshima aquarium."
+    desc_no_fm, body_no_fm = parse_memory_frontmatter(raw_no_fm)
+    assert desc_no_fm == "Kamakura Trip Notes"
+    assert "Visited Enoshima aquarium." in body_no_fm
+
+
+def test_chunk_memory_markdown_breadcrumbs() -> None:
+    """Verify structural Markdown chunking preserves ancestor heading breadcrumbs and ignores code comments."""
+    body = (
+        "# Architecture\n"
+        "Top-level intro.\n\n"
+        "## Database\n"
+        "Uses SQLite WAL mode.\n"
+        "```python\n"
+        "# Not a markdown heading\n"
+        "conn.execute('PRAGMA journal_mode=WAL;')\n"
+        "```\n\n"
+        "### Indexing\n"
+        "Memory chunks table.\n"
+    )
+    chunks = chunk_memory_markdown("projects/kesoku.md", "Kesoku architecture overview", body)
+    assert chunks[0] == "# projects/kesoku.md\nKesoku architecture overview"
+    assert any("# Architecture\n## Database" in c and "# Not a markdown heading" in c for c in chunks)
+    assert any("# Architecture\n## Database\n### Indexing\nMemory chunks table." in c for c in chunks)
+
+
+def test_sync_role_memories_incremental_and_pruning(tmp_path, monkeypatch) -> None:
+    """Verify incremental mtime/hash syncing and deleted file pruning in SQLite."""
+    db_path = str(tmp_path / "test_sync.db")
+    db = DatabaseManager(db_path)
     db.init_tables()
 
-    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
-    gw = Gateway(context=KesokuContext(config=cfg))
+    embed_calls = 0
 
-    session1 = Session(id="sess_abc", title="Sess ABC", created_at=time.time(), updated_at=time.time())
-    await gw.db.create_session(session1)
+    def mock_get_embeddings(texts: list[str]) -> list[list[float]]:
+        nonlocal embed_calls
+        embed_calls += 1
+        return [[1.0] + [0.0] * 383 for _ in texts]
 
-    msg = Message(
-        id="unique_msg_999",
-        session_id="sess_abc",
-        chatbot_id="discord",
-        channel_id="chan_1",
-        sender="Asuka",
-        role=MessageRole.ASSISTANT,
-        type=MessageType.TEXT,
-        content="This is a secret long content.",
-        status=MessageStatus.RESPONDED,
-    )
-    await gw.post(msg)
+    monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", mock_get_embeddings)
 
-    ctx = ToolContext(
-        session_id="sess_abc",
-        session_workspace="test_ws",
-        original_msg_id="unique_msg_999",
-        chatbot_id="discord",
-        channel_id="chan_1",
-        gateway=gw,
-    )
+    mem_dir = tmp_path / "roles" / "writer" / "memories"
+    mem_dir.mkdir(parents=True)
+    f1 = mem_dir / "pets.md"
+    f1.write_text("---\ndescription: Cat Neon\n---\n- Likes tuna\n", encoding="utf-8")
 
-    # Test retrieval
-    res = await view_message("unique_msg_999", context=ctx)
-    assert "Message Details" in res
-    assert "unique_msg_999" in res
-    assert "Asuka (assistant)" in res
-    assert "This is a secret long content." in res
-    # Historical results carry a "do not imitate formatting" notice
-    from kesoku.agent.tools.memory import HISTORICAL_RESULT_NOTICE
+    # 1. Initial sync indexes f1
+    updated1 = sync_role_memories(db, "writer", str(mem_dir))
+    assert updated1 == 1
+    assert embed_calls == 1
+    files_in_db = db.get_memory_files_by_role("writer")
+    assert len(files_in_db) == 1
+    assert files_in_db[0]["rel_path"] == "pets.md"
 
-    assert res.endswith(HISTORICAL_RESULT_NOTICE)
+    # 2. Second sync without file changes skips re-embedding
+    updated2 = sync_role_memories(db, "writer", str(mem_dir))
+    assert updated2 == 0
+    assert embed_calls == 1
 
-    # Test non-existent retrieval
-    res_fail = await view_message("non_existent_id", context=ctx)
-    assert "not found" in res_fail
-    assert HISTORICAL_RESULT_NOTICE not in res_fail
+    # 3. Deleting the file prunes it from memory_files and memory_chunks
+    f1.unlink()
+    updated3 = sync_role_memories(db, "writer", str(mem_dir))
+    assert updated3 == 0
+    assert db.get_memory_files_by_role("writer") == []
+    assert db.get_memory_chunks_for_role("writer") == []
 
 
-@pytest.mark.asyncio
-async def test_chat_search_hybrid_and_boosting(tmp_path, monkeypatch) -> None:
-    """Test chat_search hybrid exact matching and score boosting + text truncation."""
-    from kesoku.gateway.gateway import Gateway
-
-    temp_db = str(tmp_path / "test_search_hybrid.db")
-    db = DatabaseManager(temp_db)
+def test_search_role_memories_hybrid_and_role_isolation(tmp_path, monkeypatch) -> None:
+    """Verify MAX(chunk_similarity) + lexical_boost ranking and strict role isolation."""
+    db_path = str(tmp_path / "test_search_mem.db")
+    db = DatabaseManager(db_path)
     db.init_tables()
 
-    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
-    gw = Gateway(context=KesokuContext(config=cfg))
-
-    await gw.db.set_channel_role("discord", "chan_1", "coder")
-    session1 = Session(id="sess_1", title="Sess 1", created_at=time.time(), updated_at=time.time())
-    await gw.db.create_session(session1)
-    await gw.db.set_active_session_for_channel("discord", "chan_1", "sess_1")
-
-    embeddings_map = {
-        "Game Console Joystick": [1.0, 0.0],
-        "How controller is built": [0.5, 0.5],
-    }
-
-    def pad_vector(v):
+    def pad(v: list[float]) -> list[float]:
         return v + [0.0] * (384 - len(v))
-
-    padded_map = {k: pad_vector(v) for k, v in embeddings_map.items()}
 
     def mock_get_embedding(text: str) -> list[float]:
         if text == "controller":
-            return pad_vector([0.2, 0.8])
-        for key_text, vec in padded_map.items():
-            if text == key_text or key_text in text:
-                return vec
-        return pad_vector([0.0, 0.0])
+            return pad([1.0, 0.0])
+        if "controller" in text.lower() or "joystick" in text.lower():
+            return pad([0.8, 0.6])
+        return pad([0.0, 1.0])
 
     monkeypatch.setattr("kesoku.utils.embedding.get_embedding", mock_get_embedding)
-    monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", lambda texts: [mock_get_embedding(t) for t in texts])
+    monkeypatch.setattr(
+        "kesoku.utils.embedding.get_embeddings",
+        lambda texts: [mock_get_embedding(t) for t in texts],
+    )
 
-    now = time.time()
-    msg_sem = Message(
-        id="m_sem",
-        session_id="sess_1",
-        chatbot_id="discord",
-        channel_id="chan_1",
+    coder_mem = tmp_path / "roles" / "coder" / "memories"
+    coder_mem.mkdir(parents=True)
+    # File 1: semantic match + exact lexical match ("controller")
+    (coder_mem / "hardware.md").write_text(
+        "---\ndescription: Custom controller build log\n---\n- Built a custom controller\n",
+        encoding="utf-8",
+    )
+    # File 2: semantic match only ("joystick", no literal "controller")
+    (coder_mem / "arcade.md").write_text(
+        "---\ndescription: Arcade joystick notes\n---\n- Sanwa joystick parts\n",
+        encoding="utf-8",
+    )
+
+    # Another role's memory that should never leak into 'coder'
+    writer_mem = tmp_path / "roles" / "writer" / "memories"
+    writer_mem.mkdir(parents=True)
+    (writer_mem / "secret.md").write_text(
+        "---\ndescription: Writer controller secret\n---\n- Secret controller\n",
+        encoding="utf-8",
+    )
+    sync_role_memories(db, "writer", str(writer_mem))
+
+    matches = search_role_memories(
+        db=db,
+        role="coder",
+        query="controller",
+        limit=5,
+        min_score=0.5,
+        memories_dir=str(coder_mem),
+    )
+    assert len(matches) == 2
+    assert matches[0].rel_path == "hardware.md"
+    assert matches[1].rel_path == "arcade.md"
+    # Lexical boost gives hardware.md a higher score than arcade.md despite identical cosine similarity
+    assert matches[0].score > matches[1].score
+    assert all(m.rel_path != "secret.md" for m in matches)
+
+
+def test_render_context_query_and_ambient_block() -> None:
+    """Verify multi-turn context query extraction and <memory> progressive disclosure formatting."""
+    m1 = Message(
+        id="u1",
+        session_id="s1",
+        chatbot_id="cli",
+        channel_id="c1",
         sender="user",
         role=MessageRole.USER,
         type=MessageType.TEXT,
-        content="Game Console Joystick",
-        timestamp=now - 50 * 3600,
-        status=MessageStatus.PROCESSED,
+        content="<instructions>\nIgnore me\n</instructions>\n<current_message>\nOld turn 1\n</current_message>",
+        timestamp=100.0,
     )
-    msg_exact = Message(
-        id="m_exact",
-        session_id="sess_1",
-        chatbot_id="discord",
-        channel_id="chan_1",
+    m2 = Message(
+        id="u2",
+        session_id="s1",
+        chatbot_id="cli",
+        channel_id="c1",
         sender="user",
         role=MessageRole.USER,
         type=MessageType.TEXT,
-        content="Hello controller world",
-        timestamp=now - 300,
-        status=MessageStatus.PROCESSED,
+        content="<memory>\nOld mem\n</memory>\n<current_message>\nLet's check Neon's snacks\n</current_message>",
+        timestamp=200.0,
     )
-    msg_both = Message(
-        id="m_both",
-        session_id="sess_1",
-        chatbot_id="discord",
-        channel_id="chan_1",
+    m3 = Message(
+        id="a2",
+        session_id="s1",
+        chatbot_id="cli",
+        channel_id="c1",
+        sender="Writer",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="Sure! Let me check.\n[question: Which one? || Tuna | Salmon]",
+        timestamp=210.0,
+    )
+    m4 = Message(
+        id="u3",
+        session_id="s1",
+        chatbot_id="cli",
+        channel_id="c1",
         sender="user",
         role=MessageRole.USER,
         type=MessageType.TEXT,
-        content="How controller is built",
-        timestamp=now - 200,
-        status=MessageStatus.PROCESSED,
-    )
-    long_content = "controller " + "a" * 600
-    msg_long = Message(
-        id="m_long",
-        session_id="sess_1",
-        chatbot_id="discord",
-        channel_id="chan_1",
-        sender="user",
-        role=MessageRole.USER,
-        type=MessageType.TEXT,
-        content=long_content,
-        timestamp=now - 100,
-        status=MessageStatus.PROCESSED,
+        content="What did she eat last week?",
+        timestamp=300.0,
     )
 
-    db.save_message(msg_sem)
-    db.save_message(msg_exact)
-    db.save_message(msg_both)
-    db.save_message(msg_long)
+    q = render_context_query([m1, m2, m3, m4], m4, max_turns=2)
+    assert "Old turn 1" not in q
+    assert "Ignore me" not in q
+    assert "User: Let's check Neon's snacks" in q
+    assert "Assistant: Sure! Let me check." in q
+    assert "Tuna | Salmon" not in q
+    assert "User: What did she eat last week?" in q
 
-    ctx = ToolContext(
-        session_id="sess_1",
-        session_workspace="test_ws",
-        gateway=gw,
-    )
-
-    res = await chat_search(query="controller", limit=10, context=ctx)
-
-    assert "m_both" in res
-    assert "m_exact" in res
-    assert "m_sem" not in res
-    assert "m_long" in res
-
-    pos_both = res.index("m_both")
-    pos_exact = res.index("m_exact")
-
-    assert pos_both < pos_exact
-
-    assert "Truncated for Brevity" in res
-    assert len(res) < 1500
-
-
-@pytest.mark.asyncio
-async def test_chat_search_wildcard_and_time_filters(tmp_path, monkeypatch) -> None:
-    """Test chat_search supporting wildcard queries and time range filtering."""
-    from kesoku.gateway.gateway import Gateway
-
-    temp_db = str(tmp_path / "test_search_wildcard.db")
-    db = DatabaseManager(temp_db)
-    db.init_tables()
-
-    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
-    gw = Gateway(context=KesokuContext(config=cfg))
-
-    await gw.db.set_channel_role("discord", "chan_1", "coder")
-    session1 = Session(id="sess_1", title="Sess 1", created_at=time.time(), updated_at=time.time())
-    await gw.db.create_session(session1)
-    await gw.db.set_active_session_for_channel("discord", "chan_1", "sess_1")
-
-    with db.connection_provider.connection() as conn:
-        with conn:
-            sql = (
-                "INSERT INTO messages ("
-                "  id, session_id, chatbot_id, channel_id, sender, role, type, "
-                "  content, metadata, timestamp, status, embedding"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    block = format_ambient_memory_block(
+        [
+            MemoryMatch(
+                rel_path="pets/neon.md",
+                memory_path="$MEMORY_DIR/pets/neon.md",
+                description="Neon the cat profile and favorite snacks",
+                score=0.88,
+                mtime=1700000000.0,
             )
-            conn.execute(sql, (
-                "m1", "sess_1", "discord", "chan_1", "user", "user", "text",
-                "first message", "{}", 1000.0, "processed", None
-            ))
-            conn.execute(sql, (
-                "m2", "sess_1", "discord", "chan_1", "user", "user", "text",
-                "second message", "{}", 2000.0, "processed", None
-            ))
-            conn.execute(sql, (
-                "m3", "sess_1", "discord", "chan_1", "user", "user", "text",
-                "third message", "{}", 3000.0, "processed", None
-            ))
-
-    ctx = ToolContext(
-        session_id="sess_1",
-        session_workspace="test_ws",
-        gateway=gw,
+        ]
     )
-
-    res_wildcard = await chat_search(query="*", limit=10, context=ctx)
-    assert "Search Results for '*'" in res_wildcard
-    assert "m3" in res_wildcard
-    assert "m2" in res_wildcard
-    assert "m1" in res_wildcard
-
-    pos_m3 = res_wildcard.index("m3")
-    pos_m2 = res_wildcard.index("m2")
-    pos_m1 = res_wildcard.index("m1")
-    assert pos_m3 < pos_m2 < pos_m1
-    assert "score:" not in res_wildcard
-
-    res_time = await chat_search(
-        query="*",
-        start_time="1500",
-        end_time="2500",
-        limit=10,
-        context=ctx
-    )
-    assert "m2" in res_time
-    assert "m1" not in res_time
-    assert "m3" not in res_time
+    assert block.startswith("<memory>\n")
+    assert '$MEMORY_DIR/pets/neon.md' in block
+    assert "description: Neon the cat profile and favorite snacks" in block
+    assert "read_file" in block
+    assert block.endswith("</memory>\n")
 
 
 @pytest.mark.asyncio
-async def test_chat_search_chunks_limit(tmp_path, monkeypatch) -> None:
-    """Test that chat_search limits matching chunks from the same message to at most 3 in the final ranking."""
+async def test_memory_search_tool_and_legacy_tools_removed(tmp_path, monkeypatch) -> None:
+    """Verify memory_search tool works end-to-end and chat_search/view_message are removed."""
     from kesoku.gateway.gateway import Gateway
 
-    temp_db = str(tmp_path / "test_search_chunks_limit.db")
+    names = [f.__name__ for f in default_registry.get_tools_list()]
+    assert "memory_search" in names
+    assert "update_file" in names
+    assert "chat_search" not in names
+    assert "view_message" not in names
+    assert "update_session_notes" not in names
+    assert not hasattr(kesoku.agent.tools, "chat_search")
+    assert not hasattr(kesoku.agent.tools, "view_message")
+
+    monkeypatch.setattr("kesoku.utils.embedding.get_embedding", lambda text: [1.0] + [0.0] * 383)
+    monkeypatch.setattr(
+        "kesoku.utils.embedding.get_embeddings",
+        lambda texts: [[1.0] + [0.0] * 383 for _ in texts],
+    )
+
+    temp_db = str(tmp_path / "test_tool.db")
+    roles_dir = tmp_path / "roles"
+    mem_dir = roles_dir / "coder" / "memories"
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "python_rules.md").write_text(
+        "---\ndescription: Always use uv run pytest\n---\n- Run tests with uv\n",
+        encoding="utf-8",
+    )
+
     db = DatabaseManager(temp_db)
     db.init_tables()
-
-    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db, roles_dir=str(roles_dir)))
     gw = Gateway(context=KesokuContext(config=cfg))
 
     await gw.db.set_channel_role("discord", "chan_1", "coder")
-    session1 = Session(id="sess_1", title="Sess 1", created_at=time.time(), updated_at=time.time())
+    session1 = Session(
+        id="sess_1",
+        title="Sess 1",
+        created_at=time.time(),
+        updated_at=time.time(),
+        role_name="coder",
+    )
     await gw.db.create_session(session1)
     await gw.db.set_active_session_for_channel("discord", "chan_1", "sess_1")
-
-    # Mock embeddings to be neutral so exact matching (literal query match) determines the ranking
-    def mock_get_embedding(text: str) -> list[float]:
-        return [0.0] * 384
-    monkeypatch.setattr("kesoku.utils.embedding.get_embedding", mock_get_embedding)
-    monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", lambda texts: [mock_get_embedding(t) for t in texts])
-
-    # A message containing 5 distinct sentences matching the keyword "target"
-    # With threshold=15, they will be chunked into 5 separate chunks.
-    msg = Message(
-        id="m_multi",
-        session_id="sess_1",
-        chatbot_id="discord",
-        channel_id="chan_1",
-        sender="user",
-        role=MessageRole.USER,
-        type=MessageType.TEXT,
-        content=(
-            "target sentence one which is quite long. "
-            "target sentence two which is also very long. "
-            "target sentence three which is also long. "
-            "target sentence four which is long. "
-            "target sentence five which is long."
-        ),
-        timestamp=time.time(),
-        status=MessageStatus.PROCESSED,
-    )
-    # This calls db.save_message internally which chunks it
-    await gw.post(msg)
 
     ctx = ToolContext(
         session_id="sess_1",
         session_workspace="test_ws",
+        chatbot_id="discord",
+        channel_id="chan_1",
         gateway=gw,
     )
 
-    # Search for "target"
-    res = await chat_search(query="target", limit=10, context=ctx)
+    with monkeypatch.context() as m:
+        m.setattr("kesoku.utils.path.get_config", lambda: cfg)
+        res = await memory_search(query="pytest", limit=5, context=ctx)
 
-    # Verify that the message ID is shown but only 3 times
-    assert res.count("(ID: `m_multi`)") == 3
-
-
-# ---------------------------------------------------------------------------
-# Session notes: the full-overwrite tool is removed; update_file is the only writer
-# ---------------------------------------------------------------------------
-
-
-def test_update_session_notes_tool_removed() -> None:
-    """update_session_notes is no longer registered, exported, or defined; update_file remains."""
-    names = [f.__name__ for f in default_registry.get_tools_list()]
-    assert "update_session_notes" not in names
-    assert "update_file" in names
-    assert not hasattr(kesoku.agent.tools, "update_session_notes")
-    assert "update_session_notes" not in getattr(kesoku.agent.tools, "__all__", [])
-    assert not hasattr(kesoku.agent.tools.memory, "update_session_notes")
-    with pytest.raises(KeyError):
-        default_registry.get_tool("update_session_notes")
+    assert "Memory Search Results for 'pytest'" in res
+    assert "$MEMORY_DIR/python_rules.md" in res
+    assert "Always use uv run pytest" in res
+    assert "read_file" in res
 
 
 def test_legacy_notes_tool_still_truncated_in_history() -> None:
