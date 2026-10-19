@@ -1,0 +1,9 @@
+.venv/
+uv.lock
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.diag_*
+server.pid
+requests.log
+build/

@@ -1,0 +1,13 @@
+[project]
+name = "tmplc"
+version = "0.1.0"
+description = "Statically typed template and macro compiler"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

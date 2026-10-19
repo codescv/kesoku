@@ -1,0 +1,7 @@
+[pipeline]
+batch_size = 1000
+chunk_size = 64
+num_workers = 16
+queue_size = 32
+output_path = "output/processed.jsonl"
+seed = 42

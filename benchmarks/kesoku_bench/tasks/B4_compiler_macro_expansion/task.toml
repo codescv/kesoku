@@ -1,0 +1,24 @@
+[task]
+id = "B4_compiler_macro_expansion"
+suite = "B"
+title = "Template compiler macro default type coercion error before 24K IR dump"
+config_profile = "default"
+turn_timeout_s = 900
+continue_on_timeout = false
+
+[[turns]]
+kind = "user"
+text = """Running `uv run python -m tmplc build templates/` fails to compile the template bundle. Diagnose and fix the compiler bug in `tmplc/` so all templates in `templates/` build cleanly and all tests pass."""
+
+[grading]
+fail_to_pass = [
+    "tests/test_holdout_tmplc.py::test_bind_defaults_coerces_types",
+    "tests/test_holdout_tmplc.py::test_build_all_templates",
+    "tests/test_holdout_tmplc.py::test_cli_build_templates",
+]
+pass_to_pass = [
+    "tests/test_tmplc.py::test_lexer_and_parser",
+    "tests/test_tmplc.py::test_coerce_literal",
+    "tests/test_tmplc.py::test_expand_explicit_macro_args",
+    "tests/test_tmplc.py::test_build_explicit_templates",
+]

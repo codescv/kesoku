@@ -1,0 +1,25 @@
+[task]
+id = "B2_migration_seed_mismatch"
+suite = "B"
+title = "Reversible migration fuzz failure at top of 25K table dump output"
+config_profile = "default"
+turn_timeout_s = 900
+continue_on_timeout = false
+
+[[turns]]
+kind = "user"
+text = """Running `uv run python scripts/fuzz_migrations.py` fails the reversible migration property check. Diagnose and fix the bug in `ledger/` so that the lossless round-trip invariant `down(up(state)) == state` holds across all seeded fuzz runs and edge cases, and all tests pass."""
+
+[grading]
+fail_to_pass = [
+    "tests/test_holdout_migrations.py::test_fuzz_seed_20251019_steps_17",
+    "tests/test_holdout_migrations.py::test_roundtrip_double_spaces",
+    "tests/test_holdout_migrations.py::test_roundtrip_mononym_and_empty_surname",
+    "tests/test_holdout_migrations.py::test_roundtrip_trailing_and_leading_spaces",
+]
+pass_to_pass = [
+    "tests/test_migrations.py::test_migrations_m001_to_m004_roundtrip",
+    "tests/test_migrations.py::test_migration_m005_standard_names",
+    "tests/test_migrations.py::test_migration_m006_audit_flag",
+    "tests/test_migrations.py::test_engine_apply_chain",
+]
