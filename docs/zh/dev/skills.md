@@ -85,3 +85,6 @@ class SkillManifest(BaseModel):
     > SKILL_DIR='{abs_skill_dir}'
     ```
 *   这能够明确训练并引导 Agent 使用此绝对路径定位技能附属的脚本或资产文件，确保 shell 工具在运行脚本（例如 `python /absolute/path/to/skills/my-skill/scripts/runner.py`）时能够精准找到目标。
+
+### 6. 系统提示词静态 `# Available Skills` 索引
+在构建会话系统提示词时（`src/kesoku/agent/prompt.py` 中的 `build_sys_prompt`），`SkillManager.build_skills_index_block()` 会自动将当前平台兼容的所有技能以 `- **[name]**: description`（描述不超过 160 字符）的形式编译进 `# Available Skills` 区块，使 Agent 在首轮即可直接调用 `use_skill(skill_name)` 而无需先调用 `list_skills()`。

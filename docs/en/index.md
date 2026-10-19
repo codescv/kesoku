@@ -12,7 +12,8 @@ Kesoku is a minimal, readable, and highly modular autonomous AI agent framework.
 *   **Asynchronous Concurrency**: Dispatcher spawns a dedicated task loop (`SessionWorker`) for each session to prevent multi-user collisions.
 *   **Anti-Stall & Interruption**: Agent workers support thought interruption when a new user prompt is received mid-turn, without killing active safe tools.
 *   **Structured TOML Config**: Manage models, database settings, and credentials centrally in `config.toml`.
-*   **Extensible Skills & Decorators**: Discover and apply domain-specific instruction manuals (`SKILL.md`) dynamically.
+*   **Coding & Compaction Suite**: Dedicated `read_file` / diagnostic `update_file` tools, head+tail middle-out output truncation, continuation-oriented hierarchical compaction (`Dead Ends`, `Pending State`, water-fill `<recent_user_messages>`), per-turn `<running_jobs>` / `<staging_artifacts>` / `<repo_rules>` state snapshots, `manage_job`, `delegate_subagent`, and configurable post-tool/stop hooks.
+*   **Extensible Skills & Static Prompt Index**: Discover and apply domain-specific instruction manuals (`SKILL.md`) with a zero-turn static `# Available Skills` index in the system prompt.
 *   **OS Daemon Integration**: Register and manage the agent easily as a `systemd` or `launchd` service.
 
 ---

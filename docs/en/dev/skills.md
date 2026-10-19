@@ -85,3 +85,6 @@ When `get_skill(skill_name)` is executed:
     > SKILL_DIR='{abs_skill_dir}'
     ```
 *   This teaches the agent the exact location of any supporting files/scripts in the workspace, ensuring shell commands resolve their targets correctly (e.g. `python /absolute/path/to/skills/my-skill/scripts/runner.py`).
+
+### 6. Static `# Available Skills` System Prompt Index
+When building a session's system prompt (`build_sys_prompt` in `src/kesoku/agent/prompt.py`), `SkillManager.build_skills_index_block()` appends a compact `# Available Skills` catalog listing each platform-compatible skill as `- **[name]**: description` (descriptions capped at 160 characters). This allows the agent to call `use_skill(skill_name)` directly on the first turn without spending an extra turn calling `list_skills()`.

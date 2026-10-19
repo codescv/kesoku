@@ -40,6 +40,7 @@ def grade(ctx: Any, gold_mode: bool = False) -> dict[str, Any]:
             },
             "diagnostics": {
                 "agents_md_read": None,
+                "repo_rules_injected": None,
                 "lint_run_by_agent": None,
                 "list_skills_calls": None,
                 "llm_calls_before_first_use_skill": None,
@@ -48,7 +49,9 @@ def grade(ctx: Any, gold_mode: bool = False) -> dict[str, Any]:
         }
 
     tool_events: list[dict[str, Any]] = getattr(ctx, "tool_events", None) or []
+    llm_logs: list[Path] = getattr(ctx, "llm_logs", None) or []
     agents_md_read = False
+    repo_rules_injected = False
     lint_run_by_agent = False
 
     for ev in tool_events:
@@ -56,10 +59,22 @@ def grade(ctx: Any, gold_mode: bool = False) -> dict[str, Any]:
         res_str = str(ev.get("result", ""))
         if "AGENTS.md" in args_str or "AGENTS.md" in res_str:
             agents_md_read = True
+        if "[repo rules discovered:" in res_str:
+            repo_rules_injected = True
         if ev.get("name") == "run_shell_command" and "lint_conventions.py" in str(
             ev.get("args", {}).get("command", "")
         ):
             lint_run_by_agent = True
+
+    if not repo_rules_injected:
+        for log_path in llm_logs:
+            try:
+                text = Path(log_path).read_text(encoding="utf-8")
+                if '<context name="repo_rules">' in text or "[repo rules discovered:" in text:
+                    repo_rules_injected = True
+                    break
+            except Exception:  # noqa: BLE001
+                continue
 
     list_skills_calls = sum(1 for ev in tool_events if ev.get("name") == "list_skills")
     use_skill_events = [ev for ev in tool_events if ev.get("name") == "use_skill"]
@@ -72,6 +87,7 @@ def grade(ctx: Any, gold_mode: bool = False) -> dict[str, Any]:
         },
         "diagnostics": {
             "agents_md_read": agents_md_read,
+            "repo_rules_injected": repo_rules_injected,
             "lint_run_by_agent": lint_run_by_agent,
             "list_skills_calls": list_skills_calls,
             "llm_calls_before_first_use_skill": None,

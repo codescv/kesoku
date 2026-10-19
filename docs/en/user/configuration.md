@@ -28,9 +28,20 @@ Manages paths for the SQLite database, logs, and custom capability folders.
 *   **`sessions_dir`** (string, default: `"sessions"`): Workspace directory where per-session raw logs, trajectories, and attachments are staged.
 
 ### 2. `[agent]`
-Defines active agent features.
+Defines active agent features, context compaction, repository rules, and sub-agent delegation.
 
 *   **`llm`** (string, default: `"gemini"`): The active LLM engine provider. Supported values are `"gemini"` and `"claude"`.
+*   **`protect_front_turns`** / **`protect_tail_turns`** (int, defaults: `1` / `3`): Number of initial and most-recent logical turns protected from automatic compaction.
+*   **`base_node_min_tokens`** (int, default: `25000`): Token watermark above which eligible buffer turns are compacted into Level-0 summary nodes.
+*   **`recent_user_messages_limit`** / **`recent_user_messages_total_chars`** / **`recent_user_message_ceiling_chars`** (ints, defaults: `100` / `12000` / `6000`): Water-filling budget for verbatim user messages retained in `<recent_user_messages>` across compacted turns.
+*   **`repo_rules_files`** (list of strings, default: `["AGENTS.md", "GEMINI.md"]`): Filenames discovered automatically along touched directory paths up to `$AWD` and injected as `<context name="repo_rules">`.
+*   **`repo_rules_max_files`** / **`repo_rules_max_chars`** (ints, defaults: `3` / `4000`): Cap on discovered repository rule files and characters per file.
+*   **`repo_rules_stop_reminder`** (bool, default: `true`): When enabled, reminds the agent once before ending a turn that modified files inside a discovered rules subtree to run required verification/lint checks.
+*   **`subagent_allowed_tools`** (list of strings, default: `["read_file", "run_shell_command", "list_skills", "use_skill"]`): Tools available to `delegate_subagent` sub-agents.
+*   **`subagent_allow_write`** (bool, default: `false`): Whether sub-agents may use `update_file`.
+*   **`subagent_max_steps`** / **`subagent_max_concurrent`** / **`subagent_max_per_turn`** (ints, defaults: `12` / `1` / `3`): Step and concurrency limits for `delegate_subagent`.
+*   **`subagent_shell_timeout_seconds`** (int, default: `120`): Foreground timeout for sub-agent shell commands (sub-agent commands never background).
+*   **`subagent_model_name`** (string, default: `""`): Optional model override for sub-agent runs.
 
 ### 3. `[gemini]`
 Configures Google GenAI/Gemini integrations.
@@ -58,6 +69,12 @@ Defines safety configurations for the shell command tool runner execution.
 *   **`allowlist_patterns`** (list of regex, default: echo/pwd/git/uv/etc.): Regexes matching commands that are allowed to run.
 *   **`blocklist_patterns`** (list of regex, default: rm/sudo/shutdown/etc.): Regexes matching dangerous commands that will be rejected.
 *   **`forbidden_patterns`** (dictionary/table of regex to string): Regexes matching commands mapped to custom error messages. If a command matches, it is rejected and the custom error message is returned.
+
+### 6. `[hooks]`
+Configures optional `[[hooks.post_tool_use]]` and `[[hooks.stop]]` commands executed automatically during turns:
+
+*   **`[[hooks.post_tool_use]]`**: Runs after matching `tools` (e.g. `["update_file"]`) and optional `file_pattern` regex (e.g. `"\\.py$"`), substituting `{file}`, `{awd}`, and `{staging_dir}` in `command`. Appends `[hook <name> exit <code>]` to the tool result when `append_on` is `"nonzero"` or `"always"`.
+*   **`[[hooks.stop]]`**: Runs before the agent finishes a turn when any tool in `when_tools_used` ran during the turn. Non-zero exit codes re-prompt the agent up to `max_retries` times.
 
 ---
 

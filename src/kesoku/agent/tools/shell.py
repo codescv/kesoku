@@ -1,3 +1,5 @@
+"""Shell execution tools and background process monitoring for Kesoku AI Agent."""
+
 import asyncio
 import logging
 import os
@@ -72,6 +74,7 @@ class ActiveJobsRegistry:
         self._jobs: dict[str, dict[str, Any]] = {}
         # session_id -> recently finished jobs; ordered by last update for LRU eviction.
         self._finished: OrderedDict[str, deque[FinishedJob]] = OrderedDict()
+        self._killed_by_agent: set[str] = set()
         self._lock = asyncio.Lock()
 
     async def register(
@@ -123,7 +126,7 @@ class ActiveJobsRegistry:
 
 
     async def kill_job(self, job_id: str, session_id: str) -> KillResult:
-        """Kill a job and return the result."""
+        """Terminate a background job's process group (SIGTERM -> 3s -> SIGKILL) without holding the registry lock."""
         async with self._lock:
             job = self._jobs.get(job_id)
             if not job:
@@ -131,16 +134,23 @@ class ActiveJobsRegistry:
                 history = self._finished.get(session_id, [])
                 for fj in history:
                     if fj.job_id == job_id:
-                        return KillResult(True, f"Job {job_id} already finished with exit {fj.return_code}", fj.return_code)  # noqa: E501
-                return KillResult(False, f"Job id '{job_id}' is unknown or expired")
+                        return KillResult(
+                            True,
+                            f"Job {job_id} already finished with exit {fj.return_code}.",
+                            fj.return_code,
+                        )
+                return KillResult(False, f"Job id '{job_id}' is unknown or expired.")
 
             if job["session_id"] != session_id:
-                return KillResult(False, f"Job id '{job_id}' is unknown or expired")
+                return KillResult(False, f"Job id '{job_id}' is unknown or expired.")
 
             # (1) under lock: verify ownership, set killed_by_agent, move to finished
             job["killed_by_agent"] = True
+            self._killed_by_agent.add(job_id)
             proc = job["process"]
             pgid = job["pgid"]
+            stdout_path = job.get("log_filepath", "")
+            stderr_path = job.get("stderr_filepath", "")
 
             # Pop from active, add to finished with pending return code
             del self._jobs[job_id]
@@ -149,14 +159,13 @@ class ActiveJobsRegistry:
                 command=job["command"],
                 return_code=None,
                 finished_at=time.time(),
-                stdout_path=job["log_filepath"],
-                stderr_path=job["stderr_filepath"],
-                reason="killed"
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                reason="killed",
             )
             self._record_finished_locked(session_id, fj)
 
         # (2) release lock, kill
-        import signal
         try:
             if os.name == "posix":
                 os.killpg(pgid, signal.SIGTERM)
@@ -192,18 +201,26 @@ class ActiveJobsRegistry:
                         finished_at=f_job.finished_at,
                         stdout_path=f_job.stdout_path,
                         stderr_path=f_job.stderr_path,
-                        reason="killed"
+                        reason="killed",
                     )
                     break
 
         return KillResult(True, f"Killed job {job_id} (pgid {pgid}, {action_taken}, exit {rc}).", rc)
 
-    def was_killed_by_agent(self, job_id: str, session_id: str) -> bool:
+    def was_killed_by_agent(self, job_id: str, session_id: str | None = None) -> bool:
         """Check if the job was killed by the agent."""
-        history = self._finished.get(session_id, [])
-        for fj in history:
-            if fj.job_id == job_id and fj.reason == "killed":
-                return True
+        if job_id in self._killed_by_agent:
+            return True
+        if session_id is not None:
+            history = self._finished.get(session_id, [])
+            for fj in history:
+                if fj.job_id == job_id and fj.reason == "killed":
+                    return True
+        else:
+            for history in self._finished.values():
+                for fj in history:
+                    if fj.job_id == job_id and fj.reason == "killed":
+                        return True
         return False
 
     async def unregister(self, job_id: str, return_code: int | None = None) -> None:
@@ -226,6 +243,8 @@ class ActiveJobsRegistry:
                     command=job.get("command", ""),
                     return_code=return_code,
                     finished_at=time.time(),
+                    stdout_path=job.get("log_filepath", ""),
+                    stderr_path=job.get("stderr_filepath", ""),
                 ),
             )
             logger.info(f"Unregistered background job '{job_id}' (return code {return_code})")
@@ -270,6 +289,7 @@ class ActiveJobsRegistry:
             target_job_ids = [jid for jid, job in self._jobs.items() if job["session_id"] == session_id]
 
             for jid in target_job_ids:
+                self._killed_by_agent.add(jid)
                 job = self._jobs[jid]
                 proc = job["process"]
                 logger.info(f"Force terminating background job '{jid}' for session '{session_id}'")
@@ -349,6 +369,10 @@ async def monitor_background_job(
         # Wait for process and stream tasks to finish
         return_code = await proc.wait()
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+
+        if context.active_jobs and context.active_jobs.was_killed_by_agent(job_id, context.session_id):
+            logger.info(f"Background Job '{job_id}' was killed by agent; suppressing wakeup alert.")
+            return
 
         # Read the final output logs
         stdout = ""
@@ -456,7 +480,7 @@ async def run_shell_command(
     Returns:
         Command execution stdout and stderr, or truncated preview if output exceeds max_output_chars.
     """
-    config = get_config()
+    config = getattr(getattr(context, "kesoku_context", None), "config", None) or get_config()
     if not config.shell.enabled:
         return "Execution denied: The shell command tool is disabled in configuration."
 
@@ -543,16 +567,53 @@ async def run_shell_command(
         stderr_task = asyncio.create_task(stream_to_file(proc.stderr, log_filepath_stderr, "w"))
 
         # Wait up to configured foreground threshold limit
-        threshold = (
-            background_threshold_seconds
-            if background_threshold_seconds is not None
-            else getattr(config.shell, "background_threshold_seconds", 300.0)
-        )
+        is_foreground_only = bool(getattr(context, "foreground_only", False))
+        if is_foreground_only:
+            subagent_timeout = float(getattr(config.agent, "subagent_shell_timeout_seconds", 120))
+            threshold = (
+                min(float(background_threshold_seconds), subagent_timeout)
+                if background_threshold_seconds is not None
+                else subagent_timeout
+            )
+        else:
+            threshold = (
+                background_threshold_seconds
+                if background_threshold_seconds is not None
+                else getattr(config.shell, "background_threshold_seconds", 300.0)
+            )
         try:
             await asyncio.wait_for(proc.wait(), timeout=threshold)
             # Process finished successfully within threshold. Ensure all pipe reads complete.
             await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
         except TimeoutError:
+            if is_foreground_only:
+                try:
+                    if os.name == "posix":
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                        except Exception:
+                            proc.terminate()
+                    else:
+                        proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except Exception:
+                    try:
+                        if os.name == "posix":
+                            try:
+                                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                            except Exception:
+                                proc.kill()
+                        else:
+                            proc.kill()
+                        await proc.wait()
+                    except Exception:
+                        pass
+                await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+                return (
+                    f"Command killed after {int(threshold)} s "
+                    "(sub-agent commands cannot run in the background)"
+                )
+
             # Command exceeded foreground threshold. Transition to background job.
             if context.active_jobs:
                 await context.active_jobs.register(

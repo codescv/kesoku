@@ -1,3 +1,4 @@
+"""Turn execution logic for the Kesoku Agent."""
 
 import asyncio
 import datetime
@@ -18,13 +19,14 @@ from kesoku.agent.history import (
     prepare_history_for_llm,
     strip_question_options,
 )
-from kesoku.agent.hooks import run_post_tool_use_hooks
+from kesoku.agent.hooks import run_post_tool_use_hooks, run_stop_hooks
 from kesoku.agent.llm import BaseLLM, LLMResponse
 from kesoku.agent.repo_rules import RepoRulesManager
-from kesoku.agent.state_snapshot import render_running_jobs, render_staging_artifacts
+from kesoku.agent.state_snapshot import render_repo_rules, render_running_jobs, render_staging_artifacts
 from kesoku.agent.tool_runner import ToolRunner
+from kesoku.agent.tools.file import expand_path_variables
 from kesoku.agent.turn_logger import TurnLogger
-from kesoku.config import KesokuConfig, get_config
+from kesoku.config import KesokuConfig
 from kesoku.context import KesokuContext
 from kesoku.utils.async_fs import async_exists, async_read_text_file, async_write_text_file
 from kesoku.utils.path import PathResolver
@@ -155,13 +157,14 @@ class TurnExecutor:
         self.gateway = gateway
         self.tool_runner = tool_runner
         self.turn_logger = turn_logger
-        self.context = context
+        self.context = context or getattr(gateway, "context", None) or KesokuContext()
         self._turn_tools_used: set[str] = set()
         self._turn_writes = False
         self._stop_reminder_fired = False
         self._hook_retries: dict[str, int] = {}
         self._subagent_calls = 0
         self._subagent_tokens = 0
+        self._repo_rules_manager: RepoRulesManager | None = None
         # Per-turn frozen state snapshot (running_jobs / staging_artifacts context blocks). It must be byte-identical
         # across all LLM calls of a turn so the implicit prefix cache keeps hitting; reset on pivot.
         self._snapshot_cache: list[ContextEntry] | None = None
@@ -292,6 +295,14 @@ class TurnExecutor:
                     )
                     self.tool_runner.tool_context.original_msg_id = current_msg.id
                     self._snapshot_cache = None
+                    self._turn_tools_used.clear()
+                    self._turn_writes = False
+                    self._stop_reminder_fired = False
+                    self._hook_retries.clear()
+                    self._subagent_calls = 0
+                    self._subagent_tokens = 0
+                    self.tool_runner.tool_context.subagent_llm_calls = 0
+                    self.tool_runner.tool_context.subagent_tokens = 0
                     empty_attempts = 0
                     turn_tool_calls = 0
                     turn_tokens = 0
@@ -862,53 +873,97 @@ class TurnExecutor:
             + "\n</relevant_historical_context>\n"
         )
 
-    async def _get_state_snapshot_entries(self, staging_dir: str | None) -> list[ContextEntry]:
-        """Deterministic `running_jobs` / `staging_artifacts` context entries, computed once per turn.
+    def _ensure_repo_rules_manager(
+        self,
+        staging_dir: str | None,
+        cfg: KesokuConfig,
+    ) -> RepoRulesManager | None:
+        """Lazily initialize RepoRulesManager for the session and discover AWD rules on turn start."""
+        if self._repo_rules_manager is None and staging_dir and cfg.agent_working_dir:
+            awd = os.path.abspath(cfg.agent_working_dir)
+            self._repo_rules_manager = RepoRulesManager(
+                staging_dir=staging_dir,
+                agent_working_dir=awd,
+                max_files=cfg.agent.repo_rules_max_files,
+                max_chars=cfg.agent.repo_rules_max_chars,
+                rule_filenames=cfg.agent.repo_rules_files,
+            )
+            self._repo_rules_manager.discover([awd])
+        return self._repo_rules_manager
 
-        `running_jobs` comes from the session's ActiveJobsRegistry snapshot; `staging_artifacts` is rendered only once
-        the session has summary nodes (before that the files are visible in the verbatim history). Failures are
-        logged and yield no entry; they never break the turn.
+    @staticmethod
+    def _resolve_touched_path(
+        raw_path: str,
+        awd: str,
+        staging_dir: str | None,
+        tool_context: object | None = None,
+    ) -> str:
+        """Resolve a tool path argument into an absolute filesystem path, expanding $STAGING_DIR/$AWD."""
+        cleaned = raw_path.strip().strip("\"'")
+        if staging_dir:
+            cleaned = cleaned.replace("${STAGING_DIR}", staging_dir).replace("$STAGING_DIR", staging_dir)
+        if awd:
+            cleaned = cleaned.replace("${AWD}", awd).replace("$AWD", awd)
+        if "$" in cleaned:
+            cleaned = expand_path_variables(cleaned, tool_context)  # type: ignore[arg-type]
+        cleaned = os.path.expanduser(cleaned)
+        if os.path.isabs(cleaned):
+            return os.path.abspath(cleaned)
+        return os.path.abspath(os.path.join(awd, cleaned))
+
+    @staticmethod
+    def _is_shell_write_command(cmd: str) -> bool:
+        """Check whether a shell command string contains a write indicator (ignoring stream redirections)."""
+        cmd_clean = re.sub(r"(?:\d*>&\d+|&>/dev/null|\d*>/dev/null)", "", cmd)
+        if ">" in cmd_clean:
+            return True
+        if re.search(r"\b(?:tee|patch|mv|cp)\b", cmd_clean):
+            return True
+        if re.search(r"\bgit\s+apply\b", cmd_clean):
+            return True
+        if re.search(r"\bsed\b[^\n;|&]*\s-[a-zA-Z]*i", cmd_clean):
+            return True
+        return False
+
+    async def _get_state_snapshot_entries(self, staging_dir: str | None) -> list[ContextEntry]:
+        """Deterministic `running_jobs` / `repo_rules` / `staging_artifacts` context entries, computed once per turn.
+
+        `running_jobs` comes from the session's ActiveJobsRegistry snapshot; `repo_rules` renders discovered
+        AGENTS.md/GEMINI.md files; `staging_artifacts` is rendered only once the session has summary nodes (before
+        that the files are visible in the verbatim history). Failures are logged and yield no entry; they never
+        break the turn.
         """
         if self._snapshot_cache is not None:
             return self._snapshot_cache
         entries: list[ContextEntry] = []
+        cfg = self.context.config
         try:
             active_jobs = getattr(self.context, "active_jobs", None)
             if active_jobs is not None and hasattr(active_jobs, "snapshot"):
                 snapshot = active_jobs.snapshot(self.session_id)
                 if inspect.isawaitable(snapshot):
                     snapshot = await snapshot
-                jobs_text = render_running_jobs(snapshot)
+                manage_job_enabled = "manage_job" not in set(cfg.agent.disabled_tools)
+                jobs_text = render_running_jobs(snapshot, manage_job_enabled=manage_job_enabled)
                 if jobs_text:
                     entries.append(ContextEntry("running_jobs", jobs_text))
         except Exception as e:
             logger.warning(f"Failed to build running_jobs snapshot for session '{self.session_id}': {e}")
 
         try:
-            from kesoku.agent.repo_rules import RepoRulesManager
-            from kesoku.agent.state_snapshot import render_repo_rules
-            from kesoku.config import get_config
-
-            cfg = get_config()
-            if not hasattr(self, "_repo_rules_manager") and staging_dir and cfg.agent_working_dir:
-                self._repo_rules_manager = RepoRulesManager(
-                    staging_dir,
-                    cfg.agent_working_dir,
-                    max_files=cfg.agent.repo_rules_max_files,
-                    max_chars=cfg.agent.repo_rules_max_chars,
-                    rule_filenames=cfg.agent.repo_rules_files
-                )
-
-            if hasattr(self, "_repo_rules_manager"):
-                rules_text = render_repo_rules(
-                    self._repo_rules_manager.discovered_files,
+            mgr = self._ensure_repo_rules_manager(staging_dir, cfg)
+            if mgr is not None and mgr.discovered_files:
+                rules_text = await asyncio.to_thread(
+                    render_repo_rules,
+                    mgr.discovered_files,
                     cfg.agent.repo_rules_max_chars,
-                    cfg.agent_working_dir
+                    cfg.agent_working_dir,
                 )
                 if rules_text:
                     entries.append(ContextEntry("repo_rules", rules_text))
         except Exception as e:
             logger.warning(f"Failed to build repo_rules snapshot: {e}")
+
         try:
             has_summaries = self._has_summaries
             if has_summaries is None:
@@ -1086,6 +1141,9 @@ class TurnExecutor:
             await self.gateway.post(tool_call_msg)
             tool_call_msgs.append((call, tool_call_msg))
 
+        self.tool_runner.tool_context.interrupt_check = lambda: not worker.queue_empty()
+        self.tool_runner.tool_context.kesoku_context = self.context
+
         exec_tasks = [
             self.tool_runner.execute_tool(
                 call,
@@ -1104,110 +1162,138 @@ class TurnExecutor:
 
         result_msgs = await asyncio.gather(*exec_tasks)
 
-        # P2-2: Touch collection and repo rules discovery
+        sub_calls = getattr(self.tool_runner.tool_context, "subagent_llm_calls", 0)
+        if isinstance(sub_calls, int):
+            self._subagent_calls = sub_calls
+        sub_toks = getattr(self.tool_runner.tool_context, "subagent_tokens", 0)
+        if isinstance(sub_toks, int):
+            self._subagent_tokens = sub_toks
 
-        cfg = get_config()
-        if not hasattr(self, "_repo_rules_manager") and session_staging_dir and cfg.agent_working_dir:
-            self._repo_rules_manager = RepoRulesManager(
-                session_staging_dir,
-                cfg.agent_working_dir,
-                max_files=cfg.agent.repo_rules_max_files,
-                max_chars=cfg.agent.repo_rules_max_chars,
-                rule_filenames=cfg.agent.repo_rules_files
-            )
-
+        # P2-2: Post-tool hooks, touch collection, and repo rules discovery
+        cfg = self.context.config
+        awd = PathResolver.resolve(cfg.agent_working_dir)
+        mgr = self._ensure_repo_rules_manager(session_staging_dir, cfg)
         env = getattr(self.context, "env", {})
 
-        for idx, (call, rm) in enumerate(zip(tool_call_msgs, result_msgs)):
-            # Hooks execution
+        for idx, (call_pair, rm) in enumerate(zip(tool_call_msgs, result_msgs)):
+            call_obj = call_pair[0]
             if hasattr(cfg, "hooks"):
                 await run_post_tool_use_hooks(
-                    call[0], rm, cfg.hooks, cfg.agent_working_dir, session_staging_dir, env
+                    call_obj,
+                    rm,
+                    cfg.hooks,
+                    awd,
+                    session_staging_dir,
+                    env,
                 )
 
-            # Touch collection
-            paths = []
-            tool_name = call[0].name
+            paths: list[str] = []
+            tool_name = call_obj.name
             self._turn_tools_used.add(tool_name)
-            args = call[0].arguments
-            if tool_name in ("update_file", "read_file") and "file_name" in args:
+            args = call_obj.arguments or {}
+            if tool_name in ("update_file", "read_file") and args.get("file_name"):
                 try:
-                    paths.append(PathResolver.resolve(args["file_name"]))
+                    paths.append(
+                        self._resolve_touched_path(
+                            str(args["file_name"]),
+                            awd,
+                            session_staging_dir,
+                            self.tool_runner.tool_context,
+                        )
+                    )
+                except Exception:
+                    pass
+            elif tool_name == "analyze_media" and args.get("media_path"):
+                try:
+                    paths.append(
+                        self._resolve_touched_path(
+                            str(args["media_path"]),
+                            awd,
+                            session_staging_dir,
+                            self.tool_runner.tool_context,
+                        )
+                    )
                 except Exception:
                     pass
             elif tool_name == "run_shell_command":
                 cwd_arg = args.get("cwd")
-                cmd = args.get("command", "")
+                cmd = str(args.get("command", ""))
                 if cwd_arg:
                     try:
-                        paths.append(PathResolver.resolve(cwd_arg))
+                        paths.append(
+                            self._resolve_touched_path(
+                                str(cwd_arg),
+                                awd,
+                                session_staging_dir,
+                                self.tool_runner.tool_context,
+                            )
+                        )
                     except Exception:
                         pass
                 else:
-                    # check leading cd
-                    m = re.match(r"^\s*cd\s+([^\s;]+)\s*(?:&&|;)", cmd)
+                    m = re.match(r"^\s*cd\s+([^\s;&]+)\s*(?:&&|;)", cmd)
                     if m:
                         try:
-                            paths.append(PathResolver.resolve(m.group(1)))
+                            paths.append(
+                                self._resolve_touched_path(
+                                    m.group(1),
+                                    awd,
+                                    session_staging_dir,
+                                    self.tool_runner.tool_context,
+                                )
+                            )
                         except Exception:
                             pass
-                    else:
-                        if cfg.agent_working_dir:
-                            paths.append(cfg.agent_working_dir)
+                    elif awd:
+                        paths.append(awd)
 
-            if paths:
-                if hasattr(self, "_repo_rules_manager"):
-                    new_discoveries = self._repo_rules_manager.discover(paths)
-                # Check if it's a write
-                is_write = False
+            if paths and mgr is not None:
+                new_discoveries = mgr.discover(paths)
+                abs_staging = PathResolver.resolve(session_staging_dir) if session_staging_dir else None
+                in_ruled_subtree = False
                 for p in paths:
-                    # check if p is outside STAGING_DIR
-                    if session_staging_dir:
+                    if abs_staging:
                         try:
-                            if os.path.commonpath([p, session_staging_dir]) == session_staging_dir:
+                            if os.path.commonpath([p, abs_staging]) == abs_staging:
                                 continue
                         except ValueError:
                             pass
-
-                    if hasattr(self, "_repo_rules_manager"):
-                        # check if inside a discovered rules file's subtree
-                        for rf in self._repo_rules_manager.discovered_files:
-                            rdir = os.path.dirname(rf)
-                            try:
-                                if os.path.commonpath([p, rdir]) == rdir:
-                                    is_write = True
-                                    break
-                            except ValueError:
-                                pass
-                    if is_write:
+                    for rf in mgr.discovered_files:
+                        rdir = os.path.dirname(PathResolver.resolve(rf))
+                        try:
+                            if os.path.commonpath([p, rdir]) == rdir:
+                                in_ruled_subtree = True
+                                break
+                        except ValueError:
+                            pass
+                    if in_ruled_subtree:
                         break
 
-                if is_write:
-                    if tool_name == "update_file":
+                if in_ruled_subtree:
+                    has_tool_error = bool(rm.metadata and rm.metadata.get("tool_error"))
+                    if tool_name == "update_file" and not has_tool_error:
                         self._turn_writes = True
-                    elif tool_name == "run_shell_command":
-                        cmd_clean = re.sub(r"2>&1|>&2|>/dev/null|2>/dev/null", "", cmd)
-                        if ">" in cmd_clean or ">>" in cmd_clean or any(x in cmd_clean.split() for x in ("tee", "git", "patch", "mv", "cp", "sed")):  # noqa: E501
-                            self._turn_writes = True
+                    elif tool_name == "run_shell_command" and self._is_shell_write_command(
+                        str(args.get("command", ""))
+                    ):
+                        self._turn_writes = True
 
                 if new_discoveries:
-                    # Append to result_msg
                     append_text = ""
                     for f in new_discoveries:
-                        rel_path = os.path.relpath(f, cfg.agent_working_dir)  # noqa: ASYNC240
-                        content_str = ""
+                        rel_path = os.path.relpath(f, awd)  # noqa: ASYNC240
                         try:
-                            with open(f, encoding="utf-8") as rf:  # noqa: ASYNC230
-                                content_str = rf.read()
+                            content_str = (await async_read_text_file(f)).strip()
                             if len(content_str) > cfg.agent.repo_rules_max_chars:
-                                content_str = content_str[:cfg.agent.repo_rules_max_chars] + "\n[truncated]"
+                                content_str = (
+                                    content_str[: cfg.agent.repo_rules_max_chars] + "\n...[truncated]"
+                                )
                         except Exception as e:
                             content_str = f"[Error reading file: {e}]"
-
                         append_text += f"\n\n[repo rules discovered: {rel_path}]\n{content_str}"
 
                     rm.content += append_text
-                    if rm.metadata and "tool_result" in rm.metadata:
+                    if rm.metadata and "tool_result" in rm.metadata and rm.metadata["tool_result"]:
                         rm.metadata["tool_result"] += append_text
 
             rm.timestamp = time.time() + (idx * 0.001)
@@ -1232,6 +1318,47 @@ class TurnExecutor:
 
         return True
 
+    async def _post_draft_before_hook(
+        self,
+        res: LLMResponse,
+        current_msg: Message,
+    ) -> None:
+        """Persist the assistant's thought and draft text (status=RESPONDED) before a stop hook/reminder."""
+        chatbot_id = current_msg.chatbot_id
+        channel_id = current_msg.channel_id
+        if res.thought:
+            thought_metadata = {}
+            if res.thought_signature:
+                thought_metadata["thought_signature"] = res.thought_signature
+            await self.gateway.post(
+                Message(
+                    session_id=self.session_id,
+                    chatbot_id=chatbot_id,
+                    channel_id=channel_id,
+                    sender="Kesoku",
+                    role=MessageRole.ASSISTANT,
+                    type=MessageType.THOUGHT,
+                    content=res.thought,
+                    status=MessageStatus.RESPONDED,
+                    parent_id=current_msg.id,
+                    metadata=thought_metadata,
+                )
+            )
+        if res.content and res.content.strip():
+            await self.gateway.post(
+                Message(
+                    session_id=self.session_id,
+                    chatbot_id=chatbot_id,
+                    channel_id=channel_id,
+                    sender="Kesoku",
+                    role=MessageRole.ASSISTANT,
+                    type=MessageType.TEXT,
+                    content=res.content,
+                    status=MessageStatus.RESPONDED,
+                    parent_id=current_msg.id,
+                )
+            )
+
     async def _handle_final_response(
         self,
         res: LLMResponse,
@@ -1244,64 +1371,7 @@ class TurnExecutor:
         llm: BaseLLM,
         empty_attempts: int,
     ) -> tuple[bool, int]:
-        chatbot_id = current_msg.chatbot_id
-        channel_id = current_msg.channel_id
-
-        cfg = get_config()
-
-        # P2-2 Stop Hooks
-        if hasattr(cfg, "hooks") and cfg.hooks.stop:
-            from kesoku.agent.hooks import run_stop_hooks
-            env = getattr(self.context, "env", {})
-            outcomes = await run_stop_hooks(self._turn_tools_used, cfg.hooks, cfg.agent_working_dir, env)
-            for out in outcomes:
-                if out.exit_code != 0:
-                    retries = self._hook_retries.get(out.name, 0)
-                    # Find hook max_retries
-                    max_retries = 2
-                    for hook in cfg.hooks.stop:
-                        if hook.name == out.name:
-                            max_retries = hook.max_retries
-                            break
-
-                    if retries < max_retries:
-                        self._hook_retries[out.name] = retries + 1
-                        msg = Message(
-                            session_id=self.session_id,
-                            chatbot_id=chatbot_id,
-                            channel_id=channel_id,
-                            sender="Hook",
-                            role=MessageRole.SYSTEM,
-                            type=MessageType.TEXT,
-                            content=f"[stop hook {out.name} exit {out.exit_code}]\n{out.output}\nFix the reported problems, then finish.",  # noqa: E501
-                            status=MessageStatus.RESPONDED,
-                            parent_id=current_msg.id
-                        )
-                        await self.gateway.post(msg)
-                        return True, empty_attempts
-                    else:
-                        # Append warning to final_content
-                        res.content += f"\n\n[warning: stop hook {out.name} failed after {max_retries} retries]"
-
-        # P2-2 Built-in Stop Reminder
-        if cfg.agent.repo_rules_stop_reminder and getattr(self, "_repo_rules_manager", None):
-            if self._repo_rules_manager.discovered_files and self._turn_writes and not self._stop_reminder_fired:
-                self._stop_reminder_fired = True
-                msg = Message(
-                    session_id=self.session_id,
-                    chatbot_id=chatbot_id,
-                    channel_id=channel_id,
-                    sender="Hook",
-                    role=MessageRole.SYSTEM,
-                    type=MessageType.TEXT,
-                    content="Before finishing, re-check `<context name=\"repo_rules\">`: run any verification/lint command it requires, add any test it mandates (e.g. regression tests), and fix violations. If everything is already satisfied, finish now.",  # noqa: E501
-                    status=MessageStatus.RESPONDED,
-                    parent_id=current_msg.id
-                )
-                await self.gateway.post(msg)
-                return True, empty_attempts
-
-        """Handle final assistant response including thought logging, retry logic, and metrics embedding.
+        """Handle final assistant response including stop hooks, thought logging, retry logic, and metrics.
 
         `empty_attempts` tracks how many times the model already answered with no content this turn.
 
@@ -1312,6 +1382,72 @@ class TurnExecutor:
         """
         chatbot_id = current_msg.chatbot_id
         channel_id = current_msg.channel_id
+        cfg = self.context.config
+
+        if res.content and res.content.strip():
+            # P2-2 Stop Hooks
+            if hasattr(cfg, "hooks") and cfg.hooks.stop:
+                awd = PathResolver.resolve(cfg.agent_working_dir)
+                env = getattr(self.context, "env", {})
+                outcomes = await run_stop_hooks(self._turn_tools_used, cfg.hooks, awd, env)
+                for out in outcomes:
+                    if out.exit_code != 0:
+                        retries = self._hook_retries.get(out.name, 0)
+                        max_retries = 2
+                        for hook in cfg.hooks.stop:
+                            if hook.name == out.name:
+                                max_retries = hook.max_retries
+                                break
+
+                        if retries < max_retries:
+                            self._hook_retries[out.name] = retries + 1
+                            await self._post_draft_before_hook(res, current_msg)
+                            msg = Message(
+                                session_id=self.session_id,
+                                chatbot_id=chatbot_id,
+                                channel_id=channel_id,
+                                sender="Hook",
+                                role=MessageRole.SYSTEM,
+                                type=MessageType.TEXT,
+                                content=(
+                                    f"[stop hook {out.name} exit {out.exit_code}]\n"
+                                    f"{out.output}\n"
+                                    "Fix the reported problems, then finish."
+                                ),
+                                status=MessageStatus.RESPONDED,
+                                parent_id=current_msg.id,
+                            )
+                            await self.gateway.post(msg)
+                            return True, empty_attempts
+                        res.content += f"\n\n[warning: stop hook {out.name} failed after {max_retries} retries]"
+
+            # P2-2 Built-in Stop Reminder
+            if cfg.agent.repo_rules_stop_reminder and self._repo_rules_manager is not None:
+                if (
+                    self._repo_rules_manager.discovered_files
+                    and self._turn_writes
+                    and not self._stop_reminder_fired
+                ):
+                    self._stop_reminder_fired = True
+                    await self._post_draft_before_hook(res, current_msg)
+                    msg = Message(
+                        session_id=self.session_id,
+                        chatbot_id=chatbot_id,
+                        channel_id=channel_id,
+                        sender="Hook",
+                        role=MessageRole.SYSTEM,
+                        type=MessageType.TEXT,
+                        content=(
+                            'Before finishing, re-check `<context name="repo_rules">`: run any '
+                            "verification/lint command it requires, add any test it mandates (e.g. "
+                            "regression tests), and fix violations. If everything is already "
+                            "satisfied, finish now."
+                        ),
+                        status=MessageStatus.RESPONDED,
+                        parent_id=current_msg.id,
+                    )
+                    await self.gateway.post(msg)
+                    return True, empty_attempts
 
         if res.thought:
             thought_metadata = {}

@@ -21,8 +21,10 @@ from kesoku.agent.tools.search import (
 from kesoku.agent.tools.shell import (
     ActiveJobsRegistry,
     ShellCommandError,
+    manage_job,
     run_shell_command,
 )
+from kesoku.agent.tools.subagent import delegate_subagent
 
 __all__ = [
     "ToolContext",
@@ -30,6 +32,7 @@ __all__ = [
     "default_registry",
     "ActiveJobsRegistry",
     "run_shell_command",
+    "manage_job",
     "ShellCommandError",
     "web_search",
     "WebSearchTool",
@@ -41,4 +44,5 @@ __all__ = [
     "skill_manager",
     "update_file",
     "read_file",
+    "delegate_subagent",
 ]

@@ -181,6 +181,7 @@ class SessionWorker:
                 original_msg_id=current_msg.id,
                 active_jobs=self.context.active_jobs,
                 gateway=self.gateway,
+                kesoku_context=self.context,
             )
 
             cfg = self.context.config

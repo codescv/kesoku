@@ -1,9 +1,13 @@
+"""Touch-driven repository rules (AGENTS.md / GEMINI.md) discovery and persistence."""
+
 import json
 import os
 
+from kesoku.agent.state_snapshot import render_repo_rules
 from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
+
 
 class RepoRulesManager:
     """Manager for repository rules discovery and persistence."""
@@ -94,27 +98,4 @@ class RepoRulesManager:
 
     def render(self) -> str:
         """Render the rules block for the LLM context."""
-        if not self.discovered_files:
-            return ""
-
-        lines = [
-            "Repository rules discovered in this session (read them before editing; they override general habits):"
-        ]
-        for abs_path in self.discovered_files:
-            try:
-                rel_path = os.path.relpath(abs_path, self.agent_working_dir)
-            except ValueError:
-                rel_path = abs_path
-
-            lines.append(f"### {rel_path}")
-            try:
-                with open(abs_path, encoding="utf-8") as f:
-                    content = f.read()
-
-                if len(content) > self.max_chars:
-                    content = content[:self.max_chars] + "\n[truncated]"
-                lines.append(content)
-            except Exception as e:
-                lines.append(f"[Error reading file: {e}]")
-
-        return "\n".join(lines)
+        return render_repo_rules(self.discovered_files, self.max_chars, self.agent_working_dir)

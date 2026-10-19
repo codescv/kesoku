@@ -42,9 +42,10 @@ STAGING_EXCLUDED_PREFIXES: tuple[str, ...] = (
     "background_",
     "error_",
     "turn_",
+    "subagent_",
 )
-# Exact names excluded from the staging listing (pinned notes and the tool-maintained context directory).
-STAGING_EXCLUDED_NAMES: frozenset[str] = frozenset({"notes.md", "context"})
+# Exact names excluded from the staging listing (pinned notes, repo rules state, and tool-maintained context dir).
+STAGING_EXCLUDED_NAMES: frozenset[str] = frozenset({"notes.md", "context", "repo_rules.json"})
 # Upper bound on files counted inside one first-level directory (keeps huge trees cheap to list).
 DIR_FILE_COUNT_CAP = 1000
 
@@ -103,9 +104,11 @@ def _one_line(command: str) -> str:
 
 
 def _finished_status(job: FinishedJob) -> str:
-    """Render the outcome of a finished job ("exit 0", "stopped", ...)."""
+    """Render the outcome of a finished job ("exit 0", "stopped", "killed", ...)."""
     if job.reason == "stopped":
         return "stopped"
+    if job.reason == "killed":
+        return f"killed (exit {job.return_code})" if job.return_code is not None else "killed"
     if job.return_code is None:
         return "exit unknown"
     return f"exit {job.return_code}"
@@ -117,12 +120,13 @@ def render_running_jobs(
     """Render the `running_jobs` context block content.
 
     Jobs run under `setsid` through `sh -c`, so the recorded pid is only the shell leader; the block therefore
-    names the process group and tells the model to kill the whole group (`kill -TERM -- -<pgid>`).
+    names the process group and tells the model to stop the whole group (`manage_job(action="kill", ...)` or
+    `kill -TERM -- -<pgid>`).
 
     Args:
         snapshot: Jobs snapshot of the session, taken once at the start of the turn.
         tz: Timezone for absolute timestamps; local time when None.
-        manage_job_enabled: Whether to hint at manage_job instead of kill -TERM.
+        manage_job_enabled: Whether to hint at manage_job in addition to kill -TERM.
 
     Returns:
         The block content, or None when there are neither running nor finished jobs.
@@ -142,10 +146,16 @@ def render_running_jobs(
             if job.stderr_path:
                 log_line += f" | stderr: {job.stderr_path}"
             lines.append(log_line)
-            lines.append(
-                f"  stop the whole job with: kill -TERM -- -{job.pgid}   "
-                "(never kill only the pid: child processes would be orphaned)"
-            )
+            if manage_job_enabled:
+                lines.append(
+                    f'  stop it with: manage_job(action="kill", job_id="{job.job_id}") '
+                    f"(or kill -TERM -- -{job.pgid}; never kill only the pid: child processes would be orphaned)"
+                )
+            else:
+                lines.append(
+                    f"  stop the whole job with: kill -TERM -- -{job.pgid}   "
+                    "(never kill only the pid: child processes would be orphaned)"
+                )
     if snapshot.finished:
         lines.append("Finished earlier in this session:")
         for fin in snapshot.finished:
@@ -260,19 +270,28 @@ def sorted_running(jobs: Sequence[JobInfo]) -> list[JobInfo]:
     return sorted(jobs, key=lambda j: (j.started_at, j.job_id))
 
 def render_repo_rules(discovered_files: list[str], max_chars: int, agent_working_dir: str) -> str:
-    """Render the rules block for the LLM context."""
+    """Render the rules block for the LLM context.
+
+    Args:
+        discovered_files: Ordered list of discovered rule file paths.
+        max_chars: Per-file character cap.
+        agent_working_dir: Root workspace directory for relative path rendering.
+
+    Returns:
+        Rendered markdown string, or empty string when no rules are discovered.
+    """
     if not discovered_files:
         return ""
 
-    import os
     lines = [
         "Repository rules discovered in this session (read them before editing; they override general habits):"
     ]
     for abs_path in discovered_files:
         try:
-            rel_path = os.path.relpath(abs_path, agent_working_dir)
+            rel_path = os.path.relpath(abs_path, agent_working_dir) if agent_working_dir else abs_path
         except ValueError:
             rel_path = abs_path
+        rel_path = rel_path.replace("\\", "/")
 
         lines.append(f"### {rel_path}")
         try:

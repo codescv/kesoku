@@ -28,9 +28,20 @@ kesoku init -c config.toml
 *   **`sessions_dir`**（字符串，默认：`"sessions"`）：会话工作区暂存目录，用于存放单次会话的原始 Trace 日志、执行文件及下载的媒体附件。
 
 ### 2. `[agent]`
-配置活动的 Agent 功能。
+配置活动的 Agent 功能、上下文分层压缩、仓库规范发现与子智能体委派参数。
 
 *   **`llm`**（字符串，默认：`"gemini"`）：当前选用的核心 LLM 驱动引擎。支持 `"gemini"` 或 `"claude"`。
+*   **`protect_front_turns`** / **`protect_tail_turns`**（整数，默认：`1` / `3`）：自动上下文压缩时在会话开头和末尾保留的完整回合数。
+*   **`base_node_min_tokens`**（整数，默认：`25000`）：触发自动 Level-0 摘要压缩的缓冲区 Token 阈值。
+*   **`recent_user_messages_limit`** / **`recent_user_messages_total_chars`** / **`recent_user_message_ceiling_chars`**（整数，默认：`100` / `12000` / `6000`）：已压缩回合中保留在 `<recent_user_messages>` 内的用户原话数量上限、注水算法总字符预算与单条上限。
+*   **`repo_rules_files`**（字符串列表，默认：`["AGENTS.md", "GEMINI.md"]`）：沿访问路径向上至 `$AWD` 自动发现并注入到 `<context name="repo_rules">` 的仓库规范文件名。
+*   **`repo_rules_max_files`** / **`repo_rules_max_chars`**（整数，默认：`3` / `4000`）：最多注入的仓库规范文件数与单文件字符上限。
+*   **`repo_rules_stop_reminder`**（布尔值，默认：`true`）：当回合内修改了受规范约束的仓库文件时，在结束回合前自动提醒 Agent 检查测试与规范要求。
+*   **`subagent_allowed_tools`**（字符串列表，默认：`["read_file", "run_shell_command", "list_skills", "use_skill"]`）：`delegate_subagent` 子智能体允许调用的工具列表。
+*   **`subagent_allow_write`**（布尔值，默认：`false`）：是否允许子智能体使用 `update_file`。
+*   **`subagent_max_steps`** / **`subagent_max_concurrent`** / **`subagent_max_per_turn`**（整数，默认：`12` / `1` / `3`）：子智能体单次最大推理步数、并发上限与单回合调用上限。
+*   **`subagent_shell_timeout_seconds`**（整数，默认：`120`）：子智能体前台 Shell 命令超时秒数（子智能体命令不允许转入后台）。
+*   **`subagent_model_name`**（字符串，默认：`""`）：可选的子智能体专用模型名称覆盖。
 
 ### 3. `[gemini]`
 配置 Google GenAI / Gemini 相关的连接参数。
@@ -58,6 +69,12 @@ kesoku init -c config.toml
 *   **`allowlist_patterns`**（正则表达式列表，默认包含 echo/pwd/git/uv 等）：允许执行的命令行正则模式。
 *   **`blocklist_patterns`**（正则表达式列表，默认包含 rm/sudo/shutdown 等）：禁止执行的危险命令行正则模式。
 *   **`forbidden_patterns`**（键值为正则表达式、Value 为错误信息的字典/映射表）：匹配特定正则表达式的命令将被拒绝执行，并向 Agent 返回对应的自定义错误信息。
+
+### 6. `[hooks]`
+定义在工具调用后或回合结束前自动执行的检查钩子：
+
+*   **`[[hooks.post_tool_use]]`**：在匹配 `tools` 及可选 `file_pattern` 正则（如 `"\\.py$"`）的工具执行后运行命令（支持 `{file}`、`{awd}`、`{staging_dir}` 占位符），并根据 `append_on`（`"nonzero"` 或 `"always"`）将 `[hook <name> exit <code>]` 附加至工具输出。
+*   **`[[hooks.stop]]`**：当回合内调用过 `when_tools_used` 中的工具且 Agent 准备结束回合时运行命令；若退出码非零则提示 Agent 修复并重试（最多 `max_retries` 次）。
 
 ---
 

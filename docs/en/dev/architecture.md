@@ -217,7 +217,28 @@ metadata:
 - **Platform Filtering**: If `platforms` is specified under `metadata`, `list_skills` evaluates the host OS (`platform.system().lower()`). If the current platform is not in the list, the skill is excluded. If `platforms` is omitted (`None`), the skill is treated as cross-platform and listed on all operating systems. If explicitly defined as empty (`[]`), the skill is excluded from all platforms.
 
 ### Native Tool Integration & Script Robustness
-The skill manager exposes two native tools to the LLM:
+The skill manager exposes two native tools to the LLM and compiles a static skill index into the system prompt:
 
-1. `list_skills()`: Scans `skills_dir`, parses YAML frontmatter, filters by OS platform, and returns a summary of available skills.
-2. `use_skill(skill_name: str)`: Returns the complete markdown instructions from the skill's `SKILL.md`. To ensure robust execution when a skill includes scripts or tools (e.g., `uv run scripts/script.py`), `use_skill` automatically prepends a prominent header with the exact absolute path to the skill directory, instructing the LLM to use absolute paths for all CLI command invocations.
+1. **Static `# Available Skills` Prompt Index**: Built at session creation (`SkillManager.build_skills_index_block()`) with one `- **[name]**: description` line per compatible skill so the model can call `use_skill(skill_name)` directly without a discovery round-trip.
+2. `list_skills()`: Scans `skills_dir`, parses YAML frontmatter, filters by OS platform, and returns a summary of available skills.
+3. `use_skill(skill_name: str)`: Returns the complete markdown instructions from the skill's `SKILL.md`. To ensure robust execution when a skill includes scripts or tools (e.g., `uv run scripts/script.py`), `use_skill` automatically prepends a prominent header with the exact absolute path to the skill directory, instructing the LLM to use absolute paths for all CLI command invocations.
+
+## Coding Tools, Context Compaction & Sub-Agent Delegation
+
+### 1. Coding Tool Suite & Output Truncation (P0)
+- **Middle-Out Truncation (`truncate_middle`)**: Long shell outputs and historical tool outputs preserve both the head (40%, showing the command and initial output) and tail (60%, showing tracebacks and test summaries).
+- **`read_file` & `update_file`**: `read_file` provides line-numbered inspection (`offset`/`limit`), binary detection, directory listings, and fuzzy filename suggestions. `update_file` expands `$STAGING_DIR`/`$AWD`, strips accidental line-number prefixes from `old_content`, reports nearest-match line numbers on mismatch, and returns a compact unified diff.
+
+### 2. Continuation-Oriented Compaction & State Snapshots (P1)
+- **Structured Hierarchical Compaction (`HistoryCompressor`)**: Summarizes older turns into Level-0 and Level-1+ nodes containing `Summary`, `Key Decisions & Rationale`, `Dead Ends (Do Not Repeat)`, `Pending State`, and `External Files`.
+- **Water-Fill `<recent_user_messages>`**: Retains verbatim user messages from compacted turns using a fair-share water-filling character pool (`recent_user_messages_total_chars = 12000`, `recent_user_message_ceiling_chars = 6000`).
+- **Frozen Per-Turn State Snapshots (`state_snapshot.py`)**: Injects `<context name="running_jobs">`, `<context name="repo_rules">`, and (once compacted) `<context name="staging_artifacts">`, cached once per turn so prompt prefix caching remains byte-identical across tool calls.
+- **`/compact [instructions]` Command**: Allows users to trigger immediate compaction with optional custom focus instructions.
+
+### 3. Job Lifecycle, Repo Rules, Hooks & Sub-Agents (P2)
+- **`manage_job`**: Provides `list`, `status`, and process-group `kill` (`SIGTERM` -> `SIGKILL`) for background shell jobs, suppressing redundant wake-up alerts when a job is killed intentionally by the agent.
+- **Touch-Driven `AGENTS.md` / `GEMINI.md` Discovery & Hooks**: `RepoRulesManager` discovers repository convention files along touched paths up to `$AWD`, appends newly discovered rules to the tool result, renders `<context name="repo_rules">` on subsequent turns, and fires a one-shot stop reminder when repository files were modified. Configurable `[[hooks.post_tool_use]]` and `[[hooks.stop]]` commands enforce automated lint/test gates.
+- **`delegate_subagent`**: Runs an isolated, bounded read-only `SubagentRunner` loop (with foreground-only shell commands and `subagent_<id>.log.yaml` trajectory logging) and returns only a concise `<= 1500`-char report to the parent turn.
+
+### 4. `kesoku-bench` Evaluation Suite
+`benchmarks/kesoku_bench/` provides a 16-task end-to-end benchmark (`A1`–`A4`, `B1`–`B4`, `C1`–`C4`, `D1`–`D4`) with deterministic behavioral graders, `MeteredLLM` cost/token ledgers, and stage ablation profiles (`baseline`, `p0`, `p1`, `p2`).

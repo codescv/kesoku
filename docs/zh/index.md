@@ -12,7 +12,8 @@ Kesoku 是一个极简、易读且高度模块化的自主 AI 智能体 (Agent) 
 *   **异步并发处理**：调度器为每个会话启动专用的任务循环 (`SessionWorker`)，防止多用户会话碰撞与上下文串扰。
 *   **防卡死与思维中断**：当在推理中途收到新的用户输入时，支持即时中断当前思维，同时保证正在运行的工具调用（如 Shell 写入）安全执行完毕。
 *   **结构化 TOML 配置**：在 `config.toml` 中集中管理模型参数、数据库路径及各平台凭证。
-*   **自治技能系统 (Skills)**：支持 Agent 动态发现并加载特定的领域操作手册 (`SKILL.md`)。
+*   **编码与上下文压缩套件**：内置专用 `read_file` 与带行号提示/Diff 的 `update_file` 工具、首尾保留中间截断 (`truncate_middle`)、面向任务续接的分层压缩（含 `Dead Ends` 与 `Pending State` 以及注水分配的 `<recent_user_messages>`）、每轮冻结状态快照（`<running_jobs>`、`<staging_artifacts>`、`<repo_rules>`）、后台任务管理工具 `manage_job`、只读调查子智能体 `delegate_subagent` 以及可配置工具/结束钩子 (`[hooks]`)。
+*   **自治技能系统与静态索引 (Skills)**：支持在系统提示词中注入静态 `# Available Skills` 索引并按需通过 `use_skill` 加载完整的 `SKILL.md`。
 *   **操作系统守护进程集成**：提供服务安装命令，一键将 Agent 注册为 `systemd` 或 `launchd` 系统服务。
 
 ---

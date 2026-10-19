@@ -82,8 +82,8 @@ sequenceDiagram
     ```
 2.  **Draining and Pivoting**: Inside `execute_turn`, the `TurnExecutor` queries the queue to see if multiple user messages arrived in rapid succession. It drains them and merges them into a single consolidated prompt.
 3.  **Agent Reasoning Loop**:
-    *   **Context Assembling**: The executor compiles the dynamic system prompt (loading role `intro.md`, AWD path, and staging paths).
-    *   **LLM Inference**: The executor issues a non-blocking request to the active LLM backend (`GeminiLLM` or `ClaudeLLM`). It passes an `is_interrupted` callback pointing to `not worker.queue_empty()`. If a user types a new message while the LLM is generating, the generation can be preemptively cancelled.
-    *   **Tool Executions**: If the model decides to invoke tools (e.g. `run_shell_command`), the executor runs them.
+    *   **Context Assembling & Auto-Compaction**: The executor checks token usage against `base_node_min_tokens` to run continuation-oriented compaction if needed, and injects frozen per-turn `<context>` blocks (`notes`, `running_jobs`, `repo_rules`, `staging_artifacts`).
+    *   **LLM Inference**: The executor issues a non-blocking request to the active LLM backend (`GeminiLLM` or `ClaudeLLM`). If a user types a new message while the LLM is generating, the turn pivots on the next check-in.
+    *   **Tool Executions, Repo Rules & Post-Tool Hooks**: If the model invokes tools (`read_file`, `update_file`, `run_shell_command`, `manage_job`, `delegate_subagent`, etc.), the executor runs them concurrently, executes matching `[[hooks.post_tool_use]]` hooks, and discovers any `AGENTS.md`/`GEMINI.md` files along touched paths.
         *   *Safety Note*: Tool executions are atomic. Once a tool has started running, it will not be killed mid-execution. Interruption checks only happen *between* steps.
-4.  **Completion & Hibernation**: Once the LLM returns a final text response (indicating it has finished its turn) and the message queue is empty, the worker task yields and goes to sleep, waiting for the dispatcher to enqueue new events.
+4.  **Stop Gates, Completion & Hibernation**: When the LLM returns a final text response, `TurnExecutor` runs any configured `[[hooks.stop]]` hooks and the built-in `repo_rules` stop reminder (if repository files were modified). Once all gates pass and the message queue is empty, the final response is posted and the worker goes to sleep.

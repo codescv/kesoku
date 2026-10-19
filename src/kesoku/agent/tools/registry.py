@@ -17,7 +17,7 @@ class ToolContext(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
 
     session_id: str = Field(..., description="Unique session identifier")
-    session_workspace: str = Field(..., description="Relative folder name for the session workspace")
+    session_workspace: str = Field(default="", description="Relative folder name for the session workspace")
     original_msg_id: str | None = Field(None, description="ID of the message initiating the turn")
     active_jobs: Any = Field(None, exclude=True)
     transitioned_to_session: str | None = Field(None, description="New session ID if history was compacted")
@@ -30,6 +30,16 @@ class ToolContext(BaseModel):
     subagents_launched_this_turn: int = Field(
         default=0, exclude=True, description="Number of sub-agents launched in turn"
     )
+    running_subagents: int = Field(
+        default=0, exclude=True, description="Number of currently running sub-agents"
+    )
+    subagent_llm_calls: int = Field(
+        default=0, exclude=True, description="LLM calls made by sub-agents in turn"
+    )
+    subagent_tokens: int = Field(
+        default=0, exclude=True, description="Total tokens used by sub-agents in turn"
+    )
+    kesoku_context: Any = Field(default=None, exclude=True)
 
 
 def _create_schema_func(func: Callable) -> Callable:

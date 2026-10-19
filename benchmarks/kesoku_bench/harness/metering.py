@@ -104,6 +104,7 @@ class TurnLedger:
     idx: int
     llm_calls: int = 0
     summarize_calls: int = 0
+    subagent_calls: int = 0
     uncached_in: int = 0
     cached_in: int = 0
     out: int = 0
@@ -206,6 +207,8 @@ class CostLedger:
         if kind == "agent":
             self._turn_agent_calls += 1
             t.llm_calls += 1
+        elif kind == "subagent":
+            t.subagent_calls += 1
         else:
             self._turn_summarize_calls += 1
             t.summarize_calls += 1
@@ -224,6 +227,8 @@ class CostLedger:
         return {
             "llm_calls": kinds.get("agent", 0),
             "summarize_calls": kinds.get("summarize", 0),
+            "subagent_calls": kinds.get("subagent", 0),
+            "subagent_cost_usd": round(sum(r.cost_usd for r in ok if r.kind == "subagent"), 6),
             "tokens": {
                 "uncached_in": sum(r.uncached_in for r in ok),
                 "cached_in": sum(r.cached_in for r in ok),
@@ -312,9 +317,17 @@ class MeteredLLM(BaseLLM):
         return getattr(self._inner, name)
 
     @staticmethod
-    def classify(prompt: str | None, history: list[Message] | None) -> str:
-        """Classify a call as `summarize` (prompt only) or `agent`."""
-        return "summarize" if prompt is not None and not history else "agent"
+    def classify(
+        prompt: str | None,
+        history: list[Message] | None,
+        system_prompt: str | None = None,
+    ) -> str:
+        """Classify a call as `summarize` (prompt only), `subagent`, or `agent`."""
+        if prompt is not None and not history:
+            return "summarize"
+        if system_prompt and system_prompt.lstrip().startswith("# Kesoku Sub-agent"):
+            return "subagent"
+        return "agent"
 
     async def generate(
         self,
@@ -325,7 +338,7 @@ class MeteredLLM(BaseLLM):
         cached_content: str | None = None,
     ) -> LLMResponse:
         """Meter and forward a generation call (see class docstring for breaker semantics)."""
-        kind = self.classify(prompt, history)
+        kind = self.classify(prompt, history, system_prompt)
         reason = self.ledger.check(kind)
         if reason:
             self.ledger.note_blocked(kind, reason)

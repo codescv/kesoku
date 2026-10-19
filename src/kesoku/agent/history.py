@@ -159,7 +159,8 @@ def segment_logical_turns(history: list[Message]) -> list[list[Message]]:
     for m in history:
         if m.role == MessageRole.ASSISTANT and m.sender == "Notification":
             continue
-        if m.role in (MessageRole.USER, MessageRole.SYSTEM):
+        is_hook_nudge = m.role == MessageRole.SYSTEM and m.sender == "Hook" and bool(current_turn)
+        if m.role in (MessageRole.USER, MessageRole.SYSTEM) and not is_hook_nudge:
             if current_turn:
                 turns.append(current_turn)
             current_turn = [m]

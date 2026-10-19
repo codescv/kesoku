@@ -53,6 +53,41 @@ recent_user_message_ceiling_chars = 6000
 # Model name to use for semantic search and context compression vector embedding generation.
 embedding_model = "vertex_ai/text-multilingual-embedding-002"
 
+# Repository convention files discovered along touched directory paths up to AWD and injected as <context name="repo_rules">.
+repo_rules_files = ["AGENTS.md", "GEMINI.md"]
+repo_rules_max_files = 3
+repo_rules_max_chars = 4000
+# Remind the agent to verify discovered repo_rules before ending a turn that wrote to the repository.
+repo_rules_stop_reminder = true
+
+# Sub-agent delegation (delegate_subagent tool) configuration.
+subagent_allowed_tools = ["read_file", "run_shell_command", "list_skills", "use_skill"]
+subagent_allow_write = false
+subagent_max_steps = 12
+subagent_max_concurrent = 1
+subagent_max_per_turn = 3
+subagent_shell_timeout_seconds = 120
+subagent_model_name = ""
+
+
+# Optional: Post-tool-use and pre-stop verification hooks
+# [[hooks.post_tool_use]]
+# name = "ruff"
+# tools = ["update_file"]
+# file_pattern = "\\.py$"
+# command = "uv run ruff check {file}"
+# timeout_seconds = 30.0
+# max_output_chars = 2000
+# append_on = "nonzero"
+#
+# [[hooks.stop]]
+# name = "pytest"
+# command = "uv run pytest -q"
+# when_tools_used = ["update_file", "run_shell_command"]
+# timeout_seconds = 60.0
+# max_output_chars = 3000
+# max_retries = 2
+
 
 [gemini]
 # Standard stable model identifier.

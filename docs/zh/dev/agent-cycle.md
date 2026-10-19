@@ -82,8 +82,8 @@ sequenceDiagram
     ```
 2.  **清空队列与合并（Draining and Pivoting）**：在执行回合 `execute_turn` 时，状态执行器（`TurnExecutor`）会首先排查队列中是否在极短时间内涌入了多条用户消息。若有，它会将它们一次性出队并合并为一个单一的 Prompt，供 Agent 处理。
 3.  **智能体推理执行环**：
-    *   **组装上下文**：执行器编译当前的系统提示词（依次装载角色 `intro.md` 人设、工作区目录 AWD、以及会话 Staging 目录等）。
-    *   **LLM 推理**：执行器调用底层 LLM 驱动（`GeminiLLM` 或 `ClaudeLLM`），并为其注册 `is_interrupted` 回调函数（指向 `not worker.queue_empty()`）。如果用户在模型生成中途又发送了新消息，推理任务会被优雅地抢占并提前终止。
-    *   **工具执行**：如果模型决定调用外部工具（例如运行 Shell 脚本），执行器会并发启动工具运行器。
+    *   **组装上下文与自动压缩**：执行器检查当前上下文 Token 是否达到水位线以触发续接摘要压缩，并注入单轮冻结的 `<context>` 状态块（`notes`、`running_jobs`、`repo_rules`、`staging_artifacts`）。
+    *   **LLM 推理**：执行器调用底层 LLM 驱动（`GeminiLLM` 或 `ClaudeLLM`）。如果用户在模型推理中途发送了新消息，下一检查点将自动抢占并切换至新消息。
+    *   **工具执行、规范发现与工具后钩子**：如果模型调用工具（`read_file`、`update_file`、`run_shell_command`、`manage_job`、`delegate_subagent` 等），执行器会并发执行工具、运行匹配的 `[[hooks.post_tool_use]]` 钩子，并沿访问路径自动发现 `AGENTS.md`/`GEMINI.md` 仓库规范。
         *   *安全机制*：工具执行具有原子性。一旦工具开始在宿主机上运行，系统不会在中途强制 Kill 进程，只有在两次执行步骤**之间**才会检查中断状态。
-4.  **回合结束与休眠**：当 LLM 返回最终的文本响应（说明当前回合的任务已处理完毕）且消息队列为空时，Worker 协程进入休眠状态，等待调度器分发下一个新事件。
+4.  **结束门禁、回合完成与休眠**：当 LLM 返回最终文本回复时，`TurnExecutor` 会依次执行 `[[hooks.stop]]` 钩子与内置的 `repo_rules` 结束提醒（若本轮修改了仓库文件）。所有检查通过且消息队列为空后，最终回复被发布，Worker 协程进入休眠状态。

@@ -98,3 +98,66 @@ async def test_monitor_background_job_suppression(mock_killpg, tool_context, moc
     )
 
     gateway.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_kill_job_real_process_group_and_status(tool_context, mock_registry, tmp_path):
+    """Spawning a shell with a child process and calling manage_job(action='kill') kills the entire process group."""
+    import os
+    import signal
+    import sys
+
+    out_path = tmp_path / "stdout.log"
+    err_path = tmp_path / "stderr.log"
+    pid_file = tmp_path / "child.pid"
+    out_path.write_text("server starting\n", encoding="utf-8")
+    err_path.write_text("", encoding="utf-8")
+
+    cmd = (
+        f"{sys.executable} -c "
+        "\"import os, sys, time; open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(60)\" "
+        f"{pid_file}"
+    )
+    proc = await asyncio.create_subprocess_shell(
+        cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    for _ in range(50):
+        if pid_file.exists() and pid_file.read_text().strip():
+            break
+        await asyncio.sleep(0.05)
+    child_pid = int(pid_file.read_text().strip())
+
+    await mock_registry.register(
+        job_id="realjob",
+        session_id="test_sess",
+        process=proc,
+        log_filepath=str(out_path),
+        command=cmd,
+        stderr_filepath=str(err_path),
+    )
+
+    # Cross-session kill attempt must be rejected
+    other_ctx = MagicMock()
+    other_ctx.session_id = "other_sess"
+    other_ctx.active_jobs = mock_registry
+    other_res = await manage_job(action="kill", job_id="realjob", context=other_ctx)
+    assert "unknown or expired" in other_res
+
+    # Kill from owning session
+    res = await manage_job(action="kill", job_id="realjob", context=tool_context)
+    assert "Killed job realjob" in res
+
+    # Both parent and child must be gone
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+    with pytest.raises(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIG_DFL)
+
+    # Status after kill should report FINISHED and include log tail
+    status_res = await manage_job(action="status", job_id="realjob", context=tool_context)
+    assert "FINISHED" in status_res
+    assert "server starting" in status_res
+
