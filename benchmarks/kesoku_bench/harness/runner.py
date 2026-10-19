@@ -178,6 +178,8 @@ def generic_diagnostics(
         "wrong_skill_loads": sum(1 for n in loaded if target_skills and n not in target_skills),
         "skills_installed": len(skills),
         "tool_calls_missing_result": sum(1 for e in events if not e["has_result"]),
+        "tool_iter_cap_turns": sorted({r.turn_idx for r in ledger.records
+                                       if r.blocked and r.blocked.startswith("max_tool_iters")}),
     }
 
 

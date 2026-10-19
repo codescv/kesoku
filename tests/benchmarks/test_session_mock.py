@@ -182,6 +182,7 @@ async def test_max_tool_iters_ends_turn(make_task: Callable[..., Path], tmp_path
     llm = MockLLM(responses=[_tool("run_shell_command", command="true", cwd="repo") for _ in range(5)])
     res = await run_task(spec, _opts(tmp_path, max_tool_iters=2), llm_factory=_factory(llm))
     assert res["totals"]["llm_calls"] == 2 and res["totals"]["blocked_calls"] == 1
+    assert res["diagnostics"]["tool_iter_cap_turns"] == [1]
     assert res["status"] == "failed"
 
 
