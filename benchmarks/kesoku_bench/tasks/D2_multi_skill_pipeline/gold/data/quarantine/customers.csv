@@ -1,0 +1,2 @@
+customer_id,email,country,signup_date,credit_limit,loyalty_tier,notes
+1006,diana.prince@example.org,US,2025-02-14,-250.00,SILVER,chargeback pending

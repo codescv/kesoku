@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0",
+  "generator": "legacy",
+  "strict_dates": false,
+  "schema_digest": "0000000000000000",
+  "tables": {
+    "customers": {
+      "source_file": "data/customers.csv",
+      "columns": [
+        {"name": "customer_id", "position": 0, "type": "integer", "nullable": false},
+        {"name": "email", "position": 1, "type": "string", "nullable": false},
+        {"name": "country", "position": 2, "type": "string", "nullable": false},
+        {"name": "signup_date", "position": 3, "type": "string", "nullable": false},
+        {"name": "credit_limit", "position": 4, "type": "float", "nullable": false},
+        {"name": "notes", "position": 5, "type": "string", "nullable": false}
+      ]
+    },
+    "orders": {
+      "source_file": "data/orders.csv",
+      "columns": [
+        {"name": "order_id", "position": 0, "type": "integer", "nullable": false},
+        {"name": "customer_id", "position": 1, "type": "integer", "nullable": false},
+        {"name": "order_date", "position": 2, "type": "string", "nullable": false},
+        {"name": "status", "position": 3, "type": "string", "nullable": false},
+        {"name": "amount", "position": 4, "type": "float", "nullable": false}
+      ]
+    }
+  }
+}

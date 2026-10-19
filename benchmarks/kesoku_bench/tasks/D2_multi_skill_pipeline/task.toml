@@ -1,0 +1,26 @@
+[task]
+id = "D2_multi_skill_pipeline"
+suite = "D"
+title = "Repair data pipeline schema and quarantine violating CSV fixtures using team skills"
+config_profile = "default"
+force_compact_before_turn = []
+turn_timeout_s = 900
+continue_on_timeout = false
+
+[[turns]]
+kind = "user"
+text = "The nightly `uv run python -m datapipe.pipeline` fails with `SchemaMismatch` and then `AuditViolation`. Repair the pipeline inputs following our team conventions."
+
+[grading]
+fail_to_pass = [
+    "tests/test_holdout_pipeline.py::test_pipeline_run_succeeds",
+    "tests/test_holdout_pipeline.py::test_schema_matches_reference_inference",
+    "tests/test_holdout_pipeline.py::test_quarantine_files_contain_exact_violating_rows",
+    "tests/test_holdout_pipeline.py::test_source_csvs_cleaned_and_row_counts_conserved",
+]
+pass_to_pass = [
+    "tests/test_datapipe_unit.py::test_infer_column_type_primitives",
+    "tests/test_datapipe_unit.py::test_evaluate_row_rules",
+]
+behavioral = "grade.py"
+required_behavioral = []

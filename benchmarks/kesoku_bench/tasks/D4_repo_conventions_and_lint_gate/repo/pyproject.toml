@@ -1,0 +1,13 @@
+[project]
+name = "textutils"
+version = "0.2.0"
+description = "Lightweight text normalization, slug generation, and excerpt truncation library"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

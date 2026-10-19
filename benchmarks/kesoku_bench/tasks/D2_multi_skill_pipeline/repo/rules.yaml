@@ -1,0 +1,31 @@
+version: 1
+quarantine_dir: data/quarantine
+tables:
+  customers:
+    file: data/customers.csv
+    expected_total_rows: 10
+    rules:
+      - column: email
+        check: contains_at
+      - column: credit_limit
+        check: float_range
+        min: 0.0
+        max: 50000.0
+      - column: loyalty_tier
+        check: allowed_values
+        values: [STANDARD, SILVER, GOLD, PLATINUM]
+  orders:
+    file: data/orders.csv
+    expected_total_rows: 12
+    rules:
+      - column: status
+        check: allowed_values
+        values: [PENDING, PAID, SHIPPED, DELIVERED, REFUNDED]
+      - column: amount
+        check: float_range
+        min: 0.01
+        max: 100000.0
+      - column: discount_pct
+        check: int_range
+        min: 0
+        max: 80
