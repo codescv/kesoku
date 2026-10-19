@@ -1,0 +1,18 @@
+[project]
+name = "cfgkit"
+version = "0.2.0"
+description = "Service configuration loading, merging, environment binding, and export toolkit"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

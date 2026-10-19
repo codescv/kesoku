@@ -1,0 +1,18 @@
+[project]
+name = "svc"
+version = "0.1.0"
+description = "Media thumbnail caching (Subsystem X) and webhook HMAC verification (Subsystem Y)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

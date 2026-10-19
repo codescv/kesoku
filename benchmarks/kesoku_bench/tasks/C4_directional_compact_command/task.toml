@@ -1,0 +1,56 @@
+[task]
+id = "C4_directional_compact_command"
+suite = "C"
+title = "Directional /compact command retaining Subsystem Y boundaries while discarding Subsystem X"
+config_profile = "compaction_forced"
+force_compact_before_turn = [8]
+critical_turn = 3
+turn_timeout_s = 900
+continue_on_timeout = false
+fallback_force_if_noop = true
+
+[[turns]]
+kind = "user"
+text = """Inspect `repo/` (`svc/subsystem_x` and `svc/subsystem_y`) and run `uv run pytest` to verify the initial test suite passes. Give a brief overview of both subsystems."""
+
+[[turns]]
+kind = "user"
+text = """Investigate Subsystem X (`repo/svc/subsystem_x/`): explain the `ThumbnailLRUCache` eviction logic and list its edge cases. Do not modify any files."""
+
+[[turns]]
+kind = "user"
+text = """Investigate Subsystem Y (`repo/svc/subsystem_y/`): document its public signatures (`verify`, `compute_signature`, `WebhookVerifier`) and every unfixed boundary condition you can find in `webhook.py` and `BOUNDARIES.md`. Do not fix them yet."""
+
+[[turns]]
+kind = "user"
+text = """Run the full test suite with `uv run pytest -vv` and run `uv run python -m svc.lint` to inspect the full static audit output."""
+
+[[turns]]
+kind = "user"
+text = """Write `STATUS.md` in your session staging directory (never inside `repo/`) briefly summarising the current state of both subsystems."""
+
+[[turns]]
+kind = "command"
+text = """/compact 只保留 Subsystem Y 的接口签名与未修复的边界条件；Subsystem X 的内容可以丢弃"""
+
+[[turns]]
+kind = "user"
+text = """Fix all the Subsystem Y boundary conditions you identified in `repo/svc/subsystem_y/webhook.py` while keeping `hmac.compare_digest` and existing tests passing."""
+
+[[turns]]
+kind = "user"
+text = """Run `uv run pytest` to confirm all tests pass and summarise the Subsystem Y fixes."""
+
+[grading]
+fail_to_pass = [
+    "tests/test_holdout_webhook.py::test_tolerance_boundary_inclusive",
+    "tests/test_holdout_webhook.py::test_empty_body_accepted_with_valid_signature",
+    "tests/test_holdout_webhook.py::test_non_utf8_bytes_signature_returns_false",
+    "tests/test_holdout_webhook.py::test_constant_time_compare_digest_still_used",
+]
+pass_to_pass = [
+    "tests/test_subsystem_x.py",
+    "tests/test_subsystem_y.py",
+]
+behavioral = "grade.py"
+required_behavioral = ["constant_time_compare_preserved"]

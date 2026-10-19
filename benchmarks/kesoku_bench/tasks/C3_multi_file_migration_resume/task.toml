@@ -1,0 +1,55 @@
+[task]
+id = "C3_multi_file_migration_resume"
+suite = "C"
+title = "Resume selective multi-file OldConfig-to-ConfigV2 migration across forced compactions"
+config_profile = "compaction_forced"
+force_compact_before_turn = [5, 7]
+critical_turn = 3
+turn_timeout_s = 900
+continue_on_timeout = false
+
+[[turns]]
+kind = "user"
+text = """Read `repo/MIGRATION.md` and inspect the `cfgkit` package. Create `migration_checklist.md` in your session staging directory (never inside `repo/`) with one line per consumer module (`loader.py`, `merge.py`, `env.py`, `export.py`) and keep it updated as we go. Do not migrate any code yet."""
+
+[[turns]]
+kind = "user"
+text = """Migrate `repo/cfgkit/loader.py` from `OldConfig` to `ConfigV2` following `MIGRATION.md`, run its tests (`uv run pytest tests/test_loader.py`), and tick `loader.py` in your staging `migration_checklist.md`."""
+
+[[turns]]
+kind = "user"
+text = """Change of plan: **skip `env.py`** — another team deletes it next sprint, and keep `legacy.py` as long as `env.py` needs it. Do `merge.py` now; when you later migrate `export.py`, its output must keep `OldConfig.to_dict()`'s key order (legacy consumers diff it). Update `migration_checklist.md` to mark `merge.py` done and `env.py` skipped."""
+
+[[turns]]
+kind = "user"
+text = """Run the full visible test suite with `uv run pytest -vv` and then run `uv run python -m cfgkit.lint` to inspect the full static audit report. Do not migrate any more modules in this turn."""
+
+[[turns]]
+kind = "user"
+text = """Continue the migration where you left off."""
+
+[[turns]]
+kind = "user"
+text = """Finish whatever remains of the plan and tidy up."""
+
+[[turns]]
+kind = "user"
+text = """Run `uv run pytest` and give a short summary of the final migration status."""
+
+[grading]
+fail_to_pass = [
+    "tests/test_holdout_migration.py::test_migrated_modules_import_v2_and_not_old_config",
+    "tests/test_holdout_migration.py::test_v2_behavioral_loader_and_merge",
+    "tests/test_holdout_migration.py::test_export_v2_key_order_matches_legacy",
+    "tests/test_holdout_migration.py::test_selective_migration_env_untouched_and_legacy_kept",
+    "tests/test_holdout_migration.py::test_migration_checklist_completed_with_env_skipped",
+]
+pass_to_pass = [
+    "tests/test_models.py",
+    "tests/test_loader.py",
+    "tests/test_merge.py",
+    "tests/test_env.py",
+    "tests/test_export.py",
+]
+behavioral = "grade.py"
+required_behavioral = ["plan_violations_zero"]
