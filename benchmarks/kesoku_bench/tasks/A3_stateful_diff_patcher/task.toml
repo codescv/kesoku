@@ -1,0 +1,29 @@
+[task]
+id = "A3_stateful_diff_patcher"
+suite = "A"
+title = "Fix cumulative offset, CRLF preservation, and overlapping context in upatch"
+config_profile = "default"
+config_overrides = {}
+force_compact_before_turn = []
+turn_timeout_s = 900
+continue_on_timeout = false
+
+[[turns]]
+kind = "user"
+text = """`upatch apply fixtures/multi.patch fixtures/multi.txt` fails on the second hunk and `fixtures/win.txt` (CRLF) comes out with LF endings and a context-mismatch error. Single-hunk patches work. Fix it; output files must be byte-identical to GNU patch for the fixtures in `fixtures/`."""
+
+[grading]
+fail_to_pass = [
+    "tests/test_holdout_patch.py::test_multi_hunk_delta_plus2_then_minus1",
+    "tests/test_holdout_patch.py::test_multi_fixture_matches_gnu_patch",
+    "tests/test_holdout_patch.py::test_crlf_byte_exact_round_trip",
+    "tests/test_holdout_patch.py::test_mixed_crlf_lf_preserved_per_line",
+    "tests/test_holdout_patch.py::test_overlapping_context_pair",
+]
+pass_to_pass = [
+    "tests/test_parse.py::test_parse_single_hunk_header_and_operations",
+    "tests/test_parse.py::test_parse_multiple_hunks_and_leading_trailing_context_counts",
+    "tests/test_single_hunk.py::test_apply_single_hunk_lf_fixture",
+    "tests/test_single_hunk.py::test_apply_single_hunk_with_offset_option",
+    "tests/test_single_hunk.py::test_cli_apply_single_hunk_to_output_file",
+]

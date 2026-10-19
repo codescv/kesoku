@@ -1,0 +1,23 @@
+--- a/multi.txt
++++ b/multi.txt
+@@ -1,5 +1,7 @@
+ [section:alpha]
+ enabled = true
+-workers = 2
++workers = 4
++queue_size = 64
++prefetch = 2
+ timeout = 10
+ retries = 1
+@@ -9,5 +11,4 @@
+ workers = 4
+ timeout = 20
+-legacy_flag = on
+ retries = 2
+ 
+@@ -15,4 +16,4 @@
+ enabled = true
+ workers = 8
+-timeout = 30
++timeout = 45
+ retries = 3

@@ -1,0 +1,5 @@
+header = 1
+mode = legacy
+timeout = 30
+retries = 3
+footer = end

@@ -1,0 +1,32 @@
+[task]
+id = "A2_sql_query_planner"
+suite = "A"
+title = "Fix subquery alias shadowing and unsafe predicate pushdown in minisql"
+config_profile = "default"
+config_overrides = {}
+force_compact_before_turn = []
+turn_timeout_s = 900
+continue_on_timeout = false
+
+[[turns]]
+kind = "user"
+text = """Two queries in `queries/regressions.sql` return wrong rows (expected results documented in `queries/README.md`). The planner output looks fine; the executor is believed to be correct. Fix the planner/optimizer so all documented queries return the documented rows."""
+
+[grading]
+fail_to_pass = [
+    "tests/test_holdout_planner.py::test_alias_shadowing_numeric",
+    "tests/test_holdout_planner.py::test_alias_shadowing_string_swap",
+    "tests/test_holdout_planner.py::test_limit_subquery_blocks_pushdown",
+    "tests/test_holdout_planner.py::test_ordered_limit_subquery_blocks_pushdown",
+    "tests/test_holdout_planner.py::test_group_by_blocks_aggregate_pushdown",
+    "tests/test_holdout_planner.py::test_combined_alias_shadowing_and_group_by",
+    "tests/test_holdout_planner.py::test_pushdown_still_happens_when_safe",
+]
+pass_to_pass = [
+    "tests/test_parser.py::test_parse_simple_select_with_where_and_limit",
+    "tests/test_parser.py::test_parse_subquery_and_group_by_count",
+    "tests/test_parser.py::test_parse_sql_script_multiple_statements",
+    "tests/test_optimizer.py::test_simple_subquery_predicate_pushdown",
+    "tests/test_optimizer.py::test_aliased_column_pushdown_non_shadowing",
+    "tests/test_optimizer.py::test_base_table_group_by_and_order_by",
+]

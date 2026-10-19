@@ -1,0 +1,17 @@
+--- a/overlap.txt
++++ b/overlap.txt
+@@ -2,5 +2,6 @@
+ line_2
+-line_3
++line_3_a
++line_3_b
+ line_4
+ line_5
+ line_6
+@@ -5,4 +6,5 @@
+ line_5
+ line_6
+-line_7
++line_7_a
++line_7_b
+ line_8
