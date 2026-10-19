@@ -8,8 +8,16 @@ import shlex
 import signal
 import time
 import uuid
+from collections import OrderedDict, deque
 from typing import Any
 
+from kesoku.agent.state_snapshot import (
+    JOB_COMMAND_MAX_CHARS,
+    FinishedJob,
+    JobInfo,
+    JobsSnapshot,
+    sorted_running,
+)
 from kesoku.agent.tools.registry import ToolContext, default_registry
 from kesoku.config import get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
@@ -27,12 +35,33 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_OUTPUT_LENGTH = 30000
 
 
+def _process_group_id(pid: int) -> int:
+    """Return the process group of `pid`, falling back to `pid` itself (non-POSIX, or the process is gone)."""
+    if os.name != "posix":
+        return pid
+    try:
+        return os.getpgid(pid)
+    except (OSError, AttributeError):
+        return pid
+
+
 class ActiveJobsRegistry:
-    """Registry of active background subprocesses to prevent zombie processes."""
+    """Registry of active background subprocesses to prevent zombie processes.
+
+    Besides the running jobs, the registry keeps a small per-session history of finished jobs (at most
+    `FINISHED_PER_SESSION` per session, for at most `MAX_FINISHED_SESSIONS` sessions, least recently updated
+    evicted first) so the per-turn `running_jobs` snapshot can report recent outcomes. That history is in-memory
+    only and does not survive a service restart; a session's history is dropped by `stop_all_for_session`.
+    """
+
+    FINISHED_PER_SESSION = 5
+    MAX_FINISHED_SESSIONS = 200
 
     def __init__(self) -> None:
         """Initialize the registry with an empty dict and lock."""
         self._jobs: dict[str, dict[str, Any]] = {}
+        # session_id -> recently finished jobs; ordered by last update for LRU eviction.
+        self._finished: OrderedDict[str, deque[FinishedJob]] = OrderedDict()
         self._lock = asyncio.Lock()
 
     async def register(
@@ -41,6 +70,9 @@ class ActiveJobsRegistry:
         session_id: str,
         process: asyncio.subprocess.Process,
         log_filepath: str,
+        *,
+        command: str = "",
+        stderr_filepath: str = "",
     ) -> None:
         """Register a new active background process.
 
@@ -48,34 +80,98 @@ class ActiveJobsRegistry:
             job_id: The background job identifier.
             session_id: The session ID the job belongs to.
             process: The asyncio subprocess instance.
-            log_filepath: Path to the log file.
+            log_filepath: Path to the stdout log file.
+            command: The shell command (stored truncated to `JOB_COMMAND_MAX_CHARS`).
+            stderr_filepath: Path to the stderr log file.
         """
+        pid = process.pid
+        # Jobs are started under setsid, so the group id is captured once here (the leader may exit later).
+        pgid = _process_group_id(pid)
         async with self._lock:
             self._jobs[job_id] = {
                 "session_id": session_id,
                 "process": process,
                 "log_filepath": log_filepath,
+                "stderr_filepath": stderr_filepath,
+                "command": command[:JOB_COMMAND_MAX_CHARS],
+                "pid": pid,
+                "pgid": pgid,
                 "creation_time": time.time(),
             }
-            logger.info(f"Registered background job '{job_id}' for session '{session_id}'")
+            logger.info(f"Registered background job '{job_id}' for session '{session_id}' (pgid {pgid})")
 
-    async def unregister(self, job_id: str) -> None:
-        """Unregister a background job.
+    def _record_finished_locked(self, session_id: str, finished: FinishedJob) -> None:
+        """Append a finished job to the session's bounded history (caller holds the lock)."""
+        history = self._finished.get(session_id)
+        if history is None:
+            history = deque(maxlen=self.FINISHED_PER_SESSION)
+            self._finished[session_id] = history
+        history.append(finished)
+        self._finished.move_to_end(session_id)
+        while len(self._finished) > self.MAX_FINISHED_SESSIONS:
+            self._finished.popitem(last=False)
+
+    async def unregister(self, job_id: str, return_code: int | None = None) -> None:
+        """Unregister a background job and record it in the session's finished-job history.
+
+        Unknown job ids (e.g. already removed by `stop_all_for_session`) are ignored.
 
         Args:
             job_id: The job identifier to remove.
+            return_code: The process exit code, if known.
         """
         async with self._lock:
-            self._jobs.pop(job_id, None)
-            logger.info(f"Unregistered background job '{job_id}'")
+            job = self._jobs.pop(job_id, None)
+            if job is None:
+                return
+            self._record_finished_locked(
+                job["session_id"],
+                FinishedJob(
+                    job_id=job_id,
+                    command=job.get("command", ""),
+                    return_code=return_code,
+                    finished_at=time.time(),
+                ),
+            )
+            logger.info(f"Unregistered background job '{job_id}' (return code {return_code})")
+
+    async def snapshot(self, session_id: str) -> JobsSnapshot:
+        """Take a point-in-time snapshot of a session's running and recently finished jobs.
+
+        Args:
+            session_id: The session ID.
+
+        Returns:
+            Running jobs ordered by start time and finished jobs ordered oldest first.
+        """
+        async with self._lock:
+            running = [
+                JobInfo(
+                    job_id=jid,
+                    command=job.get("command", ""),
+                    pid=job["pid"] if "pid" in job else job["process"].pid,
+                    pgid=job["pgid"] if "pgid" in job else job["process"].pid,
+                    started_at=job["creation_time"],
+                    stdout_path=job.get("log_filepath", ""),
+                    stderr_path=job.get("stderr_filepath", ""),
+                )
+                for jid, job in self._jobs.items()
+                if job["session_id"] == session_id
+            ]
+            finished = list(self._finished.get(session_id, ()))
+        return JobsSnapshot(running=sorted_running(running), finished=finished)
 
     async def stop_all_for_session(self, session_id: str) -> None:
         """Terminate and clean up all active background jobs for a session.
+
+        The session's finished-job history is dropped as well (worker stop, `/clear`, session delete), so the
+        stopped jobs are not reported by later snapshots.
 
         Args:
             session_id: The session ID to clean up.
         """
         async with self._lock:
+            self._finished.pop(session_id, None)
             target_job_ids = [jid for jid, job in self._jobs.items() if job["session_id"] == session_id]
 
             for jid in target_job_ids:
@@ -216,7 +312,7 @@ async def monitor_background_job(
         logger.error(f"Error in monitor_background_job for '{job_id}': {ex}", exc_info=True)
     finally:
         if context.active_jobs:
-            await context.active_jobs.unregister(job_id)
+            await context.active_jobs.unregister(job_id, return_code=proc.returncode)
 
 
 class ShellCommandError(RuntimeError):
@@ -364,7 +460,14 @@ async def run_shell_command(
         except TimeoutError:
             # Command exceeded foreground threshold. Transition to background job.
             if context.active_jobs:
-                await context.active_jobs.register(job_id, context.session_id, proc, log_filepath_stdout)
+                await context.active_jobs.register(
+                    job_id,
+                    context.session_id,
+                    proc,
+                    log_filepath_stdout,
+                    command=command,
+                    stderr_filepath=log_filepath_stderr,
+                )
 
             # Spin off background monitor task
             asyncio.create_task(

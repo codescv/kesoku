@@ -14,6 +14,7 @@ from kesoku.agent.context_dir import (
     build_context_prefix,
     collect_context_entries,
     context_block_name,
+    insert_extra_entries,
     render_context_blocks,
     truncate_context_content,
 )
@@ -147,3 +148,68 @@ async def test_context_file_named_notes_is_renamed(tmp_path: Path) -> None:
     assert warn.call_count == 2
     prefix = render_context_blocks(entries)
     assert prefix.count('<context name="notes">') == 1
+
+
+@pytest.mark.asyncio
+async def test_build_context_prefix_extra_entries_after_notes(tmp_path: Path) -> None:
+    """Extra (system snapshot) entries go right after notes and before context/*.md, in the given order."""
+    (tmp_path / "notes.md").write_text("note")
+    ctx = tmp_path / "context"
+    ctx.mkdir()
+    (ctx / "10-tool.md").write_text("tool data")
+    extras = [ContextEntry("running_jobs", "jobs"), ContextEntry("staging_artifacts", "files")]
+
+    prefix = await build_context_prefix(str(tmp_path), 20000, extra_entries=extras)
+    order = [
+        prefix.index('<context name="notes">'),
+        prefix.index('<context name="running_jobs">'),
+        prefix.index('<context name="staging_artifacts">'),
+        prefix.index('<context name="tool">'),
+    ]
+    assert order == sorted(order)
+
+
+@pytest.mark.asyncio
+async def test_build_context_prefix_extra_entries_without_notes(tmp_path: Path) -> None:
+    """Without notes, extra entries come first; empty extra entries are skipped; works without a context dir."""
+    ctx = tmp_path / "context"
+    ctx.mkdir()
+    (ctx / "10-tool.md").write_text("tool data")
+    extras = [ContextEntry("running_jobs", "jobs"), ContextEntry("staging_artifacts", "")]
+    prefix = await build_context_prefix(str(tmp_path), extra_entries=extras)
+    assert prefix.startswith('<context name="running_jobs">\njobs\n</context>\n')
+    assert "staging_artifacts" not in prefix
+    assert '<context name="tool">' in prefix
+
+    # Only extras, empty staging dir.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    only = await build_context_prefix(str(empty), extra_entries=[ContextEntry("running_jobs", "jobs")])
+    assert only == '<context name="running_jobs">\njobs\n</context>\n'
+    # Default (no extras) is unchanged behaviour.
+    assert await build_context_prefix(str(empty)) == ""
+
+
+@pytest.mark.asyncio
+async def test_build_context_prefix_budget_drops_tool_files_before_extras(tmp_path: Path) -> None:
+    """The drop-from-the-end budget sacrifices context/*.md files before the system snapshots."""
+    (tmp_path / "notes.md").write_text("n" * 10)
+    ctx = tmp_path / "context"
+    ctx.mkdir()
+    (ctx / "10-tool.md").write_text("t" * 100)
+    extras = [ContextEntry("running_jobs", "j" * 50)]
+
+    prefix = await build_context_prefix(str(tmp_path), 70, extra_entries=extras)
+    assert '<context name="notes">' in prefix
+    assert '<context name="running_jobs">' in prefix
+    assert '<context name="tool">' not in prefix
+
+
+def test_insert_extra_entries() -> None:
+    """insert_extra_entries does not mutate its input and places extras after a leading notes entry only."""
+    entries = [ContextEntry("notes", "n"), ContextEntry("a", "a")]
+    out = insert_extra_entries(entries, [ContextEntry("x", "x")])
+    assert [e.name for e in out] == ["notes", "x", "a"]
+    assert [e.name for e in entries] == ["notes", "a"]
+    assert [e.name for e in insert_extra_entries([ContextEntry("a", "a")], [ContextEntry("x", "x")])] == ["x", "a"]
+    assert insert_extra_entries(entries, ()) == entries

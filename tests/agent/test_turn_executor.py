@@ -1231,17 +1231,17 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
     assert gen_call_2["cached_content"] is None
     assert "Agent Working Directory" in gen_call_2["system_prompt"]
     assert gen_call_2["tools"] == ["dummy_tool"]
-    # history has: Turn 1 (2) + Scaffold (1) + Ack (1) + Turn 3 (active turn with tool call/response) (5)
-    assert len(gen_call_2["history"]) == 9
+    # history has: Scaffold (1) + Ack (1) + Turn 3 (active turn with tool call/response) (5). Turn 1 carries a
+    # summary_node_id, so it is represented only by the scaffold, never verbatim (even inside the protected head).
+    assert len(gen_call_2["history"]) == 7
+    assert not any(m.content == "User message 1" for m in gen_call_2["history"])
     assert gen_call_2["history"][0].role == MessageRole.USER
-    assert "User message 1" in gen_call_2["history"][0].content
-    assert gen_call_2["history"][2].role == MessageRole.USER
-    assert "[Note: This conversation uses custom turn-based" in gen_call_2["history"][2].content
-    assert "Compacted user query" in gen_call_2["history"][2].content
-    assert gen_call_2["history"][5].role == MessageRole.ASSISTANT
-    assert "I need to call a tool" in gen_call_2["history"][5].content
-    assert gen_call_2["history"][7].role == MessageRole.TOOL
-    assert "Tool output content" in gen_call_2["history"][7].content
+    assert "[Note: This conversation uses custom turn-based" in gen_call_2["history"][0].content
+    assert "Compacted user query" in gen_call_2["history"][0].content
+    assert gen_call_2["history"][3].role == MessageRole.ASSISTANT
+    assert "I need to call a tool" in gen_call_2["history"][3].content
+    assert gen_call_2["history"][5].role == MessageRole.TOOL
+    assert "Tool output content" in gen_call_2["history"][5].content
 
 
 @pytest.mark.asyncio

@@ -367,7 +367,7 @@ async def test_manual_compact_command(tmp_path) -> None:
 
     await bot.commands.execute("compact", mock_reply, "ch_cmd")
 
-    assert "Context compaction is not needed right now" in reply_msg
+    assert "Nothing to compact" in reply_msg
 
 
 @pytest.mark.asyncio
@@ -586,4 +586,201 @@ async def test_run_shell_command_middle_out_keeps_head_marker(tmp_path) -> None:
         full = open(saved.group(1), encoding="utf-8").read()
         assert "packet 0200" in full and "HEAD_MARKER" in full and "TAIL_MARKER" in full
     finally:
+        kesoku.config._global_config = original_config
+
+
+# --- ActiveJobsRegistry bookkeeping for the running_jobs snapshot (P1-3) -------------------------------------------
+
+
+class _FakeProc:
+    """Minimal stand-in for asyncio.subprocess.Process (only `pid` is read at registration)."""
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.returncode: int | None = None
+
+
+@pytest.mark.asyncio
+async def test_registry_register_snapshot_fields() -> None:
+    """register stores the truncated command, log paths, pid and pgid; snapshot is per session and ordered."""
+    import os
+
+    from kesoku.agent.state_snapshot import JOB_COMMAND_MAX_CHARS
+    from kesoku.agent.tools import ActiveJobsRegistry
+
+    reg = ActiveJobsRegistry()
+    pid = os.getpid()
+    long_cmd = "x" * 500
+    await reg.register("job_a", "s1", _FakeProc(pid), "/s/a.stdout", command=long_cmd, stderr_filepath="/s/a.stderr")
+    await reg.register("job_b", "s1", _FakeProc(pid), "/s/b.stdout")
+    await reg.register("job_other", "s2", _FakeProc(pid), "/s/o.stdout", command="other")
+
+    snap = await reg.snapshot("s1")
+    assert [j.job_id for j in snap.running] == ["job_a", "job_b"]
+    a = snap.running[0]
+    assert a.command == long_cmd[:JOB_COMMAND_MAX_CHARS]
+    assert a.stdout_path == "/s/a.stdout"
+    assert a.stderr_path == "/s/a.stderr"
+    assert a.pid == pid
+    expected_pgid = os.getpgid(pid) if os.name == "posix" else pid
+    assert a.pgid == expected_pgid
+    assert a.started_at > 0
+    assert snap.running[1].command == ""
+    assert snap.running[1].stderr_path == ""
+    assert snap.finished == []
+
+    assert [j.job_id for j in (await reg.snapshot("s2")).running] == ["job_other"]
+    assert (await reg.snapshot("nobody")).is_empty
+
+
+@pytest.mark.asyncio
+async def test_registry_pgid_falls_back_to_pid_for_dead_process() -> None:
+    """When the process group cannot be resolved (process gone), pgid falls back to the pid."""
+    from kesoku.agent.tools import ActiveJobsRegistry
+
+    reg = ActiveJobsRegistry()
+    # PIDs this large do not exist on Linux (pid_max <= 4194304), so getpgid raises ProcessLookupError.
+    await reg.register("job_dead", "s1", _FakeProc(2**30), "/s/d.stdout")
+    snap = await reg.snapshot("s1")
+    assert snap.running[0].pgid == 2**30
+
+
+@pytest.mark.asyncio
+async def test_registry_unregister_records_finished_with_return_code() -> None:
+    """unregister moves the job into the session's finished list with its return code; unknown ids are no-ops."""
+    import os
+
+    from kesoku.agent.tools import ActiveJobsRegistry
+
+    reg = ActiveJobsRegistry()
+    await reg.register("job_a", "s1", _FakeProc(os.getpid()), "/s/a.stdout", command="make test")
+    await reg.unregister("job_a", return_code=2)
+    await reg.unregister("job_a", return_code=0)  # already gone: ignored
+    await reg.unregister("never_registered")
+
+    snap = await reg.snapshot("s1")
+    assert snap.running == []
+    assert len(snap.finished) == 1
+    fin = snap.finished[0]
+    assert (fin.job_id, fin.command, fin.return_code, fin.reason) == ("job_a", "make test", 2, "exited")
+    assert fin.finished_at > 0
+
+    # Default return code is None.
+    await reg.register("job_b", "s1", _FakeProc(os.getpid()), "/s/b.stdout")
+    await reg.unregister("job_b")
+    assert (await reg.snapshot("s1")).finished[-1].return_code is None
+
+
+@pytest.mark.asyncio
+async def test_registry_finished_deque_and_lru_bounds() -> None:
+    """Finished jobs are capped per session (oldest dropped) and sessions are LRU-evicted beyond the cap."""
+    import os
+
+    from kesoku.agent.tools import ActiveJobsRegistry
+
+    reg = ActiveJobsRegistry()
+    pid = os.getpid()
+    for i in range(ActiveJobsRegistry.FINISHED_PER_SESSION + 3):
+        await reg.register(f"job_{i}", "s1", _FakeProc(pid), "/s/x")
+        await reg.unregister(f"job_{i}", return_code=i)
+    finished = (await reg.snapshot("s1")).finished
+    assert len(finished) == ActiveJobsRegistry.FINISHED_PER_SESSION
+    assert [f.return_code for f in finished] == list(range(3, ActiveJobsRegistry.FINISHED_PER_SESSION + 3))
+
+    reg.MAX_FINISHED_SESSIONS = 3  # instance override keeps the test small
+    for sid in ["s2", "s3", "s4"]:
+        await reg.register(f"job_{sid}", sid, _FakeProc(pid), "/s/x")
+        await reg.unregister(f"job_{sid}", return_code=0)
+    # s1 was least recently updated and is evicted.
+    assert (await reg.snapshot("s1")).finished == []
+    # Updating s2 makes it most recent, so adding s5 evicts s3 instead.
+    await reg.register("job_s2b", "s2", _FakeProc(pid), "/s/x")
+    await reg.unregister("job_s2b", return_code=0)
+    await reg.register("job_s5", "s5", _FakeProc(pid), "/s/x")
+    await reg.unregister("job_s5", return_code=0)
+    assert len((await reg.snapshot("s2")).finished) == 2
+    assert (await reg.snapshot("s3")).finished == []
+    assert len((await reg.snapshot("s4")).finished) == 1
+    assert len((await reg.snapshot("s5")).finished) == 1
+
+
+@pytest.mark.asyncio
+async def test_registry_stop_all_for_session_terminates_group_and_drops_history() -> None:
+    """stop_all_for_session kills the session's job process group and drops its finished history only."""
+    import asyncio
+    import os
+
+    from kesoku.agent.tools import ActiveJobsRegistry
+
+    reg = ActiveJobsRegistry()
+    proc = await asyncio.create_subprocess_shell("sleep 30", preexec_fn=os.setsid if os.name == "posix" else None)
+    try:
+        await reg.register("job_run", "s1", proc, "/s/run.stdout", command="sleep 30")
+        await reg.register("job_done", "s1", _FakeProc(os.getpid()), "/s/done.stdout")
+        await reg.unregister("job_done", return_code=0)
+        await reg.register("job_keep", "s2", _FakeProc(os.getpid()), "/s/keep.stdout")
+        await reg.unregister("job_keep", return_code=0)
+
+        snap = await reg.snapshot("s1")
+        assert [j.job_id for j in snap.running] == ["job_run"]
+        assert snap.running[0].pgid == (os.getpgid(proc.pid) if os.name == "posix" else proc.pid)
+        assert len(snap.finished) == 1
+
+        await reg.stop_all_for_session("s1")
+        assert proc.returncode is not None
+        assert (await reg.snapshot("s1")).is_empty
+        assert len((await reg.snapshot("s2")).finished) == 1
+
+        # The monitor's late unregister for a stopped job must not resurrect the session's history.
+        await reg.unregister("job_run", return_code=proc.returncode)
+        assert (await reg.snapshot("s1")).is_empty
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_background_job_bookkeeping(tmp_path) -> None:
+    """A backgrounded command is registered with its command/stderr path and recorded with its exit code."""
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    import kesoku.config
+    from kesoku.agent.tools import ActiveJobsRegistry
+    from kesoku.config import init_config, load_config
+
+    original_config = kesoku.config._global_config
+    try:
+        config_path = tmp_path / "config.toml"
+        init_config(str(config_path))
+        cfg = load_config(str(config_path))
+        cfg.agent_working_dir = str(tmp_path)
+        cfg.shell.background_threshold_seconds = 0.1
+
+        active_jobs = ActiveJobsRegistry()
+        gateway = MagicMock()
+        gateway.post = AsyncMock()
+        ctx = ToolContext(session_id="bg_sess", session_workspace="bg_ws", active_jobs=active_jobs, gateway=gateway)
+
+        res = await run_shell_command("sleep 0.5; exit 3", context=ctx)
+        assert "transitioned to background execution" in res
+        snap = await active_jobs.snapshot("bg_sess")
+        assert len(snap.running) == 1
+        job = snap.running[0]
+        assert job.command == "sleep 0.5; exit 3"
+        assert job.stdout_path.endswith(f"background_{job.job_id}.stdout")
+        assert job.stderr_path.endswith(f"background_{job.job_id}.stderr")
+
+        # Wait for the monitor task to finish and unregister the job.
+        for _ in range(100):
+            snap = await active_jobs.snapshot("bg_sess")
+            if snap.finished:
+                break
+            await asyncio.sleep(0.05)
+        assert snap.running == []
+        assert [(f.job_id, f.return_code) for f in snap.finished] == [(job.job_id, 3)]
+        gateway.post.assert_awaited_once()
+    finally:
+        await active_jobs.stop_all_for_session("bg_sess")
         kesoku.config._global_config = original_config

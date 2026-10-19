@@ -252,8 +252,10 @@ class Chatbot(ABC):
             status_msg = await self.get_session_status_by_channel(channel_id)
             await reply_func(status_msg)
 
-        async def handle_compact(reply_func: Callable[[str], Awaitable[None]], channel_id: str) -> None:
-            status_msg = await self.manual_compact_session_by_channel(channel_id)
+        async def handle_compact(
+            reply_func: Callable[[str], Awaitable[None]], channel_id: str, instructions: str = ""
+        ) -> None:
+            status_msg = await self.manual_compact_session_by_channel(channel_id, instructions)
             await reply_func(status_msg)
 
         async def handle_role(
@@ -275,7 +277,11 @@ class Chatbot(ABC):
         self.commands.register("clear", "Clear the active conversation session.", handle_clear)
         self.commands.register("reset", "Clear the active conversation session.", handle_clear)
         self.commands.register("status", "Get conversation and performance statistics.", handle_status)
-        self.commands.register("compact", "Manually compact conversation history.", handle_compact)
+        self.commands.register(
+            "compact",
+            "Compact history now; optional focus, e.g. /compact keep only the API decisions",
+            handle_compact,
+        )
         self.commands.register(
             "role",
             "Update or view the active roleplay persona for the current channel.",
@@ -564,7 +570,13 @@ class Chatbot(ABC):
         command = raw_command.lower().lstrip("/")
 
         try:
-            if command in {"clear", "reset", "status", "compact", "debug", "cron"}:
+            if command == "compact":
+                if not channel_id:
+                    await reply_func("⚠️ Channel ID is required for this command.")
+                    return
+                instructions = text.strip()[len(raw_command) :].strip()
+                await self.commands.execute("compact", reply_func, channel_id=channel_id, instructions=instructions)
+            elif command in {"clear", "reset", "status", "debug", "cron"}:
                 if not channel_id:
                     await reply_func("⚠️ Channel ID is required for this command.")
                     return
@@ -658,11 +670,25 @@ class Chatbot(ABC):
             return f"♻️ New session '{new_session.id}' started. Old session '{session.id}' preserved."
         return "⚠️ No active session found for this chat."
 
-    async def manual_compact_session_by_channel(self, channel_id: str) -> str:
-        """Manually trigger context compaction on the active history of this channel."""
+    async def manual_compact_session_by_channel(self, channel_id: str, instructions: str = "") -> str:
+        """Force-compact the active history of this channel, optionally steered by focus instructions.
+
+        Compacts every uncompressed turn between the protected head and tail regardless of the watermark. Refuses
+        while a turn is in progress so the running turn's scaffold never changes between its LLM calls.
+
+        Args:
+            channel_id: Channel whose active session is compacted.
+            instructions: Optional focus directive (e.g. "keep only the API decisions").
+
+        Returns:
+            A user-facing status line.
+        """
         session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
         if not session:
             return "⚠️ No active session found for this chat."
+
+        if await self._session_turn_in_progress(session.id):
+            return "⏳ A turn is in progress; run /compact after it finishes."
 
         # Fetch active history
         history = await build_history(self.gateway, session.id, heal_orphans=False)
@@ -676,23 +702,40 @@ class Chatbot(ABC):
         cfg = self.gateway.context.config
         llm = get_llm(provider=cfg.agent.context_llm or cfg.agent.llm, config=cfg, use_context_compression=True)
         staging_dir = self.get_session_staging_dir(session.workspace_name)
+        directive = instructions.strip() or None
+        turns_before = sum(
+            1 for t in compressor.segment_turns(history) if any(m.summary_node_id is not None for m in t)
+        )
 
         try:
-            # Trigger compaction
-            compacted = await compressor.auto_compact_session(
-                session_id=session.id,
-                history=history,
-                llm=llm,
-                config=cfg,
-                staging_dir=staging_dir,
+            nodes = await compressor.force_compact_session(
+                session.id, history, llm, cfg, directive=directive, staging_dir=staging_dir
             )
-            if compacted:
-                return "🔄 Context Compaction completed successfully! Old turns have been compacted into summary nodes."
-            else:
-                return "ℹ️ Context compaction is not needed right now: turns do not meet threshold limits."
         except Exception as e:
             logger.error(f"Failed manual compaction for session {session.id}: {e}")
             return f"⚠️ Failed to compact history: {e}"
+        if not nodes:
+            return (
+                "ℹ️ Nothing to compact: all turns are already summarised or inside the protected head/tail "
+                f"({cfg.agent.protect_front_turns} + {cfg.agent.protect_tail_turns} turns)."
+            )
+        turns_after = sum(
+            1 for t in compressor.segment_turns(history) if any(m.summary_node_id is not None for m in t)
+        )
+        reply = f"🔄 Compacted {turns_after - turns_before} turn(s) into {nodes} summary node(s)."
+        if directive:
+            reply += f'\nFocus: "{directive}"'
+        return reply
+
+    async def _session_turn_in_progress(self, session_id: str) -> bool:
+        """Whether the session has a message waiting for / being processed by the agent, or a busy worker."""
+        for status in (MessageStatus.PENDING_AGENT, MessageStatus.PROCESSING):
+            busy = await self.gateway.db.get_messages_by_filters({"session_id": session_id, "status": status})
+            if busy:
+                return True
+        agent = getattr(self.gateway, "agent", None)
+        worker = agent.workers.get(session_id) if agent is not None and hasattr(agent, "workers") else None
+        return bool(worker is not None and getattr(worker, "_processing_turn", False))
 
     async def get_session_status_by_channel(self, channel_id: str) -> str:
         """Get session statistics for the channel."""

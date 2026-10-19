@@ -17,7 +17,7 @@ Kesoku chatbot adapters support standard slash commands (e.g. on Discord) or tex
     *   Deletes the entire conversation history for the current channel/thread from the SQLite database.
     *   Recursively deletes the session's workspace staging folder on disk (cleaning up downloaded files/attachments).
     *   Removes active views and button elements.
-*   **`/compact`**: Manually forces context compaction on the active history of this channel immediately, replacing old turns with scaffold summary nodes to free up context window space.
+*   **`/compact [instructions]`**: Immediately compacts the active history of this channel (every turn outside the protected head and tail) into summary nodes, regardless of the watermark. Optional focus text steers what the new summaries keep, e.g. `/compact keep only the API signatures and open bugs; the UI discussion can go`. Refused while the agent is still working on a turn.
 *   **`/context`**: Generates and returns a download link to an interactive dark-mode HTML trace file (`lcm_context.html`) detailing the exact LLM thinking trajectory, prompt logs, and tools executed in the current turn.
 *   **`/grep {query}`** (Alias: **`/memory-grep`**): Searches active memories and past chat messages for the current channel's role persona matching the query (keyword match or wildcard `*`).
 *   **`/search {query}`** (Alias: **`/memory-search`**): Performs semantic (vector) search against active memories and past chat messages for the current channel's role persona.

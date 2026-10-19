@@ -41,6 +41,15 @@ base_node_turns = 4
 # Branching factor K to merge K Level-n nodes into Level-n+1.
 context_consolidation_k = 4
 
+# Verbatim user messages of compacted turns kept in the <recent_user_messages> scaffold block.
+# Max number of messages (0 disables the block).
+recent_user_messages_limit = 100
+# Total character pool shared by those messages (water-filling: short messages are kept whole,
+# long ones share what is left and are shortened in the middle).
+recent_user_messages_total_chars = 12000
+# Per-message ceiling, applied even when the pool has spare room (must be <= the pool; both >= 200).
+recent_user_message_ceiling_chars = 6000
+
 # Model name to use for semantic search and context compression vector embedding generation.
 embedding_model = "vertex_ai/text-multilingual-embedding-002"
 

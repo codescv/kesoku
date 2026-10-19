@@ -7,7 +7,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from kesoku.agent.compressor import (
+    CONSOLIDATE_SUMMARIES_PROMPT,
+    SUMMARIZE_TURN_PROMPT,
     HistoryCompressor,
+    sanitize_directive,
 )
 from kesoku.agent.llm import LLMResponse
 from kesoku.config import KesokuConfig
@@ -372,3 +375,164 @@ def test_estimate_prepared_turn_tokens_truncates_notes_tool_args():
         metadata={"tool_name": "update_session_notes", "tool_arguments": {"content": "n" * 5000}},
     )
     assert compressor.estimate_prepared_turn_tokens([call], llm_mock) < 500
+
+
+
+# --- P1-1: continuation-style summary schema -----------------------------------------------------------------
+
+GOLDEN_JSON = """{
+  "timeline": ["2026-10-19 13:00 - 2026-10-19 13:40: Implemented the validator", "13:40 - 13:55: Ran tests"],
+  "dead_ends": ["Cached the clock -> test_clock_skew failed, reverted"],
+  "pending_state": {
+    "unfinished": ["Add 503 retry to _build_request; next: write the retry test"],
+    "constraints": ["Error codes use E_DOM_CORE_NNN", "skip env.py, keep legacy.py"],
+    "key_files": ["migration_checklist.md: checklist, 3/5 done"]
+  },
+  "learnings": "Use uv run pytest -x for fast feedback."
+}"""
+
+GOLDEN_SUMMARY = """Timeline:
+- 2026-10-19 13:00 - 2026-10-19 13:40: Implemented the validator
+- 13:40 - 13:55: Ran tests
+
+Dead Ends:
+- Cached the clock -> test_clock_skew failed, reverted
+
+Pending State:
+Unfinished:
+- Add 503 retry to _build_request; next: write the retry test
+Constraints:
+- Error codes use E_DOM_CORE_NNN
+- skip env.py, keep legacy.py
+Key files:
+- migration_checklist.md: checklist, 3/5 done
+
+Learnings:
+Use uv run pytest -x for fast feedback."""
+
+
+def test_format_summary_golden() -> None:
+    """All four sections render in a stable order and layout."""
+    assert HistoryCompressor.format_summary(GOLDEN_JSON) == GOLDEN_SUMMARY
+
+
+def test_format_summary_null_sections_render_none() -> None:
+    """Absent / null dead_ends and pending_state render "None", like Learnings."""
+    result = HistoryCompressor.format_summary('{"timeline": ["t"], "dead_ends": null, "learnings": null}')
+    assert result == "Timeline:\n- t\n\nDead Ends:\nNone\n\nPending State:\nNone\n\nLearnings:\nNone"
+
+
+def test_format_pending_state_forms() -> None:
+    """pending_state accepts the dict form, partial dicts, strings, lists and nulls."""
+    fmt = HistoryCompressor._format_pending_state
+    assert fmt(None) == "None"
+    assert fmt({}) == "None"
+    assert fmt({"unfinished": [], "constraints": None, "key_files": ["null"]}) == "None"
+    # Empty groups are omitted; a string group value becomes a single bullet.
+    assert fmt({"unfinished": [], "constraints": "keep Y"}) == "Constraints:\n- keep Y"
+    # Unknown keys are kept after the known groups.
+    assert fmt({"key_files": ["a.py: x"], "open_questions": ["which port?"]}) == (
+        "Key files:\n- a.py: x\nOpen questions:\n- which port?"
+    )
+    # Non-conforming list / string forms are rendered as plain bullets / text.
+    assert fmt(["finish X", "keep Y"]) == "- finish X\n- keep Y"
+    assert fmt("finish X") == "finish X"
+    assert fmt("none") == "None"
+
+
+def test_format_dead_ends_forms() -> None:
+    """dead_ends renders lists as bullets, strings verbatim, empty/null as None."""
+    for dead_ends, expected in [
+        ('["a -> b", "c -> d"]', "- a -> b\n- c -> d"),
+        ('"tried a -> failed"', "tried a -> failed"),
+        ("[]", "None"),
+        ("null", "None"),
+    ]:
+        result = HistoryCompressor.format_summary(f'{{"timeline": ["t"], "dead_ends": {dead_ends}}}')
+        assert f"Dead Ends:\n{expected}\n\nPending State:" in result
+
+
+def test_prompts_format_with_and_without_directive() -> None:
+    """Both prompts format without KeyError, list the new keys, and keep a {directive} slot."""
+    common = {"max_chars": 1500, "date_context": "ctx", "example_start_time": "s", "example_end_time": "e"}
+    for template, extra in [
+        (SUMMARIZE_TURN_PROMPT, {"segment": "seg {not a field}"}),
+        (CONSOLIDATE_SUMMARIES_PROMPT, {"summaries": "sums {x}"}),
+    ]:
+        for directive in ("", "Compaction focus requested by the user: \"{weird}\"."):
+            prompt = template.format(directive=directive, **common, **extra)
+            for key in ('"timeline"', '"dead_ends"', '"pending_state"', '"unfinished"', '"constraints"',
+                        '"key_files"', '"learnings"'):
+                assert key in prompt
+            assert directive in prompt
+
+
+def test_summarize_prompt_guidelines() -> None:
+    """The L0 prompt explains dead_ends and pending_state (verbatim rules, no completed work)."""
+    assert "so they are not retried later" in SUMMARIZE_TURN_PROMPT
+    assert "quote short rules\n     verbatim" in SUMMARIZE_TURN_PROMPT
+    assert "Do NOT list completed work here" in SUMMARIZE_TURN_PROMPT
+
+
+def test_consolidation_prompt_contains_merge_rules() -> None:
+    """The consolidation prompt dedupes dead ends, keeps only open items and never drops live constraints."""
+    assert "Merge and deduplicate the dead ends" in CONSOLIDATE_SUMMARIES_PROMPT
+    assert "still open at the end of the latest summary" in CONSOLIDATE_SUMMARIES_PROMPT
+    assert "an item shown as\n   completed in a later summary is dropped" in CONSOLIDATE_SUMMARIES_PROMPT
+    assert "a later rule supersedes an earlier conflicting one" in CONSOLIDATE_SUMMARIES_PROMPT
+    assert "Never drop a constraint that is still in force, whatever the focus directive says." in (
+        CONSOLIDATE_SUMMARIES_PROMPT
+    )
+
+
+def test_strip_legacy_sections_keeps_new_sections() -> None:
+    """A legacy Tools & Skills section followed by Dead Ends / Pending State keeps the new sections."""
+    legacy = (
+        "Timeline:\n- t\n\n"
+        "Tools & Skills:\n- run_shell_command: x\n\n"
+        "Dead Ends:\n- a -> b\n\n"
+        "User Asks:\n- stale\n\n"
+        "Pending State:\nConstraints:\n- keep Y\n\n"
+        "Learnings:\nNone"
+    )
+    assert HistoryCompressor.strip_legacy_sections(legacy) == (
+        "Timeline:\n- t\n\nDead Ends:\n- a -> b\n\nPending State:\nConstraints:\n- keep Y\n\nLearnings:\nNone"
+    )
+    # No-op without legacy markers.
+    assert HistoryCompressor.strip_legacy_sections(GOLDEN_SUMMARY) == GOLDEN_SUMMARY
+
+
+def test_sanitize_directive() -> None:
+    """Directives are stripped, whitespace-collapsed, capped at 500 chars; blank -> None."""
+    assert sanitize_directive(None) is None
+    assert sanitize_directive("  \n\t ") is None
+    assert sanitize_directive("  keep\n\nonly   {Y} ") == "keep only {Y}"
+    assert sanitize_directive("x" * 600) == "x" * 500
+
+
+@pytest.mark.asyncio
+async def test_auto_compact_prompt_has_no_directive_and_new_sections_persist(tmp_path):
+    """auto_compact_session passes no directive; dead_ends/pending_state reach the stored node."""
+    db_mock = AsyncMock()
+    db_mock.get_root_summary_nodes.return_value = []
+    llm_mock = AsyncMock()
+    llm_mock.estimate_tokens_fallback = MagicMock(return_value=10000)
+    llm_mock.generate.return_value = LLMResponse(content=GOLDEN_JSON)
+    cfg = KesokuConfig()
+    cfg.agent.protect_front_turns = 1
+    cfg.agent.protect_tail_turns = 1
+    cfg.agent.base_node_turns = 2
+    cfg.agent.base_node_min_tokens = 1000
+    messages = [
+        Message(
+            id=f"golden_{idx}", session_id="sess_golden", chatbot_id="cb", channel_id="ch", sender="user",
+            role=MessageRole.USER, type=MessageType.TEXT, content=f"Turn {idx}", status=MessageStatus.RESPONDED,
+            timestamp=time.time() + idx,
+        )
+        for idx in range(4)
+    ]
+    assert await HistoryCompressor(db_mock).auto_compact_session("sess_golden", messages, llm_mock, cfg)
+    prompt = llm_mock.generate.call_args[1]["prompt"]
+    assert "Compaction focus" not in prompt
+    inserted: SummaryNode = db_mock.insert_summary_node.call_args[0][0]
+    assert inserted.summary == GOLDEN_SUMMARY

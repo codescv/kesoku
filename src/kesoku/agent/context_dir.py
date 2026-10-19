@@ -3,11 +3,14 @@
 Every turn, the agent injects the session's pinned notes (`$STAGING_DIR/notes.md`) and every Markdown file in
 `$STAGING_DIR/context/` into the latest user message, each wrapped as `<context name="NAME">...</context>`.
 Files in `context/` are maintained by external tools; the agent reads them but does not edit them.
+System-generated snapshot blocks (`running_jobs`, `staging_artifacts`; see `kesoku.agent.state_snapshot`) can be
+passed as extra entries and are placed right after `notes`.
 """
 
 import asyncio
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from kesoku.logger import setup_logger
@@ -142,7 +145,41 @@ def render_context_blocks(entries: list[ContextEntry]) -> str:
     return "".join(f'<context name="{e.name}">\n{e.content}\n</context>\n' for e in entries)
 
 
-async def build_context_prefix(staging_dir: str, max_total_chars: int = DEFAULT_CONTEXT_TOTAL_MAX_CHARS) -> str:
-    """Collect, budget and render all context blocks for a session staging directory."""
-    entries = await collect_context_entries(staging_dir)
+def insert_extra_entries(entries: list[ContextEntry], extra_entries: Sequence[ContextEntry]) -> list[ContextEntry]:
+    """Insert system-generated entries right after the notes block (or first, when there are no notes).
+
+    Placing them before the `context/*.md` blocks means the total budget (which drops from the end) sacrifices
+    tool-written files before the system snapshots.
+
+    Args:
+        entries: Collected entries (notes first, then `context/*.md`).
+        extra_entries: Entries to insert, in order; entries with empty content are skipped.
+
+    Returns:
+        A new ordered list of entries.
+    """
+    extras = [e for e in extra_entries if e.content]
+    if not extras:
+        return list(entries)
+    insert_at = 1 if entries and entries[0].name == NOTES_BLOCK_NAME else 0
+    return [*entries[:insert_at], *extras, *entries[insert_at:]]
+
+
+async def build_context_prefix(
+    staging_dir: str,
+    max_total_chars: int = DEFAULT_CONTEXT_TOTAL_MAX_CHARS,
+    extra_entries: Sequence[ContextEntry] = (),
+) -> str:
+    """Collect, budget and render all context blocks for a session staging directory.
+
+    Args:
+        staging_dir: Absolute path of the session staging directory.
+        max_total_chars: Maximum total characters across all block contents.
+        extra_entries: System-generated entries (e.g. `running_jobs`, `staging_artifacts`) inserted right after
+            `notes` and before the `context/*.md` blocks.
+
+    Returns:
+        The rendered `<context>` blocks (empty string if none).
+    """
+    entries = insert_extra_entries(await collect_context_entries(staging_dir), extra_entries)
     return render_context_blocks(apply_total_budget(entries, max_total_chars))

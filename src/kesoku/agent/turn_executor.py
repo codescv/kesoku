@@ -13,13 +13,14 @@ from typing import TYPE_CHECKING
 import tzlocal
 
 from kesoku.agent.compressor import SCAFFOLD_HEADER, HistoryCompressor, estimate_tokens_calibrated
-from kesoku.agent.context_dir import build_context_prefix
+from kesoku.agent.context_dir import ContextEntry, build_context_prefix
 from kesoku.agent.history import (
     build_history,
     prepare_history_for_llm,
     strip_question_options,
 )
 from kesoku.agent.llm import BaseLLM, LLMResponse
+from kesoku.agent.state_snapshot import render_running_jobs, render_staging_artifacts
 from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.turn_logger import TurnLogger
 from kesoku.config import KesokuConfig
@@ -153,6 +154,10 @@ class TurnExecutor:
         self.tool_runner = tool_runner
         self.turn_logger = turn_logger
         self.context = context or getattr(gateway, "context", KesokuContext())
+        # Per-turn frozen state snapshot (running_jobs / staging_artifacts context blocks). It must be byte-identical
+        # across all LLM calls of a turn so the implicit prefix cache keeps hitting; reset on pivot.
+        self._snapshot_cache: list[ContextEntry] | None = None
+        self._has_summaries: bool | None = None
 
     async def _get_session_turns_count(self) -> int:
         """Retrieve the count of user turns in the current session.
@@ -278,6 +283,7 @@ class TurnExecutor:
                         f"Resetting turn metrics and empty-response counter."
                     )
                     self.tool_runner.tool_context.original_msg_id = current_msg.id
+                    self._snapshot_cache = None
                     empty_attempts = 0
                     turn_tool_calls = 0
                     turn_tokens = 0
@@ -671,7 +677,9 @@ class TurnExecutor:
         if target_staging_dir:
             try:
                 context_blocks_prefix = await build_context_prefix(
-                    target_staging_dir, self.context.config.agent.context_dir_max_chars
+                    target_staging_dir,
+                    self.context.config.agent.context_dir_max_chars,
+                    extra_entries=await self._get_state_snapshot_entries(target_staging_dir),
                 )
             except Exception as e:
                 logger.warning(f"Failed to build context blocks for session '{self.session_id}': {e}")
@@ -846,6 +854,40 @@ class TurnExecutor:
             + "\n</relevant_historical_context>\n"
         )
 
+    async def _get_state_snapshot_entries(self, staging_dir: str | None) -> list[ContextEntry]:
+        """Deterministic `running_jobs` / `staging_artifacts` context entries, computed once per turn.
+
+        `running_jobs` comes from the session's ActiveJobsRegistry snapshot; `staging_artifacts` is rendered only once
+        the session has summary nodes (before that the files are visible in the verbatim history). Failures are
+        logged and yield no entry; they never break the turn.
+        """
+        if self._snapshot_cache is not None:
+            return self._snapshot_cache
+        entries: list[ContextEntry] = []
+        try:
+            active_jobs = getattr(self.context, "active_jobs", None)
+            if active_jobs is not None and hasattr(active_jobs, "snapshot"):
+                snapshot = active_jobs.snapshot(self.session_id)
+                if inspect.isawaitable(snapshot):
+                    snapshot = await snapshot
+                jobs_text = render_running_jobs(snapshot)
+                if jobs_text:
+                    entries.append(ContextEntry("running_jobs", jobs_text))
+        except Exception as e:
+            logger.warning(f"Failed to build running_jobs snapshot for session '{self.session_id}': {e}")
+        try:
+            has_summaries = self._has_summaries
+            if has_summaries is None:
+                has_summaries = bool(await self.context.db.get_root_summary_nodes(self.session_id))
+            if has_summaries and staging_dir:
+                artifacts_text = await asyncio.to_thread(render_staging_artifacts, staging_dir)
+                if artifacts_text:
+                    entries.append(ContextEntry("staging_artifacts", artifacts_text))
+        except Exception as e:
+            logger.warning(f"Failed to build staging_artifacts snapshot for session '{self.session_id}': {e}")
+        self._snapshot_cache = entries
+        return entries
+
     async def _check_and_auto_compact_history(
         self,
         history: list[Message],
@@ -886,34 +928,18 @@ class TurnExecutor:
 
         # Retrieve all root summary nodes from the database for this session
         root_summaries = await self.context.db.get_root_summary_nodes(self.session_id)
+        self._has_summaries = bool(root_summaries)
 
         if not root_summaries:
             return history, compacted_occurred
 
-        # Re-segment and assemble the scaffold context
+        # Re-segment and assemble the scaffold context. A turn that carries a summary_node_id is represented by the
+        # scaffold and never verbatim, wherever it sits (manual/forced compaction may reach into the tail).
         turns = compressor.segment_turns(history)
         protect_front = cfg.agent.protect_front_turns
-        protect_tail = cfg.agent.protect_tail_turns
-
-        # Assemble Protected Head
-        protected_head = []
-        for t in turns[:protect_front]:
-            protected_head.extend(t)
-
-        # Assemble Protected Tail
-        protected_tail = []
-        if len(turns) > protect_front:
-            tail_start = max(protect_front, len(turns) - protect_tail)
-            for t in turns[tail_start:]:
-                protected_tail.extend(t)
-
-        # Assemble Buffer (uncompacted turns in the middle)
-        buffer = []
-        if len(turns) > protect_front + protect_tail:
-            middle_turns = turns[protect_front:-protect_tail]
-            for t in middle_turns:
-                if not any(msg.summary_node_id is not None for msg in t):
-                    buffer.extend(t)
+        compressed = [any(msg.summary_node_id is not None for msg in t) for t in turns]
+        protected_head = [m for i, t in enumerate(turns) if i < protect_front and not compressed[i] for m in t]
+        uncompressed_rest = [m for i, t in enumerate(turns) if i >= protect_front and not compressed[i] for m in t]
 
         # Format hierarchical summaries
         scaffold_parts = [SCAFFOLD_HEADER]
@@ -925,7 +951,10 @@ class TurnExecutor:
             )
         # Verbatim user messages of compressed turns (changes only on compaction, so it stays cacheable)
         recent_user_block = HistoryCompressor.build_recent_user_messages_block(
-            turns, cfg.agent.recent_user_messages_limit
+            turns,
+            cfg.agent.recent_user_messages_limit,
+            total_chars=cfg.agent.recent_user_messages_total_chars,
+            ceiling_chars=cfg.agent.recent_user_message_ceiling_chars,
         )
         if recent_user_block:
             scaffold_parts.append("\n" + recent_user_block)
@@ -960,9 +989,7 @@ class TurnExecutor:
         )
         assembled_history.append(scaffold_msg)
         assembled_history.append(ack_msg)
-
-        assembled_history.extend(buffer)
-        assembled_history.extend(protected_tail)
+        assembled_history.extend(uncompressed_rest)
 
         return assembled_history, compacted_occurred
 

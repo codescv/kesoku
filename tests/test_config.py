@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from kesoku.config import KesokuConfig, init_config, load_config
+from kesoku.config import AgentConfig, KesokuConfig, init_config, load_config
 
 
 def test_load_config_file_not_found(tmp_path: Any) -> None:
@@ -287,3 +287,34 @@ account_id = "my-wechat-account"
     assert w_cfg is not None
     assert w_cfg.enabled is True
     assert w_cfg.account_id == "my-wechat-account"
+
+
+def test_recent_user_message_budget_defaults() -> None:
+    """The <recent_user_messages> pool and per-message ceiling default to 12000 / 6000 chars."""
+    agent = AgentConfig()
+    assert agent.recent_user_messages_limit == 100
+    assert agent.recent_user_messages_total_chars == 12000
+    assert agent.recent_user_message_ceiling_chars == 6000
+
+
+def test_recent_user_message_budget_validation() -> None:
+    """Ceiling must fit in the pool and both must be >= 200."""
+    with pytest.raises(ValueError, match="must be <="):
+        AgentConfig(recent_user_messages_total_chars=5000, recent_user_message_ceiling_chars=6000)
+    with pytest.raises(ValueError, match=">= 200"):
+        AgentConfig(recent_user_messages_total_chars=150, recent_user_message_ceiling_chars=100)
+    with pytest.raises(ValueError, match=">= 200"):
+        AgentConfig(recent_user_message_ceiling_chars=199)
+    agent = AgentConfig(recent_user_messages_total_chars=8000, recent_user_message_ceiling_chars=8000)
+    assert agent.recent_user_message_ceiling_chars == 8000
+
+
+def test_example_config_documents_recent_user_message_budget(tmp_path: Any) -> None:
+    """The bundled example config sets both budget keys and loads with them."""
+    config_path = tmp_path / "config.toml"
+    init_config(str(config_path))
+    text = config_path.read_text(encoding="utf-8")
+    assert "recent_user_messages_total_chars = 12000" in text
+    assert "recent_user_message_ceiling_chars = 6000" in text
+    cfg = load_config(str(config_path))
+    assert cfg.agent.recent_user_messages_total_chars == 12000

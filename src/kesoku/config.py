@@ -141,6 +141,17 @@ class AgentConfig(BaseModel):
         default=100,
         description="Max number of verbatim user messages from compressed turns kept in the scaffold (0 disables)",
     )
+    recent_user_messages_total_chars: int = Field(
+        default=12000,
+        description=(
+            "Total character pool for the verbatim <recent_user_messages> block, shared by water-filling: short "
+            "messages are kept whole and long ones split the remainder (shortened in the middle)"
+        ),
+    )
+    recent_user_message_ceiling_chars: int = Field(
+        default=6000,
+        description="Per-message character ceiling in <recent_user_messages>, even when the pool has spare room",
+    )
     disabled_tools: list[str] = Field(
         default_factory=list,
         description=(
@@ -178,6 +189,19 @@ class AgentConfig(BaseModel):
             "to reduce in-context self-imitation"
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_recent_user_message_budget(self) -> "AgentConfig":
+        """Require a usable <recent_user_messages> pool and a ceiling that fits inside it."""
+        for name in ("recent_user_messages_total_chars", "recent_user_message_ceiling_chars"):
+            if getattr(self, name) < 200:
+                raise ValueError(f"{name} ({getattr(self, name)}) must be >= 200")
+        if self.recent_user_message_ceiling_chars > self.recent_user_messages_total_chars:
+            raise ValueError(
+                f"recent_user_message_ceiling_chars ({self.recent_user_message_ceiling_chars}) must be <= "
+                f"recent_user_messages_total_chars ({self.recent_user_messages_total_chars})"
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_watermarks(self) -> "AgentConfig":

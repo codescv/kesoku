@@ -127,6 +127,38 @@ def setup_discord_commands(chatbot: "DiscordChatbot") -> None:
                 description=description,
                 callback=make_search_callback(cmd_name),
             )
+        elif cmd_name == "compact":
+
+            async def compact_callback(interaction: discord.Interaction, instructions: str = "") -> None:
+                logger.info(
+                    f"Received /compact slash command with instructions='{instructions}' from user "
+                    f"{interaction.user.name} (ID: {interaction.user.id}) in channel {interaction.channel_id}"
+                )
+                await interaction.response.defer()
+
+                async def reply_func(text: str) -> None:
+                    from kesoku.utils.text import split_text_into_chunks
+
+                    for chunk in split_text_into_chunks(text, 2000):
+                        if chunk.strip():
+                            await interaction.followup.send(chunk)
+
+                try:
+                    await chatbot.commands.execute(
+                        "compact",
+                        reply_func,
+                        channel_id=str(interaction.channel_id),
+                        instructions=instructions,
+                    )
+                except Exception as e:
+                    logger.error(f"Discord command /compact execution failed: {e}")
+                    await reply_func(f"⚠️ Failed to execute command: {e}")
+
+            cmd = app_commands.Command(
+                name="compact",
+                description=description,
+                callback=compact_callback,
+            )
         elif cmd_name == "notes":
 
             async def notes_callback(interaction: discord.Interaction, content: str = "") -> None:
