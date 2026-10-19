@@ -1,7 +1,8 @@
 """$0 re-grading of saved TaskResults: re-run a task's grade.py against the run's preserved workdir and DB.
 
-Used when a behavioural grader is fixed after a live run. Pytest outcomes are taken from the saved result (the
-repo state is unchanged); only behavioural checks, `resolved` and `status` are recomputed.
+Used when a behavioural grader or a metric definition changes after a live run. Pytest outcomes are taken from
+the saved result (the repo state is unchanged); behavioural checks, event-derived generic diagnostics,
+`resolved` and `status` are recomputed.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from benchmarks.kesoku_bench.harness.grading import (
     required_checks_pass,
     run_behavioral,
 )
-from benchmarks.kesoku_bench.harness.runner import decide_status
+from benchmarks.kesoku_bench.harness.runner import decide_status, generic_diagnostics
 from benchmarks.kesoku_bench.harness.taskspec import TASKS_DIR, TaskSpec, load_task
 from kesoku.constants import MessageRole, MessageType
 from kesoku.db import DatabaseManager
@@ -75,8 +76,6 @@ def regrade_result(result_path: Path, write: bool = True, tasks_root: Path | Non
     """
     result = json.loads(result_path.read_text(encoding="utf-8"))
     spec = load_task((tasks_root or TASKS_DIR) / result["task_id"])
-    if spec.grade_path is None:
-        return result
     ws = Path(result["workdir"]) / "ws"
     db = DatabaseManager(str(ws / "kesoku.db"))
     session = db.get_latest_session()
@@ -104,17 +103,26 @@ def regrade_result(result_path: Path, write: bool = True, tasks_root: Path | Non
         })
     grading = result["grading"]
     f2p, p2p = grading.get("fail_to_pass") or {}, grading.get("pass_to_pass") or {}
+    events = extract_tool_events(messages)
+    # Event-derived generic metrics are recomputed so every stage uses the current definitions.
+    diag = {**diag, **generic_diagnostics(spec, events, None, None)}
+    previous = {"status": result.get("status"), "resolved": result.get("resolved"),
+                "behavioral": grading.get("behavioral")}
+    result["regraded"] = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "previous": previous}
+    if spec.grade_path is None:
+        result["diagnostics"] = diag
+        if write:
+            _write(result_path, result)
+        return result
     ctx = GradeContext(
         task_id=spec.id, task_dir=spec.task_dir, repo_dir=ws / "repo", gold_mode=False, ws_dir=ws,
         staging_dir=staging, session_id=session.id, db_path=ws / "kesoku.db", turns=turns,
-        tool_events=extract_tool_events(messages), messages=messages, summary_nodes=nodes, llm_logs=logs,
+        tool_events=events, messages=messages, summary_nodes=nodes, llm_logs=logs,
         llm_log_turn=group_llm_logs_by_turn(logs, windows), junit={**f2p, **p2p}, extras=extras,
     )
     outcome = run_behavioral(load_grade_module(spec.grade_path), ctx)
     required_ok = required_checks_pass(outcome, spec.grading.required_behavioral)
     resolved = all(f2p.values()) and all(p2p.values()) and not grading.get("tampered") and required_ok
-    previous = {"status": result.get("status"), "resolved": result.get("resolved"),
-                "behavioral": grading.get("behavioral")}
     grading["behavioral"] = outcome.checks
     grading["required_behavioral"] = spec.grading.required_behavioral
     result["diagnostics"] = {**diag, **outcome.diagnostics}
@@ -124,13 +132,17 @@ def regrade_result(result_path: Path, write: bool = True, tasks_root: Path | Non
         budget=bool(diag.get("budget_exceeded_reason")),
         timeout=any(t.get("status") == "timeout" for t in result.get("turns", [])), resolved=resolved,
     )
-    result["regraded"] = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "previous": previous}
     if write:
-        backup = result_path.with_name(result_path.name + ".orig")
-        if not backup.exists():
-            shutil.copy2(result_path, backup)
-        result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+        _write(result_path, result)
     return result
+
+
+def _write(result_path: Path, result: dict[str, Any]) -> None:
+    """Rewrite a result JSON, keeping the very first version as `<name>.json.orig`."""
+    backup = result_path.with_name(result_path.name + ".orig")
+    if not backup.exists():
+        shutil.copy2(result_path, backup)
+    result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
 
 
 def collect_result_files(paths: list[Path], task_ids: list[str] | None = None) -> list[Path]:

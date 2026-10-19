@@ -97,6 +97,7 @@ def stage_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
     toks = [t.get("tokens") or {} for t in totals]
     cached = sum(int(t.get("cached_in") or 0) for t in toks)
     uncached = sum(int(t.get("uncached_in") or 0) for t in toks)
+    suite_a = [d for r, d in zip(results, diags, strict=True) if r.get("suite") == "A"]
     suite_b = [d for r, d in zip(results, diags, strict=True) if r.get("suite") == "B"]
     suite_d = [d for r, d in zip(results, diags, strict=True) if r.get("suite") == "D"]
     return {
@@ -112,7 +113,12 @@ def stage_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
         "avg_summarize_calls": _mean([float(t.get("summarize_calls") or 0) for t in totals]),
         "avg_tool_calls": _mean([float(t.get("tool_calls") or 0) for t in totals]),
         "update_file_error_rate": round(upd_err / upd_calls, 4) if upd_calls else None,
+        "log_rereads_suite_b": _mean([float(d.get("log_rereads_total", d.get("shell_log_rereads")) or 0)
+                                      for d in suite_b]),
         "shell_log_rereads_suite_b": _mean([float(d.get("shell_log_rereads") or 0) for d in suite_b]),
+        "read_calls_suite_a": _mean([float(d.get("read_calls_total", d.get("read_like_shell_calls")) or 0)
+                                     for d in suite_a]),
+        "shell_read_calls_suite_a": _mean([float(d.get("read_like_shell_calls") or 0) for d in suite_a]),
         "list_skills_calls_suite_d": _mean([float(d.get("list_skills_calls") or 0) for d in suite_d]),
         "llm_calls_before_first_use_skill_suite_d": _mean(
             [float(d["llm_calls_before_first_use_skill"]) for d in suite_d
@@ -143,7 +149,10 @@ def render_markdown(stages: dict[str, dict[str, Any]]) -> str:
         ("P1-4 directive metric (C4)", "p14_directive_metric"), ("Avg LLM calls / run", "avg_llm_calls"),
         ("Avg summarize calls / run", "avg_summarize_calls"), ("Avg tool calls / run", "avg_tool_calls"),
         ("update_file error rate", "update_file_error_rate"),
-        ("Shell log re-reads (Suite B)", "shell_log_rereads_suite_b"),
+        ("Read calls: shell + read_file (Suite A)", "read_calls_suite_a"),
+        ("Read calls: shell only (Suite A)", "shell_read_calls_suite_a"),
+        ("Log re-reads: shell + read_file (Suite B)", "log_rereads_suite_b"),
+        ("Log re-reads: shell only (Suite B)", "shell_log_rereads_suite_b"),
         ("list_skills calls (Suite D)", "list_skills_calls_suite_d"),
         ("LLM calls before first use_skill (D)", "llm_calls_before_first_use_skill_suite_d"),
         ("Wrong skill loads (D)", "wrong_skill_loads_suite_d"), ("Total cost USD", "total_cost_usd"),

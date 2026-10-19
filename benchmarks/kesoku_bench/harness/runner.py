@@ -53,7 +53,7 @@ EVAL_SCRIPT = REPO_ROOT / "scripts" / "eval_bench.py"
 AUTO_REPLY_TEXT = (COMMON_DIR / "auto_reply.md").read_text(encoding="utf-8").strip()
 _QUESTION_RE = re.compile(r"```ui\b|\[question:", re.IGNORECASE)
 _READ_LIKE_RE = re.compile(r"^\s*(cd\s+\S+\s*&&\s*)?(cat|sed|grep|rg|head|tail|nl|less|awk|wc)\b")
-_REREAD_RE = re.compile(r"cmd_output_|hist_tool_|background_job_")
+_REREAD_RE = re.compile(r"cmd_output_|hist_(?:tool|err)_|background_job_")
 STATUS_ORDER = ("tampered", "error", "budget_exceeded", "timeout", "resolved", "failed")
 
 
@@ -143,12 +143,18 @@ def _turn_tool_metrics(events: list[dict[str, Any]], turn_idx: int) -> dict[str,
 
 
 def generic_diagnostics(
-    spec: TaskSpec, events: list[dict[str, Any]], ledger: CostLedger, skills: list[str]
+    spec: TaskSpec, events: list[dict[str, Any]], ledger: CostLedger | None, skills: list[str] | None
 ) -> dict[str, Any]:
-    """Suite-independent diagnostics derived from tool events and the ledger (spec §3)."""
+    """Suite-independent diagnostics derived from tool events and the ledger (spec §3).
+
+    Read/re-read metrics count both shell reads and `read_file` calls (`read_calls_total`, `log_rereads_total`)
+    so a stage that moves reads from the shell to `read_file` is not credited for it; the shell-only counts are
+    kept as separate keys. Ledger- and fixture-based keys are omitted when `ledger` / `skills` is None (regrade).
+    """
     shell = [e for e in events if e["name"] == "run_shell_command"]
+    reads = [e for e in events if e["name"] == "read_file"]
     updates = [e for e in events if e["name"] == "update_file"]
-    rereads = 0
+    shell_rereads = 0
     for e in shell:
         cmd = str(e["args"].get("command", ""))
         try:
@@ -156,31 +162,40 @@ def generic_diagnostics(
         except (TypeError, ValueError):
             max_chars = 0
         if _REREAD_RE.search(cmd) or max_chars > 5000:
-            rereads += 1
+            shell_rereads += 1
+    read_file_rereads = sum(1 for e in reads if _REREAD_RE.search(str(e["args"].get("file_name", ""))))
+    shell_reads = sum(1 for e in shell if _READ_LIKE_RE.search(str(e["args"].get("command", ""))))
     use_skill = [e for e in events if e["name"] == "use_skill"]
-    first_use_ts = use_skill[0]["ts"] if use_skill else None
-    agent_records = [r for r in ledger.records if r.kind == "agent" and r.blocked is None]
-    calls_before_skill = (sum(1 for r in agent_records if r.ts <= first_use_ts) if first_use_ts is not None
-                          else None)
     target_skills = {p.name for p in spec.skills_dir.iterdir() if p.is_dir()} if spec.skills_dir.is_dir() else set()
     loaded = [str(e["args"].get("skill_name") or e["args"].get("name") or "") for e in use_skill]
     update_errors = sum(1 for e in updates if e["is_error"])
-    return {
-        "read_like_shell_calls": sum(1 for e in shell if _READ_LIKE_RE.search(str(e["args"].get("command", "")))),
-        "shell_log_rereads": rereads,
+    out: dict[str, Any] = {
+        "read_like_shell_calls": shell_reads,
+        "read_file_calls": len(reads),
+        "read_calls_total": shell_reads + len(reads),
+        "shell_log_rereads": shell_rereads,
+        "read_file_log_rereads": read_file_rereads,
+        "log_rereads_total": shell_rereads + read_file_rereads,
         "update_file_calls": len(updates),
         "update_file_errors": update_errors,
         "update_file_error_rate": round(update_errors / len(updates), 4) if updates else None,
         "first_edit_file": str(updates[0]["args"].get("file_name", "")) if updates else None,
         "list_skills_calls": sum(1 for e in events if e["name"] == "list_skills"),
         "use_skill_calls": len(use_skill),
-        "llm_calls_before_first_use_skill": calls_before_skill,
         "wrong_skill_loads": sum(1 for n in loaded if target_skills and n not in target_skills),
-        "skills_installed": len(skills),
         "tool_calls_missing_result": sum(1 for e in events if not e["has_result"]),
-        "tool_iter_cap_turns": sorted({r.turn_idx for r in ledger.records
-                                       if r.blocked and r.blocked.startswith("max_tool_iters")}),
     }
+    if skills is not None:
+        out["skills_installed"] = len(skills)
+    if ledger is not None:
+        first_use_ts = use_skill[0]["ts"] if use_skill else None
+        agent_records = [r for r in ledger.records if r.kind == "agent" and r.blocked is None]
+        out["llm_calls_before_first_use_skill"] = (
+            sum(1 for r in agent_records if r.ts <= first_use_ts) if first_use_ts is not None else None
+        )
+        out["tool_iter_cap_turns"] = sorted({r.turn_idx for r in ledger.records
+                                             if r.blocked and r.blocked.startswith("max_tool_iters")})
+    return out
 
 
 def _compaction_attribution(
