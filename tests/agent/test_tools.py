@@ -1,5 +1,6 @@
 """Unit tests for Kesoku agent tools and skill registry."""
 
+import re
 from unittest.mock import MagicMock
 
 import pytest
@@ -289,22 +290,23 @@ async def test_run_shell_command_max_output_chars(tmp_path) -> None:
         res = await run_shell_command(cmd_6000, context=ctx)
 
         assert "Output truncated" in res
-        assert "Preview (last 5000 chars):" in res
-        assert "with a larger `max_output_chars` parameter" in res
+        assert "Preview (first ~45% and last ~55% of 5000 chars):" in res
+        assert "read_file(" in res and "max_output_chars" in res
 
-        # Verify preview contains the end of output (last 5000 chars)
-        preview_part = res.split("Preview (last 5000 chars):\n")[1]
+        # Middle-out preview keeps both the head (STDOUT header) and the tail (STDERR footer)
+        preview_part = res.split("Preview (first ~45% and last ~55% of 5000 chars):\n")[1]
+        assert preview_part.startswith("=== STDOUT ===")
         assert "=== STDERR ===" in preview_part
-        assert "=== STDOUT ===" not in preview_part
+        assert "chars omitted from the middle" in preview_part
+        assert len(preview_part) <= 5000
 
         # Test custom max_output_chars = 100
         res_custom = await run_shell_command(cmd_6000, max_output_chars=100, context=ctx)
         assert "Output truncated" in res_custom
-        assert "Preview (last 100 chars):" in res_custom
-
-        preview_part_custom = res_custom.split("Preview (last 100 chars):\n")[1]
+        preview_part_custom = res_custom.split("Preview (first ~45% and last ~55% of 100 chars):\n")[1]
+        assert preview_part_custom.startswith("=== STDOUT ===")
         assert "=== STDERR ===" in preview_part_custom
-        assert "=== STDOUT ===" not in preview_part_custom
+        assert len(preview_part_custom) <= 100
 
         # Test no truncation if content is shorter than max_output_chars
         cmd_50 = "python3 -c 'print(\"a\" * 50)'"
@@ -555,3 +557,33 @@ def test_disabled_tools_default_empty_keeps_everything() -> None:
     cfg.agent.disabled_tools = []
     with patch("kesoku.config.get_config", return_value=cfg):
         assert [f.__name__ for f in reg.get_tools_list()] == ["alpha", "beta"]
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_middle_out_keeps_head_marker(tmp_path) -> None:
+    """A 20K output: a marker in the first 100 chars and one in the last 100 chars both survive; file is complete."""
+    import kesoku.config
+    from kesoku.config import init_config, load_config
+
+    original_config = kesoku.config._global_config
+    try:
+        config_path = tmp_path / "config.toml"
+        init_config(str(config_path))
+        cfg = load_config(str(config_path))
+        cfg.agent_working_dir = str(tmp_path)
+        ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
+        script = tmp_path / "gen.py"
+        script.write_text(
+            "print('HEAD_MARKER negotiated=lz4')\n"
+            "for i in range(400):\n    print(f'packet {i:04d} ' + 'x' * 40)\n"
+            "print('TAIL_MARKER dropped=37')\n"
+        )
+        res = await run_shell_command(f"python3 {script}", context=ctx)
+        assert "HEAD_MARKER negotiated=lz4" in res
+        assert "TAIL_MARKER dropped=37" in res
+        saved = re.search(r"saved to session workspace file: `([^`]+)`", res)
+        assert saved
+        full = open(saved.group(1), encoding="utf-8").read()
+        assert "packet 0200" in full and "HEAD_MARKER" in full and "TAIL_MARKER" in full
+    finally:
+        kesoku.config._global_config = original_config

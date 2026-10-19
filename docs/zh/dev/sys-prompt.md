@@ -51,6 +51,12 @@
     ```
 *   **目的**：告诉模型所有在执行过程中产生的中间产物、下载的文件、生成的图片等，都必须保存到当前会话专属的暂存目录下，避免污染全局工作区。
 
+### 3b. 可用技能索引（Available Skills）
+*   `build_skills_section()` 在目录信息之后生成确定性的 `# Available Skills` 段落：每个已安装技能一行 `- <name>: <description>`（全局 + 角色技能，同名时角色技能优先），按名称排序，描述压成一行并截断到 200 字符，最多 60 条、6000 字符，其余提示调用 `list_skills()`。
+*   目的：模型直接调用 `use_skill(skill_name=...)`，不必先调用 `list_skills()`。
+*   当 `use_skill` 在 `agent.disabled_tools` 中、没有技能或列举失败时省略。
+*   注意：系统提示词在会话创建（及切换角色/恢复）时持久化，之后新增的技能只出现在新会话中；`list_skills()` 仍是实时列表。
+
 ### 4. 内置功能交互规范
 这些是硬编码在 `prompt.py` 中的提示语，用于训练智能体理解和操作 Kesoku 的独特机制：
 
@@ -61,6 +67,7 @@
 *   **隐藏文本**：`<spoiler>…</spoiler>` 行内隐藏文本（用户点击才显示）。由各平台适配器的 `format_text` 渲染：Discord 转为原生 `||…||`；不支持隐藏文本的平台（CLI、微信、Google Chat）去掉标签、内容直接可见。实现见 `kesoku.utils.text.render_spoilers`。
 *   **`MEMORY_AND_HISTORY_INSTRUCTIONS`**：指导模型如何读写 SQLite 数据库中的结构化记忆条目。
 *   **`SESSION_NOTES_INSTRUCTIONS`**：说明每回合注入的 `<context name="...">` 块（见第 7 节）、如何用 `update_file` 维护 `$STAGING_DIR/notes.md`，以及 `$STAGING_DIR/context/` 下的文件由工具维护、禁止用 `update_file` 编辑。
+*   **`FILE_TOOL_INSTRUCTIONS`**：用 `read_file(file_name, start_line, end_line)` 代替 `cat`/`head`/`sed -n` 读文件；省略 `old_content` 调用 `update_file(file_name, new_content=...)` 创建文件；编辑时从 `read_file` 输出中原样复制一小段唯一的文本（去掉 `N: ` 行号前缀）；被截断的 shell 输出用 `read_file` 分页查看。
 *   **`BACKGROUND_EXECUTION_INSTRUCTIONS`**：指导模型在遇到耗时较长的 background 终端命令时，如何优雅地向用户发送中间提示并立即结束本回合，等待系统后台完成通知。
 
 ### 5. 全局配置提示词 (User Prompts)

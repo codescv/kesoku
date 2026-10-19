@@ -62,7 +62,16 @@ This ensures that if a new user prompt arrived in the queue while the agent was 
 Using `inspect.signature(tool_func)`, the runner checks that all required arguments (parameters without default values) were emitted by the LLM:
 
 *   If a parameter named `context` exists in the signature, the runner automatically injects the current `ToolContext` object (which holds the active `gateway`, `session_id`, and `original_msg_id`).
-*   If any arguments are missing due to LLM parsing errors or truncation, it throws a descriptive validation error rather than attempting execution.
+*   JSON `null` reaches Optional parameters (`str | None`, `Annotated[int | None, ...]`) as `None` (never the string `"None"`); for non-Optional parameters a `null` is treated as absent so the default applies.
+*   If any required arguments are missing (usually LLM output truncation), it returns `Missing required argument(s) for tool '<name>': <args>.` plus a hint to split large content into ≤4000-character chunks, rather than attempting execution.
+
+### File tools (`tools/file.py`)
+*   **`read_file(file_name, start_line=1, end_line=None, max_lines=500)`**: numbered (`N: `), paged view of a text file (hard caps: 2000 lines, 30000 chars, lines over 2000 chars are cut). Missing files get `Did you mean: repo/...?` suggestions (missing first-level directory prefix or same basename under the AWD); directories list their entries; binary files are refused.
+*   **`update_file(file_name, old_content=None, new_content=None)`**: omit `old_content` to create a file (rejected if it exists); otherwise replace an exact block that occurs once (twice: both replaced, with a warning; more: rejected with the matching line numbers and context). `new_content` is required (`""` deletes the block). Failed matches return recovery hints: the whitespace-insensitive match with its exact lines, or the closest lines plus a `read_file` range. `N: ` prefixes accidentally copied from `read_file` are stripped automatically. Success messages report the affected line range.
+
+### Output truncation (middle-out)
+*   `run_shell_command` keeps at most `max_output_chars` (default 5000, max 30000): the preview keeps ~45% head and ~55% tail around a placeholder, and the full output is saved to `$STAGING_DIR/cmd_output_*.txt`.
+*   In completed turns, `prepare_history_for_llm` shrinks tool results/errors to a 500-char head+tail preview (`history_preview`), after stripping the shell's own truncation banner so the head budget shows real output (a leading `Command failed with exit code N.` line is kept). The full text stays on disk (the shell's file is reused; otherwise a deterministic `hist_*` file per message keeps the prompt prefix cacheable). `HistoryCompressor.estimate_prepared_turn_tokens` uses the same helper.
 
 ### 3. Thread Safe Subprocesses
 The runner supports both synchronous and asynchronous functions:

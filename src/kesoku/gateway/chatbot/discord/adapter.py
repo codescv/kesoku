@@ -49,6 +49,7 @@ TOOL_EMOJI_MAP: dict[str, str] = {
     "run_shell_command": "💻",
     "web_search": "🔍",
     "update_file": "📝",
+    "read_file": "📖",
     "analyze_media": "🖼️",
     "chat_search": "🧠",
     "view_message": "📜",
@@ -155,11 +156,24 @@ def format_tool_arguments(tool_name: str, tool_args: dict[str, Any] | None, max_
             arg_str = query.strip()
 
     elif tool_name == "update_file":
-        target = filtered.get("path") or filtered.get("file_path") or filtered.get("target_file") or ""
+        target = (
+            filtered.get("file_name") or filtered.get("path") or filtered.get("file_path")
+            or filtered.get("target_file") or ""
+        )
         mode = filtered.get("mode") or filtered.get("action")
+        if not mode and "file_name" in filtered:
+            mode = "create" if not filtered.get("old_content") else None
         if target:
             c_path = compact_path(str(target), max_len=60)
             arg_str = f"{c_path} ({mode})" if mode else c_path
+
+    elif tool_name == "read_file":
+        target = filtered.get("file_name") or filtered.get("path") or ""
+        if target:
+            arg_str = compact_path(str(target), max_len=60)
+            start, end = filtered.get("start_line"), filtered.get("end_line")
+            if start or end:
+                arg_str += f" [{start or 1}-{end or ''}]"
 
     elif tool_name == "analyze_media":
         media_path = filtered.get("media_path") or filtered.get("path") or ""

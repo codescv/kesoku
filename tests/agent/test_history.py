@@ -275,3 +275,104 @@ def test_prepare_history_mixed_legacy_and_ui() -> None:
     texts = _assistant_texts(prepare_history_for_llm(_ui_history(["向右", "x", "y"], block)))
     assert STRIPPED in texts[0]
     assert "answered: 向右" in texts[0]
+
+
+# ---------------------------------------------------------------------------
+# P0-1: head + tail history previews (shell truncation banner stripped)
+# ---------------------------------------------------------------------------
+
+B3_HEADER = (
+    "=== STDOUT ===\nnetdiag v2.3 session diagnostic\nNEGOTIATED: codec=lz4-v2 max_frame=3072 token=a9f3c1\n"
+    "--- packet dump (1200 packets) ---\n"
+)
+B3_BODY = "".join(f"pkt {i:05d} len=128 flags=ACK\n" for i in range(600))
+B3_TAIL = "dropped=37 retransmits=4\ndiagnose complete (1200 packets)\n=== STDERR ===\n"
+
+
+def _shell_banner(total: int, path: str) -> str:
+    return (
+        f"Output truncated (total length {total} bytes). Full output saved to session workspace file: `{path}`.\n"
+        f'Page through it with `read_file("{path}", start_line=1)` (or re-run with a larger `max_output_chars`, '
+        "max 30000).\n\nPreview (first ~45% and last ~55% of 5000 chars):\n"
+    )
+
+
+def _tool_turn(result: str | None = None, error: str | None = None) -> list[Message]:
+    meta: dict = {"tool_name": "run_shell_command"}
+    if error is not None:
+        meta["tool_error"] = error
+    else:
+        meta["tool_result"] = result
+    body = error if error is not None else result
+    return [
+        Message(id="u1", session_id="s", chatbot_id="cb", channel_id="ch", sender="u", role=MessageRole.USER,
+                type=MessageType.TEXT, content="run it", status=MessageStatus.RESPONDED, timestamp=10),
+        Message(id="r1", session_id="s", chatbot_id="cb", channel_id="ch", sender="run_shell_command",
+                role=MessageRole.TOOL, type=MessageType.TOOL_RESULT, content=f"Tool returned:\n```\n{body}\n```",
+                status=MessageStatus.RESPONDED, timestamp=11, metadata=meta),
+        Message(id="u2", session_id="s", chatbot_id="cb", channel_id="ch", sender="u", role=MessageRole.USER,
+                type=MessageType.TEXT, content="next", status=MessageStatus.RESPONDED, timestamp=20),
+    ]
+
+
+def test_strip_shell_truncation_banner_variants() -> None:
+    from kesoku.agent.history import strip_shell_truncation_banner
+
+    banner = _shell_banner(17000, "/s/cmd_output_1.txt")
+    assert strip_shell_truncation_banner(banner + "BODY") == "BODY"
+    failed = "Command failed with exit code 2.\n" + banner + "BODY"
+    assert strip_shell_truncation_banner(failed) == "Command failed with exit code 2.\nBODY"
+    legacy = "Output truncated (total length 9 bytes). Full output saved to x.\n\nPreview (last 5000 chars):\nBODY"
+    assert strip_shell_truncation_banner(legacy) == "BODY"
+    assert strip_shell_truncation_banner("plain output") == "plain output"
+    assert strip_shell_truncation_banner("") == ""
+
+
+def test_history_preview_keeps_b3_header_and_tail(tmp_path) -> None:
+    """B3 shape: a ~140-char header, 16K of packet lines, a 2-line tail -> header and tail both in the preview."""
+    full = B3_HEADER + B3_BODY + B3_TAIL
+    saved = tmp_path / "cmd_output_1.txt"
+    saved.write_text(full)
+    shell_result = _shell_banner(len(full), str(saved)) + full[:2250] + "\n\n... <omitted> ...\n\n" + full[-2750:]
+    prepared = prepare_history_for_llm(_tool_turn(result=shell_result), staging_dir=str(tmp_path))
+    res = prepared[1].metadata["tool_result"]
+    assert "NEGOTIATED: codec=lz4-v2 max_frame=3072 token=a9f3c1" in res
+    assert "dropped=37 retransmits=4" in res
+    assert "Preview (head and tail, 500 chars):" in res
+    # S4: the shell's saved file is reused, no duplicate hist_* file is written
+    assert prepared[1].metadata["output_filepath"] == str(saved)
+    assert not list(tmp_path.glob("hist_*"))
+    preview = res.split("Preview (head and tail, 500 chars):\n", 1)[1]
+    assert len(preview) <= 500
+
+
+def test_history_preview_error_variant_keeps_exit_code(tmp_path) -> None:
+    full = B3_HEADER + B3_BODY + B3_TAIL
+    err = "Command failed with exit code 2.\n" + _shell_banner(len(full), "/nonexistent/cmd_output_9.txt") + full
+    prepared = prepare_history_for_llm(_tool_turn(error=err), staging_dir=str(tmp_path))
+    out = prepared[1].metadata["tool_error"]
+    assert "Error truncated for history" in out
+    preview = out.split("Preview (head and tail, 500 chars):\n", 1)[1]
+    assert preview.startswith("Command failed with exit code 2.\n=== STDOUT ===")
+    assert "NEGOTIATED: codec=lz4-v2" in preview
+    assert "diagnose complete (1200 packets)" in preview
+    # deterministic err_* file written once per message id
+    assert (tmp_path / "hist_err_run_shell_command_r1.txt").is_file() or list(tmp_path.glob("hist_err_*"))
+
+
+def test_history_preview_short_outputs_untouched(tmp_path) -> None:
+    prepared = prepare_history_for_llm(_tool_turn(result="short"), staging_dir=str(tmp_path))
+    assert prepared[1].metadata["tool_result"] == "short"
+
+
+def test_estimate_prepared_turn_tokens_uses_same_preview() -> None:
+    from kesoku.agent.compressor import HistoryCompressor, estimate_tokens_calibrated
+    from kesoku.agent.history import history_preview
+    from kesoku.agent.llm import MockLLM
+
+    full = B3_HEADER + B3_BODY + B3_TAIL
+    turn = _tool_turn(result=full)[:2]
+    comp = HistoryCompressor(db=None)  # type: ignore[arg-type]
+    tokens = comp.estimate_prepared_turn_tokens(turn, MockLLM(), calibrated=True)
+    expected = estimate_tokens_calibrated("run it") + estimate_tokens_calibrated(history_preview(full, 500))
+    assert tokens == expected

@@ -8,7 +8,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import kesoku.config
-from kesoku.agent.prompt import OUTPUT_FORMATTING_INSTRUCTIONS, SESSION_NOTES_INSTRUCTIONS, build_sys_prompt
+from kesoku.agent.prompt import (
+    FILE_TOOL_INSTRUCTIONS,
+    OUTPUT_FORMATTING_INSTRUCTIONS,
+    SESSION_NOTES_INSTRUCTIONS,
+    build_skills_section,
+    build_sys_prompt,
+)
 from kesoku.config import KesokuConfig, init_config, load_config
 from kesoku.db import Session
 from kesoku.utils.ui_markup import find_first_ui_block
@@ -214,9 +220,11 @@ def test_session_notes_instructions_use_update_file() -> None:
 
 
 def test_session_notes_instructions_first_creation_uses_none() -> None:
-    """old_content=None is reserved for creating notes.md when <context name=\"notes\"> is absent."""
+    """Omitting old_content (old_content=None) is reserved for creating notes.md when <context name=\"notes\"> is
+    absent."""
     text = SESSION_NOTES_INSTRUCTIONS
     assert re.search(r"old_content\s*=\s*None", text)
+    assert "Omit `old_content`" in text
 
 
 def test_session_notes_instructions_forbid_redundant_shell_reads() -> None:
@@ -266,3 +274,86 @@ def test_output_formatting_example_parses_as_question() -> None:
     _, question = find_first_ui_block(example)
     assert question is not None
     assert question.options == ["Option 1", "Option 2"]
+
+
+# ---------------------------------------------------------------------------
+# P0-2 file tool guidance and P0-3 skills index
+# ---------------------------------------------------------------------------
+
+
+def test_file_tool_instructions_present_once_after_tool_calling() -> None:
+    prompt = build_sys_prompt(session=Session(id="ft01", title="t"))
+    assert prompt.count("# File Tools") == 1
+    assert "read_file(file_name, start_line, end_line)" in FILE_TOOL_INSTRUCTIONS
+    assert prompt.index("# Tool Execution Rules") < prompt.index("# File Tools") < prompt.index("# Background Tasks")
+
+
+def _write_skill(base: Path, name: str, description: str) -> None:
+    (base / name).mkdir(parents=True, exist_ok=True)
+    (base / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: \"{description}\"\n---\nBody of {name}.\n")
+
+
+@pytest.fixture
+def skills_cfg(tmp_path: Path) -> Iterator[KesokuConfig]:
+    """Global config with an isolated skills dir and roles dir."""
+    original = kesoku.config._global_config
+    config_path = tmp_path / "config.toml"
+    init_config(str(config_path))
+    cfg = load_config(str(config_path))
+    cfg.agent_working_dir = str(tmp_path)
+    cfg.workspace.skills_dir = str(tmp_path / "skills_x")
+    cfg.workspace.roles_dir = str(tmp_path / "roles_x")
+    (tmp_path / "skills_x").mkdir()
+    try:
+        yield cfg
+    finally:
+        kesoku.config._global_config = original
+
+
+def test_skills_section_sorted_with_role_override(skills_cfg: KesokuConfig, tmp_path: Path) -> None:
+    _write_skill(tmp_path / "skills_x", "zeta-tool", "Zeta does z.")
+    _write_skill(tmp_path / "skills_x", "alpha-tool", "Alpha global description.")
+    _write_skill(tmp_path / "roles_x" / "eng" / "skills", "alpha-tool", "Alpha role-scoped description.")
+    section = build_skills_section("eng", skills_cfg)
+    assert section.startswith("# Available Skills")
+    assert 'use_skill(skill_name="<name>")' in section
+    assert section.index("- alpha-tool: Alpha role-scoped description.") < section.index("- zeta-tool: Zeta does z.")
+    assert "Alpha global description." not in section
+    prompt = build_sys_prompt(session=Session(id="sk01", title="t", role_name="eng"))
+    assert prompt.count("# Available Skills") == 1
+    assert prompt.index("# Session Staging Directory") < prompt.index("# Available Skills")
+    assert prompt.index("# Available Skills") < prompt.index("# Output Formatting Rules")
+
+
+def test_skills_section_omitted_when_empty_or_disabled(skills_cfg: KesokuConfig, tmp_path: Path) -> None:
+    assert build_skills_section("default", skills_cfg) == ""
+    _write_skill(tmp_path / "skills_x", "one", "One.")
+    assert "- one: One." in build_skills_section("default", skills_cfg)
+    skills_cfg.agent.disabled_tools = ["use_skill"]
+    assert build_skills_section("default", skills_cfg) == ""
+    assert "# Available Skills" not in build_sys_prompt(session=Session(id="sk02", title="t"))
+
+
+def test_skills_section_caps(skills_cfg: KesokuConfig, tmp_path: Path) -> None:
+    _write_skill(tmp_path / "skills_x", "long-desc", "word " * 100)
+    section = build_skills_section("default", skills_cfg)
+    line = next(line for line in section.splitlines() if line.startswith("- long-desc"))
+    assert line.endswith("…") and len(line) <= len("- long-desc: ") + 200
+    for i in range(70):
+        _write_skill(tmp_path / "skills_x", f"s{i:03d}", "d" * 150)
+    section = build_skills_section("default", skills_cfg)
+    assert len(section) <= 6000 + 80
+    assert "more (call list_skills() for the full list)" in section
+    assert len([ln for ln in section.splitlines() if ln.startswith("- s")]) <= 60
+
+
+def test_skills_section_listing_failure_never_breaks_prompt(skills_cfg: KesokuConfig) -> None:
+    with patch("kesoku.agent.prompt.SkillManager.list_skills", side_effect=RuntimeError("boom")):
+        assert build_skills_section("default", skills_cfg) == ""
+        assert "# Agent Working Directory" in build_sys_prompt(session=Session(id="sk03", title="t"))
+
+
+def test_skills_section_twelve_skills_overhead(skills_cfg: KesokuConfig, tmp_path: Path) -> None:
+    for i in range(12):
+        _write_skill(tmp_path / "skills_x", f"skill-{i:02d}", "A plausible one-line description of what it does." * 2)
+    assert len(build_skills_section("default", skills_cfg)) < 2500

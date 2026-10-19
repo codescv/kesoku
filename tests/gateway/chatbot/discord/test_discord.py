@@ -899,6 +899,17 @@ def test_format_tool_arguments_helper() -> None:
         format_tool_arguments("update_file", {"path": "src/main.py", "action": "write"})
         == "src/main.py (write)"
     )
+    # update_file with the real argument name (file_name); omitted old_content means create
+    assert format_tool_arguments("update_file", {"file_name": "repo/a.py", "new_content": "x"}) == "repo/a.py (create)"
+    assert (
+        format_tool_arguments("update_file", {"file_name": "repo/a.py", "old_content": "y", "new_content": "x"})
+        == "repo/a.py"
+    )
+    # read_file
+    assert format_tool_arguments("read_file", {"file_name": "repo/a.py"}) == "repo/a.py"
+    assert format_tool_arguments("read_file", {"file_name": "repo/a.py", "start_line": 10, "end_line": 40}) == (
+        "repo/a.py [10-40]"
+    )
     # analyze_media
     assert (
         format_tool_arguments("analyze_media", {"media_path": "img.png", "prompt": "describe"})

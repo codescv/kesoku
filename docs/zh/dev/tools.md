@@ -62,7 +62,16 @@ if is_interrupted and is_interrupted():
 利用 Python 内置的 `inspect.signature(tool_func)`，执行器检查模型生成的参数是否满足函数签名：
 
 *   如果工具函数的参数中包含名为 `context` 的参数，执行器在调用时会**自动注入**当前的 `ToolContext` 上下文对象（其中包含活跃的 `gateway` 数据库实例、`session_id` 以及原始消息 ID `original_msg_id`）。
-*   如果有任何非默认值的必填参数在模型输出中缺失，执行器会直接抛出校验异常，终止执行，以防止未定义行为。
+*   JSON `null` 传给 Optional 参数（`str | None`、`Annotated[int | None, ...]`）时保持为 `None`（不会变成字符串 `"None"`）；传给非 Optional 参数时视为未提供，使用默认值。
+*   如果有必填参数缺失（通常是模型输出被截断），返回 `Missing required argument(s) for tool '<name>': <args>.`，并提示把大段内容拆成 ≤4000 字符的多次调用。
+
+### 文件工具（`tools/file.py`）
+*   **`read_file(file_name, start_line=1, end_line=None, max_lines=500)`**：带 `N: ` 行号的分页读取（上限 2000 行、30000 字符，单行超过 2000 字符会被截断）。文件不存在时给出 `Did you mean: repo/...?` 路径建议；目录返回条目列表；拒绝二进制文件。
+*   **`update_file(file_name, old_content=None, new_content=None)`**：省略 `old_content` 即创建文件（已存在则拒绝）；否则替换只出现一次的精确文本块（出现两次会都替换并给出警告，超过两次拒绝并列出行号和上下文）。`new_content` 必填（`""` 表示删除）。匹配失败时给出恢复提示：忽略空白差异的匹配及其原文行，或最相近的行和 `read_file` 行号范围；误复制的 `N: ` 前缀会被自动去除。成功消息包含受影响的行号范围。
+
+### 输出截断（中间截断）
+*   `run_shell_command` 最多保留 `max_output_chars`（默认 5000，上限 30000）：预览保留约 45% 开头和 55% 结尾，完整输出保存到 `$STAGING_DIR/cmd_output_*.txt`。
+*   已完成回合中，`prepare_history_for_llm` 把工具结果/错误缩成 500 字符的首尾预览（`history_preview`），先去掉 shell 自己的截断说明，使开头预算展示真实输出（保留开头的 `Command failed with exit code N.`）。完整内容保留在磁盘上。`HistoryCompressor.estimate_prepared_turn_tokens` 使用同一个函数。
 
 ### 3. 多线程与并发安全
 执行器对同步函数和异步协程均提供了支持：

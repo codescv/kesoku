@@ -246,3 +246,24 @@ def test_render_spoilers_leaves_unmatched_tags_and_plain_text_alone() -> None:
 
 def test_render_spoilers_drops_empty_spoiler() -> None:
     assert render_spoilers("x <spoiler>  </spoiler> y", "||", "||") == "x  y"
+
+
+def test_truncate_middle_head_snaps_to_last_newline() -> None:
+    """A4: a head marker at char ~180 of a 16K text survives a 500-char middle-out cut."""
+    lines = [f"line {i:03d} " + "y" * 20 for i in range(6)]  # ~30 chars each -> marker line ends ~200
+    head = "\n".join(lines) + "\nHEAD_MARKER_X\n"
+    text = head + ("z" * 60 + "\n") * 260 + "TAIL_MARKER\n"
+    assert 150 < text.index("HEAD_MARKER_X") < 200
+    out = truncate_middle(text, 500, "\n...\n")
+    assert len(out) <= 500
+    assert "HEAD_MARKER_X" in out and "TAIL_MARKER" in out
+    prefixed = "Command failed with exit code 2.\n" + text
+    assert "HEAD_MARKER_X" in truncate_middle(prefixed, 500 + 33, "\n...\n")
+
+
+def test_truncate_middle_cuts_on_line_boundaries() -> None:
+    text = "".join(f"row {i:04d} abcdefghij\n" for i in range(1000))
+    out = truncate_middle(text, 400, "\n[cut]\n")
+    head, tail = out.split("\n[cut]\n")
+    assert all(line.startswith("row ") and len(line) == 19 for line in head.splitlines())
+    assert all(line.startswith("row ") and len(line) == 19 for line in tail.splitlines())

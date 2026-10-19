@@ -2,7 +2,8 @@
 
 import os
 
-from kesoku.config import get_config
+from kesoku.agent.skills import SkillManager
+from kesoku.config import KesokuConfig, get_config
 from kesoku.db import DatabaseManager, Session
 from kesoku.logger import setup_logger
 
@@ -52,6 +53,71 @@ which is still SERIAL.
 
 
 
+FILE_TOOL_INSTRUCTIONS = """
+# File Tools
+- Read source files with `read_file(file_name, start_line, end_line)` instead of `cat`/`head`/`sed -n`; page large
+  files with `start_line`.
+- Create a file with `update_file(file_name, new_content=...)` (omit `old_content`). Edit by passing a short, unique
+  block (3-15 lines) copied verbatim from `read_file` output as `old_content`, without the `N: ` line-number prefixes.
+- When a shell output is truncated and saved to a file, page through that file with `read_file`.
+"""
+
+# Skills index limits (system prompt size control).
+MAX_SKILLS_IN_INDEX = 60
+MAX_SKILL_DESCRIPTION_CHARS = 200
+MAX_SKILLS_SECTION_CHARS = 6000
+SKILLS_SECTION_HEADER = (
+    "# Available Skills\n"
+    "These skills are installed for this role. When a task matches one, call `use_skill(skill_name=\"<name>\")` "
+    "FIRST to load its full instructions; do not call `list_skills` just to discover them (it returns this same list)."
+)
+
+
+def build_skills_section(role: str | None, cfg: KesokuConfig) -> str:
+    """Render the deterministic `# Available Skills` index for the system prompt.
+
+    Returns "" when `use_skill` is disabled, no skills are installed, or listing fails (never raises). Entries are
+    sorted by name, descriptions are collapsed to one line and cut at 200 chars, and the section is capped at
+    60 entries and 6000 chars (the rest is summarised with a pointer to `list_skills`).
+
+    Args:
+        role: Active role (role-scoped skills override global ones with the same name).
+        cfg: Active configuration.
+
+    Returns:
+        The section text, or "".
+    """
+    if "use_skill" in set(cfg.agent.disabled_tools):
+        return ""
+    try:
+        skills = SkillManager().list_skills(role=role)
+    except Exception as e:  # noqa: BLE001 - prompt construction must never fail because of skills
+        logger.warning(f"Failed to list skills for the system prompt: {e}")
+        return ""
+    if not skills:
+        return ""
+    lines = [SKILLS_SECTION_HEADER]
+    size = len(SKILLS_SECTION_HEADER)
+    ordered = sorted(skills, key=lambda item: str(item.get("name", "")))
+    shown = 0
+    for item in ordered:
+        if shown >= MAX_SKILLS_IN_INDEX:
+            break
+        desc = " ".join(str(item.get("description") or "").split())
+        if len(desc) > MAX_SKILL_DESCRIPTION_CHARS:
+            desc = desc[: MAX_SKILL_DESCRIPTION_CHARS - 1].rstrip() + "…"
+        line = f"- {item.get('name')}: {desc}" if desc else f"- {item.get('name')}"
+        if size + len(line) + 1 > MAX_SKILLS_SECTION_CHARS:
+            break
+        lines.append(line)
+        size += len(line) + 1
+        shown += 1
+    remaining = len(ordered) - shown
+    if remaining > 0:
+        lines.append(f"- … and {remaining} more (call list_skills() for the full list)")
+    return "\n".join(lines)
+
+
 BACKGROUND_EXECUTION_INSTRUCTIONS = """
 # Background Tasks
 If a command transitions to a background job:
@@ -72,8 +138,8 @@ SESSION_NOTES_INSTRUCTIONS = """
   `<context name="notes">`.
 - To edit, copy the exact lines to change from `<context name="notes">` as `old_content`;
   do NOT run shell commands (`cat`, `rg`, etc.) to read `notes.md` first.
-- Pass `old_content=None` only when creating `notes.md` for the first time (when `<context name="notes">` is
-  absent).
+- Omit `old_content` (equivalently `old_content=None`) only when creating `notes.md` for the first time (when
+  `<context name="notes">` is absent).
 - Edit only the specific lines that change: append a new rule by replacing an adjacent line with itself plus the
   new line, replace an outdated line with its new version, or delete a line by replacing it with an empty
   string. Never rewrite the whole file, and never drop unrelated existing entries.
@@ -177,11 +243,15 @@ Unless the user explicitly instructs otherwise, do not refer to any file outside
     sections.append(working_dir_info.strip())
     if session_dir_info:
         sections.append(session_dir_info.strip())
+    skills_section = build_skills_section(role, cfg)
+    if skills_section:
+        sections.append(skills_section)
 
     sections.extend(
         [
             OUTPUT_FORMATTING_INSTRUCTIONS.strip(),
             TOOL_CALLING_INSTRUCTIONS.strip(),
+            FILE_TOOL_INSTRUCTIONS.strip(),
             BACKGROUND_EXECUTION_INSTRUCTIONS.strip(),
             SESSION_NOTES_INSTRUCTIONS.strip(),
         ]

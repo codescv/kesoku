@@ -79,7 +79,8 @@ def test_tool_runner_missing_argument() -> None:
 
     assert result_msg.role == "tool"
     assert result_msg.type == "tool_result"
-    assert "Command too long!" in result_msg.content
+    assert "Missing required argument(s) for tool 'calculate_product': y." in result_msg.content
+    assert "4000 characters" in result_msg.content
     assert "tool_error" in result_msg.metadata
 
 
@@ -257,3 +258,50 @@ def test_tool_runner_argument_coercion() -> None:
         "a_str=42 (str), annotated_int=500 (int)"
     )
     assert result_msg.metadata["tool_result"] == expected_result
+
+
+def _run(registry: ToolRegistry, name: str, arguments: dict) -> Message:
+    import asyncio
+
+    runner = ToolRunner(registry, ToolContext(session_id="sess_1", session_workspace="ws_1"))
+    call = ToolCallRequest(name=name, arguments=arguments, tool_call_id="tc_1")
+    tc_msg = Message(id="msg_tc_1", session_id="sess_1", chatbot_id="cli", channel_id="ch1", sender="Kesoku",
+                     role="tool", content=f"Calling {name}")
+    return asyncio.run(runner.execute_tool(call, tc_msg))
+
+
+def test_tool_runner_preserves_none_for_optional_params() -> None:
+    """JSON null must reach Optional parameters as None, never as the string "None"."""
+    from typing import Annotated, Optional
+
+    registry = ToolRegistry()
+
+    @registry.register
+    def opt_tool(
+        a: str | None,
+        b: int | None = 5,
+        c: Annotated[int | None, "doc"] = 7,
+        d: Optional[str] = "x",  # noqa: UP045 - exercise typing.Optional explicitly
+    ) -> str:
+        """Report received values."""
+        return repr((a, b, c, d))
+
+    result = _run(registry, "opt_tool", {"a": None, "b": None, "c": None, "d": None})
+    assert result.metadata["tool_result"] == "(None, None, None, None)"
+    assert "'None'" not in result.metadata["tool_result"]
+
+
+def test_tool_runner_none_for_non_optional_is_treated_as_absent() -> None:
+    """None for a non-Optional parameter: the default applies, or the missing-argument error fires."""
+    registry = ToolRegistry()
+
+    @registry.register
+    def strict_tool(name: str, count: int = 3) -> str:
+        """Report received values."""
+        return repr((name, count))
+
+    ok = _run(registry, "strict_tool", {"name": "n", "count": None})
+    assert ok.metadata["tool_result"] == "('n', 3)"
+    missing = _run(registry, "strict_tool", {"name": None})
+    assert "tool_error" in missing.metadata
+    assert "Missing required argument(s) for tool 'strict_tool': name." in missing.metadata["tool_error"]

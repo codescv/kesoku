@@ -14,6 +14,7 @@ from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
 from kesoku.utils.path import PathResolver
+from kesoku.utils.text import truncate_middle
 from kesoku.utils.ui_markup import collapse_ui_blocks
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,40 @@ logger = logging.getLogger(__name__)
 # `update_session_notes` is no longer a tool, but legacy calls to it in stored history must still be truncated.
 TRUNCATED_ARG_TOOLS = frozenset({"update_session_notes", "update_file"})
 MAX_HISTORICAL_TOOL_ARG_CHARS = 300
+
+# run_shell_command's own truncation banner ("Output truncated (total length N bytes). Full output saved to ...
+# Preview (...):\n"). Stripped before building the history preview so its head budget shows real output.
+_SHELL_TRUNCATION_BANNER_RE = re.compile(
+    r"\AOutput truncated \(total length \d+ bytes\)\..*?Preview \([^)\n]*\):\n", re.DOTALL
+)
+_COMMAND_FAILED_PREFIX = "Command failed with exit code"
+HISTORY_PREVIEW_PLACEHOLDER = "\n... <middle truncated> ...\n"
+
+
+def strip_shell_truncation_banner(text: str) -> str:
+    """Remove run_shell_command's truncation banner, keeping a leading `Command failed with exit code N.` line.
+
+    Args:
+        text: A tool result or tool error string.
+
+    Returns:
+        The text without the banner (unchanged if there is none).
+    """
+    if not text:
+        return text
+    prefix = ""
+    body = text
+    if body.startswith(_COMMAND_FAILED_PREFIX):
+        first, sep, rest = body.partition("\n")
+        prefix, body = first + sep, rest
+    stripped = _SHELL_TRUNCATION_BANNER_RE.sub("", body, count=1)
+    return prefix + stripped
+
+
+def history_preview(text: str, max_chars: int) -> str:
+    """Head + tail preview of a historical tool output (shell banner stripped, middle truncated)."""
+    return truncate_middle(strip_shell_truncation_banner(text), max_chars, HISTORY_PREVIEW_PLACEHOLDER)
+
 
 # Matches `[question: <stem> || <options>]` (or the legacy `<stem> | <opt> | ...` form) blocks.
 # Nested brackets are not allowed inside question blocks, so `[^\]]` is a safe body matcher.
@@ -244,11 +279,11 @@ def prepare_history_for_llm(
                             except Exception as ex:
                                 logger.warning(f"Failed to write historical tool error to {err_filepath}: {ex}")
 
-                        err_preview = tool_error[-max_historical_tool_chars:]
+                        err_preview = history_preview(tool_error, max_historical_tool_chars)
                         truncated_err = (
                             f"Error truncated for history (total length {len(tool_error)} chars). "
                             f"Full error log saved to: `{err_filepath}`.\n\n"
-                            f"Preview (last {max_historical_tool_chars} chars):\n{err_preview}"
+                            f"Preview (head and tail, {max_historical_tool_chars} chars):\n{err_preview}"
                         )
                         m = m.model_copy()
                         m.metadata = dict(m.metadata) if m.metadata else {}
@@ -271,11 +306,11 @@ def prepare_history_for_llm(
                             except Exception as ex:
                                 logger.warning(f"Failed to write historical tool output to {filepath}: {ex}")
 
-                        preview = raw_res[-max_historical_tool_chars:]
+                        preview = history_preview(raw_res, max_historical_tool_chars)
                         truncated_res = (
                             f"Output truncated for history (total length {len(raw_res)} chars). "
                             f"Full output saved to: `{filepath}`.\n\n"
-                            f"Preview (last {max_historical_tool_chars} chars):\n{preview}"
+                            f"Preview (head and tail, {max_historical_tool_chars} chars):\n{preview}"
                         )
                         m = m.model_copy()
                         m.metadata = dict(m.metadata) if m.metadata else {}

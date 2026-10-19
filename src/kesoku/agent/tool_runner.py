@@ -14,6 +14,21 @@ from kesoku.logger import setup_logger
 logger = setup_logger(__name__)
 
 
+def _admits_none(annotation: Any) -> bool:
+    """Whether a parameter annotation accepts None (Optional / `X | None` / Annotated[Optional[X], ...] / Any)."""
+    if annotation is inspect.Parameter.empty or annotation is Any or annotation is None or annotation is type(None):
+        return True
+    if isinstance(annotation, str):  # postponed annotations
+        return "None" in annotation or "Optional" in annotation or annotation.strip() == "Any"
+    origin = typing.get_origin(annotation)
+    if origin is typing.Annotated:
+        args = typing.get_args(annotation)
+        return _admits_none(args[0]) if args else False
+    if origin is typing.Union or str(origin) in ("<class 'union'>", "<class 'types.UnionType'>"):
+        return any(a is type(None) or a is Any for a in typing.get_args(annotation))
+    return False
+
+
 class ToolRunner:
     """Handles safe parameter validation and asynchronous execution of tools."""
 
@@ -72,43 +87,51 @@ class ToolRunner:
 
             # Coerce parameters based on signature type hints
             for param_name, param in sig.parameters.items():
-                if param_name in call_kwargs:
-                    val = call_kwargs[param_name]
-                    annotation = param.annotation
+                if param_name not in call_kwargs:
+                    continue
+                val = call_kwargs[param_name]
+                annotation = param.annotation
+                if val is None:
+                    # JSON null: keep it for Optional parameters (e.g. update_file(old_content=None)); for any
+                    # other parameter treat it as absent so the default applies or the missing-argument error
+                    # fires. Never turn None into the string "None".
+                    if not _admits_none(annotation):
+                        del call_kwargs[param_name]
+                    continue
 
-                    # Handle Union/Annotated types to get the base type
-                    origin = typing.get_origin(annotation)
-                    if origin is typing.Annotated:
-                        args = typing.get_args(annotation)
-                        if args:
-                            annotation = args[0]
-                            origin = typing.get_origin(annotation)
-                    if origin is typing.Union or str(origin) in ("<class 'union'>", "<class 'types.UnionType'>"):
-                        args = typing.get_args(annotation)
-                        non_none_args = [a for a in args if a is not type(None)]
-                        if non_none_args:
-                            annotation = non_none_args[0]
+                # Handle Union/Annotated types to get the base type
+                origin = typing.get_origin(annotation)
+                if origin is typing.Annotated:
+                    args = typing.get_args(annotation)
+                    if args:
+                        annotation = args[0]
+                        origin = typing.get_origin(annotation)
+                if origin is typing.Union or str(origin) in ("<class 'union'>", "<class 'types.UnionType'>"):
+                    args = typing.get_args(annotation)
+                    non_none_args = [a for a in args if a is not type(None)]
+                    if non_none_args:
+                        annotation = non_none_args[0]
 
-                    # Coerce value
-                    if annotation is int and not isinstance(val, int):
-                        try:
-                            call_kwargs[param_name] = int(val)
-                        except (ValueError, TypeError):
-                            pass
-                    elif annotation is float and not isinstance(val, (int, float)):
-                        try:
-                            call_kwargs[param_name] = float(val)
-                        except (ValueError, TypeError):
-                            pass
-                    elif annotation is bool and not isinstance(val, bool):
-                        if str(val).lower() in ("true", "1", "yes"):
-                            call_kwargs[param_name] = True
-                        elif str(val).lower() in ("false", "0", "no"):
-                            call_kwargs[param_name] = False
-                    elif annotation is str and not isinstance(val, str):
-                        call_kwargs[param_name] = str(val)
+                # Coerce value
+                if annotation is int and not isinstance(val, int):
+                    try:
+                        call_kwargs[param_name] = int(val)
+                    except (ValueError, TypeError):
+                        pass
+                elif annotation is float and not isinstance(val, (int, float)):
+                    try:
+                        call_kwargs[param_name] = float(val)
+                    except (ValueError, TypeError):
+                        pass
+                elif annotation is bool and not isinstance(val, bool):
+                    if str(val).lower() in ("true", "1", "yes"):
+                        call_kwargs[param_name] = True
+                    elif str(val).lower() in ("false", "0", "no"):
+                        call_kwargs[param_name] = False
+                elif annotation is str and not isinstance(val, str):
+                    call_kwargs[param_name] = str(val)
 
-            # Validate required parameters to handle LLM truncation gracefully
+            # Validate required parameters (a missing one usually means the LLM output was cut off)
             missing_args = []
             for param in sig.parameters.values():
                 if param.name == "context":
@@ -117,9 +140,9 @@ class ToolRunner:
                     missing_args.append(param.name)
             if missing_args:
                 raise ValueError(
-                    "Command too long! Split your command into smaller chunks!\n"
-                    "If you are writing a file, write at most 4000 characters per command!\n"
-                    "Note: only emit 1 tool call in your response because it's too long!"
+                    f"Missing required argument(s) for tool '{call.name}': {', '.join(missing_args)}. "
+                    "If your tool call was cut off by the output limit, split large content into chunks of at "
+                    "most 4000 characters and emit only one tool call per response."
                 )
 
             if "context" in sig.parameters:

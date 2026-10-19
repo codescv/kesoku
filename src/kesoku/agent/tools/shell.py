@@ -20,6 +20,7 @@ from kesoku.utils.async_fs import (
     async_write_text_file,
 )
 from kesoku.utils.path import PathResolver
+from kesoku.utils.text import truncate_middle
 
 logger = logging.getLogger(__name__)
 
@@ -257,7 +258,8 @@ async def run_shell_command(
             If the command takes longer than this limit, it transitions to background execution.
             If not provided, defaults to configuration setting.
         max_output_chars: Maximum output characters to return. Defaults to 5000.
-            Output exceeding this length is truncated and full output saved to a staging file.
+            Output exceeding this length is truncated in the middle (head and tail kept) and the full output is
+            saved to a staging file.
         context: Optional tool execution context.
 
     Returns:
@@ -442,21 +444,27 @@ async def run_shell_command(
         timestamp = int(time.time())
         output_filename = f"cmd_output_{timestamp}_{uuid.uuid4().hex[:8]}.txt"
         output_filepath = os.path.join(session_staging_dir, output_filename)
+        # Middle-out preview: the head (headers, first error) and the tail (summary) both survive.
+        placeholder = (
+            f"\n\n... <{len(out_str) - effective_max} of {len(out_str)} chars omitted from the middle; "
+            f"full output in `{output_filename}`> ...\n\n"
+            if effective_max >= 1000
+            else "\n... <truncated> ...\n"
+        )
+        preview = truncate_middle(out_str, effective_max, placeholder)
+        preview_label = f"Preview (first ~45% and last ~55% of {effective_max} chars):"
         try:
             await async_write_text_file(output_filepath, out_str)
             final_output = (
                 f"Output truncated (total length {len(out_str)} bytes). "
                 f"Full output saved to session workspace file: `{output_filepath}`.\n"
-                f"You can use tool `run_shell_command` (e.g., `cat {output_filename}`) "
-                f"with a larger `max_output_chars` parameter (e.g., 30000) to examine the full output.\n\n"
-                f"Preview (last {effective_max} chars):\n{out_str[-effective_max:]}"
+                f'Page through it with `read_file("{output_filepath}", start_line=1)` (or re-run with a larger '
+                f"`max_output_chars`, max {MAX_TOOL_OUTPUT_LENGTH}).\n\n"
+                f"{preview_label}\n{preview}"
             )
         except Exception as ex:
             logger.error(f"Failed to save truncated output to '{output_filepath}': {ex}")
-            final_output = (
-                f"Output truncated (total length {len(out_str)} bytes). "
-                f"Preview (last {effective_max} chars):\n{out_str[-effective_max:]}"
-            )
+            final_output = f"Output truncated (total length {len(out_str)} bytes). {preview_label}\n{preview}"
 
     if proc.returncode != 0:
         raise ShellCommandError(f"Command failed with exit code {proc.returncode}.\n{final_output}")

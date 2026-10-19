@@ -276,14 +276,18 @@ def truncate_middle(text: str, max_len: int, placeholder: str = "\n\n... [Trunca
     keep_start = int(budget * 0.45)
     keep_end = budget - keep_start
 
-    # Try to find clean newline boundaries near the split indices, clamping to budget
-    start_idx = text.find("\n", max(0, keep_start - 100), keep_start)
+    # Snap to clean newline boundaries near the split indices without leaving the budget: the head ends at the
+    # LAST newline before keep_start and the tail starts at the FIRST newline after its cut, so at most one
+    # partial line is dropped on each side.
+    start_idx = text.rfind("\n", max(0, keep_start - 100), keep_start)
     if start_idx == -1:
         start_idx = keep_start
 
-    end_idx = text.rfind("\n", len(text) - keep_end, min(len(text), len(text) - keep_end + 100))
+    end_idx = text.find("\n", len(text) - keep_end, min(len(text), len(text) - keep_end + 100))
     if end_idx == -1:
         end_idx = len(text) - keep_end
+    else:
+        end_idx += 1  # the tail starts on a fresh line
 
     if start_idx < end_idx:
         return text[:start_idx] + placeholder + text[end_idx:]

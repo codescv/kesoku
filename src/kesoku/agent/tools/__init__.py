@@ -1,6 +1,6 @@
 """Registry and skill tools package for Kesoku AI Agent."""
 
-from kesoku.agent.tools.file import update_file
+from kesoku.agent.tools.file import read_file, update_file
 from kesoku.agent.tools.media import analyze_media
 from kesoku.agent.tools.memory import (
     chat_search,
@@ -40,4 +40,5 @@ __all__ = [
     "view_message",
     "skill_manager",
     "update_file",
+    "read_file",
 ]

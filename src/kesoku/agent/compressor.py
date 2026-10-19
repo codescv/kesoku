@@ -9,7 +9,7 @@ import time
 import uuid
 from typing import Any
 
-from kesoku.agent.history import segment_logical_turns, truncate_tool_call_arguments
+from kesoku.agent.history import history_preview, segment_logical_turns, truncate_tool_call_arguments
 from kesoku.agent.llm import BaseLLM
 from kesoku.config import KesokuConfig
 from kesoku.constants import MessageRole, MessageType
@@ -305,7 +305,10 @@ class HistoryCompressor:
             # Truncate historical tool outputs exceeding character limit
             if msg.role == MessageRole.TOOL and msg.type == MessageType.TOOL_RESULT:
                 if len(content) > max_historical_tool_chars:
-                    content = content[-max_historical_tool_chars:]
+                    # Same head+tail preview prepare_history_for_llm builds (shell banner stripped).
+                    meta = msg.metadata or {}
+                    raw = meta.get("tool_error") or meta.get("tool_result") or content
+                    content = history_preview(str(raw), max_historical_tool_chars)
             elif msg.role == MessageRole.TOOL and msg.type == MessageType.TOOL_CALL:
                 args = (msg.metadata or {}).get("tool_arguments")
                 if isinstance(args, dict):

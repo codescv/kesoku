@@ -876,7 +876,7 @@ async def test_prepare_history_for_llm_truncates_historical_tool_output(temp_db:
 
     # Historical turn tool result MUST be truncated to 500 chars and saved to file
     assert "Output truncated for history" in tr1_prepared.metadata["tool_result"]
-    assert "Preview (last 500 chars):" in tr1_prepared.metadata["tool_result"]
+    assert "Preview (head and tail, 500 chars):" in tr1_prepared.metadata["tool_result"]
     assert "Full output saved to:" in tr1_prepared.metadata["tool_result"]
     saved_file = tr1_prepared.metadata.get("output_filepath")
     assert saved_file is not None

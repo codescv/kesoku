@@ -51,6 +51,16 @@ The prompt is constructed dynamically by `build_sys_prompt()` inside `src/kesoku
     ```
 *   **Purpose**: Instructs the agent to save all generated images, downloaded files, and execution outputs inside this isolated folder to prevent workspace pollution.
 
+### 3b. Available Skills Index
+*   **Instruction**: `build_skills_section()` renders a deterministic `# Available Skills` section right after the
+    directory blocks: one `- <name>: <description>` line per installed skill (global + role-scoped, role skills win
+    on name collisions), sorted by name, descriptions collapsed to one line and cut at 200 chars, at most 60 entries
+    and 6000 chars (the rest is summarised with a pointer to `list_skills()`).
+*   **Purpose**: The agent calls `use_skill(skill_name=...)` directly instead of spending a `list_skills()` call.
+*   **Skipped** when `use_skill` is in `agent.disabled_tools`, when no skills are installed, or when listing fails.
+*   **Caveat**: the system prompt is persisted per session at creation (and on role switch/resume), so skills added
+    later only appear in new sessions; `list_skills()` remains the live listing.
+
 ### 4. Built-in Instructions
 These are static, hardcoded instructions inside `prompt.py` that train the agent on how to use Kesoku's features:
 
@@ -61,6 +71,7 @@ These are static, hardcoded instructions inside `prompt.py` that train the agent
 *   **Hidden text**: `<spoiler>…</spoiler>` marks inline text the user must click to reveal. Each adapter's `format_text` renders it: Discord emits native `||…||`; platforms without hidden-text support (CLI, WeChat, Google Chat) strip the tags and show the content. See `kesoku.utils.text.render_spoilers`.
 *   **`MEMORY_AND_HISTORY_INSTRUCTIONS`**: Guides the agent on how to access and modify structured memories in SQLite.
 *   **`SESSION_NOTES_INSTRUCTIONS`**: Explains the per-turn `<context name="...">` blocks (see section 7), how to maintain `$STAGING_DIR/notes.md` with `update_file`, and that files under `$STAGING_DIR/context/` are tool-maintained and must never be edited with `update_file`.
+*   **`FILE_TOOL_INSTRUCTIONS`**: Read files with `read_file(file_name, start_line, end_line)` instead of `cat`/`head`/`sed -n`; create files with `update_file(file_name, new_content=...)` (omit `old_content`); edit with a short unique block copied from `read_file` output without the `N: ` prefixes; page truncated shell outputs with `read_file`.
 *   **`BACKGROUND_EXECUTION_INSTRUCTIONS`**: Instructs the agent on how to handle long-running background shell executions and yield the conversational turn.
 
 ### 5. Configured User Prompts
