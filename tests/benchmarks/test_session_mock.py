@@ -139,7 +139,7 @@ async def test_forced_compaction_scaffold(make_task: Callable[..., Path], tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_compact_command_noop_triggers_fallback(make_task: Callable[..., Path], tmp_path: Path,
+async def test_compact_command_compacts_or_triggers_fallback(make_task: Callable[..., Path], tmp_path: Path,
                                                       restore_environ: None) -> None:
     turns = [("user", f"turn {i}") for i in range(1, 5)] + [("command", "/compact keep only Y"), ("user", "fix it")]
     task_dir = make_task(task_id="C8_synthetic", suite="C", profile="compaction_forced", turns=turns,
@@ -153,10 +153,16 @@ async def test_compact_command_noop_triggers_fallback(make_task: Callable[..., P
     res = await run_task(spec, _opts(tmp_path), llm_factory=_factory(llm))
     assert res["error"] is None, res["error"]
     d = res["diagnostics"]
-    assert d["manual_compact_nodes_delta"] == 0
-    assert "not needed" in d["manual_compact_reply"]
-    assert d["fallback_forced"] is True
-    assert res["turns"][4]["kind"] == "command" and res["turns"][4]["forced_nodes"] == 1
+    assert res["turns"][4]["kind"] == "command"
+    if d["fallback_forced"]:
+        # Pre-P1-4 kesoku: /compact is a watermark no-op, the harness forces an equivalent compaction.
+        assert d["manual_compact_nodes_delta"] == 0
+        assert "not needed" in d["manual_compact_reply"]
+        assert res["turns"][4]["forced_nodes"] == 1
+    else:
+        # P1-4 kesoku: /compact force-compacts the middle turns itself; no fallback.
+        assert d["manual_compact_nodes_delta"] == 1
+        assert res["turns"][4]["forced_nodes"] == 0
     assert res["totals"]["compactions_l0"] == 1
     assert res["status"] == "resolved"
 
