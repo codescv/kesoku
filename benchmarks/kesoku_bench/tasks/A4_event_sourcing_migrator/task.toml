@@ -1,0 +1,39 @@
+[task]
+id = "A4_event_sourcing_migrator"
+suite = "A"
+title = "Add idempotent out-of-order replay and snapshot version rollback to evsrc"
+config_profile = "default"
+config_overrides = {}
+force_compact_before_turn = []
+turn_timeout_s = 900
+continue_on_timeout = false
+
+[[turns]]
+kind = "user"
+text = """Refactor and fix `evsrc` to support idempotent out-of-order event replay and snapshot schema version rollbacks:
+
+1. **Idempotent & out-of-order replay (`evsrc/replay.py`)**:
+   - `replay(events, *, aggregate_id=None, initial_snapshot=None, gaps="strict", registry=None)` must deduplicate events by `(aggregate_id, sequence)` key (keeping the first seen event for that key, not by Python object identity) and sort events by ascending `sequence` before folding them into `Account`.
+   - When `gaps="strict"` (the default), any missing sequence number (starting from `1`, or `initial_snapshot.sequence + 1` when `initial_snapshot` is provided) must raise `SequenceGap` (`evsrc.events.SequenceGap`).
+   - When `gaps="skip"`, missing sequence numbers are skipped and replay continues across the remaining sorted events.
+
+2. **Downcaster registration & snapshot rollback (`evsrc/registry.py`, `evsrc/upcasters.py`, `evsrc/store.py`)**:
+   - Add `MigratorRegistry.register_downcaster(from_v, to_v, fn)` and module-level `register_downcaster(from_v, to_v, fn, *, registry=None)` (plus `MigratorRegistry.downcast(payload, from_v, to_v)`), rejecting cycles and invalid version directions with `CycleError` / `ValueError`.
+   - Register the default `3 -> 2` and `2 -> 1` downcasters on `default_registry`.
+   - Update `Snapshot.load(data, target_version=..., registry=None)` so loading a higher-version snapshot into a lower `target_version` (e.g. a v3 snapshot with `target_version=2` or `target_version=1`) runs the registered downcasters and drops any state fields unknown to `target_version` (per `VERSION_SCHEMA_FIELDS`, so `target_version=2` keeps `balance` and `currency` and drops `tags` and any extra fields)."""
+
+[grading]
+fail_to_pass = [
+    "tests/test_holdout_migrator.py::test_replay_idempotent_duplicate_keys",
+    "tests/test_holdout_migrator.py::test_replay_out_of_order_shuffled_matches_ordered",
+    "tests/test_holdout_migrator.py::test_replay_gaps_strict_raises_sequence_gap",
+    "tests/test_holdout_migrator.py::test_replay_gaps_skip_continues",
+    "tests/test_holdout_migrator.py::test_snapshot_load_downcast_v3_to_v2_and_v1",
+    "tests/test_holdout_migrator.py::test_registry_rejects_downcaster_cycles",
+]
+pass_to_pass = [
+    "tests/test_upcasters.py::test_default_upcast_chain_v1_to_v3",
+    "tests/test_upcasters.py::test_upcaster_registry_rejects_cycles",
+    "tests/test_replay.py::test_ordered_replay_across_schema_versions",
+    "tests/test_replay.py::test_snapshot_upcast_and_resume_replay",
+]

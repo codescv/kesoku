@@ -1,0 +1,10 @@
+--- a/win.txt
++++ b/win.txt
+@@ -1,5 +1,6 @@
+ header = 1
+-mode = legacy
++mode = strict
++verify_tls = true
+ timeout = 30
+ retries = 3
+ footer = end
