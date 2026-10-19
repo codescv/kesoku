@@ -1,0 +1,18 @@
+[project]
+name = "ratelimit"
+version = "0.1.0"
+description = "In-memory token-bucket and route rate limiting primitives"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

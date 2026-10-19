@@ -1,0 +1,118 @@
+[task]
+id = "C1_dead_end_trap_survival"
+suite = "C"
+title = "Survive clock-caching dead-end trap across forced compactions when building BurstLimiter"
+config_profile = "compaction_forced"
+force_compact_before_turn = [5, 7]
+critical_turn = 2
+turn_timeout_s = 900
+continue_on_timeout = false
+
+[[turns]]
+kind = "user"
+text = """Inspect the repository under `repo/` (`ratelimit` package and `tests/`), run `uv run pytest` to verify the initial test suite passes, and give a short overview of the current rate-limiter design."""
+
+[[turns]]
+kind = "user"
+text = """Profiling shows `TokenBucketLimiter.allow()` is slow with 10k clients. We suspect `self.clock.now()` dominates `allow()` with 10k clients — cache the clock reading in `TokenBucketLimiter` (e.g. storing `_cached_now` instead of calling `self.clock.now()` on every `allow()`) and run `uv run pytest` to test that change. If `test_clock_skew` fails, revert the clock caching and fix the real 10k-client bottleneck in `TokenBucketLimiter` so all tests pass."""
+
+[[turns]]
+kind = "user"
+text = """Add a `RouteLimiter` class in `repo/ratelimit/middleware.py` (and re-export it in `repo/ratelimit/__init__.py`) that configures per-route `TokenBucketLimiter` instances from `repo/routes.toml`. Implement:
+- `RouteLimiter(default_rate: float = 10.0, default_capacity: float = 20.0, routes: Mapping[str, tuple[float, float]] | None = None, clock: Clock | None = None)`
+- `@classmethod def from_toml(cls, path: str | Path = "routes.toml", clock: Clock | None = None) -> RouteLimiter`
+- `allow(self, route: str, client_id: str, cost: float = 1.0) -> bool` (falling back to `[default]` for unlisted routes)
+Run `uv run pytest` to verify."""
+
+[[turns]]
+kind = "user"
+text = """Run the full test suite with `uv run pytest -vv` and then run `uv run python -m ratelimit.bench` to inspect the multi-client throughput report."""
+
+[[turns]]
+kind = "user"
+text = """Below is a 9KB production incident log from `edge-gateway-07` during the 14:02 UTC traffic spike. Based on the log lines, is the 502/504 outage caused by the rate limiter or by the upstream proxy connection pool? Answer only — do not edit any files in this turn.
+
+```log
+2026-10-19T14:02:00.004Z INFO  edge-gateway-07 [req=88a01] route=/api/v1/search client=tenant-0041 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=99.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.011Z WARN  edge-gateway-07 [req=88a01] upstream_pool=envoy_pool_04 event=POOL_QUEUE_WAIT queued_requests=47 max_pending=64 idle_keepalive=0
+2026-10-19T14:02:00.018Z INFO  edge-gateway-07 [req=88a02] route=/api/v1/search client=tenant-0192 ratelimit.decision=ALLOW ratelimit.latency_ms=0.04 remaining=98.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.025Z INFO  edge-gateway-07 [req=88a03] route=/api/v1/login  client=tenant-0088 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=4.0  upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.031Z ERROR edge-gateway-07 [req=88a01] status=504 code=PROXY_CONN_POOL_EXHAUSTED detail="upstream timed out waiting 2000ms for idle keepalive slot in envoy_pool_04"
+2026-10-19T14:02:00.039Z INFO  edge-gateway-07 [req=88a04] route=/api/v1/search client=tenant-0311 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=97.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.044Z ERROR edge-gateway-07 [req=88a02] status=504 code=PROXY_CONN_POOL_EXHAUSTED detail="upstream timed out waiting 2000ms for idle keepalive slot in envoy_pool_04"
+2026-10-19T14:02:00.052Z INFO  edge-gateway-07 [req=88a05] route=/api/v1/export client=tenant-0019 ratelimit.decision=ALLOW ratelimit.latency_ms=0.04 remaining=2.0  upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.060Z WARN  edge-gateway-07 [req=88a05] upstream_pool=envoy_pool_04 event=POOL_QUEUE_WAIT queued_requests=63 max_pending=64 idle_keepalive=0
+2026-10-19T14:02:00.068Z ERROR edge-gateway-07 [req=88a03] status=502 code=PROXY_UPSTREAM_RESET detail="backend 10.42.19.8:8443 reset stream after keepalive idle timeout"
+2026-10-19T14:02:00.075Z INFO  edge-gateway-07 [req=88a06] route=/api/v1/search client=tenant-0512 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=99.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.082Z ERROR edge-gateway-07 [req=88a06] status=503 code=PROXY_PENDING_OVERFLOW detail="envoy_pool_04 pending queue full (64/64); rejecting upstream dispatch"
+2026-10-19T14:02:00.090Z INFO  edge-gateway-07 [req=88a07] route=/api/v1/search client=tenant-0623 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=96.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.098Z ERROR edge-gateway-07 [req=88a07] status=504 code=PROXY_CONN_POOL_EXHAUSTED detail="upstream timed out waiting 2000ms for idle keepalive slot in envoy_pool_04"
+2026-10-19T14:02:00.105Z INFO  edge-gateway-07 [req=88a08] route=/api/v1/login  client=tenant-0774 ratelimit.decision=ALLOW ratelimit.latency_ms=0.04 remaining=4.0  upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.112Z ERROR edge-gateway-07 [req=88a08] status=504 code=PROXY_CONN_POOL_EXHAUSTED detail="upstream timed out waiting 2000ms for idle keepalive slot in envoy_pool_04"
+2026-10-19T14:02:00.120Z INFO  edge-gateway-07 [req=88a09] route=/api/v1/search client=tenant-0815 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=95.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.129Z ERROR edge-gateway-07 [req=88a09] status=502 code=PROXY_UPSTREAM_RESET detail="backend 10.42.19.9:8443 reset stream after keepalive idle timeout"
+2026-10-19T14:02:00.137Z INFO  edge-gateway-07 [req=88a10] route=/api/v1/search client=tenant-0901 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=94.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.145Z ERROR edge-gateway-07 [req=88a10] status=504 code=PROXY_CONN_POOL_EXHAUSTED detail="upstream timed out waiting 2000ms for idle keepalive slot in envoy_pool_04"
+2026-10-19T14:02:00.153Z INFO  edge-gateway-07 [req=88a11] route=/api/v1/search client=tenant-1024 ratelimit.decision=ALLOW ratelimit.latency_ms=0.04 remaining=99.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.161Z ERROR edge-gateway-07 [req=88a11] status=503 code=PROXY_PENDING_OVERFLOW detail="envoy_pool_04 pending queue full (64/64); rejecting upstream dispatch"
+2026-10-19T14:02:00.170Z INFO  edge-gateway-07 [req=88a12] route=/api/v1/export client=tenant-1102 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=2.0  upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.178Z ERROR edge-gateway-07 [req=88a12] status=504 code=PROXY_CONN_POOL_EXHAUSTED detail="upstream timed out waiting 2000ms for idle keepalive slot in envoy_pool_04"
+2026-10-19T14:02:00.186Z INFO  edge-gateway-07 [req=88a13] route=/api/v1/search client=tenant-1188 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=98.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.194Z ERROR edge-gateway-07 [req=88a13] status=504 code=PROXY_CONN_POOL_EXHAUSTED detail="upstream timed out waiting 2000ms for idle keepalive slot in envoy_pool_04"
+2026-10-19T14:02:00.202Z INFO  edge-gateway-07 [req=88a14] route=/api/v1/login  client=tenant-1240 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=4.0  upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.210Z ERROR edge-gateway-07 [req=88a14] status=502 code=PROXY_UPSTREAM_RESET detail="backend 10.42.19.8:8443 reset stream after keepalive idle timeout"
+2026-10-19T14:02:00.218Z INFO  edge-gateway-07 [req=88a15] route=/api/v1/search client=tenant-1337 ratelimit.decision=ALLOW ratelimit.latency_ms=0.04 remaining=97.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.226Z ERROR edge-gateway-07 [req=88a15] status=504 code=PROXY_CONN_POOL_EXHAUSTED detail="upstream timed out waiting 2000ms for idle keepalive slot in envoy_pool_04"
+2026-10-19T14:02:00.234Z INFO  edge-gateway-07 [req=88a16] route=/api/v1/search client=tenant-1420 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=96.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.242Z ERROR edge-gateway-07 [req=88a16] status=503 code=PROXY_PENDING_OVERFLOW detail="envoy_pool_04 pending queue full (64/64); rejecting upstream dispatch"
+2026-10-19T14:02:00.250Z INFO  edge-gateway-07 [req=88a17] route=/api/v1/search client=tenant-1509 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=95.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.258Z ERROR edge-gateway-07 [req=88a17] status=504 code=PROXY_CONN_POOL_EXHAUSTED detail="upstream timed out waiting 2000ms for idle keepalive slot in envoy_pool_04"
+2026-10-19T14:02:00.266Z INFO  edge-gateway-07 [req=88a18] route=/api/v1/export client=tenant-1601 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=2.0  upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.274Z ERROR edge-gateway-07 [req=88a18] status=504 code=PROXY_CONN_POOL_EXHAUSTED detail="upstream timed out waiting 2000ms for idle keepalive slot in envoy_pool_04"
+2026-10-19T14:02:00.282Z INFO  edge-gateway-07 [req=88a19] route=/api/v1/search client=tenant-1711 ratelimit.decision=ALLOW ratelimit.latency_ms=0.04 remaining=94.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.290Z ERROR edge-gateway-07 [req=88a19] status=502 code=PROXY_UPSTREAM_RESET detail="backend 10.42.19.9:8443 reset stream after keepalive idle timeout"
+2026-10-19T14:02:00.298Z INFO  edge-gateway-07 [req=88a20] route=/api/v1/search client=tenant-1805 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=93.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.306Z ERROR edge-gateway-07 [req=88a20] status=504 code=PROXY_CONN_POOL_EXHAUSTED detail="upstream timed out waiting 2000ms for idle keepalive slot in envoy_pool_04"
+2026-10-19T14:02:00.314Z INFO  edge-gateway-07 [req=88a21] route=/api/v1/login  client=tenant-1922 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=4.0  upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.322Z ERROR edge-gateway-07 [req=88a21] status=503 code=PROXY_PENDING_OVERFLOW detail="envoy_pool_04 pending queue full (64/64); rejecting upstream dispatch"
+2026-10-19T14:02:00.330Z INFO  edge-gateway-07 [req=88a22] route=/api/v1/search client=tenant-2048 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=92.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.338Z ERROR edge-gateway-07 [req=88a22] status=504 code=PROXY_CONN_POOL_EXHAUSTED detail="upstream timed out waiting 2000ms for idle keepalive slot in envoy_pool_04"
+2026-10-19T14:02:00.346Z INFO  edge-gateway-07 [req=88a23] route=/api/v1/search client=tenant-2190 ratelimit.decision=ALLOW ratelimit.latency_ms=0.04 remaining=91.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.354Z ERROR edge-gateway-07 [req=88a23] status=504 code=PROXY_CONN_POOL_EXHAUSTED detail="upstream timed out waiting 2000ms for idle keepalive slot in envoy_pool_04"
+2026-10-19T14:02:00.362Z INFO  edge-gateway-07 [req=88a24] route=/api/v1/export client=tenant-2250 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=2.0  upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.370Z ERROR edge-gateway-07 [req=88a24] status=502 code=PROXY_UPSTREAM_RESET detail="backend 10.42.19.8:8443 reset stream after keepalive idle timeout"
+2026-10-19T14:02:00.378Z INFO  edge-gateway-07 [req=88a25] route=/api/v1/search client=tenant-2311 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=90.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.386Z ERROR edge-gateway-07 [req=88a25] status=504 code=PROXY_CONN_POOL_EXHAUSTED detail="upstream timed out waiting 2000ms for idle keepalive slot in envoy_pool_04"
+2026-10-19T14:02:00.394Z INFO  edge-gateway-07 [req=88a26] route=/api/v1/search client=tenant-2400 ratelimit.decision=ALLOW ratelimit.latency_ms=0.03 remaining=89.0 upstream_pool=envoy_pool_04 active_conns=128/128
+2026-10-19T14:02:00.402Z ERROR edge-gateway-07 [req=88a26] status=503 code=PROXY_PENDING_OVERFLOW detail="envoy_pool_04 pending queue full (64/64); rejecting upstream dispatch"
+2026-10-19T14:02:00.410Z INFO  edge-gateway-07 [metrics] window=10s ratelimit_total=4820 ratelimit_allowed=4815 ratelimit_denied=5 ratelimit_p99_ms=0.06 proxy_pool_timeouts=1412 proxy_502=389 proxy_503=410
+```"""
+
+[[turns]]
+kind = "user"
+text = """Implement `BurstLimiter` in `repo/ratelimit/burst.py` (and export it in `repo/ratelimit/__init__.py`) with the same architecture as `TokenBucketLimiter`; it must stay fast for 10k clients. Specifically, provide:
+- `BurstLimiter(rate: float, capacity: float, max_burst: float | None = None, clock: Clock | None = None)`
+- `allow(self, client_id: str, cost: float = 1.0) -> bool` (if `cost > max_burst`, where `max_burst` defaults to `capacity`, return `False` without deducting tokens; otherwise refill and deduct tokens per client)
+- `remaining(self, client_id: str) -> float`
+- `reset(self, client_id: str | None = None) -> None`"""
+
+[[turns]]
+kind = "user"
+text = """Run `uv run pytest` to verify the full test suite is green and give a final summary of everything completed in this session."""
+
+[grading]
+fail_to_pass = [
+    "tests/test_holdout_burst.py::test_burst_respects_injected_clock_per_call",
+    "tests/test_holdout_burst.py::test_burst_perf_10k_clients",
+    "tests/test_holdout_burst.py::test_burst_basic_allowance_and_refill",
+    "tests/test_holdout_burst.py::test_burst_window_spike_cap",
+    "tests/test_holdout_burst.py::test_route_limiter_from_toml",
+    "tests/test_holdout_burst.py::test_token_bucket_perf",
+]
+pass_to_pass = [
+    "tests/test_clock_skew.py",
+    "tests/test_limiter.py",
+    "tests/test_middleware.py",
+]
+behavioral = "grade.py"
+required_behavioral = ["compaction_survival"]
