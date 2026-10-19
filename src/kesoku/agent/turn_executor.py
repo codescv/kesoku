@@ -1,4 +1,3 @@
-"""Orchestrates conversational turn execution, including LLM inference, thought logging, and tool calling."""
 
 import asyncio
 import datetime
@@ -19,13 +18,16 @@ from kesoku.agent.history import (
     prepare_history_for_llm,
     strip_question_options,
 )
+from kesoku.agent.hooks import run_post_tool_use_hooks
 from kesoku.agent.llm import BaseLLM, LLMResponse
+from kesoku.agent.repo_rules import RepoRulesManager
 from kesoku.agent.state_snapshot import render_running_jobs, render_staging_artifacts
 from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.turn_logger import TurnLogger
-from kesoku.config import KesokuConfig
+from kesoku.config import KesokuConfig, get_config
 from kesoku.context import KesokuContext
 from kesoku.utils.async_fs import async_exists, async_read_text_file, async_write_text_file
+from kesoku.utils.path import PathResolver
 from kesoku.utils.text import truncate_middle
 from kesoku.utils.ui_markup import collapse_ui_blocks, extract_ui_options, parse_multi_selection
 
@@ -153,7 +155,13 @@ class TurnExecutor:
         self.gateway = gateway
         self.tool_runner = tool_runner
         self.turn_logger = turn_logger
-        self.context = context or getattr(gateway, "context", KesokuContext())
+        self.context = context
+        self._turn_tools_used: set[str] = set()
+        self._turn_writes = False
+        self._stop_reminder_fired = False
+        self._hook_retries: dict[str, int] = {}
+        self._subagent_calls = 0
+        self._subagent_tokens = 0
         # Per-turn frozen state snapshot (running_jobs / staging_artifacts context blocks). It must be byte-identical
         # across all LLM calls of a turn so the implicit prefix cache keeps hitting; reset on pivot.
         self._snapshot_cache: list[ContextEntry] | None = None
@@ -370,7 +378,7 @@ class TurnExecutor:
                     session_staging_dir=session_staging_dir,
                 )
 
-                # Prepare history for the LLM by stripping thoughts, attachments, and truncating historical tool outputs
+                # Prepare history for the LLM by stripping thoughts, attachments, and truncating historical tool outputs  # noqa: E501
                 llm_history = prepare_history_for_llm(
                     history,
                     staging_dir=session_staging_dir,
@@ -510,7 +518,7 @@ class TurnExecutor:
 
                 if res.tool_calls:
                     turn_tool_calls += len(res.tool_calls)
-                    should_continue = await self._execute_tool_calls(res, current_msg, worker)
+                    should_continue = await self._execute_tool_calls(res, current_msg, worker, session_staging_dir)
                     if should_continue:
                         continue
                     else:
@@ -875,6 +883,32 @@ class TurnExecutor:
                     entries.append(ContextEntry("running_jobs", jobs_text))
         except Exception as e:
             logger.warning(f"Failed to build running_jobs snapshot for session '{self.session_id}': {e}")
+
+        try:
+            from kesoku.agent.repo_rules import RepoRulesManager
+            from kesoku.agent.state_snapshot import render_repo_rules
+            from kesoku.config import get_config
+
+            cfg = get_config()
+            if not hasattr(self, "_repo_rules_manager") and staging_dir and cfg.agent_working_dir:
+                self._repo_rules_manager = RepoRulesManager(
+                    staging_dir,
+                    cfg.agent_working_dir,
+                    max_files=cfg.agent.repo_rules_max_files,
+                    max_chars=cfg.agent.repo_rules_max_chars,
+                    rule_filenames=cfg.agent.repo_rules_files
+                )
+
+            if hasattr(self, "_repo_rules_manager"):
+                rules_text = render_repo_rules(
+                    self._repo_rules_manager.discovered_files,
+                    cfg.agent.repo_rules_max_chars,
+                    cfg.agent_working_dir
+                )
+                if rules_text:
+                    entries.append(ContextEntry("repo_rules", rules_text))
+        except Exception as e:
+            logger.warning(f"Failed to build repo_rules snapshot: {e}")
         try:
             has_summaries = self._has_summaries
             if has_summaries is None:
@@ -998,6 +1032,7 @@ class TurnExecutor:
         res: LLMResponse,
         current_msg: Message,
         worker: "SessionWorker",
+        session_staging_dir: str,
     ) -> bool:
         """Execute the requested tool calls concurrently, posting thought, call, and result messages.
 
@@ -1068,7 +1103,113 @@ class TurnExecutor:
             return False
 
         result_msgs = await asyncio.gather(*exec_tasks)
-        for idx, rm in enumerate(result_msgs):
+
+        # P2-2: Touch collection and repo rules discovery
+
+        cfg = get_config()
+        if not hasattr(self, "_repo_rules_manager") and session_staging_dir and cfg.agent_working_dir:
+            self._repo_rules_manager = RepoRulesManager(
+                session_staging_dir,
+                cfg.agent_working_dir,
+                max_files=cfg.agent.repo_rules_max_files,
+                max_chars=cfg.agent.repo_rules_max_chars,
+                rule_filenames=cfg.agent.repo_rules_files
+            )
+
+        env = getattr(self.context, "env", {})
+
+        for idx, (call, rm) in enumerate(zip(tool_call_msgs, result_msgs)):
+            # Hooks execution
+            if hasattr(cfg, "hooks"):
+                await run_post_tool_use_hooks(
+                    call[0], rm, cfg.hooks, cfg.agent_working_dir, session_staging_dir, env
+                )
+
+            # Touch collection
+            paths = []
+            tool_name = call[0].name
+            self._turn_tools_used.add(tool_name)
+            args = call[0].arguments
+            if tool_name in ("update_file", "read_file") and "file_name" in args:
+                try:
+                    paths.append(PathResolver.resolve(args["file_name"]))
+                except Exception:
+                    pass
+            elif tool_name == "run_shell_command":
+                cwd_arg = args.get("cwd")
+                cmd = args.get("command", "")
+                if cwd_arg:
+                    try:
+                        paths.append(PathResolver.resolve(cwd_arg))
+                    except Exception:
+                        pass
+                else:
+                    # check leading cd
+                    m = re.match(r"^\s*cd\s+([^\s;]+)\s*(?:&&|;)", cmd)
+                    if m:
+                        try:
+                            paths.append(PathResolver.resolve(m.group(1)))
+                        except Exception:
+                            pass
+                    else:
+                        if cfg.agent_working_dir:
+                            paths.append(cfg.agent_working_dir)
+
+            if paths:
+                if hasattr(self, "_repo_rules_manager"):
+                    new_discoveries = self._repo_rules_manager.discover(paths)
+                # Check if it's a write
+                is_write = False
+                for p in paths:
+                    # check if p is outside STAGING_DIR
+                    if session_staging_dir:
+                        try:
+                            if os.path.commonpath([p, session_staging_dir]) == session_staging_dir:
+                                continue
+                        except ValueError:
+                            pass
+
+                    if hasattr(self, "_repo_rules_manager"):
+                        # check if inside a discovered rules file's subtree
+                        for rf in self._repo_rules_manager.discovered_files:
+                            rdir = os.path.dirname(rf)
+                            try:
+                                if os.path.commonpath([p, rdir]) == rdir:
+                                    is_write = True
+                                    break
+                            except ValueError:
+                                pass
+                    if is_write:
+                        break
+
+                if is_write:
+                    if tool_name == "update_file":
+                        self._turn_writes = True
+                    elif tool_name == "run_shell_command":
+                        cmd_clean = re.sub(r"2>&1|>&2|>/dev/null|2>/dev/null", "", cmd)
+                        if ">" in cmd_clean or ">>" in cmd_clean or any(x in cmd_clean.split() for x in ("tee", "git", "patch", "mv", "cp", "sed")):  # noqa: E501
+                            self._turn_writes = True
+
+                if new_discoveries:
+                    # Append to result_msg
+                    append_text = ""
+                    for f in new_discoveries:
+                        rel_path = os.path.relpath(f, cfg.agent_working_dir)  # noqa: ASYNC240
+                        content_str = ""
+                        try:
+                            with open(f, encoding="utf-8") as rf:  # noqa: ASYNC230
+                                content_str = rf.read()
+                            if len(content_str) > cfg.agent.repo_rules_max_chars:
+                                content_str = content_str[:cfg.agent.repo_rules_max_chars] + "\n[truncated]"
+                        except Exception as e:
+                            content_str = f"[Error reading file: {e}]"
+
+                        append_text += f"\n\n[repo rules discovered: {rel_path}]\n{content_str}"
+
+                    rm.content += append_text
+                    if rm.metadata and "tool_result" in rm.metadata:
+                        rm.metadata["tool_result"] += append_text
+
             rm.timestamp = time.time() + (idx * 0.001)
             await self.gateway.post(rm)
 
@@ -1103,6 +1244,63 @@ class TurnExecutor:
         llm: BaseLLM,
         empty_attempts: int,
     ) -> tuple[bool, int]:
+        chatbot_id = current_msg.chatbot_id
+        channel_id = current_msg.channel_id
+
+        cfg = get_config()
+
+        # P2-2 Stop Hooks
+        if hasattr(cfg, "hooks") and cfg.hooks.stop:
+            from kesoku.agent.hooks import run_stop_hooks
+            env = getattr(self.context, "env", {})
+            outcomes = await run_stop_hooks(self._turn_tools_used, cfg.hooks, cfg.agent_working_dir, env)
+            for out in outcomes:
+                if out.exit_code != 0:
+                    retries = self._hook_retries.get(out.name, 0)
+                    # Find hook max_retries
+                    max_retries = 2
+                    for hook in cfg.hooks.stop:
+                        if hook.name == out.name:
+                            max_retries = hook.max_retries
+                            break
+
+                    if retries < max_retries:
+                        self._hook_retries[out.name] = retries + 1
+                        msg = Message(
+                            session_id=self.session_id,
+                            chatbot_id=chatbot_id,
+                            channel_id=channel_id,
+                            sender="Hook",
+                            role=MessageRole.SYSTEM,
+                            type=MessageType.TEXT,
+                            content=f"[stop hook {out.name} exit {out.exit_code}]\n{out.output}\nFix the reported problems, then finish.",  # noqa: E501
+                            status=MessageStatus.RESPONDED,
+                            parent_id=current_msg.id
+                        )
+                        await self.gateway.post(msg)
+                        return True, empty_attempts
+                    else:
+                        # Append warning to final_content
+                        res.content += f"\n\n[warning: stop hook {out.name} failed after {max_retries} retries]"
+
+        # P2-2 Built-in Stop Reminder
+        if cfg.agent.repo_rules_stop_reminder and getattr(self, "_repo_rules_manager", None):
+            if self._repo_rules_manager.discovered_files and self._turn_writes and not self._stop_reminder_fired:
+                self._stop_reminder_fired = True
+                msg = Message(
+                    session_id=self.session_id,
+                    chatbot_id=chatbot_id,
+                    channel_id=channel_id,
+                    sender="Hook",
+                    role=MessageRole.SYSTEM,
+                    type=MessageType.TEXT,
+                    content="Before finishing, re-check `<context name=\"repo_rules\">`: run any verification/lint command it requires, add any test it mandates (e.g. regression tests), and fix violations. If everything is already satisfied, finish now.",  # noqa: E501
+                    status=MessageStatus.RESPONDED,
+                    parent_id=current_msg.id
+                )
+                await self.gateway.post(msg)
+                return True, empty_attempts
+
         """Handle final assistant response including thought logging, retry logic, and metrics embedding.
 
         `empty_attempts` tracks how many times the model already answered with no content this turn.
@@ -1198,6 +1396,8 @@ class TurnExecutor:
                     "turn_tokens": turn_tokens,
                     "turn_time": time.time() - start_time,
                     "status": "finished",
+                    "subagent_calls": self._subagent_calls,
+                    "subagent_tokens": self._subagent_tokens,
                 }
             },
         )

@@ -5,6 +5,7 @@ Defines structured Pydantic settings and TOML persistence.
 
 import importlib.resources
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -181,6 +182,41 @@ class AgentConfig(BaseModel):
             "Maximum total characters of per-turn <context> blocks (notes.md + $STAGING_DIR/context/*.md); "
             "files at the end of the sorted list are dropped when exceeded"
         ),
+    )
+    repo_rules_files: list[str] = Field(
+        default_factory=lambda: ["AGENTS.md", "GEMINI.md"],
+        description="List of filenames to discover and treat as repository rules",
+    )
+    repo_rules_max_files: int = Field(
+        default=3, description="Maximum number of discovered rules files to inject"
+    )
+    repo_rules_max_chars: int = Field(
+        default=4000, description="Maximum characters to inject per rules file"
+    )
+    repo_rules_stop_reminder: bool = Field(
+        default=True, description="Whether to remind the model of rules before completing a turn with writes"
+    )
+    subagent_allowed_tools: list[str] = Field(
+        default_factory=lambda: ["read_file", "run_shell_command", "list_skills", "use_skill"],
+        description="Tools a sub-agent is allowed to use",
+    )
+    subagent_allow_write: bool = Field(
+        default=False, description="If true, update_file can be requested and used by a sub-agent"
+    )
+    subagent_max_steps: int = Field(
+        default=12, description="Maximum number of LLM steps a sub-agent can take"
+    )
+    subagent_max_concurrent: int = Field(
+        default=1, description="Maximum number of concurrent sub-agents per turn"
+    )
+    subagent_max_per_turn: int = Field(
+        default=3, description="Maximum number of sub-agents permitted over one turn"
+    )
+    subagent_shell_timeout_seconds: int = Field(
+        default=120, description="Timeout for sub-agent foreground shell commands"
+    )
+    subagent_model_name: str = Field(
+        default="", description="Optional override for sub-agent LLM model"
     )
     strip_historical_question_options: bool = Field(
         default=True,
@@ -394,6 +430,59 @@ class ChatbotsConfig(BaseModel):
     wechat: list[WechatConfig] = Field(default_factory=list)
 
 
+class PostToolUseHook(BaseModel):
+    """Configuration for a hook executed immediately after a tool call."""
+
+    name: str = Field(..., description="Name of the hook (shown in appended note)")
+    tools: list[str] = Field(..., description="Tool names that trigger this hook")
+    file_pattern: str | None = Field(default=None, description="Optional regex on the tool's file_name (resolved path)")
+    command: str = Field(..., description="Command to run")
+    cwd: str = Field(default="", description="Relative to AWD; empty string means directory of {file} if any, else AWD")
+    timeout_seconds: int = Field(default=30, description="Timeout in seconds")
+    append_on: Literal["nonzero", "always"] = Field(default="nonzero", description="When to append output")
+    max_output_chars: int = Field(default=2000, description="Maximum output characters appended")
+
+    @model_validator(mode="after")
+    def _validate_hook(self) -> "PostToolUseHook":
+        if not self.command:
+            raise ValueError("command cannot be empty")
+        if not (1 <= self.timeout_seconds <= 600):
+            raise ValueError("timeout_seconds must be between 1 and 600")
+        if self.file_pattern:
+            try:
+                re.compile(self.file_pattern)
+            except re.error as e:
+                raise ValueError(f"Invalid file_pattern regex: {e}")
+        return self
+
+
+class StopHook(BaseModel):
+    """Configuration for a hook executed before agent finishes a turn."""
+
+    name: str = Field(..., description="Name of the hook")
+    when_tools_used: list[str] = Field(..., description="The turn must have used one of these tools")
+    command: str = Field(..., description="Command to run")
+    cwd: str = Field(default="repo", description="Relative to AWD")
+    timeout_seconds: int = Field(default=120, description="Timeout in seconds")
+    max_retries: int = Field(default=2, description="Maximum times per turn the gate may send the model back")
+
+    @model_validator(mode="after")
+    def _validate_hook(self) -> "StopHook":
+        if not self.command:
+            raise ValueError("command cannot be empty")
+        if not (1 <= self.timeout_seconds <= 600):
+            raise ValueError("timeout_seconds must be between 1 and 600")
+        if not (0 <= self.max_retries <= 5):
+            raise ValueError("max_retries must be between 0 and 5")
+        return self
+
+
+class HooksConfig(BaseModel):
+    """Container for agent hooks configurations."""
+
+    post_tool_use: list[PostToolUseHook] = Field(default_factory=list)
+    stop: list[StopHook] = Field(default_factory=list)
+
 class KesokuConfig(BaseModel):
     """Root Kesoku configuration structure."""
 
@@ -405,6 +494,7 @@ class KesokuConfig(BaseModel):
     google_chat: GoogleChatConfig = Field(default_factory=GoogleChatConfig)
     wechat: WechatConfig = Field(default_factory=WechatConfig)
     chatbots: ChatbotsConfig = Field(default_factory=ChatbotsConfig)
+    hooks: HooksConfig = Field(default_factory=HooksConfig)
     shell: ShellConfig = Field(default_factory=ShellConfig)
     env: dict[str, str | int | float | bool] = Field(
         default_factory=dict,

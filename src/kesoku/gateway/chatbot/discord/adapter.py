@@ -56,6 +56,8 @@ TOOL_EMOJI_MAP: dict[str, str] = {
     "use_skill": "🧩",
     "list_skills": "🧩",
     "skill_manager": "🧩",
+    "manage_job": "⚙️",
+    "delegate_subagent": "🤖",
 }
 DEFAULT_TOOL_EMOJI = "🛠️"
 MAX_VISIBLE_TOOL_CALLS = 12
@@ -198,6 +200,15 @@ def format_tool_arguments(tool_name: str, tool_args: dict[str, Any] | None, max_
         msg_id = filtered.get("message_id") or filtered.get("id") or filtered.get("query") or ""
         if msg_id:
             arg_str = str(msg_id)
+
+    elif tool_name == "manage_job":
+        action = filtered.get("action") or ""
+        job_id = filtered.get("job_id") or ""
+        arg_str = f"{action} {job_id}".strip()
+
+    elif tool_name == "delegate_subagent":
+        task = filtered.get("task") or ""
+        arg_str = str(task)
 
     elif tool_name == "skill_manager":
         action = filtered.get("action") or ""

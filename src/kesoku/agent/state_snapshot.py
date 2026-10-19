@@ -73,6 +73,8 @@ class FinishedJob:
     command: str
     return_code: int | None
     finished_at: float
+    stdout_path: str = ""
+    stderr_path: str = ""
     reason: str = "exited"  # "exited" (process ended on its own) or "stopped" (terminated by kesoku)
 
 
@@ -109,7 +111,9 @@ def _finished_status(job: FinishedJob) -> str:
     return f"exit {job.return_code}"
 
 
-def render_running_jobs(snapshot: JobsSnapshot, tz: tzinfo | None = None) -> str | None:
+def render_running_jobs(
+    snapshot: JobsSnapshot, tz: tzinfo | None = None, manage_job_enabled: bool = True
+) -> str | None:
     """Render the `running_jobs` context block content.
 
     Jobs run under `setsid` through `sh -c`, so the recorded pid is only the shell leader; the block therefore
@@ -118,6 +122,7 @@ def render_running_jobs(snapshot: JobsSnapshot, tz: tzinfo | None = None) -> str
     Args:
         snapshot: Jobs snapshot of the session, taken once at the start of the turn.
         tz: Timezone for absolute timestamps; local time when None.
+        manage_job_enabled: Whether to hint at manage_job instead of kill -TERM.
 
     Returns:
         The block content, or None when there are neither running nor finished jobs.
@@ -253,3 +258,31 @@ def render_staging_artifacts(staging_dir: str, *, max_entries: int = 30) -> str 
 def sorted_running(jobs: Sequence[JobInfo]) -> list[JobInfo]:
     """Order running jobs deterministically (start time, then job id)."""
     return sorted(jobs, key=lambda j: (j.started_at, j.job_id))
+
+def render_repo_rules(discovered_files: list[str], max_chars: int, agent_working_dir: str) -> str:
+    """Render the rules block for the LLM context."""
+    if not discovered_files:
+        return ""
+
+    import os
+    lines = [
+        "Repository rules discovered in this session (read them before editing; they override general habits):"
+    ]
+    for abs_path in discovered_files:
+        try:
+            rel_path = os.path.relpath(abs_path, agent_working_dir)
+        except ValueError:
+            rel_path = abs_path
+
+        lines.append(f"### {rel_path}")
+        try:
+            with open(abs_path, encoding="utf-8") as f:
+                content = f.read()
+
+            if len(content) > max_chars:
+                content = content[:max_chars] + "\n[truncated]"
+            lines.append(content)
+        except Exception as e:
+            lines.append(f"[Error reading file: {e}]")
+
+    return "\n".join(lines)

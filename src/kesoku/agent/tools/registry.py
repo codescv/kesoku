@@ -22,6 +22,14 @@ class ToolContext(BaseModel):
     active_jobs: Any = Field(None, exclude=True)
     transitioned_to_session: str | None = Field(None, description="New session ID if history was compacted")
     gateway: Any = Field(None, exclude=True)
+    is_subagent: bool = Field(default=False, description="True if this tool is running inside a sub-agent")
+    foreground_only: bool = Field(default=False, description="True if shell commands must not be backgrounded")
+    interrupt_check: Callable[[], bool] | None = Field(
+        default=None, exclude=True, description="Returns True if user interrupted"
+    )
+    subagents_launched_this_turn: int = Field(
+        default=0, exclude=True, description="Number of sub-agents launched in turn"
+    )
 
 
 def _create_schema_func(func: Callable) -> Callable:

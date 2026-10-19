@@ -1,5 +1,3 @@
-"""Shell execution tools and background process monitoring for Kesoku AI Agent."""
-
 import asyncio
 import logging
 import os
@@ -9,6 +7,7 @@ import signal
 import time
 import uuid
 from collections import OrderedDict, deque
+from dataclasses import dataclass
 from typing import Any
 
 from kesoku.agent.state_snapshot import (
@@ -44,6 +43,17 @@ def _process_group_id(pid: int) -> int:
     except (OSError, AttributeError):
         return pid
 
+
+
+
+
+
+@dataclass
+class KillResult:
+    """Result of killing a background job."""
+    success: bool
+    message: str
+    exit_code: int | None = None
 
 class ActiveJobsRegistry:
     """Registry of active background subprocesses to prevent zombie processes.
@@ -110,6 +120,91 @@ class ActiveJobsRegistry:
         self._finished.move_to_end(session_id)
         while len(self._finished) > self.MAX_FINISHED_SESSIONS:
             self._finished.popitem(last=False)
+
+
+    async def kill_job(self, job_id: str, session_id: str) -> KillResult:
+        """Kill a job and return the result."""
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                # Check if it's already in finished list
+                history = self._finished.get(session_id, [])
+                for fj in history:
+                    if fj.job_id == job_id:
+                        return KillResult(True, f"Job {job_id} already finished with exit {fj.return_code}", fj.return_code)  # noqa: E501
+                return KillResult(False, f"Job id '{job_id}' is unknown or expired")
+
+            if job["session_id"] != session_id:
+                return KillResult(False, f"Job id '{job_id}' is unknown or expired")
+
+            # (1) under lock: verify ownership, set killed_by_agent, move to finished
+            job["killed_by_agent"] = True
+            proc = job["process"]
+            pgid = job["pgid"]
+
+            # Pop from active, add to finished with pending return code
+            del self._jobs[job_id]
+            fj = FinishedJob(
+                job_id=job_id,
+                command=job["command"],
+                return_code=None,
+                finished_at=time.time(),
+                stdout_path=job["log_filepath"],
+                stderr_path=job["stderr_filepath"],
+                reason="killed"
+            )
+            self._record_finished_locked(session_id, fj)
+
+        # (2) release lock, kill
+        import signal
+        try:
+            if os.name == "posix":
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except ProcessLookupError:
+            pass
+
+        rc = None
+        action_taken = "SIGTERM"
+        try:
+            rc = await asyncio.wait_for(proc.wait(), timeout=3.0)
+        except TimeoutError:
+            try:
+                if os.name == "posix":
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except ProcessLookupError:
+                pass
+            action_taken = "SIGKILL"
+            rc = await proc.wait()
+
+        # (4) under lock: fill in return_code
+        async with self._lock:
+            history = self._finished.get(session_id, [])
+            for i, f_job in enumerate(history):
+                if f_job.job_id == job_id:
+                    history[i] = FinishedJob(
+                        job_id=f_job.job_id,
+                        command=f_job.command,
+                        return_code=rc,
+                        finished_at=f_job.finished_at,
+                        stdout_path=f_job.stdout_path,
+                        stderr_path=f_job.stderr_path,
+                        reason="killed"
+                    )
+                    break
+
+        return KillResult(True, f"Killed job {job_id} (pgid {pgid}, {action_taken}, exit {rc}).", rc)
+
+    def was_killed_by_agent(self, job_id: str, session_id: str) -> bool:
+        """Check if the job was killed by the agent."""
+        history = self._finished.get(session_id, [])
+        for fj in history:
+            if fj.job_id == job_id and fj.reason == "killed":
+                return True
+        return False
 
     async def unregister(self, job_id: str, return_code: int | None = None) -> None:
         """Unregister a background job and record it in the session's finished-job history.
@@ -484,7 +579,7 @@ async def run_shell_command(
             )
 
             return (
-                f"The command took longer than {threshold} seconds and has been transitioned to background execution.\n"
+                f"The command took longer than {threshold} seconds and has been transitioned to background execution.\n"  # noqa: E501
                 f"Background Job ID: `{job_id}`\n"
                 f"Stdout path: `{log_filepath_stdout}`\n"
                 f"Stderr path: `{log_filepath_stderr}`\n\n"
@@ -573,3 +668,109 @@ async def run_shell_command(
         raise ShellCommandError(f"Command failed with exit code {proc.returncode}.\n{final_output}")
 
     return final_output
+
+
+@default_registry.register
+async def manage_job(action: str, job_id: str | None = None, tail_chars: int = 4000,
+                     context: ToolContext | None = None) -> str:
+    """Inspect or stop background jobs of this session started by run_shell_command.
+
+    action="list": all running and recently finished jobs. action="status": liveness, exit code and the head+tail of
+    stdout/stderr (tail_chars per stream, max 10000) of one job. action="kill": terminate the job's whole process
+    group (SIGTERM, then SIGKILL after 3 s) and drop it from the registry. job_id is required for status/kill.
+    """
+    if not context:
+        return "Error: missing context."
+
+    if action not in ("list", "status", "kill"):
+        return "Error: action must be one of list, status, kill."
+
+    tail_chars = max(200, min(tail_chars, 10000))
+    session_id = context.session_id
+
+    if action == "list":
+        snapshot = await context.active_jobs.snapshot(session_id)
+        if snapshot.is_empty:
+            return "No background jobs in this session."
+
+        lines = []
+        if snapshot.running:
+            lines.append(f"Running ({len(snapshot.running)}):")
+            for j in snapshot.running:
+                lines.append(f"- {j.job_id} | pgid {j.pgid} | started {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(j.started_at))} | {j.command}")  # noqa: E501
+                lines.append(f"  Logs: {j.stdout_path} / {j.stderr_path}")
+        if snapshot.finished:
+            lines.append(f"Finished recently ({len(snapshot.finished)}):")
+            for j in snapshot.finished:
+                exit_str = "stopped" if j.reason == "stopped" else f"exit {j.return_code}" if j.return_code is not None else "exit killed"  # noqa: E501
+                lines.append(f"- {j.job_id} | {exit_str} | finished {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(j.finished_at))} | {j.command}")  # noqa: E501
+        return "\n".join(lines)
+
+    elif action in ("status", "kill"):
+        if not job_id:
+            snapshot = await context.active_jobs.snapshot(session_id)
+            running_ids = [j.job_id for j in snapshot.running]
+            return f"Error: missing job_id. Running jobs: {', '.join(running_ids) if running_ids else 'None'}"
+
+        if action == "kill":
+            res = await context.active_jobs.kill_job(job_id, session_id)
+            snapshot = await context.active_jobs.snapshot(session_id)
+            log_str = ""
+            for rj in snapshot.running:
+                if rj.job_id == job_id:
+                    log_str = f" Logs: {rj.stdout_path} / {rj.stderr_path}"
+                    break
+            if not log_str:
+                for fj in snapshot.finished:
+                    if fj.job_id == job_id:
+                        log_str = f" Logs: {fj.stdout_path} / {fj.stderr_path}"
+                        break
+            return res.message + log_str
+
+        else: # status
+            snapshot = await context.active_jobs.snapshot(session_id)
+            job = None
+            is_running = True
+            for rj in snapshot.running:
+                if rj.job_id == job_id:
+                    job = rj
+                    break
+
+            if not job:
+                is_running = False
+                for fj in snapshot.finished:
+                    if fj.job_id == job_id:
+                        job = fj
+                        break
+
+            if not job:
+                known = [j.job_id for j in snapshot.running + snapshot.finished]
+                return f"Job id '{job_id}' is unknown or expired (only the last 5 finished jobs are kept). Known: {', '.join(known) if known else 'none'}"  # noqa: E501
+
+            lines = []
+            if is_running:
+                lines.append(f"Job {job.job_id}: RUNNING since {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(job.started_at))} (pgid {job.pgid})")  # noqa: E501
+            else:
+                exit_str = "stopped" if job.reason == "stopped" else f"exit {job.return_code}" if job.return_code is not None else "exit killed"  # noqa: E501
+                lines.append(f"Job {job.job_id}: FINISHED {exit_str} at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(job.finished_at))}")  # noqa: E501
+
+            stdout_path = job.stdout_path
+            stderr_path = job.stderr_path
+
+            async def _read_log(path: str) -> str:
+                if not path or not await async_exists(path):
+                    return "(no output yet)"
+                try:
+                    content = await async_read_text_file(path)
+                    return truncate_middle(content, tail_chars)
+                except Exception as e:
+                    return f"(error reading log: {e})"
+
+            out = await _read_log(stdout_path)
+            err = await _read_log(stderr_path)
+            lines.append(f"--- stdout ({len(out)} chars) ---")
+            lines.append(out)
+            lines.append(f"--- stderr ({len(err)} chars) ---")
+            lines.append(err)
+
+            return "\n".join(lines)
