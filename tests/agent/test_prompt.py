@@ -266,6 +266,8 @@ def test_output_formatting_teaches_ui_block_and_details_only() -> None:
     assert "<details><summary>" in text
     assert "[question:" not in text
     assert "选择：A；B" in text
+    assert "再帮我想 X 个不同的选项" in text
+    assert "Give me X different options" in text
 
 
 def test_output_formatting_example_parses_as_question() -> None:

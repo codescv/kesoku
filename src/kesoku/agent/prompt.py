@@ -31,6 +31,10 @@ place these syntax blocks at the most contextually relevant place in your final 
   *Rule*: Concise, button-like option labels. Use to clarify ambiguous requests or offer shortcuts.
   At most one `ui` block per reply. A clicked option comes back as a user message with the option text;
   a multiselect answer comes back as `选择：A；B`.
+  Never include meaningless "manual input / I'll type it myself / other (specify in chat)" options
+  (the user can always type directly in the chat box); instead, when offering candidate choices,
+  include a "再帮我想 X 个不同的选项" (or "Give me X different options") option so clicking it
+  generates a fresh batch.
 - **Collapsible Section**: `<details><summary>Title</summary>Body</details>`
   *Rule*: Use for long explanations or optional detail the user can expand. Platforms without
   collapsing show the title in bold followed by the body.
