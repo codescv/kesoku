@@ -127,8 +127,11 @@ def _strict_parse(body: str) -> dict[str, Any] | None:
 
 def _validate(data: dict[str, Any]) -> UiQuestion | None:
     """Validate parsed fields and build a UiQuestion (None when required fields are missing or invalid)."""
-    ui_type = str(data.get("type", "")).strip().lower()
-    if ui_type not in UI_TYPES:
+    raw_type = data.get("type")
+    ui_type = str(raw_type).strip().lower() if raw_type is not None else ""
+    if not ui_type:
+        ui_type = UI_TYPE_SELECT
+    elif ui_type not in UI_TYPES:
         return None
     prompt = data.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
@@ -202,53 +205,27 @@ def parse_multi_selection(text: str | None) -> list[str] | None:
     return parts or None
 
 
-def resolve_answer(question: UiQuestion, user_text: str | None) -> str | None:
-    """Return the option(s) the user chose for a question, if the reply exactly matches them.
+def collapse_ui_blocks(text: str) -> str:
+    """Collapse every valid ```ui block in text to its plain prompt text (stripping fences and options).
 
-    Single select: the reply equals one option. Multiselect: the reply is `选择：A；B` with every part an
-    option (a reply equal to a single option is accepted too). Returns None when undeterminable.
-    """
-    if not user_text or not user_text.strip():
-        return None
-    reply = user_text.strip()
-    if reply in question.options:
-        return reply
-    if question.multi:
-        parts = parse_multi_selection(reply)
-        if parts and all(p in question.options for p in parts):
-            return MULTI_SELECT_SEPARATOR.join(parts)
-    return None
-
-
-def collapse_ui_blocks(text: str, user_reply: str | None = None) -> str:
-    """Collapse every valid ```ui block in text to its prompt (plus the user's answer for the first block).
-
+    Leaving half-stripped ```ui fences in history causes the LLM to imitate incomplete ```ui blocks
+    (e.g., omitting `type: select`), and the user's chosen answer already appears as the next user message.
     Invalid blocks are left untouched. Output is deterministic for prefix-caching stability.
 
     Args:
         text: Assistant message text.
-        user_reply: The next user message after this assistant message (used to resolve the answer).
 
     Returns:
-        Text with options removed from ```ui blocks.
+        Text with valid ```ui blocks replaced by their prompt text.
     """
     if not text or "```ui" not in text:
         return text
-    is_first = True
 
     def _replace(match: re.Match[str]) -> str:
-        nonlocal is_first
         question = parse_ui_block_body(match.group("body"))
-        first_here = is_first
-        is_first = False
         if question is None:
             return match.group(0)
-        lines = ["```ui", f"prompt: {question.prompt}"]
-        answer = resolve_answer(question, user_reply) if first_here else None
-        if answer:
-            lines.append(f"answered: {answer}")
-        lines.append("```")
-        return "\n".join(lines)
+        return question.prompt
 
     return UI_BLOCK_RE.sub(_replace, text)
 

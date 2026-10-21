@@ -1,7 +1,5 @@
 """Unit tests for kesoku.utils.ui_markup (```ui blocks, <details>, multiselect answers)."""
 
-import pytest
-
 from kesoku.utils.ui_markup import (
     UiQuestion,
     collapse_ui_blocks,
@@ -12,7 +10,6 @@ from kesoku.utils.ui_markup import (
     parse_ui_block_body,
     render_details_as_text,
     render_question_as_text,
-    resolve_answer,
 )
 
 
@@ -50,11 +47,12 @@ def test_lenient_fallback_keeps_options_verbatim() -> None:
 
 
 def test_parse_drops_empty_options_and_rejects_invalid() -> None:
-    """Blank options are dropped; missing pieces return None."""
+    """Blank options are dropped; missing pieces return None; omitted type defaults to select."""
     assert parse_ui_block_body("type: select\nprompt: P\noptions:\n  - ''\n  - a\n").options == ["a"]
     assert parse_ui_block_body("type: select\nprompt: P\noptions: []\n") is None
     assert parse_ui_block_body("type: select\nprompt: ''\noptions: [a]\n") is None
-    assert parse_ui_block_body("prompt: P\noptions: [a]\n") is None
+    assert parse_ui_block_body("prompt: P\noptions: [a]\n") == UiQuestion(prompt="P", options=["a"], multi=False, max=1)
+    assert parse_ui_block_body("type: unknown\nprompt: P\noptions: [a]\n") is None
     assert parse_ui_block_body("- just\n- a list\n") is None
 
 
@@ -92,35 +90,16 @@ def test_multi_selection_round_trip() -> None:
     assert parse_multi_selection(None) is None
 
 
-@pytest.mark.parametrize(
-    ("multi", "reply", "expected"),
-    [
-        (False, "a", "a"),
-        (False, " b ", "b"),
-        (False, "选择：a；b", None),
-        (False, "other", None),
-        (True, "选择：a；c", "a；c"),
-        (True, "a", "a"),
-        (True, "选择：a；z", None),
-        (True, "", None),
-    ],
-)
-def test_resolve_answer(multi: bool, reply: str, expected: str | None) -> None:
-    """Answers resolve only when they exactly match options."""
-    q = UiQuestion(prompt="P", options=["a", "b", "c"], multi=multi, max=3 if multi else 1)
-    assert resolve_answer(q, reply) == expected
-
-
 def test_collapse_ui_blocks() -> None:
-    """Valid blocks collapse to prompt (+answer for the first block only); invalid blocks stay."""
+    """Valid blocks collapse to plain prompt text (stripping fences and options); invalid blocks stay."""
     first = "```ui\ntype: select\nprompt: A?\noptions: [x, y]\n```"
-    second = "```ui\ntype: select\nprompt: B?\noptions: [x, z]\n```"
+    second = "```ui\nprompt: B?\noptions: [x, z]\n```"
     invalid = "```ui\nbroken\n```"
-    out = collapse_ui_blocks(f"t\n{first}\n{second}\n{invalid}", "x")
-    assert out == f"t\n```ui\nprompt: A?\nanswered: x\n```\n```ui\nprompt: B?\n```\n{invalid}"
-    assert collapse_ui_blocks(out, "x") == out  # idempotent on collapsed output
-    assert collapse_ui_blocks("plain", "x") == "plain"
-    assert collapse_ui_blocks(first) == "```ui\nprompt: A?\n```"
+    out = collapse_ui_blocks(f"t\n{first}\n{second}\n{invalid}")
+    assert out == f"t\nA?\nB?\n{invalid}"
+    assert collapse_ui_blocks(out) == out  # idempotent on collapsed output
+    assert collapse_ui_blocks("plain") == "plain"
+    assert collapse_ui_blocks(first) == "A?"
 
 
 def test_render_fallbacks() -> None:

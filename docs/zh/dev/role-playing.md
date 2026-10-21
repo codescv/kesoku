@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS channel_roles (
 
 ## 🔁 抗自我模仿措施
 
-*   **历史选项折叠**：`agent.strip_historical_question_options = true`（默认）时，`prepare_history_for_llm` 会把「最后一个已完成回合」之前（`idx < num_turns - 2`）的助手消息中的 `[question: <题干> || <选项>]` 折叠为 `[question: ...]`。最后一个已完成回合保留完整选项，保证数字回复和点选检测正常；折叠后的前缀在回合间字节稳定，不影响隐式前缀缓存。```` ```ui ```` 块折叠为 `prompt:` 行，若下一条用户消息等于某个选项（多选时为各项均为选项的 `选择：A；B`），再加一行 `answered:` 记录用户的选择；否则只保留题干。
+*   **历史选项折叠**：`agent.strip_historical_question_options = true`（默认）时，`prepare_history_for_llm` 会把「最后一个已完成回合」之前（`idx < num_turns - 2`）的助手消息中的 `[question: <题干> || <options>]` 折叠为 `[question: ...]`。最后一个已完成回合保留完整选项，保证数字回复和点选检测正常；折叠后的前缀在回合间字节稳定，不影响隐式前缀缓存。```` ```ui ```` 块会直接折叠为纯文本题干（去掉 ```` ```ui ```` 代码块围栏与 `options:`，避免历史上下文中残留不完整的 ```` ```ui ```` 块诱导模型漏写字段；用户的选择已在紧随其后的下一条用户消息中体现）。
 *   **Auto-RAG 防护**：当用户消息是上一条助手提问的某个选项（与第一个 ```` ```ui ```` 块或最后一个 `[question: ...]` 精确匹配，或多选结果 `选择：A；B`）或简短数字选择时，跳过自动上下文检索；检索到的片段会折叠 `[question: ...]` 与 ```` ```ui ```` 块 并截断过长的 `Agent` 行（400 字符）。
 
 ---

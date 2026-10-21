@@ -2352,6 +2352,6 @@ def test_is_clicked_option_ui_blocks(user_text: str, reply: str, expected: bool)
 
 
 def test_sanitize_rag_snippet_line_collapses_ui_block() -> None:
-    """Retrieved snippets lose ```ui options."""
+    """Retrieved snippets lose ```ui options and fences, keeping only the plain prompt."""
     out = sanitize_rag_snippet_line("Agent", UI_REPLY)
-    assert "海边" not in out and "prompt: 去哪？" in out
+    assert out == "好的。\n去哪？"

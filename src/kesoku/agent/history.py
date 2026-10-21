@@ -209,11 +209,6 @@ def prepare_history_for_llm(
         is_latest = idx == num_turns - 1
         # Turns strictly older than the last completed turn (idx == num_turns - 2) get their options elided.
         strip_questions_here = strip_old_questions and idx < num_turns - 2
-        # The user's reply to this turn's question (first message of the next turn), used to keep the answer.
-        next_turn_first = turns[idx + 1][0] if idx + 1 < num_turns and turns[idx + 1] else None
-        next_user_text = None
-        if next_turn_first is not None and next_turn_first.role == MessageRole.USER:
-            next_user_text = next_turn_first.content
 
         if is_latest:
             # Keep all thoughts and details in the latest/active turn
@@ -228,7 +223,7 @@ def prepare_history_for_llm(
 
                 # Elide question stems/options of older completed turns (anti self-imitation)
                 if strip_questions_here and m.role == MessageRole.ASSISTANT and m.content:
-                    stripped_content = collapse_ui_blocks(strip_question_options(m.content), next_user_text)
+                    stripped_content = collapse_ui_blocks(strip_question_options(m.content))
                     if stripped_content != m.content:
                         m = m.model_copy()
                         m.content = stripped_content

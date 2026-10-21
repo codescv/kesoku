@@ -238,24 +238,24 @@ def _ui_history(replies: list[str], block: str) -> list[Message]:
     return history
 
 
-def test_prepare_history_collapses_ui_select_with_answer() -> None:
-    """An old select block keeps only its prompt and the clicked option; the last completed turn keeps all."""
+def test_prepare_history_collapses_ui_select_to_plain_prompt() -> None:
+    """An old select block collapses to its plain prompt text; the last completed turn keeps the full block."""
     texts = _assistant_texts(prepare_history_for_llm(_ui_history(["向左 [慢]", "向右", "随便"], UI_SELECT)))
-    assert texts[0] == "正文0\n```ui\nprompt: 下一步？\nanswered: 向左 [慢]\n```"
-    assert texts[1] == "正文1\n```ui\nprompt: 下一步？\nanswered: 向右\n```"
+    assert texts[0] == "正文0\n下一步？"
+    assert texts[1] == "正文1\n下一步？"
     assert texts[2] == f"正文2\n{UI_SELECT}"
 
 
 def test_prepare_history_collapses_ui_select_free_text_reply() -> None:
-    """When the reply is not an option, only the prompt is kept."""
+    """Regardless of user reply, only the plain prompt text is kept."""
     texts = _assistant_texts(prepare_history_for_llm(_ui_history(["我想想", "向右"], UI_SELECT)))
-    assert texts[0] == "正文0\n```ui\nprompt: 下一步？\n```"
+    assert texts[0] == "正文0\n下一步？"
 
 
-def test_prepare_history_collapses_ui_multiselect_with_joined_answer() -> None:
-    """A multiselect answered with `选择：A；B` keeps the chosen options."""
+def test_prepare_history_collapses_ui_multiselect_to_plain_prompt() -> None:
+    """An old multiselect block collapses to its plain prompt text (options stripped)."""
     texts = _assistant_texts(prepare_history_for_llm(_ui_history(["选择：水；雨伞", "x"], UI_MULTI)))
-    assert texts[0] == "正文0\n```ui\nprompt: 带什么？\nanswered: 水；雨伞\n```"
+    assert texts[0] == "正文0\n带什么？"
     assert "地图" not in texts[0]
 
 
@@ -274,7 +274,8 @@ def test_prepare_history_mixed_legacy_and_ui() -> None:
     block = f"{Q_BLOCK}\n{UI_SELECT}"
     texts = _assistant_texts(prepare_history_for_llm(_ui_history(["向右", "x", "y"], block)))
     assert STRIPPED in texts[0]
-    assert "answered: 向右" in texts[0]
+    assert "下一步？" in texts[0]
+    assert "```ui" not in texts[0]
 
 
 # ---------------------------------------------------------------------------
