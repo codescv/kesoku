@@ -19,6 +19,7 @@ class ToolContext(BaseModel):
     session_id: str = Field(..., description="Unique session identifier")
     session_workspace: str = Field(default="", description="Relative folder name for the session workspace")
     original_msg_id: str | None = Field(None, description="ID of the message initiating the turn")
+    user_turn: int | None = Field(default=None, description="1-based user turn count in the session")
     active_jobs: Any = Field(None, exclude=True)
     transitioned_to_session: str | None = Field(None, description="New session ID if history was compacted")
     gateway: Any = Field(None, exclude=True)

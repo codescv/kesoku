@@ -132,15 +132,16 @@ async def test_run_shell_command_env_variables(tmp_path) -> None:
         cfg = load_config(str(config_path))
         cfg.agent_working_dir = str(tmp_path)
 
-        ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
+        ctx = ToolContext(session_id="test_sess", session_workspace="test_ws", user_turn=7)
 
         # Execute command to print env variables
-        res = await run_shell_command("echo $AWD && echo $STAGING_DIR", context=ctx)
+        res = await run_shell_command("echo $AWD && echo $STAGING_DIR && echo USER_TURN=$USER_TURN", context=ctx)
 
         assert "=== STDOUT ===" in res
         assert str(tmp_path) in res
         expected_staging = os.path.realpath(os.path.join(cfg.workspace.sessions_dir, "test_ws"))
         assert expected_staging in res
+        assert "USER_TURN=7" in res
     finally:
         kesoku.config._global_config = original_config
 

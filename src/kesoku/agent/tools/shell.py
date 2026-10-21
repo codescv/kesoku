@@ -519,10 +519,12 @@ async def run_shell_command(
     if config.shell.env:
         env.update(config.shell.env)
 
-    # Inject AWD and STAGING_DIR environment variables
+    # Inject AWD, STAGING_DIR, and USER_TURN environment variables
     env["AWD"] = PathResolver.get_awd()
     if context and context.session_workspace:
         env["STAGING_DIR"] = PathResolver.get_session_staging_dir(context.session_workspace)
+    if context and isinstance(getattr(context, "user_turn", None), int):
+        env["USER_TURN"] = str(context.user_turn)
 
     # Prepare unique background job identifiers and log paths
     job_id = f"job_{int(time.time())}_{uuid.uuid4().hex[:8]}"

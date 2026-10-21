@@ -270,6 +270,7 @@ class TurnExecutor:
 
         empty_attempts = 0
         try:
+            self.tool_runner.tool_context.user_turn = await self._get_session_turns_count()
             while worker.running:
                 # Check-in before atomic action (Thought Interruption)
                 prev_msg_id = current_msg.id
@@ -280,6 +281,7 @@ class TurnExecutor:
                         f"Resetting turn metrics and empty-response counter."
                     )
                     self.tool_runner.tool_context.original_msg_id = current_msg.id
+                    self.tool_runner.tool_context.user_turn = await self._get_session_turns_count()
                     self._snapshot_cache = None
                     self._turn_tools_used.clear()
                     self._turn_writes = False
