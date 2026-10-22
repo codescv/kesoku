@@ -3,7 +3,7 @@
 Components are `discord.ui.DynamicItem`s whose custom_id encodes the session and the rendered kesoku message:
 
 * `kui:<session_id>:<message_id>:<idx>`   - a button for option `idx` of a single-select question
-* `kuis:<session_id>:<message_id>`        - a select menu (single-select with >5 options, or multiselect)
+* `kuis:<session_id>:<message_id>`        - a select menu (single-select with >10 options, or multiselect)
 * `kud:<session_id>:<details_key>`        - the expand/collapse toggle of a `<details>` section
 
 The question/details spec is stored in the `ui_prompts` DB table when rendered and loaded again on click, so no
@@ -29,7 +29,8 @@ from .ui import (
 logger = setup_logger(__name__)
 
 CUSTOM_ID_MAX_LEN = 100
-MAX_INLINE_BUTTONS = 5
+BUTTONS_PER_ROW = 5
+MAX_INLINE_BUTTONS = 10
 MAX_SELECT_OPTIONS = 25
 MAX_SELECT_LABEL_LEN = 100
 MAX_EMBED_TITLE_LEN = 256
@@ -87,7 +88,7 @@ def build_question_spec(question: str, choices: list[str], multi: bool, max_choi
 
 
 def uses_select(spec: dict[str, Any]) -> bool:
-    """A select menu is used for multiselect questions and single-select questions with >5 options."""
+    """A select menu is used for multiselect questions and single-select questions with >10 options."""
     return bool(spec.get("multi")) or len(spec.get("options", [])) > MAX_INLINE_BUTTONS
 
 
@@ -131,16 +132,17 @@ class QuestionButton(
         disabled: bool = False,
         chosen: bool = False,
     ) -> None:
-        """Create the button (row 0)."""
+        """Create the button (5 buttons per row across rows 0..1)."""
+        row = idx // BUTTONS_PER_ROW
         button = discord.ui.Button(
             style=discord.ButtonStyle.success if chosen else discord.ButtonStyle.primary,
             label=_truncate(label or str(idx + 1), MAX_BUTTON_LABEL_LEN),
             custom_id=question_button_id(session_id, message_id, idx),
             disabled=disabled,
-            row=0,
+            row=row,
         )
         # discord.py does not always set _row from the constructor argument; set it explicitly.
-        button._row = 0
+        button._row = row
         super().__init__(button)
         self.session_id = session_id
         self.message_id = message_id

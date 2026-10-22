@@ -1187,7 +1187,7 @@ class DiscordChatbot(Chatbot):
     ) -> None:
         """Deliver a question as an embed with restart-persistent components.
 
-        Single-select with <=5 options renders buttons; more options or multiselect render a select menu. The
+        Single-select with <=10 options renders buttons; more options or multiselect render a select menu. The
         spec is stored in the `ui_prompts` table so clicks keep working after a restart.
         """
         channel = await self._get_discord_channel_with_abort(message)

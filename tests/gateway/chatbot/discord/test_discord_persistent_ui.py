@@ -123,7 +123,7 @@ def test_custom_ids_and_fit() -> None:
 
 
 def test_select_question_with_few_options_uses_buttons_row0() -> None:
-    """<=5 single-select options render buttons on row 0."""
+    """<=10 single-select options render buttons (5 per row across rows 0..1)."""
     spec = pui.build_question_spec("Q", ["a", "b [x]"], multi=False, max_choices=1)
     view = pui.build_question_view("s", "m", spec)
     items = [c.item for c in view.children]
@@ -132,17 +132,24 @@ def test_select_question_with_few_options_uses_buttons_row0() -> None:
     assert [i.custom_id for i in items] == ["kui:s:m:0", "kui:s:m:1"]
     assert all(i._row == 0 for i in items)
 
+    # 6..10 options also render buttons, split across row 0 (0..4) and row 1 (5..9)
+    spec_ten = pui.build_question_spec("Q", [f"o{i}" for i in range(10)], multi=False, max_choices=1)
+    view_ten = pui.build_question_view("s", "m", spec_ten)
+    items_ten = [c.item for c in view_ten.children]
+    assert len(items_ten) == 10 and all(isinstance(i, discord.ui.Button) for i in items_ten)
+    assert [i._row for i in items_ten] == [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+
 
 def test_select_question_with_many_options_uses_single_dropdown() -> None:
-    """>5 single-select options render a dropdown with max_values=1 on row 1."""
-    spec = pui.build_question_spec("Q", [f"o{i}" for i in range(7)], multi=False, max_choices=1)
+    """>10 single-select options render a dropdown with max_values=1 on row 1."""
+    spec = pui.build_question_spec("Q", [f"o{i}" for i in range(12)], multi=False, max_choices=1)
     view = pui.build_question_view("s", "m", spec)
     (select,) = [c.item for c in view.children]
     assert isinstance(select, discord.ui.Select)
     assert select.custom_id == "kuis:s:m"
     assert (select.min_values, select.max_values) == (1, 1)
     assert select._row == 1
-    assert [o.value for o in select.options] == [str(i) for i in range(7)]
+    assert [o.value for o in select.options] == [str(i) for i in range(12)]
 
 
 def test_multiselect_uses_select_with_max_values() -> None:
@@ -236,7 +243,7 @@ async def test_multiselect_submit_posts_joined_answer(registered: tuple[object, 
 async def test_single_dropdown_submit_posts_option(registered: tuple[object, _MemoryDB, MagicMock]) -> None:
     """A single-select dropdown posts the plain option text."""
     client, db, chatbot = registered
-    await db.save_ui_prompt("s", "m", pui.build_question_spec("Q", [f"o{i}" for i in range(7)], False, 1))
+    await db.save_ui_prompt("s", "m", pui.build_question_spec("Q", [f"o{i}" for i in range(12)], False, 1))
     await pui.QuestionSelect("s", "m").callback(_interaction(client, values=["5"]))
     assert chatbot.gateway.post.call_args.args[0].content == "o5"
 
