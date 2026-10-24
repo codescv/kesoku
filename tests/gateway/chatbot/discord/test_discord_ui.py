@@ -554,3 +554,46 @@ async def test_question_view_long_label_fallback(mock_gateway: MagicMock) -> Non
     assert len(view.children) == 1
     assert view.children[0].label == "A"
     assert view.children[0].custom_id == f"btn_q_s123_0_{long_choice[:20]}"
+
+
+@pytest.mark.asyncio
+async def test_post_simulated_choice_includes_thread_parent_channel_id(mock_gateway: MagicMock) -> None:
+    """Verify post_simulated_choice populates parent_channel_id when clicked inside a Discord Thread."""
+    from kesoku.gateway.chatbot.discord.ui import post_simulated_choice
+
+    mock_chatbot = MagicMock()
+    mock_chatbot.chatbot_id = "discord_asuka"
+    mock_chatbot._typing_tasks = {}
+    mock_chatbot._keep_typing = AsyncMock()
+
+    mock_parent = MagicMock()
+    mock_parent.id = 1561581621977681950
+    mock_parent.name = "japanese-classroom"
+
+    mock_thread = MagicMock(spec=discord.Thread)
+    mock_thread.id = 1561581864303595591
+    mock_thread.name = "Beginner Japanese Lesson 20"
+    mock_thread.parent = mock_parent
+
+    mock_response_msg = MagicMock()
+    mock_response_msg.id = 987654321
+    mock_response_msg.created_at = datetime.datetime(2026, 10, 24, 10, 59, 32, tzinfo=datetime.UTC)
+    mock_thread.send = AsyncMock(return_value=mock_response_msg)
+
+    mock_interaction = MagicMock()
+    mock_interaction.channel = mock_thread
+    mock_interaction.channel_id = 1561581864303595591
+    mock_interaction.user = MagicMock()
+    mock_interaction.user.id = 612062857844228116
+    mock_interaction.user.display_name = "bottlemerchant"
+
+    await post_simulated_choice(mock_gateway, mock_chatbot, mock_interaction, "111e43df", "Next segment")
+
+    mock_gateway.post.assert_called_once()
+    posted_msg = mock_gateway.post.call_args[0][0]
+    assert posted_msg.metadata["parent_channel_id"] == "1561581621977681950"
+    assert posted_msg.metadata["parent_channel_name"] == "japanese-classroom"
+    assert posted_msg.metadata["channel_name"] == "Beginner Japanese Lesson 20"
+    assert posted_msg.metadata["sender_name"] == "bottlemerchant (ID: 612062857844228116)"
+
+

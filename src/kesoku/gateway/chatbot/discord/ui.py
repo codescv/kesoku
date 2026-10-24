@@ -731,6 +731,33 @@ async def post_simulated_choice(
     # Send a visible confirmation message to the channel
     response_msg = await interaction.channel.send(f"<@{interaction.user.id}> selected: **{content}**")
 
+    target_channel = interaction.channel
+    channel_name = getattr(target_channel, "name", "") or ""
+    parent_channel_id = ""
+    parent_channel_name = ""
+    if isinstance(target_channel, discord.Thread):
+        parent = getattr(target_channel, "parent", None)
+        if parent:
+            parent_channel_id = str(parent.id)
+            parent_channel_name = getattr(parent, "name", "") or ""
+        elif getattr(target_channel, "parent_id", None):
+            parent_channel_id = str(target_channel.parent_id)
+
+    msg_metadata: dict[str, Any] = {
+        "discord_message_id": str(response_msg.id),
+        "discord_author_id": str(interaction.user.id),
+    }
+    if channel_name:
+        msg_metadata["channel_name"] = channel_name
+    if getattr(interaction.user, "display_name", None) and getattr(interaction.user, "id", None):
+        msg_metadata["sender_name"] = f"{interaction.user.display_name} (ID: {interaction.user.id})"
+    if parent_channel_id:
+        msg_metadata["parent_channel_id"] = parent_channel_id
+    if parent_channel_name:
+        msg_metadata["parent_channel_name"] = parent_channel_name
+
+    msg_timestamp = response_msg.created_at.timestamp()
+
     # Construct and post the user message to the Gateway
     msg = Message(
         session_id=session_id,
@@ -740,13 +767,17 @@ async def post_simulated_choice(
         role=MessageRole.USER,
         type=MessageType.TEXT,
         content=content,
-        timestamp=response_msg.created_at.timestamp(),
+        timestamp=msg_timestamp,
         status=MessageStatus.PENDING_AGENT,
-        metadata={
-            "discord_message_id": str(response_msg.id),
-            "discord_author_id": str(interaction.user.id),
-        },
+        metadata=msg_metadata,
     )
+    if getattr(gateway, "db", None) is not None and hasattr(gateway.db, "update_session_updated_at"):
+        try:
+            res = gateway.db.update_session_updated_at(session_id, msg_timestamp)
+            if asyncio.iscoroutine(res):
+                await res
+        except Exception as e:
+            logger.warning(f"Failed to update session updated_at on simulated choice for {session_id}: {e}")
     await gateway.post(msg)
 
     # Trigger typing task since a new user message was posted

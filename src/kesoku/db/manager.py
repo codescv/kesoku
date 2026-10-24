@@ -1215,26 +1215,49 @@ class DatabaseManager:
         if role:
             return role
 
-        # 2. Discord parent channel inheritance
-        if chatbot_id.startswith("discord") and session_id:
+        # 2. Discord parent channel inheritance (scan most recent user message that carries parent_channel_id,
+        # so UI button / simulated choice messages without parent_channel_id do not shadow earlier thread messages)
+        if chatbot_id.startswith("discord"):
             with self.connection_provider.connection() as conn:
                 try:
                     cursor = conn.cursor()
-                    cursor.execute(
-                        "SELECT metadata FROM messages WHERE session_id = ? AND role = 'user' "
-                        "ORDER BY timestamp DESC LIMIT 1",
-                        (session_id,),
-                    )
+                    if session_id:
+                        cursor.execute(
+                            "SELECT json_extract(metadata, '$.parent_channel_id') AS parent_id "
+                            "FROM messages WHERE session_id = ? AND role = 'user' "
+                            "AND json_extract(metadata, '$.parent_channel_id') IS NOT NULL "
+                            "AND json_extract(metadata, '$.parent_channel_id') != '' "
+                            "ORDER BY timestamp DESC LIMIT 1",
+                            (session_id,),
+                        )
+                    else:
+                        cursor.execute(
+                            "SELECT json_extract(metadata, '$.parent_channel_id') AS parent_id "
+                            "FROM messages WHERE chatbot_id = ? AND channel_id = ? AND role = 'user' "
+                            "AND json_extract(metadata, '$.parent_channel_id') IS NOT NULL "
+                            "AND json_extract(metadata, '$.parent_channel_id') != '' "
+                            "ORDER BY timestamp DESC LIMIT 1",
+                            (chatbot_id, channel_id),
+                        )
                     row = cursor.fetchone()
-                    if row:
-                        meta = json.loads(row["metadata"])
-                        parent_id = meta.get("parent_channel_id")
-                        if parent_id:
-                            role = self.get_channel_role(chatbot_id, parent_id)
-                            if role:
-                                return role
+                    if row and row["parent_id"]:
+                        role = self.get_channel_role(chatbot_id, str(row["parent_id"]))
+                        if role:
+                            return role
                 except Exception as e:
                     logger.warning(f"Failed to retrieve parent channel role: {e}")
+
+        # 3. Fallback to the session's own persisted role_name if no explicit channel/parent role was found
+        if session_id:
+            with self.connection_provider.connection() as conn:
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT role_name FROM sessions WHERE id = ?", (session_id,))
+                    row = cursor.fetchone()
+                    if row and row["role_name"] and row["role_name"] != "default":
+                        return str(row["role_name"])
+                except Exception as e:
+                    logger.warning(f"Failed to retrieve session role fallback: {e}")
 
         return "default"
 

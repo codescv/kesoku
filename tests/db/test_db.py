@@ -412,6 +412,60 @@ def test_thread_session_role_inheritance(db_manager):
     assert retrieved.role_name == "asuka"
 
 
+def test_get_channel_role_with_inheritance_after_ui_button_click(db_manager):
+    """Ensure a UI button message lacking parent_channel_id does not break parent role inheritance."""
+    db_manager.set_channel_role("discord_asuka", "parent_chan_1", "asuka")
+    now = time.time()
+    session = Session(
+        id="111e43df",
+        title="Beginner Japanese Lesson 20",
+        created_at=now - 100,
+        updated_at=now,
+        role_name="asuka",
+    )
+    db_manager.create_session(session)
+
+    # First user message from Discord thread includes parent_channel_id
+    msg1 = Message(
+        id="m1",
+        session_id="111e43df",
+        chatbot_id="discord_asuka",
+        channel_id="thread_chan_1",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Hello",
+        timestamp=now - 50,
+        metadata={"parent_channel_id": "parent_chan_1"},
+    )
+    db_manager.save_message(msg1)
+
+    # Later user message simulated by UI button click lacked parent_channel_id
+    msg2 = Message(
+        id="m2",
+        session_id="111e43df",
+        chatbot_id="discord_asuka",
+        channel_id="thread_chan_1",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Next segment",
+        timestamp=now,
+        metadata={"discord_message_id": "12345"},
+    )
+    db_manager.save_message(msg2)
+
+    assert (
+        db_manager.get_channel_role_with_inheritance("discord_asuka", "thread_chan_1", "111e43df")
+        == "asuka"
+    )
+    assert (
+        db_manager.get_channel_role_with_inheritance("discord_asuka", "thread_chan_1", None)
+        == "asuka"
+    )
+
+
+
 
 
 
