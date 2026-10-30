@@ -16,9 +16,10 @@ from abc import ABC
 from collections.abc import Awaitable, Callable, Iterator
 from typing import Any, Literal
 
+import requests
 from anthropic import AnthropicVertex
 from google import genai
-from google.genai import _transformers, types
+from google.genai import _api_client, _transformers, types
 from PIL import Image
 from pydantic import BaseModel, Field
 
@@ -34,6 +35,78 @@ logger = setup_logger(__name__)
 GEMINI_THINKING_LEVELS: frozenset[str] = frozenset({"minimal", "low", "medium", "high"})
 CLAUDE_THINKING_LEVELS: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
 StreamCallback = Callable[[str, str], Awaitable[None]]
+
+
+def _patch_requests_response_utf8_lines(response: requests.Response) -> requests.Response:
+    r"""Patch a `requests.Response` so `iter_lines(decode_unicode=True)` decodes raw byte lines as UTF-8.
+
+    Vertex AI SSE responses return `Content-Type: text/event-stream` without an explicit
+    `charset` parameter, so `requests` defaults `response.encoding` to `ISO-8859-1` (RFC 2616).
+    Calling `response.iter_lines(decode_unicode=True)` then both corrupts multi-byte UTF-8 text
+    into Latin-1 mojibake and calls `str.splitlines()`, which splits mid-JSON whenever a UTF-8
+    continuation byte equals `0x85` (`U+0085` NEXT LINE in Latin-1, e.g. `旅` `\xe6\x97\x85`
+    or `充` `\xe5\x85\x85`). Iterating with `decode_unicode=False` splits raw `bytes` only on
+    ASCII line breaks before decoding complete lines as UTF-8.
+
+    Args:
+        response: The `requests.Response` instance backing an SSE stream.
+
+    Returns:
+        The patched `requests.Response` instance.
+    """
+    if getattr(response, "_kesoku_utf8_lines_patched", False):
+        return response
+
+    orig_iter_lines = response.iter_lines
+    if not response.encoding or response.encoding.lower() in ("iso-8859-1", "latin-1", "latin1"):
+        response.encoding = "utf-8"
+
+    def _utf8_iter_lines(
+        chunk_size: int = requests.models.ITER_CHUNK_SIZE,
+        decode_unicode: bool = False,
+        delimiter: str | bytes | None = None,
+    ) -> Iterator[str | bytes]:
+        if not decode_unicode:
+            yield from orig_iter_lines(chunk_size=chunk_size, decode_unicode=False, delimiter=delimiter)
+            return
+        byte_delim = delimiter.encode("utf-8") if isinstance(delimiter, str) else delimiter
+        # Split on ASCII line breaks in raw bytes first (reassembling multi-byte UTF-8 across
+        # network chunks and avoiding false `0x85` / `U+0085` line splits), then decode UTF-8.
+        for raw_line in orig_iter_lines(chunk_size=chunk_size, decode_unicode=False, delimiter=byte_delim):
+            if isinstance(raw_line, bytes):
+                yield raw_line.decode("utf-8", errors="replace")
+            else:
+                yield raw_line
+
+    response.iter_lines = _utf8_iter_lines  # type: ignore[method-assign]
+    response._kesoku_utf8_lines_patched = True  # type: ignore[attr-defined]
+    return response
+
+
+def _ensure_genai_utf8_streaming() -> None:
+    """Idempotently patch `google.genai` `HttpResponse._iter_response_stream` for UTF-8 `requests.Response` SSE."""
+    http_response_cls = _api_client.HttpResponse
+    if getattr(http_response_cls, "_kesoku_utf8_stream_patched", False):
+        return
+
+    orig_iter_response_stream = http_response_cls._iter_response_stream
+
+    def _utf8_iter_response_stream(self: Any) -> Iterator[str]:
+        stream_obj = getattr(self, "response_stream", None)
+        if isinstance(stream_obj, requests.Response):
+            _patch_requests_response_utf8_lines(stream_obj)
+            try:
+                yield from orig_iter_response_stream(self)
+            finally:
+                stream_obj.close()
+        else:
+            yield from orig_iter_response_stream(self)
+
+    http_response_cls._iter_response_stream = _utf8_iter_response_stream  # type: ignore[method-assign]
+    http_response_cls._kesoku_utf8_stream_patched = True  # type: ignore[attr-defined]
+
+
+_ensure_genai_utf8_streaming()
 
 
 async def _drain_blocking_stream(
@@ -687,6 +760,7 @@ class GeminiLLM(BaseLLM):
         self.model_name = config.model_name
         self.context_window_limit = 1048576  # 1M tokens context limit for Gemini Flash
         logger.info(f"Using GeminiLLM backend ({self.model_name}).")
+        _ensure_genai_utf8_streaming()
 
         try:
             if config.auth_mode == "vertex":

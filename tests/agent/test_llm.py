@@ -1,16 +1,20 @@
 """Unit tests for Kesoku LLM module and Anthropic Claude support."""
 
+import io
+import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from google.genai import types
+import requests
+from google.genai import _api_client, types
 
 from kesoku.agent.llm import (
     ClaudeLLM,
     GeminiLLM,
     MockLLM,
+    _patch_requests_response_utf8_lines,
     function_to_anthropic_tool,
     get_llm,
     history_to_turns,
@@ -1392,5 +1396,136 @@ async def test_claude_llm_streaming_and_callback_resilience() -> None:
     assert stream_res.thought_signature == non_stream_res.thought_signature == "sig-c"
     assert stream_res.tool_calls == non_stream_res.tool_calls
     assert stream_res.total_tokens == non_stream_res.total_tokens == 23
+
+
+@pytest.mark.asyncio
+async def test_gemini_llm_stream_requests_response_utf8_with_0x85_bytes() -> None:
+    """Verify `requests.Response` SSE with `ISO-8859-1` and `0x85` UTF-8 bytes streams intact Chinese text."""
+    chunk_text_1 = "去印度旅游有什么"
+    chunk_text_2 = "注意事项，充满魅力"
+    full_expected = chunk_text_1 + chunk_text_2
+
+    sse_event_1 = (
+        "data: "
+        + json.dumps(
+            {"candidates": [{"content": {"role": "model", "parts": [{"text": chunk_text_1}]}}]},
+            ensure_ascii=False,
+        )
+        + "\r\n\r\n"
+    ).encode("utf-8")
+    sse_event_2 = (
+        "data: "
+        + json.dumps(
+            {
+                "candidates": [
+                    {
+                        "content": {"role": "model", "parts": [{"text": chunk_text_2}]},
+                        "finishReason": "STOP",
+                    }
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 9,
+                    "candidatesTokenCount": 14,
+                    "totalTokenCount": 23,
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\r\n\r\n"
+    ).encode("utf-8")
+    raw_sse = sse_event_1 + sse_event_2
+
+    # Sanity-check that `旅` (\xe6\x97\x85) and `充` (\xe5\x85\x85) embed literal 0x85 bytes.
+    assert b"\xe6\x97\x85" in sse_event_1
+    assert b"\xe5\x85\x85" in sse_event_2
+    assert raw_sse.count(b"\x85") >= 2
+
+    # Split a network chunk right before the 0x85 continuation byte of `旅` (\xe6\x97 | \x85)
+    # to also verify multi-byte UTF-8 reassembly across transport chunks.
+    split_pos = raw_sse.index(b"\xe6\x97\x85") + 2
+    network_chunks = [raw_sse[:split_pos], raw_sse[split_pos:]]
+
+    class _ChunkedRawStream:
+        def __init__(self, payloads: list[bytes]) -> None:
+            self._payloads = payloads
+            self.released = False
+
+        def stream(self, amt: int | None = None, decode_content: bool = True) -> Any:
+            _ = (amt, decode_content)
+            yield from self._payloads
+
+        def release_conn(self) -> None:
+            self.released = True
+
+        def close(self) -> None:
+            self.released = True
+
+    raw_stream = _ChunkedRawStream(network_chunks)
+    req_resp = requests.Response()
+    req_resp.status_code = 200
+    req_resp.headers["Content-Type"] = "text/event-stream"
+    req_resp.encoding = requests.utils.get_encoding_from_headers(req_resp.headers)
+    assert req_resp.encoding == "ISO-8859-1"
+    req_resp.raw = raw_stream
+
+    http_resp = _api_client.HttpResponse(req_resp.headers, req_resp)
+    gemini = GeminiLLM(
+        config=GeminiConfig(
+            auth_mode="api_key",
+            api_key="test-key",
+            model_name="gemini-3.5-flash-lite",
+            thinking_level="low",
+        )
+    )
+
+    seen_chunks: list[tuple[str, str]] = []
+
+    async def on_chunk(delta: str, accumulated: str) -> None:
+        seen_chunks.append((delta, accumulated))
+
+    with patch.object(gemini.client._api_client, "_request", return_value=http_resp):
+        res = await gemini.generate(
+            prompt="去印度旅游有什么注意事项",
+            stream=True,
+            on_stream_chunk=on_chunk,
+        )
+
+    assert seen_chunks == [
+        (chunk_text_1, chunk_text_1),
+        (chunk_text_2, full_expected),
+    ]
+    assert res.content == full_expected
+    assert res.finish_reason == "STOP"
+    assert res.total_tokens == 23
+    assert raw_stream.released is True
+
+
+def test_patch_requests_response_utf8_lines_idempotent_and_bytes_passthrough() -> None:
+    """Verify `_patch_requests_response_utf8_lines` is idempotent and preserves `decode_unicode=False`."""
+    payload = "去印度旅游，充满魅力\n第二行\n".encode()
+    resp = requests.Response()
+    resp.status_code = 200
+    resp.headers["Content-Type"] = "text/event-stream"
+    resp.encoding = "ISO-8859-1"
+    resp.raw = io.BytesIO(payload)
+
+    patched_once = _patch_requests_response_utf8_lines(resp)
+    iter_fn = patched_once.iter_lines
+    patched_twice = _patch_requests_response_utf8_lines(resp)
+    assert patched_twice is resp
+    assert patched_twice.iter_lines is iter_fn
+    assert resp.encoding == "utf-8"
+
+    lines = list(resp.iter_lines(decode_unicode=True, delimiter="\n"))
+    assert lines == ["去印度旅游，充满魅力", "第二行", ""]
+
+    resp_bytes = requests.Response()
+    resp_bytes.status_code = 200
+    resp_bytes.encoding = "ISO-8859-1"
+    resp_bytes.raw = io.BytesIO(payload)
+    _patch_requests_response_utf8_lines(resp_bytes)
+    raw_lines = list(resp_bytes.iter_lines(decode_unicode=False))
+    assert raw_lines == ["去印度旅游，充满魅力".encode(), "第二行".encode()]
+
 
 
