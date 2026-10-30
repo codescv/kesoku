@@ -1,17 +1,20 @@
 """Unit tests for the Chatbot base class and its utilities."""
 
 import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from pathlib import Path
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
+from kesoku.agent.prompt import build_sys_prompt as real_build_sys_prompt
+from kesoku.config import AgentConfig, KesokuConfig, WorkspaceConfig
 from kesoku.constants import (
     MessageRole,
     MessageType,
 )
 from kesoku.context import KesokuContext
-from kesoku.db import Message, Session
-from kesoku.gateway.chatbot.base import Chatbot, _format_uptime
+from kesoku.db import DatabaseManager, Message, Session
+from kesoku.gateway.chatbot.base import Chatbot, InboundMessageDTO, _format_uptime
 from kesoku.gateway.gateway import Gateway
 
 
@@ -636,3 +639,87 @@ async def test_chatbot_cron_command() -> None:
     # Missing channel id
     await chatbot.execute_command_from_text("/cron", reply_func)
     assert "Channel ID is required" in replies[-1]
+
+
+@pytest.mark.asyncio
+async def test_resolve_or_create_session_passes_role_to_build_sys_prompt(tmp_path: Path) -> None:
+    """Verify _resolve_or_create_session passes session= and role= to build_sys_prompt without reopening DB."""
+    temp_db = str(tmp_path / "test_role_kwarg.db")
+    db_mgr = DatabaseManager(temp_db)
+    db_mgr.init_tables()
+
+    roles_dir = tmp_path / "roles"
+    (roles_dir / "default").mkdir(parents=True)
+    (roles_dir / "writer").mkdir(parents=True)
+    (roles_dir / "default" / "intro.md").write_text("Default intro", encoding="utf-8")
+    (roles_dir / "writer" / "intro.md").write_text("Writer intro", encoding="utf-8")
+
+    mock_cfg = KesokuConfig(
+        workspace=WorkspaceConfig(sessions_dir=str(tmp_path / "sessions"), db_path=temp_db, roles_dir=str(roles_dir)),
+        agent=AgentConfig(user_prompts=[]),
+        agent_working_dir=str(tmp_path),
+    )
+
+    with (
+        patch("kesoku.gateway.chatbot.base.get_config", return_value=mock_cfg),
+        patch("kesoku.agent.prompt.get_config", return_value=mock_cfg),
+    ):
+        mock_gateway = Gateway(context=KesokuContext(config=mock_cfg, db=db_mgr))
+        chatbot = MockChatbot(chatbot_id="mock_bot", gateway=mock_gateway)
+
+        # 1. Create initial default session
+        dto1 = InboundMessageDTO(sender_id="u1", channel_id="c1", text="First", timestamp=1000.0)
+        session_def, created = await chatbot._resolve_or_create_session(dto1)
+        assert created is True
+
+        # 2. Existing default session: build_sys_prompt receives session= and role="default",
+        # and prompt.DatabaseManager is never instantiated.
+        dto2 = InboundMessageDTO(
+            sender_id="u1",
+            channel_id="c1",
+            text="Second",
+            timestamp=1002.0,
+            custom_prompt="Extra context",
+        )
+        with (
+            patch("kesoku.gateway.chatbot.base.build_sys_prompt", wraps=real_build_sys_prompt) as spy_bsp,
+            patch(
+                "kesoku.agent.prompt.DatabaseManager",
+                side_effect=AssertionError("DatabaseManager should not be opened when role is pre-resolved"),
+            ),
+        ):
+            resolved_def, created2 = await chatbot._resolve_or_create_session(dto2)
+            assert created2 is False
+            spy_bsp.assert_called_once_with(custom_prompt="Extra context", session=ANY, role="default")
+            assert spy_bsp.call_args.kwargs["session"].id == session_def.id
+            assert spy_bsp.call_args.kwargs["role"] == "default"
+            assert resolved_def.id == session_def.id
+
+        # 3. Switch channel role to 'writer' and verify role="writer" is forwarded
+        await chatbot.update_role_by_channel("c1", "writer")
+        dto3 = InboundMessageDTO(sender_id="u1", channel_id="c1", text="Third", timestamp=1004.0)
+        with patch("kesoku.gateway.chatbot.base.build_sys_prompt", wraps=real_build_sys_prompt) as spy_bsp_writer:
+            resolved_writer, created3 = await chatbot._resolve_or_create_session(dto3)
+            assert created3 is False
+            spy_bsp_writer.assert_called_once_with(custom_prompt=None, session=ANY, role="writer")
+            assert spy_bsp_writer.call_args.kwargs["session"].id == resolved_writer.id
+            assert spy_bsp_writer.call_args.kwargs["role"] == "writer"
+
+        # 4. Empty string current_role falls back to role=None rather than forcing role=""
+        with (
+            patch.object(
+                mock_gateway.db,
+                "get_channel_role_with_inheritance",
+                new=AsyncMock(return_value=""),
+            ),
+            patch("kesoku.gateway.chatbot.base.build_sys_prompt", wraps=real_build_sys_prompt) as spy_bsp_empty,
+        ):
+            existing_empty = Session(id="sess_empty_role", title="Empty Role", role_name="")
+            with patch.object(
+                mock_gateway.db,
+                "get_session_by_channel",
+                new=AsyncMock(return_value=existing_empty),
+            ):
+                dto4 = InboundMessageDTO(sender_id="u1", channel_id="c1", text="Fourth", timestamp=1006.0)
+                await chatbot._resolve_or_create_session(dto4)
+                spy_bsp_empty.assert_called_once_with(custom_prompt=None, session=existing_empty, role=None)

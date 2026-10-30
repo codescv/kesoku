@@ -1567,8 +1567,13 @@ class Chatbot(ABC):
         else:
             await self.gateway.db.update_session_updated_at(session.id, time.time())
 
-            # Always rebuild the system prompt to pick up on-disk template changes
-            new_sys_prompt = build_sys_prompt(custom_prompt=dto.custom_prompt or None, session=session)
+            # Always rebuild the system prompt to pick up on-disk template changes.
+            # Pass pre-resolved role so default-role sessions skip opening a new DatabaseManager.
+            new_sys_prompt = build_sys_prompt(
+                custom_prompt=dto.custom_prompt or None,
+                session=session,
+                role=current_role or None,
+            )
             await self.gateway.db.update_session_system_prompt(session.id, new_sys_prompt)
 
         return session, created

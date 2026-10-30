@@ -5,8 +5,10 @@ import time
 
 import pytest
 
+from kesoku.agent.compressor import HistoryCompressor
+from kesoku.agent.history import segment_logical_turns
 from kesoku.constants import MessageRole, MessageStatus, MessageType
-from kesoku.db import DatabaseManager, Message, Session
+from kesoku.db import AsyncDatabaseManager, DatabaseManager, Message, Session, SummaryNode
 
 
 @pytest.fixture
@@ -463,6 +465,239 @@ def test_get_channel_role_with_inheritance_after_ui_button_click(db_manager):
         db_manager.get_channel_role_with_inheritance("discord_asuka", "thread_chan_1", None)
         == "asuka"
     )
+
+
+@pytest.mark.asyncio
+async def test_get_session_history_active_only_and_limit(db_manager: DatabaseManager) -> None:
+    """Verify active_only drops compressed ASSISTANT/TOOL rows while preserving turn structure and limit slicing."""
+    now = 1_700_000_000.0
+    sid = "sess_active_only"
+    db_manager.create_session(Session(id=sid, title="Active Only Test", created_at=now, updated_at=now))
+
+    messages = [
+        # Turn 1 (uncompressed protected head)
+        Message(
+            id="u1",
+            session_id=sid,
+            chatbot_id="cli",
+            channel_id="ch",
+            sender="user",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="Turn 1 user prompt",
+            timestamp=now + 1,
+            status=MessageStatus.RESPONDED,
+        ),
+        Message(
+            id="a1_thought",
+            session_id=sid,
+            chatbot_id="cli",
+            channel_id="ch",
+            sender="assistant",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.THOUGHT,
+            content="Turn 1 thinking",
+            timestamp=now + 2,
+            status=MessageStatus.DELIVERED,
+            parent_id="u1",
+        ),
+        Message(
+            id="a1",
+            session_id=sid,
+            chatbot_id="cli",
+            channel_id="ch",
+            sender="assistant",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="Turn 1 reply",
+            timestamp=now + 3,
+            status=MessageStatus.DELIVERED,
+            parent_id="u1",
+        ),
+        # Turn 2 (compressed -> node_1: includes USER, TOOL_CALL, TOOL_RESULT, SYSTEM hook nudge, THOUGHT, TEXT)
+        Message(
+            id="u2",
+            session_id=sid,
+            chatbot_id="cli",
+            channel_id="ch",
+            sender="user",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="Turn 2 user prompt",
+            timestamp=now + 10,
+            status=MessageStatus.RESPONDED,
+        ),
+        Message(
+            id="tc2",
+            session_id=sid,
+            chatbot_id="cli",
+            channel_id="ch",
+            sender="read_file",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_CALL,
+            content="Calling read_file",
+            timestamp=now + 11,
+            status=MessageStatus.RESPONDED,
+            parent_id="u2",
+        ),
+        Message(
+            id="tr2",
+            session_id=sid,
+            chatbot_id="cli",
+            channel_id="ch",
+            sender="read_file",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content="x" * 5000,
+            timestamp=now + 12,
+            status=MessageStatus.RESPONDED,
+            parent_id="tc2",
+        ),
+        Message(
+            id="h2",
+            session_id=sid,
+            chatbot_id="cli",
+            channel_id="ch",
+            sender="Hook",
+            role=MessageRole.SYSTEM,
+            type=MessageType.TEXT,
+            content="Continue verification",
+            timestamp=now + 13,
+            status=MessageStatus.RESPONDED,
+            parent_id="u2",
+        ),
+        Message(
+            id="a2_thought",
+            session_id=sid,
+            chatbot_id="cli",
+            channel_id="ch",
+            sender="assistant",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.THOUGHT,
+            content="Turn 2 thinking",
+            timestamp=now + 14,
+            status=MessageStatus.DELIVERED,
+            parent_id="u2",
+        ),
+        Message(
+            id="a2",
+            session_id=sid,
+            chatbot_id="cli",
+            channel_id="ch",
+            sender="assistant",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="Turn 2 bulky reply",
+            timestamp=now + 15,
+            status=MessageStatus.DELIVERED,
+            parent_id="u2",
+        ),
+        # Non-conversational rename event must remain excluded in both modes
+        Message(
+            id="ren1",
+            session_id=sid,
+            chatbot_id="cli",
+            channel_id="ch",
+            sender="system",
+            role=MessageRole.SYSTEM,
+            type=MessageType.SESSION_RENAME,
+            content="Renamed session",
+            timestamp=now + 16,
+            status=MessageStatus.DELIVERED,
+        ),
+        # Turn 3 (uncompressed active/recent turn)
+        Message(
+            id="u3",
+            session_id=sid,
+            chatbot_id="cli",
+            channel_id="ch",
+            sender="user",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="Turn 3 user prompt",
+            timestamp=now + 20,
+            status=MessageStatus.RESPONDED,
+        ),
+        Message(
+            id="a3",
+            session_id=sid,
+            chatbot_id="cli",
+            channel_id="ch",
+            sender="assistant",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="Turn 3 reply",
+            timestamp=now + 21,
+            status=MessageStatus.DELIVERED,
+            parent_id="u3",
+        ),
+    ]
+    for msg in messages:
+        db_manager.save_message(msg)
+
+    node = SummaryNode(
+        id="node_1",
+        session_id=sid,
+        level=0,
+        summary="Summary of turn 2",
+        start_timestamp=now + 10,
+        end_timestamp=now + 15,
+        token_count=12,
+        source_token_count=1500,
+        parent_id=None,
+        created_at=now + 16,
+    )
+    db_manager.insert_summary_node(node)
+    db_manager.update_messages_summary_node(["u2", "tc2", "tr2", "h2", "a2_thought", "a2"], "node_1")
+
+    # 1. active_only=False (default) returns all non-rename rows unchanged
+    full_default = db_manager.get_session_history(sid, limit=0)
+    full_explicit = db_manager.get_session_history(sid, limit=0, active_only=False)
+    assert [m.id for m in full_default] == [m.id for m in full_explicit]
+    assert [m.id for m in full_default] == [
+        "u1",
+        "a1_thought",
+        "a1",
+        "u2",
+        "tc2",
+        "tr2",
+        "h2",
+        "a2_thought",
+        "a2",
+        "u3",
+        "a3",
+    ]
+
+    # 2. active_only=True drops Turn 2's ASSISTANT/TOOL rows while keeping USER/SYSTEM rows (with summary_node_id)
+    active = db_manager.get_session_history(sid, limit=0, active_only=True)
+    assert [m.id for m in active] == ["u1", "a1_thought", "a1", "u2", "h2", "u3", "a3"]
+    by_id = {m.id: m for m in active}
+    assert by_id["u2"].summary_node_id == "node_1"
+    assert by_id["h2"].summary_node_id == "node_1"
+    assert by_id["u1"].summary_node_id is None
+    assert by_id["u3"].summary_node_id is None
+
+    # 3. Logical turn segmentation & <recent_user_messages> block match full history identically
+    full_turns = segment_logical_turns(full_default)
+    active_turns = segment_logical_turns(active)
+    assert len(active_turns) == len(full_turns) == 3
+    full_flags = [any(m.summary_node_id is not None for m in t) for t in full_turns]
+    active_flags = [any(m.summary_node_id is not None for m in t) for t in active_turns]
+    assert active_flags == full_flags == [False, True, False]
+    assert HistoryCompressor.build_recent_user_messages_block(
+        active_turns, 5
+    ) == HistoryCompressor.build_recent_user_messages_block(full_turns, 5)
+    assert "Turn 2 user prompt" in HistoryCompressor.build_recent_user_messages_block(active_turns, 5)
+
+    # 4. limit slices AFTER active_only filtering ([-limit:])
+    limited_active = db_manager.get_session_history(sid, limit=4, active_only=True)
+    assert [m.id for m in limited_active] == ["u2", "h2", "u3", "a3"]
+
+    # 5. AsyncDatabaseManager forwards active_only accurately
+    async_db = AsyncDatabaseManager(db_manager)
+    async_active = await async_db.get_session_history(sid, limit=0, order="grouped", active_only=True)
+    assert [m.id for m in async_active] == ["u1", "a1_thought", "a1", "u2", "h2", "u3", "a3"]
+
 
 
 

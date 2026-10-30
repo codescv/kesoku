@@ -782,27 +782,45 @@ class DatabaseManager:
                 )
 
     def get_session_history(
-        self, session_id: str, limit: int = 20, order: Literal["phased", "grouped"] = "phased"
+        self,
+        session_id: str,
+        limit: int = 20,
+        order: Literal["phased", "grouped"] = "phased",
+        active_only: bool = False,
     ) -> list[Message]:
         """Retrieve historical messages for a specific session ordered by logical conversational turn.
 
         Args:
             session_id: Session ID to query.
-            limit: Max messages count.
+            limit: Max messages count (applied after filtering and sorting; 0 means unlimited).
             order: The sorting order. "phased" (default for Gemini) or "grouped" (for human displays).
+            active_only: When True, drop bulky ASSISTANT/TOOL rows of already-compressed turns
+                while retaining USER/SYSTEM rows (including their ``summary_node_id``) so logical
+                turn segmentation preserves turn count, indices, compressed flags, and
+                ``<recent_user_messages>`` content.
 
         Returns:
             List of Message objects ordered by the requested sorting mechanism.
         """
         with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT * FROM messages
-                WHERE session_id = ? AND type != ?
-                """,
-                (session_id, MessageType.SESSION_RENAME),
-            )
+            if active_only:
+                cursor.execute(
+                    """
+                    SELECT * FROM messages
+                    WHERE session_id = ? AND type != ?
+                      AND (summary_node_id IS NULL OR role IN (?, ?))
+                    """,
+                    (session_id, MessageType.SESSION_RENAME, MessageRole.USER, MessageRole.SYSTEM),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT * FROM messages
+                    WHERE session_id = ? AND type != ?
+                    """,
+                    (session_id, MessageType.SESSION_RENAME),
+                )
             rows = cursor.fetchall()
             all_msgs = [self._row_to_message(row) for row in rows]
 
@@ -1843,6 +1861,7 @@ class AsyncDatabaseManager:
         session_id: str,
         limit: int = 20,
         order: Literal["phased", "grouped"] = "phased",
+        active_only: bool = False,
     ) -> list[Message]:
         """Retrieve message history for a session.
 
@@ -1850,11 +1869,12 @@ class AsyncDatabaseManager:
             session_id: The ID of the session.
             limit: Maximum number of messages to return.
             order: The ordering strategy ('phased' or 'grouped').
+            active_only: Whether to omit compressed ASSISTANT/TOOL rows while keeping USER/SYSTEM anchors.
 
         Returns:
             A list of messages.
         """
-        return await asyncio.to_thread(self.sync_db.get_session_history, session_id, limit, order)
+        return await asyncio.to_thread(self.sync_db.get_session_history, session_id, limit, order, active_only)
 
     async def get_message(self, message_id: str) -> Message | None:
         """Retrieve a specific message by its unique ID.

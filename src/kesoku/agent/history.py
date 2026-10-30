@@ -108,12 +108,21 @@ async def build_history(
     session_id: str,
     order: Literal["phased", "grouped"] = "phased",
     heal_orphans: bool = False,
+    active_only: bool = False,
 ) -> list[Message]:
     """Retrieve the raw conversational history from storage.
 
     Heals orphaned tool calls (if heal_orphans is True), loads the chronological
     history, and excludes internal notification messages. Returns the raw message list
     without stripping thoughts, attachments, or adding user formatting headers.
+
+    Args:
+        gateway: Gateway instance providing database and message posting access.
+        session_id: Target session identifier.
+        order: Sorting strategy ("phased" or "grouped").
+        heal_orphans: When True, synthesize interruption tool results for orphaned tool calls.
+        active_only: When True, skip bulky compressed ASSISTANT/TOOL rows in SQLite while
+            keeping USER/SYSTEM anchors for turn segmentation and scaffold assembly.
     """
     # 1. Detects and heals orphaned tool calls using optimized database query.
     if heal_orphans:
@@ -141,8 +150,8 @@ async def build_history(
             )
             await gateway.post(interrupted_msg)
 
-    # 2. Load entire chronological history (limit=0 retrieves all messages in the session)
-    raw_history = await gateway.db.get_session_history(session_id, limit=0, order=order)
+    # 2. Load chronological history (limit=0 retrieves all matching messages in the session)
+    raw_history = await gateway.db.get_session_history(session_id, limit=0, order=order, active_only=active_only)
     # Exclude system-generated assistant notification messages from LLM prompt history
     raw_history = [m for m in raw_history if not (m.role == MessageRole.ASSISTANT and m.sender == "Notification")]
 
@@ -261,19 +270,21 @@ def prepare_history_for_llm(
                         target_dir = os.path.join(tempfile.gettempdir(), "kesoku_staging")
 
                     if tool_error and len(tool_error) > max_historical_tool_chars:
-                        os.makedirs(target_dir, exist_ok=True)
                         file_match = re.search(r"saved to(?: session workspace file)?: `([^`]+)`", tool_error)
                         if file_match and os.path.exists(file_match.group(1)):
                             err_filepath = file_match.group(1)
                         else:
                             # Deterministic name (per message) keeps the truncated preview text byte-identical
-                            # across calls, which implicit prefix caching depends on.
+                            # across calls, which implicit prefix caching depends on. Since tool output for a
+                            # given message ID is immutable, skip rewriting if already archived on disk.
                             err_filepath = os.path.join(target_dir, _hist_filename("err", tool_name, m))
-                            try:
-                                with open(err_filepath, "w", encoding="utf-8") as f:
-                                    f.write(tool_error)
-                            except Exception as ex:
-                                logger.warning(f"Failed to write historical tool error to {err_filepath}: {ex}")
+                            if not os.path.exists(err_filepath):
+                                try:
+                                    os.makedirs(target_dir, exist_ok=True)
+                                    with open(err_filepath, "w", encoding="utf-8") as f:
+                                        f.write(tool_error)
+                                except Exception as ex:
+                                    logger.warning(f"Failed to write historical tool error to {err_filepath}: {ex}")
 
                         err_preview = history_preview(tool_error, max_historical_tool_chars)
                         truncated_err = (
@@ -288,19 +299,21 @@ def prepare_history_for_llm(
                         m.content = f"Tool `{tool_name}` error:\n```\n{truncated_err}\n```"
 
                     elif not tool_error and len(raw_res) > max_historical_tool_chars:
-                        os.makedirs(target_dir, exist_ok=True)
                         file_match = re.search(r"saved to(?: session workspace file)?: `([^`]+)`", raw_res)
                         if file_match and os.path.exists(file_match.group(1)):
                             filepath = file_match.group(1)
                         else:
                             # Deterministic name (per message) keeps the truncated preview text byte-identical
-                            # across calls, which implicit prefix caching depends on.
+                            # across calls, which implicit prefix caching depends on. Since tool output for a
+                            # given message ID is immutable, skip rewriting if already archived on disk.
                             filepath = os.path.join(target_dir, _hist_filename("tool", tool_name, m))
-                            try:
-                                with open(filepath, "w", encoding="utf-8") as f:
-                                    f.write(raw_res)
-                            except Exception as ex:
-                                logger.warning(f"Failed to write historical tool output to {filepath}: {ex}")
+                            if not os.path.exists(filepath):
+                                try:
+                                    os.makedirs(target_dir, exist_ok=True)
+                                    with open(filepath, "w", encoding="utf-8") as f:
+                                        f.write(raw_res)
+                                except Exception as ex:
+                                    logger.warning(f"Failed to write historical tool output to {filepath}: {ex}")
 
                         preview = history_preview(raw_res, max_historical_tool_chars)
                         truncated_res = (

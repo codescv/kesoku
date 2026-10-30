@@ -1,8 +1,14 @@
 """Unit tests for history preparation (truncation, determinism, historical question-option stripping)."""
 
-from kesoku.agent.history import prepare_history_for_llm, strip_question_options
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from kesoku.agent.history import build_history, prepare_history_for_llm, strip_question_options
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
+from kesoku.gateway.gateway import Gateway
 
 
 def test_truncate_tool_call_arguments_only_for_file_tools():
@@ -377,3 +383,139 @@ def test_estimate_prepared_turn_tokens_uses_same_preview() -> None:
     tokens = comp.estimate_prepared_turn_tokens(turn, MockLLM(), calibrated=True)
     expected = estimate_tokens_calibrated("run it") + estimate_tokens_calibrated(history_preview(full, 500))
     assert tokens == expected
+
+
+@pytest.mark.asyncio
+async def test_build_history_forwards_active_only() -> None:
+    """Verify build_history forwards active_only to gateway.db.get_session_history with default False."""
+    notif = Message(
+        id="n1",
+        session_id="sess_1",
+        chatbot_id="cb",
+        channel_id="ch",
+        sender="Notification",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="Internal notice",
+        status=MessageStatus.DELIVERED,
+        timestamp=1.0,
+    )
+    user_msg = _hmsg(MessageRole.USER, "hello", 2.0, "u1")
+
+    mock_gw = MagicMock(spec=Gateway)
+    mock_gw.db = AsyncMock()
+    mock_gw.db.get_session_history = AsyncMock(return_value=[notif, user_msg])
+
+    res_default = await build_history(mock_gw, "sess_1")
+    mock_gw.db.get_session_history.assert_awaited_once_with(
+        "sess_1", limit=0, order="phased", active_only=False
+    )
+    assert [m.id for m in res_default] == ["u1"]
+
+    mock_gw.db.get_session_history.reset_mock()
+    res_active = await build_history(mock_gw, "sess_1", order="grouped", active_only=True)
+    mock_gw.db.get_session_history.assert_awaited_once_with(
+        "sess_1", limit=0, order="grouped", active_only=True
+    )
+    assert [m.id for m in res_active] == ["u1"]
+
+
+def test_prepare_history_skips_rewrite_when_archived_file_exists(tmp_path: Path) -> None:
+    """Second prepare_history_for_llm call skips makedirs/open when archived files exist and stays byte-identical."""
+    long_out = "O" * 1500
+    long_err = "E" * 1600
+    history = [
+        Message(
+            id="u1",
+            session_id="s",
+            chatbot_id="cb",
+            channel_id="ch",
+            sender="u",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="t1",
+            status=MessageStatus.RESPONDED,
+            timestamp=10.0,
+        ),
+        Message(
+            id="r_ok",
+            session_id="s",
+            chatbot_id="cb",
+            channel_id="ch",
+            sender="run_shell_command",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content=long_out,
+            status=MessageStatus.RESPONDED,
+            timestamp=11.0,
+            metadata={"tool_name": "run_shell_command", "tool_result": long_out},
+        ),
+        Message(
+            id="u2",
+            session_id="s",
+            chatbot_id="cb",
+            channel_id="ch",
+            sender="u",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="t2",
+            status=MessageStatus.RESPONDED,
+            timestamp=20.0,
+        ),
+        Message(
+            id="r_err",
+            session_id="s",
+            chatbot_id="cb",
+            channel_id="ch",
+            sender="run_shell_command",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content=long_err,
+            status=MessageStatus.RESPONDED,
+            timestamp=21.0,
+            metadata={"tool_name": "run_shell_command", "tool_error": long_err},
+        ),
+        Message(
+            id="u3",
+            session_id="s",
+            chatbot_id="cb",
+            channel_id="ch",
+            sender="u",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="t3",
+            status=MessageStatus.RESPONDED,
+            timestamp=30.0,
+        ),
+    ]
+
+    staging = tmp_path / "nested_staging"
+    first = prepare_history_for_llm(history, staging_dir=str(staging))
+    tool_file = staging / "hist_tool_run_shell_command_r_ok.txt"
+    err_file = staging / "hist_err_run_shell_command_r_err.txt"
+    assert tool_file.read_text(encoding="utf-8") == long_out
+    assert err_file.read_text(encoding="utf-8") == long_err
+
+    # Second call with identical history must not invoke makedirs or open for writing
+    with (
+        patch("builtins.open", side_effect=AssertionError("open() should not be called when archive exists")),
+        patch(
+            "kesoku.agent.history.os.makedirs",
+            side_effect=AssertionError("makedirs() should not be called when archive exists"),
+        ),
+    ):
+        second = prepare_history_for_llm(history, staging_dir=str(staging))
+
+    assert [m.content for m in first] == [m.content for m in second]
+    assert [m.metadata for m in first] == [m.metadata for m in second]
+
+    # Also verify file_match branch does not create staging_dir and produces byte-identical output
+    existing_saved = tmp_path / "cmd_saved.txt"
+    existing_saved.write_text(B3_HEADER + B3_BODY + B3_TAIL, encoding="utf-8")
+    shell_res = _shell_banner(20000, str(existing_saved)) + (B3_HEADER + B3_BODY + B3_TAIL)[:1200]
+    unused_staging = tmp_path / "unused_staging"
+    fm_first = prepare_history_for_llm(_tool_turn(result=shell_res), staging_dir=str(unused_staging))
+    fm_second = prepare_history_for_llm(_tool_turn(result=shell_res), staging_dir=str(unused_staging))
+    assert not unused_staging.exists()
+    assert [m.content for m in fm_first] == [m.content for m in fm_second]
+    assert [m.metadata for m in fm_first] == [m.metadata for m in fm_second]
