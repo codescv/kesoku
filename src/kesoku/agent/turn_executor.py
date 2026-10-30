@@ -474,11 +474,12 @@ class TurnExecutor:
 
                 tools_list = self.tool_runner.tool_registry.get_tools_list()
 
-                # Retrieve and build the raw session history
+                # Retrieve and build the raw session history (skip bulky compressed ASSISTANT/TOOL rows)
                 raw_history = await build_history(
                     gateway=self.gateway,
                     session_id=self.session_id,
                     heal_orphans=True,
+                    active_only=True,
                 )
 
                 # Safety net: only run pre-turn compaction if a previous turn skipped/failed post-turn compaction.
@@ -497,6 +498,7 @@ class TurnExecutor:
                             gateway=self.gateway,
                             session_id=self.session_id,
                             heal_orphans=False,
+                            active_only=True,
                         )
                         if active_cache_name:
                             logger.info("Pre-turn fallback compaction occurred. Deleting obsolete context cache...")

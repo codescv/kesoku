@@ -926,6 +926,7 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
             isinstance(m.metadata, dict) and (m.metadata.get("is_scaffold") or m.metadata.get("is_scaffold_ack"))
             for m in history
         )
+        compact_call_state["raw_history_ids"] = [m.id for m in history]
         return False
 
     context = KesokuContext(config=cfg, llm=llm)
@@ -960,6 +961,9 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
     mock_compact.assert_awaited_once()
     assert compact_call_state["final_already_saved"] is True
     assert compact_call_state["has_scaffold"] is False
+    # Slice A + Slice B integration: active_only=True kept compressed USER anchor, skipped compressed ASSISTANT row
+    assert msg_comp_u.id in compact_call_state["raw_history_ids"]
+    assert msg_comp_a.id not in compact_call_state["raw_history_ids"]
 
     # Reconstructed messages verify they match our custom turn-based structure
     assert len(llm.captured_history) == 7

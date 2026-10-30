@@ -56,13 +56,17 @@ user_allowlist = ["my_username"]       # Optional: allowed Discord usernames or 
 
 # Channel-specific overrides
 [[discord.channels]]
-channels = ["1234567890", "general"]   # Match channel ID or exact channel name
-llm = "claude"                          # Use Claude model in these channels
+channels = ["1234567890", "general"]   # Match channel ID or exact channel name (also inherited by child threads)
+llm = "claude"                          # Optional: override LLM provider ("gemini" or "claude")
 model_name = "claude-opus-5-5"          # Optional: override the specific model identifier
+thinking_level = "low"                  # Optional: override reasoning budget ("minimal", "low", "medium", "high", "xhigh", "max")
+stream = true                           # Optional: enable/disable live streaming response previews for this channel
 auto_thread = false                     # Disable automatic thread creation in these channels
 ```
 
 ### Options Breakdown:
 *   **`enabled`** (boolean): Set to `true` to run the Discord listener inside the Kesoku daemon loop (`kesoku start`).
 *   **`user_allowlist`** (list of strings): If populated, the bot only responds to these specific users. Other users can only trigger responses if they explicitly `@mention` the bot.
+*   **`thinking_level`** (string, optional): Per-channel override for the provider's thinking/reasoning level (inherited automatically by threads created inside the channel).
+*   **`stream`** (boolean, optional): Per-channel override for live token streaming (`▌` preview edited in-place into the final response).
 *   **`auto_thread`** (boolean, default: `true`): If `true`, the bot automatically isolates every new session conversation by creating a sub-thread inside the channel. If `false`, the conversation runs directly inside the channel.

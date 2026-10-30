@@ -562,7 +562,7 @@ async def test_post_simulated_choice_includes_thread_parent_channel_id(mock_gate
     from kesoku.gateway.chatbot.discord.ui import post_simulated_choice
 
     mock_chatbot = MagicMock()
-    mock_chatbot.chatbot_id = "discord_asuka"
+    mock_chatbot.chatbot_id = "discord_tutor"
     mock_chatbot._typing_tasks = {}
     mock_chatbot._keep_typing = AsyncMock()
 

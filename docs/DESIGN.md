@@ -10,7 +10,7 @@ For detailed user and developer guides, see [`docs/en/dev/architecture.md`](en/d
 
 - **Stateless Pub/Sub Gateway (`src/kesoku/gateway/gateway.py`)**: Persists all `Message` records (`user`, `assistant`, `tool`, `system`) to SQLite and broadcasts them to filtered async listeners.
 - **Agent Dispatcher & `SessionWorker` (`src/kesoku/agent/agent.py`)**: Spawns one `SessionWorker` task per active `session_id`. Tool calls execute atomically, while incoming user messages queued during LLM generation trigger thought interruption and pivot the turn cleanly.
-- **Turn Executor (`src/kesoku/agent/turn_executor.py`)**: Orchestrates per-turn context assembly, automatic watermark compaction, implicit/explicit Gemini & Claude prompt caching, concurrent tool execution, post-tool/stop hooks, and turn metrics logging (`llm-turn-{idx}.log.yaml`).
+- **Turn Executor (`src/kesoku/agent/turn_executor.py`)**: Orchestrates per-turn context assembly, post-turn automatic watermark compaction, implicit/explicit Gemini & Claude prompt caching, optional real-time token streaming (`_StreamPreviewPublisher`), concurrent tool execution, post-tool/stop hooks, and turn metrics logging (`llm-turn-{idx}.log.yaml`).
 
 ---
 
@@ -63,6 +63,22 @@ For detailed user and developer guides, see [`docs/en/dev/architecture.md`](en/d
    - **Structural Breadcrumb Chunking & Incremental SQLite Index (`memory_files`, `memory_chunks`)**: Each `.md` file is incrementally synchronized by `mtime` + SHA-256 `content_hash` and split by Markdown headings with ancestor breadcrumbs (`# rel_path (description)` + `# H1 > ## H2 ...`).
    - **Hybrid File-Level Ranking**: `search_role_memories` ranks files by `MAX(chunk_cosine_similarity) + lexical_boost` over a multi-turn context query (`render_context_query` on the last 2 user turns).
    - **Progressive Disclosure (`<memory>`) & `memory_search`**: `TurnExecutor` injects only matched file paths and 1-line descriptions (`<memory>...</memory>`), and the `memory_search(query, limit)` tool returns file paths + descriptions so the agent calls `read_file("$MEMORY_DIR/...")` on demand.
+
+### 2.4 TTFT Optimizations & Per-Channel LLM Streaming
+
+1. **Active-Only SQLite History Loading (`src/kesoku/db/manager.py`, `src/kesoku/agent/history.py`, `src/kesoku/agent/turn_executor.py`)**:
+   - `DatabaseManager.get_session_history(..., active_only=True)` adds `AND (summary_node_id IS NULL OR role IN ('user', 'system'))` in SQL so bulky `ASSISTANT` and `TOOL` rows of already-compacted turns are skipped at the storage layer, while `USER`/`SYSTEM` anchors (retaining their `summary_node_id`) preserve exact logical turn indices, `protect_front_turns`, and `<recent_user_messages>` water-fill content.
+2. **Immutable Tool-Output Disk Archive Guard (`src/kesoku/agent/history.py`)**:
+   - `prepare_history_for_llm` checks `os.path.exists(filepath)` before calling `os.makedirs` and writing `{staging_dir}/tool_results/{safe_id}.txt` (or `tool_errors/`), avoiding redundant synchronous disk writes on every subsequent turn while keeping preview strings byte-identical for implicit prefix caching.
+3. **Role Pass-Through & SDK Client Pooling (`src/kesoku/gateway/chatbot/base.py`, `src/kesoku/context.py`)**:
+   - `Chatbot.preprocess_message` passes `role=current_role or None` into `build_sys_prompt(...)` so default-role turns skip reopening `DatabaseManager`.
+   - `KesokuContext.get_llm` caches `BaseLLM` instances by `(provider, model_name, thinking_level, use_context_compression)` (clearing automatically on config reload) so underlying `genai.Client` and `AnthropicVertex` HTTP/TLS keep-alive pools persist across turns.
+4. **Post-Turn Auto-Compaction (`src/kesoku/agent/turn_executor.py`)**:
+   - `TurnExecutor.process_turn` assembles existing summary scaffolds immediately (`_assemble_scaffold_history`) before invoking the LLM and defers `_run_auto_compaction` until **after** the final assistant response has been persisted and delivered (invalidating stale explicit context caches post-turn, with a `_compaction_pending` pre-turn fallback safety net if post-turn compaction is skipped due to queued pivot messages or raises an error).
+5. **Streaming LLM Inference & Discord Live Previews (`src/kesoku/config.py`, `src/kesoku/agent/llm.py`, `src/kesoku/gateway/gateway.py`, `src/kesoku/gateway/chatbot/discord/adapter.py`)**:
+   - **Configuration & Resolution**: `[gemini].stream` and `[claude].stream` (default `false`) plus per-channel `thinking_level` and `stream` overrides on `DiscordChannelOverride` (matched across direct channels and child threads via `parent_channel_id` / `parent_channel_name`, gated on `Gateway.has_stream_handler(chatbot_id)`).
+   - **Non-Blocking Stream Pump**: `_drain_blocking_stream` runs `GeminiLLM` (`generate_content_stream`) and `ClaudeLLM` (`messages.stream`) iterators in a background thread feeding an `asyncio.Queue`, emitting text-only `(delta, accumulated)` callbacks while reconstructing full `LLMResponse` objects (thoughts, `thought_signature` bytes, tool calls, and token usage).
+   - **Throttled Preview & In-Place Final Delivery**: `_StreamPreviewPublisher` publishes the first text chunk immediately via `Gateway.publish_stream`, throttles subsequent updates (`1.5s`, single non-blocking in-flight task), and calls `discard()` on tool calls, retries, or interruptions. `DiscordChatbot` renders `<= 1900`-char `▌` previews (auto-closing odd code fences), edits Chunk 0 in-place when the final text arrives without duplication, and skips intermediate `💭` thought send-then-delete REST round-trips on final responses (`metadata["final_response"] = True`).
 
 ---
 

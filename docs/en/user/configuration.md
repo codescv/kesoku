@@ -52,6 +52,7 @@ Configures Google GenAI/Gemini integrations.
 *   **`project_id`** (string): Google Cloud Project ID (required for `"vertex"` mode).
 *   **`location`** (string, default: `"us-central1"`): GCP region for Vertex AI endpoints.
 *   **`thinking_level`** (string, default: `"high"`): The thinking/reasoning budget. Supported: `"minimal"`, `"low"`, `"medium"`, `"high"`.
+*   **`stream`** (boolean, default: `false`): When `true`, streams incremental LLM text deltas to chatbots that register a stream preview handler (such as Discord).
 *   **`safety_threshold`** (string, default: `"off"`): Harm block threshold applied to every configurable safety category (`"off"`, `"block_none"`, `"block_low_and_above"`, `"block_medium_and_above"`, `"block_only_high"`). Covers harassment, hate speech, sexually explicit, dangerous content and civic integrity, plus the Vertex-only image (hate / dangerous / harassment / sexually explicit) and jailbreak categories when `auth_mode = "vertex"`. The provider defaults intermittently blank out long roleplay replies (the response comes back with `finish_reason=SAFETY` and no content at all), so filtering is disabled by default. Set to `null` to fall back to the provider defaults.
 
 ### 4. `[claude]`
@@ -60,6 +61,8 @@ Configures Anthropic's Claude models hosted on Google Cloud Vertex AI.
 *   **`model_name`** (string, default: `"claude-3-5-sonnet@20241022"`): Vertex model ID.
 *   **`project_id`** (string): Google Cloud Project ID.
 *   **`location`** (string, default: `"us-east5"`): Vertex AI region.
+*   **`thinking_level`** (string, default: `"medium"`): Reasoning effort level (`"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`, or `null`).
+*   **`stream`** (boolean, default: `false`): When `true`, streams incremental LLM text deltas to chatbots that register a stream preview handler.
 
 ### 5. `[shell]`
 Defines safety configurations for the shell command tool runner execution.

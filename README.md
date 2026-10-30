@@ -7,6 +7,9 @@ Kesoku (name inspired by `結束/Kessoku`) is a minimal, readable, and modular a
 ## ✨ Main Features
 
 - **Decoupled Broker Gateway & Per-Session Workers**: Asynchronous pub/sub message routing with isolated per-session workers, atomic tool execution, and mid-turn thought interruption.
+- **Low-Latency TTFT & Real-Time Response Streaming**:
+  - **Live Token Streaming (`stream`) & Per-Channel Overrides**: Configurable global `[gemini].stream` / `[claude].stream` switches plus per-channel `thinking_level` and `stream` overrides on Discord (`[[chatbots.discord.channels]]`), streaming throttled `▌` live previews with in-place final message replacement and zero duplicate messages.
+  - **Fast-Path Turn Execution**: Active-only SQLite history loading (skipping already-compacted assistant/tool rows), cached `genai.Client` / `AnthropicVertex` HTTP/TLS keep-alive pools (`KesokuContext.get_llm`), immutable tool-archive write guards, and post-turn background compaction off the TTFT critical path.
 - **Coding-First Tool Suite (P0)**:
   - **Head+Tail Middle-Out Truncation (`truncate_middle`)**: Preserves both the command/header at the top and tracebacks/summaries at the bottom of long shell and historical tool outputs.
   - **Dedicated `read_file` & Diagnostic `update_file`**: Line-numbered file reads (`offset`/`limit`), binary & directory guards, `$STAGING_DIR`/`$AWD` variable expansion, line-number-prefix auto-stripping, fuzzy-match line hints, and compact unified diffs on every edit.
