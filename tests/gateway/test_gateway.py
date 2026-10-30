@@ -865,3 +865,41 @@ async def test_gateway_create_session_role_resolution(temp_db: str, tmp_path: An
         assert "# Active Persona (Role Name): (asuka)" in session.system_prompt
     finally:
         kesoku.config._global_config = original_config
+
+
+@pytest.mark.asyncio
+async def test_gateway_stream_handler_registry(temp_db: str) -> None:
+    """Verify stream handler registration, lookup, ephemeral forwarding, and exception isolation."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    assert gw.has_stream_handler("discord") is False
+
+    # Unregistered chatbot_id is a safe no-op with zero DB writes
+    await gw.publish_stream("discord", "chan1", "sess1", "turn1", "partial")
+    assert await gw.db.get_session_history("sess1") == []
+
+    received: list[tuple[str, str, str, str | None]] = []
+
+    async def handler(channel_id: str, session_id: str, turn_id: str, text: str | None) -> None:
+        received.append((channel_id, session_id, turn_id, text))
+        if text == "raise":
+            raise RuntimeError("simulated preview failure")
+
+    gw.register_stream_handler("discord", handler)
+    assert gw.has_stream_handler("discord") is True
+    assert gw.has_stream_handler("cli") is False
+
+    await gw.publish_stream("discord", "chan1", "sess1", "turn1", "Hello")
+    await gw.publish_stream("discord", "chan1", "sess1", "turn1", "raise")
+    await gw.publish_stream("discord", "chan1", "sess1", "turn1", None)
+
+    assert received == [
+        ("chan1", "sess1", "turn1", "Hello"),
+        ("chan1", "sess1", "turn1", "raise"),
+        ("chan1", "sess1", "turn1", None),
+    ]
+    # Ephemeral stream previews never touch the SQLite messages table
+    assert await gw.db.get_session_history("sess1") == []
+

@@ -1940,3 +1940,190 @@ async def test_handle_message_session_rename(mock_config: KesokuConfig, mock_gat
             # Verify update_message_status was called to mark the message as delivered
             mock_gateway.db.update_message_status.assert_called_once_with("msg123", MessageStatus.DELIVERED)
 
+
+@pytest.mark.asyncio
+async def test_discord_stream_preview_send_edit_and_replace_in_place(
+    mock_config: KesokuConfig, mock_gateway: MagicMock
+) -> None:
+    """Test preview send -> edit -> replaced in-place by final text without duplicate send or post-delivery delete."""
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_gateway.register_stream_handler.assert_called_once_with("discord_test", bot.handle_stream_preview)
+
+            mock_channel = AsyncMock(spec=discord.TextChannel)
+            preview_discord_msg = AsyncMock(spec=discord.Message)
+            preview_discord_msg.id = 8881
+            mock_channel.send = AsyncMock(return_value=preview_discord_msg)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+            mock_gateway.agent = None
+
+            # 1. First chunk -> channel.send("Hello ▌")
+            await bot.handle_stream_preview("12345", "sess_s1", "turn_1", "Hello")
+            mock_channel.send.assert_called_once_with("Hello ▌")
+            assert "sess_s1" in bot._stream_previews
+            # Invariant B9a: never tracked in _intermediate_messages or _turn_special_msg
+            assert preview_discord_msg not in bot._intermediate_messages["12345"]
+            assert "sess_s1" not in bot._turn_special_msg
+
+            # Duplicate content is a no-op
+            await bot.handle_stream_preview("12345", "sess_s1", "turn_1", "Hello")
+            preview_discord_msg.edit.assert_not_called()
+
+            # 2. Next chunk -> preview.edit("Hello world ▌")
+            await bot.handle_stream_preview("12345", "sess_s1", "turn_1", "Hello world")
+            preview_discord_msg.edit.assert_called_once_with(content="Hello world ▌")
+            assert mock_channel.send.call_count == 1
+
+            # 3. Final ASSISTANT TEXT -> replaces preview in-place via edit, NOT a second send, and NOT deleted!
+            final_msg = Message(
+                id="msg_final_1",
+                session_id="sess_s1",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
+                content="Hello world!",
+                status=MessageStatus.PENDING,
+            )
+            await bot.handle_message(final_msg)
+
+            assert mock_channel.send.call_count == 1
+            assert preview_discord_msg.edit.call_count == 2
+            preview_discord_msg.edit.assert_called_with(content="Hello world!")
+            preview_discord_msg.delete.assert_not_called()
+            assert "sess_s1" not in bot._stream_previews
+
+
+def test_discord_format_stream_preview_truncation_and_code_fence(
+    mock_config: KesokuConfig, mock_gateway: MagicMock
+) -> None:
+    """Verify preview formatter head-truncates <=1900 chars and auto-closes odd ``` code fences."""
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+
+            partial_code = "Here is code:\n```python\ndef add(a, b):\n    return a + b"
+            rendered_code = bot._format_stream_preview(partial_code)
+            assert rendered_code.count("```") == 2
+            assert rendered_code.endswith("\n```\n▌")
+
+            closed_code = "```python\nx = 1\n```\nDone"
+            rendered_closed = bot._format_stream_preview(closed_code)
+            assert rendered_closed.count("```") == 2
+            assert rendered_closed.endswith("Done ▌")
+
+            huge_unclosed = "```python\n" + ("x = 1\n" * 600)
+            rendered_huge = bot._format_stream_preview(huge_unclosed)
+            assert len(rendered_huge) <= 1900
+            assert "…" in rendered_huge
+            assert rendered_huge.count("```") % 2 == 0
+            assert rendered_huge.endswith("▌")
+
+
+@pytest.mark.asyncio
+async def test_discord_stream_preview_discard_notfound_rich_and_interruption(
+    mock_config: KesokuConfig, mock_gateway: MagicMock
+) -> None:
+    """Verify `text=None` delete, `NotFound` resilience, rich-final delete+send, and interruption cleanup."""
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.TextChannel)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+            mock_gateway.agent = None
+
+            # A. `text=None` deletes preview; `discord.NotFound` on edit/delete is swallowed cleanly
+            p1 = AsyncMock(spec=discord.Message)
+            mock_channel.send = AsyncMock(return_value=p1)
+            await bot.handle_stream_preview("12345", "sess_a", "t1", "Draft")
+            not_found_resp = MagicMock()
+            not_found_resp.status = 404
+            p1.edit.side_effect = discord.NotFound(not_found_resp, "unknown message")
+            await bot.handle_stream_preview("12345", "sess_a", "t1", "Draft 2")
+            assert "sess_a" not in bot._stream_previews
+
+            p2 = AsyncMock(spec=discord.Message)
+            p2.delete.side_effect = discord.NotFound(not_found_resp, "already gone")
+            mock_channel.send = AsyncMock(return_value=p2)
+            await bot.handle_stream_preview("12345", "sess_b", "t1", "Draft B")
+            await bot.handle_stream_preview("12345", "sess_b", "t1", None)
+            p2.delete.assert_called_once()
+            assert "sess_b" not in bot._stream_previews
+
+            # B. Rich final message (question embed+view) deletes preview first and sends normally
+            p3 = AsyncMock(spec=discord.Message)
+            mock_channel.send = AsyncMock(
+                side_effect=[p3, AsyncMock(spec=discord.Message), AsyncMock(spec=discord.Message)]
+            )
+            await bot.handle_stream_preview("12345", "sess_c", "t1", "Choose one")
+            rich_msg = Message(
+                id="msg_rich",
+                session_id="sess_c",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
+                content="Pick now\n[question: Proceed? || Yes | No]",
+                status=MessageStatus.PENDING,
+            )
+            mock_gateway.db.save_ui_prompt = AsyncMock()
+            await bot.handle_message(rich_msg)
+            p3.delete.assert_called_once()
+            p3.edit.assert_not_called()
+            assert "sess_c" not in bot._stream_previews
+
+            # C. Active interruption hook deletes leftover preview
+            p4 = AsyncMock(spec=discord.Message)
+            bot._stream_previews["sess_int"] = p4
+            bot._stream_preview_texts["sess_int"] = "Interrupted ▌"
+            bot._stream_preview_channels["sess_int"] = "12345"
+
+            mock_worker = MagicMock(running=True, _processing_turn=True)
+            mock_agent = MagicMock(workers={"sess_int": mock_worker})
+            mock_gateway.agent = mock_agent
+            mock_gateway.db.get_session_history = AsyncMock(return_value=[])
+            await bot.pre_ingest_interruption_hook(MagicMock(id="sess_int"), MagicMock(channel_id="12345"))
+            p4.delete.assert_called_once()
+            assert "sess_int" not in bot._stream_previews
+
+
+@pytest.mark.asyncio
+async def test_discord_skips_final_response_thought_rest_calls(
+    mock_config: KesokuConfig, mock_gateway: MagicMock
+) -> None:
+    """Verify THOUGHT with `metadata['final_response']=True` skips Discord REST calls and marks DELIVERED."""
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=mock_config):
+        mock_client_user = MagicMock(spec=discord.ClientUser, id=999)
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=mock_client_user):
+            bot = DiscordChatbot(chatbot_id="discord_test", gateway=mock_gateway)
+            mock_channel = AsyncMock(spec=discord.TextChannel)
+            bot.bot.get_channel = MagicMock(return_value=mock_channel)
+            mock_gateway.agent = None
+            mock_gateway.db.update_message_status = AsyncMock()
+
+            final_thought = Message(
+                id="thought_final_1",
+                session_id="sess_tf",
+                chatbot_id="discord_test",
+                channel_id="12345",
+                sender="Kesoku",
+                role=MessageRole.ASSISTANT,
+                type=MessageType.THOUGHT,
+                content="Final internal reasoning",
+                metadata={"final_response": True},
+            )
+            await bot.handle_intermediate_message(final_thought)
+
+            mock_channel.send.assert_not_called()
+            assert "sess_tf" not in bot._turn_special_items
+            mock_gateway.db.update_message_status.assert_awaited_once_with(
+                "thought_final_1", MessageStatus.DELIVERED
+            )
+
+

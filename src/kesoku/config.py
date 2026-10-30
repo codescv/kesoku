@@ -310,6 +310,10 @@ class GeminiConfig(BaseModel):
         default=3600,
         description="Time-to-Live (TTL) in seconds for the explicit context cache",
     )
+    stream: bool = Field(
+        default=False,
+        description="Stream LLM responses (live preview on chatbots that support it)",
+    )
 
 
 class ClaudeConfig(BaseModel):
@@ -334,6 +338,10 @@ class ClaudeConfig(BaseModel):
         default=1024,
         description="Minimum token threshold of static history prefix before prompt caching is triggered",
     )
+    stream: bool = Field(
+        default=False,
+        description="Stream LLM responses (live preview on chatbots that support it)",
+    )
 
 
 class DiscordChannelOverride(BaseModel):
@@ -344,6 +352,14 @@ class DiscordChannelOverride(BaseModel):
     model_name: str | None = Field(
         default=None,
         description="Override LLM model identifier (e.g., 'claude-opus-5-5', 'gemini-3.8-pro')",
+    )
+    thinking_level: Literal["minimal", "low", "medium", "high", "xhigh", "max"] | None = Field(
+        default=None,
+        description="Override thinking/reasoning level for this channel",
+    )
+    stream: bool | None = Field(
+        default=None,
+        description="Override streaming response mode for this channel",
     )
     auto_thread: bool | None = Field(default=None, description="Override auto_thread behavior")
 

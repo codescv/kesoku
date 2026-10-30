@@ -1,9 +1,11 @@
 """Unit tests for Kesoku LLM module and Anthropic Claude support."""
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from google.genai import types
 
 from kesoku.agent.llm import (
     ClaudeLLM,
@@ -13,9 +15,10 @@ from kesoku.agent.llm import (
     get_llm,
     history_to_turns,
 )
-from kesoku.config import ClaudeConfig
+from kesoku.config import ClaudeConfig, GeminiConfig, KesokuConfig, WorkspaceConfig
 from kesoku.constants import MessageRole, MessageType
-from kesoku.db import Message
+from kesoku.context import KesokuContext
+from kesoku.db import DatabaseManager, Message
 
 
 def sample_tool_func(query: str, max_results: int = 10, context: Any = None) -> str:
@@ -1130,4 +1133,264 @@ async def test_claude_llm_native_thinking() -> None:
             "type": "text",
             "text": "Hello there!"
         }
+
+
+def test_get_llm_thinking_level_override_and_validation() -> None:
+    """Verify `get_llm(thinking_level=...)` applies valid overrides and warns+ignores invalid ones."""
+    cfg = KesokuConfig(
+        gemini=GeminiConfig(thinking_level="high"),
+        claude=ClaudeConfig(thinking_level="medium"),
+    )
+
+    with (
+        patch("google.genai.Client", return_value=MagicMock()),
+        patch("kesoku.agent.llm.logger.warning") as mock_warn,
+    ):
+        g_low = get_llm(provider="gemini", config=cfg, thinking_level="low")
+        assert isinstance(g_low, GeminiLLM)
+        assert g_low.config.thinking_level == "low"
+        # Original config untouched
+        assert cfg.gemini.thinking_level == "high"
+        mock_warn.assert_not_called()
+
+        g_invalid = get_llm(provider="gemini", config=cfg, thinking_level="xhigh")
+        assert isinstance(g_invalid, GeminiLLM)
+        assert g_invalid.config.thinking_level == "high"
+        mock_warn.assert_called_once()
+        assert "Ignoring unsupported thinking_level 'xhigh' for Gemini" in mock_warn.call_args[0][0]
+
+    with (
+        patch("kesoku.agent.llm.AnthropicVertex", return_value=MagicMock()),
+        patch("kesoku.agent.llm.logger.warning") as mock_warn,
+    ):
+        c_max = get_llm(provider="claude", config=cfg, thinking_level="max")
+        assert isinstance(c_max, ClaudeLLM)
+        assert c_max.config.thinking_level == "max"
+        assert cfg.claude.thinking_level == "medium"
+        mock_warn.assert_not_called()
+
+        c_invalid = get_llm(provider="claude", config=cfg, thinking_level="minimal")
+        assert isinstance(c_invalid, ClaudeLLM)
+        assert c_invalid.config.thinking_level == "medium"
+        mock_warn.assert_called_once()
+        assert "Ignoring unsupported thinking_level 'minimal' for Claude" in mock_warn.call_args[0][0]
+
+
+def test_kesoku_context_get_llm_caching_and_invalidation(tmp_path: Any) -> None:
+    """Verify `KesokuContext.get_llm` caches by key, invalidates on config change, and respects `_llm` injection."""
+    db_path = str(tmp_path / "ctx_cache.db")
+    DatabaseManager(db_path).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=db_path))
+
+    with (
+        patch("google.genai.Client", return_value=MagicMock()),
+        patch("kesoku.agent.llm.AnthropicVertex", return_value=MagicMock()),
+    ):
+        ctx = KesokuContext(config=cfg)
+        llm_a1 = ctx.get_llm(provider="gemini", thinking_level="low")
+        llm_a2 = ctx.get_llm(provider="gemini", thinking_level="low")
+        llm_high = ctx.get_llm(provider="gemini", thinking_level="high")
+        llm_lite = ctx.get_llm(provider="gemini", model_name="gemini-3.5-flash-lite", thinking_level="low")
+        llm_ctx_comp = ctx.get_llm(provider="gemini", use_context_compression=True, thinking_level="low")
+
+        assert llm_a1 is llm_a2
+        assert llm_a1 is not llm_high
+        assert llm_a1 is not llm_lite
+        assert llm_a1 is not llm_ctx_comp
+
+        # Config reload invalidates cached instances
+        cfg2 = KesokuConfig(workspace=WorkspaceConfig(db_path=db_path))
+        ctx._config = cfg2
+        llm_after_reload = ctx.get_llm(provider="gemini", thinking_level="low")
+        assert llm_after_reload is not llm_a1
+
+        # Injected `_llm` short-circuits default lookups, while explicit overrides still resolve dynamically
+        injected = MockLLM(mock_response="injected")
+        ctx_inj = KesokuContext(config=cfg, llm=injected)
+        assert ctx_inj.get_llm() is injected
+        assert ctx_inj.get_llm(use_context_compression=True) is injected
+        override_llm = ctx_inj.get_llm(thinking_level="low")
+        assert override_llm is not injected
+        assert isinstance(override_llm, GeminiLLM)
+
+
+@pytest.mark.asyncio
+async def test_gemini_llm_streaming_parity_and_edge_cases() -> None:
+    """Verify GeminiLLM streaming emits text-only deltas, guards None chunks, and matches non-streaming parse."""
+    sig_bytes = b"\x01\x02\x03\x04"
+    part_thought = types.Part.from_text(text="Thinking step...")
+    part_thought.thought = True
+    part_text_1 = types.Part.from_text(text="Hello")
+    part_text_2 = types.Part.from_text(text=" world!")
+    part_fc = types.Part.from_function_call(name="search", args={"q": "kesoku"})
+    part_fc.thought_signature = sig_bytes
+    part_empty_sig = types.Part.from_text(text="")
+    part_empty_sig.thought_signature = sig_bytes
+
+    partial_usage = types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=12,
+        candidates_token_count=2,
+        total_token_count=14,
+    )
+    final_usage = types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=12,
+        candidates_token_count=9,
+        total_token_count=21,
+        cached_content_token_count=4,
+    )
+
+    chunks = [
+        # Chunk 0: candidates=None (e.g. initial metadata/feedback chunk)
+        types.GenerateContentResponse.model_construct(candidates=None, usage_metadata=None, prompt_feedback=None),
+        # Chunk 1: thought part + partial usage (must NOT trigger stream callback)
+        types.GenerateContentResponse.model_construct(
+            candidates=[
+                types.Candidate.model_construct(
+                    content=types.Content.model_construct(role="model", parts=[part_thought]),
+                    finish_reason=None,
+                )
+            ],
+            usage_metadata=partial_usage,
+        ),
+        # Chunk 2 & 3: text deltas
+        types.GenerateContentResponse.model_construct(
+            candidates=[
+                types.Candidate.model_construct(
+                    content=types.Content.model_construct(role="model", parts=[part_text_1]),
+                    finish_reason=None,
+                )
+            ],
+            usage_metadata=None,
+        ),
+        types.GenerateContentResponse.model_construct(
+            candidates=[
+                types.Candidate.model_construct(
+                    content=types.Content.model_construct(role="model", parts=[part_text_2, part_fc, part_empty_sig]),
+                    finish_reason=types.FinishReason.STOP,
+                )
+            ],
+            usage_metadata=None,
+        ),
+        # Chunk 4: content.parts=None with final usage metadata
+        types.GenerateContentResponse.model_construct(
+            candidates=[
+                types.Candidate.model_construct(
+                    content=types.Content.model_construct(role="model", parts=None),
+                    finish_reason=types.FinishReason.STOP,
+                )
+            ],
+            usage_metadata=final_usage,
+        ),
+    ]
+
+    non_stream_raw = types.GenerateContentResponse.model_construct(
+        candidates=[
+            types.Candidate.model_construct(
+                content=types.Content.model_construct(
+                    role="model",
+                    parts=[part_thought, part_text_1, part_text_2, part_fc, part_empty_sig],
+                ),
+                finish_reason=types.FinishReason.STOP,
+            )
+        ],
+        usage_metadata=final_usage,
+    )
+
+    mock_client = MagicMock()
+    mock_client.models.generate_content_stream.side_effect = lambda **_: iter(chunks)
+    mock_client.models.generate_content.return_value = non_stream_raw
+
+    seen_deltas: list[tuple[str, str]] = []
+
+    async def on_chunk(delta: str, accumulated: str) -> None:
+        seen_deltas.append((delta, accumulated))
+        if delta == "Hello":
+            raise RuntimeError("callback failure must not abort stream")
+
+    with patch("google.genai.Client", return_value=mock_client):
+        gemini = GeminiLLM()
+        stream_res = await gemini.generate(prompt="Hi", stream=True, on_stream_chunk=on_chunk)
+        non_stream_res = await gemini.generate(prompt="Hi", stream=False)
+
+    mock_client.models.generate_content_stream.assert_called_once()
+    mock_client.models.generate_content.assert_called_once()
+
+    # Thoughts and empty-text signature parts were excluded from callback deltas
+    assert seen_deltas == [
+        ("Hello", "Hello"),
+        (" world!", "Hello world!"),
+    ]
+    assert stream_res.content == non_stream_res.content == "Hello world!"
+    assert stream_res.thought == non_stream_res.thought == "Thinking step..."
+    assert stream_res.tool_calls == non_stream_res.tool_calls
+    assert len(stream_res.tool_calls) == 1
+    assert stream_res.tool_calls[0].thought_signature == sig_bytes.hex()
+    assert stream_res.prompt_tokens == non_stream_res.prompt_tokens == 12
+    assert stream_res.candidates_tokens == non_stream_res.candidates_tokens == 9
+    assert stream_res.total_tokens == non_stream_res.total_tokens == 21
+    assert stream_res.cached_tokens == non_stream_res.cached_tokens == 4
+    assert stream_res.finish_reason == non_stream_res.finish_reason == "STOP"
+
+
+@pytest.mark.asyncio
+async def test_claude_llm_streaming_and_callback_resilience() -> None:
+    """Verify ClaudeLLM streaming yields text deltas via `messages.stream` and parses the final Message."""
+    final_msg = MagicMock()
+    thinking_block = MagicMock(type="thinking", thinking="Claude reasoning", signature="sig-c")
+    text_block = MagicMock(type="text", text="Bonjour le monde!")
+    tool_block = MagicMock(type="tool_use", id="toolu_1", input={"x": 1})
+    tool_block.name = "calc"
+    final_msg.content = [thinking_block, text_block, tool_block]
+    final_msg.usage.input_tokens = 15
+    final_msg.usage.output_tokens = 8
+    final_msg.usage.cache_read_input_tokens = 0
+    final_msg.usage.cache_creation_input_tokens = 0
+
+    events = [
+        SimpleNamespace(type="thinking", thinking="Claude reasoning"),
+        SimpleNamespace(type="text", text="Bonjour", snapshot="Bonjour"),
+        SimpleNamespace(type="text", text=" le monde!", snapshot="Bonjour le monde!"),
+    ]
+
+    class _FakeStreamCtx:
+        def __enter__(self) -> "_FakeStreamCtx":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            return False
+
+        def __iter__(self) -> Any:
+            return iter(events)
+
+        def get_final_message(self) -> Any:
+            return final_msg
+
+    mock_client = MagicMock()
+    mock_client.messages.stream.return_value = _FakeStreamCtx()
+    mock_client.messages.create.return_value = final_msg
+
+    seen: list[tuple[str, str]] = []
+
+    async def flaky_cb(delta: str, accumulated: str) -> None:
+        seen.append((delta, accumulated))
+        if delta == "Bonjour":
+            raise ValueError("ignored callback error")
+
+    with patch("kesoku.agent.llm.AnthropicVertex", return_value=mock_client):
+        claude = ClaudeLLM(config=ClaudeConfig())
+        stream_res = await claude.generate(prompt="Salut", stream=True, on_stream_chunk=flaky_cb)
+        non_stream_res = await claude.generate(prompt="Salut", stream=False)
+
+    mock_client.messages.stream.assert_called_once()
+    mock_client.messages.create.assert_called_once()
+    assert seen == [
+        ("Bonjour", "Bonjour"),
+        (" le monde!", "Bonjour le monde!"),
+    ]
+    assert stream_res.content == non_stream_res.content == "Bonjour le monde!"
+    assert stream_res.thought == non_stream_res.thought == "Claude reasoning"
+    assert stream_res.thought_signature == non_stream_res.thought_signature == "sig-c"
+    assert stream_res.tool_calls == non_stream_res.tool_calls
+    assert stream_res.total_tokens == non_stream_res.total_tokens == 23
+
 

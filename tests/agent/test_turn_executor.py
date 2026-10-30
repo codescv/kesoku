@@ -1,5 +1,6 @@
 """Unit tests for TurnExecutor class."""
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Any
@@ -7,16 +8,17 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
-from kesoku.agent.llm import BaseLLM, LLMResponse, ToolCallRequest
+from kesoku.agent.llm import BaseLLM, LLMResponse, MockLLM, ToolCallRequest
 from kesoku.agent.turn_executor import (
     EMPTY_RESPONSE_RETRIES,
     TurnExecutor,
+    _StreamPreviewPublisher,
     extract_question_options,
     is_clicked_option,
     sanitize_rag_snippet_line,
 )
 from kesoku.agent.turn_logger import TurnLogger
-from kesoku.config import KesokuConfig, WorkspaceConfig
+from kesoku.config import DiscordChannelOverride, GeminiConfig, KesokuConfig, WorkspaceConfig
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.context import KesokuContext
 from kesoku.db import DatabaseManager, Message
@@ -784,16 +786,16 @@ async def test_turn_executor_user_context_injection(temp_db: str) -> None:
 
 
 async def test_turn_executor_auto_compaction(temp_db: str) -> None:
-    """Verify that TurnExecutor automatically triggers in-place history compaction when threshold is exceeded."""
+    """Verify scaffold assembly from existing summary nodes and post-turn HistoryCompressor execution."""
     from kesoku.constants import MessageRole
+    from kesoku.db import SummaryNode
 
     DatabaseManager(temp_db).init_tables()
     cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
     gw = Gateway(context=KesokuContext(config=cfg))
     await gw.create_session("sess_auto_compact", title="Auto Compact Session")
 
-    # Create a history with 3 turns (User -> Assistant -> User -> Assistant -> User)
-    # Note: user prompts must be marked PROCESSED so they are completed turns
+    # Turn 1 (uncompressed, protected by protect_front_turns=1)
     msg1 = Message(
         session_id="sess_auto_compact",
         chatbot_id="cli",
@@ -802,7 +804,7 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
         role=MessageRole.USER,
         content="Turn 1 user",
         status="processed",
-        timestamp=time.time() - 100,
+        timestamp=time.time() - 120,
     )
     await gw.post(msg1)
     msg2 = Message(
@@ -813,10 +815,49 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
         role=MessageRole.ASSISTANT,
         content="Turn 1 reply",
         status="delivered",
-        timestamp=time.time() - 90,
+        timestamp=time.time() - 110,
     )
     await gw.post(msg2)
 
+    # Previously compacted middle turn (compacted at the end of an earlier turn)
+    msg_comp_u = Message(
+        session_id="sess_auto_compact",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="Compacted turn user",
+        status="processed",
+        timestamp=time.time() - 100,
+    )
+    await gw.post(msg_comp_u)
+    msg_comp_a = Message(
+        session_id="sess_auto_compact",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="Compacted turn reply",
+        status="delivered",
+        timestamp=time.time() - 95,
+    )
+    await gw.post(msg_comp_a)
+
+    node = SummaryNode(
+        id="node-1-uuid",
+        session_id="sess_auto_compact",
+        level=0,
+        summary="Simulated summary node content",
+        start_timestamp=time.time() - 100,
+        end_timestamp=time.time() - 95,
+        token_count=10,
+        source_token_count=100,
+        parent_id=None,
+    )
+    await gw.db.insert_summary_node(node)
+    await gw.db.update_messages_summary_node([msg_comp_u.id, msg_comp_a.id], "node-1-uuid")
+
+    # Uncompressed recent Turn 2 + active Turn 3
     msg3 = Message(
         session_id="sess_auto_compact",
         chatbot_id="cli",
@@ -852,7 +893,6 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
     )
     await gw.post(active_msg)
 
-    # Mock LLM
     class CompactLLM(BaseLLM):
         context_window_limit: int = 1000
 
@@ -872,27 +912,23 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
     tool_runner.tool_registry.get_tools_list.return_value = []
     turn_logger = MagicMock(spec=TurnLogger)
 
-    # Mock only the HistoryCompressor.auto_compact_session method
-    from kesoku.db import SummaryNode
+    compact_call_state: dict[str, Any] = {}
 
-    async def mock_auto_compact(session_id, history, llm, config, *args, **kwargs):
-        node = SummaryNode(
-            id="node-1-uuid",
-            session_id=session_id,
-            level=0,
-            summary="Simulated summary node content",
-            start_timestamp=time.time() - 100,
-            end_timestamp=time.time() - 70,
-            token_count=10,
-            source_token_count=100,
-            parent_id=None,
+    async def mock_auto_compact(
+        session_id: str, history: list[Message], llm: Any, config: Any, *args: Any, **kwargs: Any
+    ) -> bool:
+        db_at_call = await gw.db.get_session_history(session_id, limit=0)
+        compact_call_state["final_already_saved"] = any(
+            m.role == MessageRole.ASSISTANT and m.content == "Final Assistant Turn Response"
+            for m in db_at_call
         )
-        await gw.db.insert_summary_node(node)
-        await gw.db.update_messages_summary_node([msg1.id, msg2.id], "node-1-uuid")
-        return True
+        compact_call_state["has_scaffold"] = any(
+            isinstance(m.metadata, dict) and (m.metadata.get("is_scaffold") or m.metadata.get("is_scaffold_ack"))
+            for m in history
+        )
+        return False
 
     context = KesokuContext(config=cfg, llm=llm)
-
     executor = TurnExecutor("sess_auto_compact", gw, tool_runner, turn_logger, context=context)
 
     cfg.agent.protect_front_turns = 1
@@ -920,8 +956,10 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
             session_staging_dir="/tmp/sess_auto_compact",
         )
 
-    # Assertions: Verify that the HistoryCompressor was called
-    mock_compact.assert_called_once()
+    # Post-turn compaction ran once AFTER final assistant response was persisted, with raw non-scaffold history
+    mock_compact.assert_awaited_once()
+    assert compact_call_state["final_already_saved"] is True
+    assert compact_call_state["has_scaffold"] is False
 
     # Reconstructed messages verify they match our custom turn-based structure
     assert len(llm.captured_history) == 7
@@ -950,6 +988,8 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
     db_ids = [m.id for m in db_history]
     assert msg1.id in db_ids
     assert msg2.id in db_ids
+    assert msg_comp_u.id in db_ids
+    assert msg_comp_a.id in db_ids
     assert msg3.id in db_ids
     assert msg4.id in db_ids
     assert active_msg.id in db_ids
@@ -957,26 +997,24 @@ async def test_turn_executor_auto_compaction(temp_db: str) -> None:
 
 @pytest.mark.asyncio
 async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> None:
-    """Verify context cache deletion and correct generate request when compaction occurs."""
-    from kesoku.constants import MessageRole
+    """Verify explicit context cache is reused across tool iterations, then deleted post-turn when compaction occurs."""
+    from kesoku.config import GeminiConfig
+    from kesoku.constants import MessageRole, MessageType
+    from kesoku.db import SummaryNode
 
     DatabaseManager(temp_db).init_tables()
-
-    # Configure Gemini and Context Caching
-    from kesoku.config import GeminiConfig
 
     cfg = KesokuConfig(
         workspace=WorkspaceConfig(db_path=temp_db),
         gemini=GeminiConfig(
             context_caching=True,
-            context_caching_threshold=100,  # small threshold to trigger caching
+            context_caching_threshold=100,
         ),
     )
 
     gw = Gateway(context=KesokuContext(config=cfg))
     await gw.create_session("sess_cache_compact", title="Cache and Compact")
 
-    # Post some messages to exceed threshold
     msg1 = Message(
         session_id="sess_cache_compact",
         chatbot_id="cli",
@@ -984,7 +1022,7 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
         sender="u1",
         role=MessageRole.USER,
         content="User message 1 that is quite long to accumulate tokens for caching " * 10,
-        status="pending",
+        status="processed",
         timestamp=time.time() - 10,
     )
     await gw.post(msg1)
@@ -996,7 +1034,7 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
         sender="Kesoku",
         role=MessageRole.ASSISTANT,
         content="Assistant response 1 that is also quite long " * 10,
-        status="pending",
+        status="delivered",
         timestamp=time.time() - 5,
     )
     await gw.post(msg2)
@@ -1013,17 +1051,13 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
     )
     await gw.post(active_msg)
 
-    token_count_to_return = 150
-
-    # Mock GeminiLLM to capture create_cache, delete_cache, and generate calls
     class GeminiLLM(BaseLLM):
         context_window_limit: int = 1000
 
         def __init__(self) -> None:
-            self.created_caches = []
-            self.deleted_caches = []
-            self.captured_generates = []
-            self.token_calls = 0
+            self.created_caches: list[dict[str, Any]] = []
+            self.deleted_caches: list[str] = []
+            self.captured_generates: list[dict[str, Any]] = []
 
         def count_tokens(
             self,
@@ -1032,10 +1066,7 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
             history: list[Message] | None = None,
             tools: list[Any] | None = None,
         ) -> int:
-            if len(self.captured_generates) == 0:
-                return 150
-            else:
-                return 50
+            return 150 if len(self.created_caches) == 0 else 50
 
         async def create_cache(
             self,
@@ -1078,7 +1109,6 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
                 }
             )
 
-            # 1st call (during 1st iteration): return tool call
             if len(self.captured_generates) == 1:
                 return LLMResponse(
                     content="I need to call a tool",
@@ -1091,16 +1121,13 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
                     ],
                     total_tokens=10,
                 )
-            # 2nd call (during 2nd iteration): return final text
-            else:
-                return LLMResponse(content="Final response after tool execution", total_tokens=10)
+            return LLMResponse(content="Final response after tool execution", total_tokens=10)
 
     llm = GeminiLLM()
     tool_runner = MagicMock()
     tool_runner.tool_registry.get_tools_list.return_value = ["dummy_tool"]
 
-    # Mock tool execution: returns a Message representing the tool output
-    async def mock_execute_tool(call, tc_msg, **kwargs):
+    async def mock_execute_tool(call: Any, tc_msg: Message, **kwargs: Any) -> Message:
         return Message(
             id=f"tool_res_{time.time()}",
             session_id=tc_msg.session_id,
@@ -1108,7 +1135,7 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
             channel_id=tc_msg.channel_id,
             sender="System",
             role=MessageRole.TOOL,
-            type=MessageType.TEXT,
+            type=MessageType.TOOL_RESULT,
             content="Tool output content",
             status="responded",
             parent_id=tc_msg.id,
@@ -1119,57 +1146,35 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
     tool_runner.tool_context.transitioned_to_session = None
 
     turn_logger = MagicMock(spec=TurnLogger)
-
-    # Mock only the HistoryCompressor.auto_compact_session method
-    from kesoku.db import SummaryNode
-
     compaction_calls = 0
 
-    async def mock_auto_compact(session_id, history, llm, config, *args, **kwargs):
+    async def mock_auto_compact(
+        session_id: str, history: list[Message], llm: Any, config: Any, *args: Any, **kwargs: Any
+    ) -> bool:
         nonlocal compaction_calls
         compaction_calls += 1
-        if compaction_calls == 1:
-            # First call: compact Turn 1 into a summary node
-            node = SummaryNode(
-                id="node-1-uuid",
-                session_id=session_id,
-                level=0,
-                summary="Compacted user query",
-                start_timestamp=time.time() - 100,
-                end_timestamp=time.time() - 70,
-                token_count=10,
-                source_token_count=100,
-                parent_id=None,
-            )
-            await gw.db.insert_summary_node(node)
-            await gw.db.update_messages_summary_node([msg1.id, msg2.id], "node-1-uuid")
-            return True
-        else:
-            # Second call: compact the tool messages too!
-            node2 = SummaryNode(
-                id="node-2-uuid",
-                session_id=session_id,
-                level=0,
-                summary="Compacted tool result",
-                start_timestamp=time.time() - 100,
-                end_timestamp=time.time(),
-                token_count=15,
-                source_token_count=150,
-                parent_id=None,
-            )
-            await gw.db.insert_summary_node(node2)
-            # Find the new tool messages and mark them compacted
-            tool_msgs = await gw.db.get_session_history(session_id, limit=0)
-            uncompacted_ids = [m.id for m in tool_msgs if m.summary_node_id is None]
-            await gw.db.update_messages_summary_node(uncompacted_ids, "node-2-uuid")
-            return True
+        node = SummaryNode(
+            id="node-1-uuid",
+            session_id=session_id,
+            level=0,
+            summary="Compacted user query",
+            start_timestamp=time.time() - 100,
+            end_timestamp=time.time() - 70,
+            token_count=10,
+            source_token_count=100,
+            parent_id=None,
+        )
+        await gw.db.insert_summary_node(node)
+        await gw.db.update_messages_summary_node([msg1.id, msg2.id], "node-1-uuid")
+        return True
 
     context = KesokuContext(config=cfg, llm=llm)
-
     executor = TurnExecutor("sess_cache_compact", gw, tool_runner, turn_logger, context=context)
 
-    # Set up worker to run exactly two iterations of the loop (1st turn, 2nd turn)
     worker = MagicMock()
+    worker.active_cache_name = None
+    worker.active_cache_llm = None
+    worker.cached_messages_len = 0
     type(worker).running = PropertyMock(side_effect=[True, True, False])
 
     async def mock_pivot(m: Message) -> Message:
@@ -1178,11 +1183,6 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
     worker.drain_queue_and_pivot.side_effect = mock_pivot
     worker.queue_empty.return_value = True
 
-    from kesoku.constants import MessageType
-
-    # Run the turn! It will run 2 iterations because the first iteration returns a tool call
-    # which tells process_turn to "continue" the loop. The second iteration returns a final text,
-    # which breaks the loop, exiting process_turn.
     with (
         patch("kesoku.context.get_config", return_value=cfg),
         patch(
@@ -1196,50 +1196,52 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
             session_staging_dir="/tmp/sess_cache_compact",
         )
 
-    # ASSERTIONS:
-    # 1. During the first iteration:
-    # - A context cache was successfully created for the prefix of compacted history.
-    # - active_cache_name was set to "mock_cache_0" with cached_messages_len=2
-    #   (system prompt + scaffold prefix messages).
+    # Cache created once on iteration 1 and reused across iteration 2 (no mid-turn compaction!)
     assert len(llm.created_caches) == 1
     assert llm.created_caches[0]["name"] == "mock_cache_0"
-
-    # 2. During the second iteration:
-    # - Compaction ran again (but returned False).
-    # - Obsolete cache "mock_cache_0" was deleted because history length/content changed.
-    # - No new cache was created (since token_count returned 50 < 100).
-    assert len(llm.deleted_caches) == 1
-    assert llm.deleted_caches[0] == "mock_cache_0"
-    assert len(llm.created_caches) == 1  # still only 1 cache from turn 1
-
-    # 3. Captured generates checks:
     assert len(llm.captured_generates) == 2
+    assert llm.captured_generates[0]["cached_content"] == "mock_cache_0"
+    assert llm.captured_generates[0]["tools"] is None
+    assert llm.captured_generates[1]["cached_content"] == "mock_cache_0"
 
-    # - 1st Generate:
-    gen_call_1 = llm.captured_generates[0]
-    assert gen_call_1["cached_content"] == "mock_cache_0"
-    assert "Agent Working Directory" in gen_call_1["system_prompt"]
-    assert gen_call_1["tools"] is None
-    assert len(gen_call_1["history"]) == 1
-    assert gen_call_1["history"][0].role == MessageRole.USER
-    assert "Active user query" in gen_call_1["history"][0].content
+    # Post-turn compaction ran once after final response, invalidated cache, and reset worker cache fields
+    mock_compact.assert_awaited_once()
+    assert compaction_calls == 1
+    assert llm.deleted_caches == ["mock_cache_0"]
+    assert worker.active_cache_name is None
+    assert worker.active_cache_llm is None
+    assert worker.cached_messages_len == 0
 
-    # - 2nd Generate:
-    gen_call_2 = llm.captured_generates[1]
-    assert gen_call_2["cached_content"] is None
-    assert "Agent Working Directory" in gen_call_2["system_prompt"]
-    assert gen_call_2["tools"] == ["dummy_tool"]
-    # history has: Scaffold (1) + Ack (1) + Turn 3 (active turn with tool call/response) (5). Turn 1 carries a
-    # summary_node_id, so it is represented only by the scaffold, never verbatim (even inside the protected head).
-    assert len(gen_call_2["history"]) == 7
-    assert not any(m.content == "User message 1" for m in gen_call_2["history"])
-    assert gen_call_2["history"][0].role == MessageRole.USER
-    assert "[Note: This conversation uses custom turn-based" in gen_call_2["history"][0].content
-    assert "Compacted user query" in gen_call_2["history"][0].content
-    assert gen_call_2["history"][3].role == MessageRole.ASSISTANT
-    assert "I need to call a tool" in gen_call_2["history"][3].content
-    assert gen_call_2["history"][5].role == MessageRole.TOOL
-    assert "Tool output content" in gen_call_2["history"][5].content
+    # Follow-up turn sees the newly compacted scaffold without obsolete cache
+    followup_msg = Message(
+        session_id="sess_cache_compact",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="Follow-up query",
+        status="pending_agent",
+        timestamp=time.time() + 1,
+    )
+    await gw.post(followup_msg)
+    executor2 = TurnExecutor("sess_cache_compact", gw, tool_runner, turn_logger, context=context)
+    type(worker).running = PropertyMock(side_effect=[True, False])
+    with (
+        patch("kesoku.context.get_config", return_value=cfg),
+        patch("kesoku.agent.compressor.HistoryCompressor.auto_compact_session", return_value=False),
+    ):
+        await executor2.process_turn(
+            current_msg=followup_msg,
+            worker=worker,
+            session_staging_dir="/tmp/sess_cache_compact",
+        )
+
+    gen_call_3 = llm.captured_generates[2]
+    assert gen_call_3["cached_content"] is None
+    assert gen_call_3["history"][0].role == MessageRole.USER
+    assert "[Note: This conversation uses custom turn-based" in gen_call_3["history"][0].content
+    assert "Compacted user query" in gen_call_3["history"][0].content
+    assert not any(m.id in (msg1.id, msg2.id) for m in gen_call_3["history"])
 
 
 @pytest.mark.asyncio
@@ -1551,36 +1553,39 @@ async def test_turn_executor_auto_compaction_buffer_exclusion(temp_db: str) -> N
     tool_runner.tool_registry.get_tools_list.return_value = []
     turn_logger = MagicMock(spec=TurnLogger)
 
-    # Mock auto compact to compress Turn 2 (middle turn) only!
+    # Pre-insert Turn 2 summary node (compacted post-turn at the end of Turn 2)
     from kesoku.db import SummaryNode
 
-    async def mock_auto_compact(session_id, history, llm, config, *args, **kwargs):
-        node = SummaryNode(
-            id="node-2-uuid",
-            session_id=session_id,
-            level=0,
-            summary="Turn 2 summary content",
-            start_timestamp=time.time() - 80,
-            end_timestamp=time.time() - 70,
-            token_count=10,
-            source_token_count=100,
-            parent_id=None,
+    node = SummaryNode(
+        id="node-2-uuid",
+        session_id="sess_exclude",
+        level=0,
+        summary="Turn 2 summary content",
+        start_timestamp=time.time() - 80,
+        end_timestamp=time.time() - 70,
+        token_count=10,
+        source_token_count=100,
+        parent_id=None,
+    )
+    await gw.db.insert_summary_node(node)
+    await gw.db.update_messages_summary_node([msg3.id, msg4.id], "node-2-uuid")
+
+    seen_scaffold_in_compactor = False
+
+    async def mock_auto_compact(
+        session_id: str, history: list[Message], llm: Any, config: Any, *args: Any, **kwargs: Any
+    ) -> bool:
+        nonlocal seen_scaffold_in_compactor
+        seen_scaffold_in_compactor = any(
+            isinstance(m.metadata, dict) and (m.metadata.get("is_scaffold") or m.metadata.get("is_scaffold_ack"))
+            for m in history
         )
-        await gw.db.insert_summary_node(node)
-        await gw.db.update_messages_summary_node([msg3.id, msg4.id], "node-2-uuid")
-        # Update the memory message objects in history to match the database update
-        for msg in history:
-            if msg.id in (msg3.id, msg4.id):
-                msg.summary_node_id = "node-2-uuid"
-        return True
+        return False
 
     context = KesokuContext(config=cfg, llm=llm)
     executor = TurnExecutor("sess_exclude", gw, tool_runner, turn_logger, context=context)
 
-    # Set parameters:
-    # protect_front = 1 (protects Turn 1)
-    # protect_tail = 1 (protects Turn 3 active)
-    # This leaves Turn 2 as middle/buffer candidate!
+    # protect_front = 1 (protects Turn 1), protect_tail = 1 (protects Turn 3 active)
     cfg.agent.protect_front_turns = 1
     cfg.agent.protect_tail_turns = 1
 
@@ -1606,7 +1611,8 @@ async def test_turn_executor_auto_compaction_buffer_exclusion(temp_db: str) -> N
             session_staging_dir="/tmp/sess_exclude",
         )
 
-    mock_compact.assert_called_once()
+    mock_compact.assert_awaited_once()
+    assert seen_scaffold_in_compactor is False
 
     # Reconstructed history must have:
     # 1. Turn 1 (messages 1 and 2)
@@ -2355,3 +2361,359 @@ def test_sanitize_rag_snippet_line_collapses_ui_block() -> None:
     """Retrieved snippets lose ```ui options and fences, keeping only the plain prompt."""
     out = sanitize_rag_snippet_line("Agent", UI_REPLY)
     assert out == "好的。\n去哪？"
+
+
+@pytest.mark.asyncio
+async def test_post_turn_compaction_safety_net_on_queue_or_failure(temp_db: str) -> None:
+    """Verify `_compaction_pending` triggers pre-turn compaction on the next turn after skip or failure."""
+    from kesoku.constants import MessageRole
+
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.create_session("sess_fallback", title="Fallback Compaction")
+
+    msg1 = Message(
+        session_id="sess_fallback",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="Hello 1",
+        status="pending_agent",
+        timestamp=time.time() - 10,
+    )
+    await gw.post(msg1)
+
+    events: list[str] = []
+
+    class OrderLLM(BaseLLM):
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+            cached_content: str | None = None,
+        ) -> LLMResponse:
+            events.append("generate")
+            return LLMResponse(content="Answer", total_tokens=5)
+
+    llm = OrderLLM()
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    context = KesokuContext(config=cfg, llm=llm)
+
+    worker = MagicMock()
+    type(worker).running = PropertyMock(side_effect=[True, False])
+
+    async def mock_pivot(m: Message) -> Message:
+        return m
+
+    worker.drain_queue_and_pivot.side_effect = mock_pivot
+    # Non-empty queue at turn end -> skip post-turn compaction and set `_compaction_pending`
+    worker.queue_empty.return_value = False
+
+    exec1 = TurnExecutor("sess_fallback", gw, tool_runner, None, context=context)
+    with patch(
+        "kesoku.agent.compressor.HistoryCompressor.auto_compact_session",
+        new_callable=AsyncMock,
+    ) as mock_compact_1:
+        await exec1.process_turn(msg1, worker, "/tmp/sess_fallback")
+        mock_compact_1.assert_not_awaited()
+        assert worker._compaction_pending is True
+
+    # Next turn on a fresh TurnExecutor sharing `worker`: runs pre-turn compaction BEFORE `generate`,
+    # then post-turn compaction raises -> turn still succeeds and sets `_compaction_pending` again!
+    msg2 = Message(
+        session_id="sess_fallback",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="Hello 2",
+        status="pending_agent",
+        timestamp=time.time(),
+    )
+    await gw.post(msg2)
+    worker.queue_empty.return_value = True
+    type(worker).running = PropertyMock(side_effect=[True, False])
+
+    call_idx = 0
+
+    async def compact_side_effect(*args: Any, **kwargs: Any) -> bool:
+        nonlocal call_idx
+        call_idx += 1
+        if call_idx == 1:
+            events.append("pre_compact")
+            return False
+        events.append("post_compact_fail")
+        raise RuntimeError("transient compaction failure")
+
+    exec2 = TurnExecutor("sess_fallback", gw, tool_runner, None, context=context)
+    with patch(
+        "kesoku.agent.compressor.HistoryCompressor.auto_compact_session",
+        side_effect=compact_side_effect,
+    ):
+        await exec2.process_turn(msg2, worker, "/tmp/sess_fallback")
+
+    assert events == ["generate", "pre_compact", "generate", "post_compact_fail"]
+    assert worker._compaction_pending is True
+
+
+def test_resolve_channel_override_llm_and_stream_precedence(temp_db: str) -> None:
+    """Verify `_resolve_channel_override`, `_resolve_llm` minimal kwargs, and `_resolve_stream` precedence."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(
+        workspace=WorkspaceConfig(db_path=temp_db),
+        gemini=GeminiConfig(stream=False),
+    )
+    cfg.discord.channels = [
+        DiscordChannelOverride(channels=["stream-only"], stream=True),
+        DiscordChannelOverride(channels=["think-only"], thinking_level="low"),
+        DiscordChannelOverride(
+            channels=["lite"],
+            llm="gemini",
+            model_name="gemini-3.5-flash-lite",
+            thinking_level="low",
+            stream=False,
+        ),
+    ]
+    ctx = KesokuContext(config=cfg)
+    gw = Gateway(context=ctx)
+    executor = TurnExecutor("sess_res", gw, MagicMock(), None, context=ctx)
+
+    # Thread inheriting from parent_channel_name="stream-only" even when override.llm is None
+    msg_stream_thread = Message(
+        session_id="sess_res",
+        chatbot_id="discord",
+        channel_id="thread-999",
+        sender="u1",
+        role="user",
+        content="hi",
+        metadata={"channel_name": "topic", "parent_channel_name": "stream-only"},
+    )
+    ov = executor._resolve_channel_override(msg_stream_thread)
+    assert ov is not None and ov.channels == ["stream-only"]
+
+    # Without registered stream handler on Gateway, `_resolve_stream` returns False even if override.stream=True
+    dummy_llm = MagicMock()
+    dummy_llm.config = GeminiConfig(stream=True)
+    assert executor._resolve_stream(msg_stream_thread, dummy_llm) is False
+
+    # Register Discord stream handler; CLI still has no handler
+    gw.register_stream_handler("discord", AsyncMock())
+    assert executor._resolve_stream(msg_stream_thread, MagicMock(config=GeminiConfig(stream=False))) is True
+
+    msg_cli = Message(
+        session_id="sess_res",
+        chatbot_id="cli",
+        channel_id="ch",
+        sender="u1",
+        role="user",
+        content="hi",
+    )
+    assert executor._resolve_stream(msg_cli, dummy_llm) is False
+
+    # Override stream=False beats provider stream=True
+    msg_lite = Message(
+        session_id="sess_res",
+        chatbot_id="discord",
+        channel_id="lite",
+        sender="u1",
+        role="user",
+        content="hi",
+    )
+    assert executor._resolve_stream(msg_lite, dummy_llm) is False
+
+    # MockLLM (no .config) defaults to False when override.stream is None
+    msg_think = Message(
+        session_id="sess_res",
+        chatbot_id="discord",
+        channel_id="think-only",
+        sender="u1",
+        role="user",
+        content="hi",
+    )
+    assert executor._resolve_stream(msg_think, MockLLM()) is False
+
+    # `_resolve_llm` passes ONLY non-None override kwargs
+    with patch.object(ctx, "get_llm", return_value=MockLLM()) as mock_get_llm:
+        executor._resolve_llm(msg_stream_thread)
+        mock_get_llm.assert_called_once_with()
+
+        mock_get_llm.reset_mock()
+        executor._resolve_llm(msg_think)
+        mock_get_llm.assert_called_once_with(thinking_level="low")
+
+        mock_get_llm.reset_mock()
+        executor._resolve_llm(msg_lite)
+        mock_get_llm.assert_called_once_with(
+            provider="gemini",
+            model_name="gemini-3.5-flash-lite",
+            thinking_level="low",
+        )
+
+
+@pytest.mark.asyncio
+async def test_stream_preview_publisher_throttling_inflight_and_discard(temp_db: str) -> None:
+    """Verify `_StreamPreviewPublisher` publishes first chunk immediately, throttles, skips while busy, and discards."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    gw = Gateway(context=KesokuContext(config=cfg))
+
+    published: list[str | None] = []
+    block_gate = asyncio.Event()
+    block_gate.set()
+
+    async def handler(channel_id: str, session_id: str, turn_id: str, text: str | None) -> None:
+        await block_gate.wait()
+        published.append(text)
+
+    gw.register_stream_handler("discord", handler)
+
+    now = 100.0
+    pub = _StreamPreviewPublisher(
+        gateway=gw,
+        chatbot_id="discord",
+        channel_id="ch1",
+        session_id="sess1",
+        turn_id="turn1",
+        min_interval=1.5,
+        clock=lambda: now,
+    )
+
+    # First chunk publishes immediately
+    await pub.on_chunk("Hel", "Hel")
+    assert published == ["Hel"]
+
+    # Within 1.5s -> throttled
+    now = 100.8
+    await pub.on_chunk("lo", "Hello")
+    assert published == ["Hel"]
+
+    # Past 1.5s -> publishes; simulate slow Discord 429 backoff on this task
+    block_gate.clear()
+    now = 102.0
+    await pub.on_chunk(" world", "Hello world")
+    # In-flight task hasn't finished yet, and `on_chunk` did NOT block!
+    assert published == ["Hel"]
+
+    # Even past another 1.5s, while in-flight task is still running, chunks are skipped cleanly
+    now = 105.0
+    await pub.on_chunk("!", "Hello world!")
+    assert published == ["Hel"]
+
+    # Unblock slow edit and discard -> finishes in-flight edit first, then sends None once
+    block_gate.set()
+    await pub.discard()
+    await pub.discard()  # Idempotent
+    assert published == ["Hel", "Hello world", None]
+
+
+@pytest.mark.asyncio
+async def test_process_turn_streaming_tool_discard_and_final_thought_metadata(temp_db: str) -> None:
+    """Verify streaming turn discards preview on tool calls and tags only final THOUGHT with `final_response=True`."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    cfg.discord.channels = [DiscordChannelOverride(channels=["flash"], stream=True)]
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.create_session("sess_stream_turn", title="Streaming Turn")
+
+    stream_events: list[str | None] = []
+
+    async def capture_stream(ch: str, sess: str, turn: str, text: str | None) -> None:
+        stream_events.append(text)
+
+    gw.register_stream_handler("discord", capture_stream)
+
+    user_msg = Message(
+        session_id="sess_stream_turn",
+        chatbot_id="discord",
+        channel_id="flash",
+        sender="u1",
+        role=MessageRole.USER,
+        content="Run check",
+        status="pending_agent",
+    )
+    await gw.post(user_msg)
+
+    class StreamingTestLLM(BaseLLM):
+        def __init__(self) -> None:
+            self.call_num = 0
+
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+            cached_content: str | None = None,
+            stream: bool = False,
+            on_stream_chunk: Any = None,
+        ) -> LLMResponse:
+            self.call_num += 1
+            assert stream is True
+            assert on_stream_chunk is not None
+            if self.call_num == 1:
+                await on_stream_chunk("Let me check...", "Let me check...")
+                return LLMResponse(
+                    content="Let me check...",
+                    thought="Tool planning thought",
+                    tool_calls=[ToolCallRequest(name="ping", arguments={}, tool_call_id="tc_1")],
+                    total_tokens=10,
+                )
+            await on_stream_chunk("All good!", "All good!")
+            return LLMResponse(
+                content="All good!",
+                thought="Final synthesis thought",
+                total_tokens=10,
+            )
+
+    llm = StreamingTestLLM()
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+
+    async def exec_tool(call: Any, tc_msg: Message, **kwargs: Any) -> Message:
+        # At tool execution time, the iteration-1 preview must already have been discarded (`None`)
+        assert stream_events == ["Let me check...", None]
+        return Message(
+            session_id=tc_msg.session_id,
+            chatbot_id=tc_msg.chatbot_id,
+            channel_id=tc_msg.channel_id,
+            sender="ping",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content="pong",
+            status="responded",
+            parent_id=tc_msg.id,
+        )
+
+    tool_runner.execute_tool.side_effect = exec_tool
+    tool_runner.tool_context = MagicMock(transitioned_to_session=None)
+
+    ctx = KesokuContext(config=cfg, llm=llm)
+    executor = TurnExecutor("sess_stream_turn", gw, tool_runner, None, context=ctx)
+    worker = MagicMock()
+    type(worker).running = PropertyMock(side_effect=[True, True, False])
+
+    async def mock_pivot(m: Message) -> Message:
+        return m
+
+    worker.drain_queue_and_pivot.side_effect = mock_pivot
+    worker.queue_empty.return_value = True
+
+    with patch("kesoku.agent.compressor.HistoryCompressor.auto_compact_session", return_value=False):
+        await executor.process_turn(user_msg, worker, "/tmp/sess_stream_turn")
+
+    # Iteration 1 published + discarded (`None`); Iteration 2 published final preview without discarding
+    assert stream_events == ["Let me check...", None, "All good!"]
+
+    db_msgs = await gw.db.get_session_history("sess_stream_turn", limit=0)
+    thoughts = [m for m in db_msgs if m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT]
+    assert len(thoughts) == 2
+    assert thoughts[0].content == "Tool planning thought"
+    assert thoughts[0].metadata.get("final_response") is None
+    assert thoughts[1].content == "Final synthesis thought"
+    assert thoughts[1].metadata.get("final_response") is True
+
