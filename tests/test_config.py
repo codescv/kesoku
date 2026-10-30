@@ -5,7 +5,15 @@ from typing import Any
 
 import pytest
 
-from kesoku.config import AgentConfig, KesokuConfig, init_config, load_config
+from kesoku.config import (
+    AgentConfig,
+    ClaudeConfig,
+    DiscordChannelOverride,
+    GeminiConfig,
+    KesokuConfig,
+    init_config,
+    load_config,
+)
 
 
 def test_load_config_file_not_found(tmp_path: Any) -> None:
@@ -318,3 +326,81 @@ def test_example_config_documents_recent_user_message_budget(tmp_path: Any) -> N
     assert "recent_user_message_ceiling_chars = 6000" in text
     cfg = load_config(str(config_path))
     assert cfg.agent.recent_user_messages_total_chars == 12000
+
+
+def test_stream_and_channel_thinking_level_config(tmp_path: Any) -> None:
+    """Verify provider `stream` defaults False and per-channel `thinking_level`/`stream` parse cleanly."""
+    assert GeminiConfig().stream is False
+    assert ClaudeConfig().stream is False
+    default_override = DiscordChannelOverride(channels=["general"])
+    assert default_override.thinking_level is None
+    assert default_override.stream is None
+
+    config_path = tmp_path / "config.toml"
+    toml_content = """
+[workspace]
+db_path = "kesoku.db"
+
+[gemini]
+stream = true
+
+[claude]
+stream = false
+
+[[chatbots.discord]]
+enabled = true
+chatbot_id = "discord"
+bot_token = "tok-primary"
+
+[[chatbots.discord.channels]]
+channels = ["flash"]
+llm = "gemini"
+thinking_level = "low"
+stream = true
+
+[[chatbots.discord.channels]]
+channels = ["lite"]
+llm = "gemini"
+model_name = "gemini-3.5-flash-lite"
+thinking_level = "low"
+stream = true
+
+[[chatbots.discord.channels]]
+channels = ["quiet"]
+stream = false
+
+[[chatbots.discord]]
+enabled = true
+chatbot_id = "discord_secondary"
+bot_token = "tok-secondary"
+"""
+    config_path.write_text(toml_content, encoding="utf-8")
+
+    cfg = load_config(str(config_path))
+    assert cfg.gemini.stream is True
+    assert cfg.claude.stream is False
+
+    primary = cfg.get_discord_config("discord")
+    secondary = cfg.get_discord_config("discord_secondary")
+    assert primary is not None
+    assert secondary is not None
+    assert len(primary.channels) == 3
+    assert len(secondary.channels) == 0
+
+    assert primary.channels[0].channels == ["flash"]
+    assert primary.channels[0].llm == "gemini"
+    assert primary.channels[0].model_name is None
+    assert primary.channels[0].thinking_level == "low"
+    assert primary.channels[0].stream is True
+
+    assert primary.channels[1].channels == ["lite"]
+    assert primary.channels[1].llm == "gemini"
+    assert primary.channels[1].model_name == "gemini-3.5-flash-lite"
+    assert primary.channels[1].thinking_level == "low"
+    assert primary.channels[1].stream is True
+
+    assert primary.channels[2].channels == ["quiet"]
+    assert primary.channels[2].llm is None
+    assert primary.channels[2].thinking_level is None
+    assert primary.channels[2].stream is False
+

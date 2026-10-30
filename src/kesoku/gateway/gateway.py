@@ -8,7 +8,7 @@ import asyncio
 import os
 import shutil
 import time
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 
 from kesoku.agent.prompt import build_sys_prompt
@@ -18,6 +18,8 @@ from kesoku.db import Message, Session
 from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+StreamHandler = Callable[[str, str, str, str | None], Awaitable[None]]
 
 
 class Listener:
@@ -47,9 +49,48 @@ class Gateway:
 
         self.db_path = self.workspace_config.db_path
         self._listeners: set[Listener] = set()
+        self._stream_handlers: dict[str, StreamHandler] = {}
         self.context.sync_db.verify_db()
         self.agent: Any | None = None
         self.cron_manager: Any | None = None
+
+    def register_stream_handler(self, chatbot_id: str, handler: StreamHandler) -> None:
+        """Register an ephemeral streaming preview handler for a chatbot adapter.
+
+        Args:
+            chatbot_id: Unique chatbot identifier (e.g., 'discord').
+            handler: Async callback `(channel_id, session_id, turn_id, text_or_none) -> None`.
+        """
+        self._stream_handlers[chatbot_id] = handler
+
+    def has_stream_handler(self, chatbot_id: str) -> bool:
+        """Return True if a live stream preview handler is registered for `chatbot_id`."""
+        return chatbot_id in self._stream_handlers
+
+    async def publish_stream(
+        self,
+        chatbot_id: str,
+        channel_id: str,
+        session_id: str,
+        turn_id: str,
+        text: str | None,
+    ) -> None:
+        """Forward an ephemeral streaming preview update (or None to discard) to a chatbot handler.
+
+        Args:
+            chatbot_id: Target chatbot identifier.
+            channel_id: Target channel or thread identifier.
+            session_id: Active conversational session identifier.
+            turn_id: Initiating user message ID for the turn.
+            text: Accumulated response text to display, or None to clear any active preview.
+        """
+        handler = self._stream_handlers.get(chatbot_id)
+        if handler is None:
+            return
+        try:
+            await handler(channel_id, session_id, turn_id, text)
+        except Exception as e:
+            logger.warning(f"Stream handler for chatbot '{chatbot_id}' failed (session={session_id}): {e}")
 
     def register_agent(self, agent: Any) -> None:
         """Register an active Agent dispatcher instance.

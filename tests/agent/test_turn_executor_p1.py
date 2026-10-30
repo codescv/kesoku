@@ -137,7 +137,7 @@ async def test_state_snapshot_blocks_frozen_within_a_turn(tmp_path: Path) -> Non
             patch("kesoku.agent.compressor.HistoryCompressor.auto_compact_session", return_value=False), \
             patch("kesoku.agent.turn_executor.render_running_jobs", side_effect=fake_jobs), \
             patch("kesoku.agent.turn_executor.render_staging_artifacts", side_effect=fake_artifacts), \
-            patch.object(TurnExecutor, "_check_and_auto_compact_history", side_effect=_identity):
+            patch.object(TurnExecutor, "_assemble_scaffold_history", side_effect=_identity):
         await executor.process_turn(current_msg=active, worker=_worker(2), session_staging_dir=str(staging))
 
     assert len(llm.histories) == 2
@@ -148,8 +148,8 @@ async def test_state_snapshot_blocks_frozen_within_a_turn(tmp_path: Path) -> Non
     assert calls == {"jobs": 1, "artifacts": 1}
 
 
-async def _identity(history: list[Message], **kwargs: Any) -> tuple[list[Message], bool]:
-    return history, False
+async def _identity(history: list[Message], **kwargs: Any) -> list[Message]:
+    return list(history)
 
 
 @pytest.mark.asyncio

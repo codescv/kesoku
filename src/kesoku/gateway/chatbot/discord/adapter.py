@@ -19,12 +19,14 @@ from kesoku.gateway.chatbot.base import (
     DeliveryAbortedError,
     InboundMessageAttachment,
     InboundMessageDTO,
+    parse_message_content,
 )
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 from kesoku.utils.async_fs import (
     async_exists,
 )
+from kesoku.utils.table import parse_markdown_tables
 from kesoku.utils.text import clean_latex, format_text, render_spoilers
 
 from .command import setup_discord_commands
@@ -44,6 +46,7 @@ logger = setup_logger(__name__)
 
 
 DISCORD_MAX_CONTENT_LENGTH = 2000
+STREAM_PREVIEW_MAX_LENGTH = 1900
 
 TOOL_EMOJI_MAP: dict[str, str] = {
     "run_shell_command": "💻",
@@ -476,6 +479,12 @@ class DiscordChatbot(Chatbot):
         self._turn_special_items: dict[str, list[dict[str, Any]]] = {}
         self._turn_special_msg: dict[str, discord.Message] = {}
         self._details_seq: dict[str, int] = {}
+        self._stream_previews: dict[str, discord.Message] = {}
+        self._stream_preview_texts: dict[str, str] = {}
+        self._stream_preview_channels: dict[str, str] = {}
+        register_stream_fn = getattr(gateway, "register_stream_handler", None)
+        if callable(register_stream_fn):
+            register_stream_fn(self.chatbot_id, self.handle_stream_preview)
 
     def _resolve_channel_override(
         self,
@@ -519,8 +528,103 @@ class DiscordChatbot(Chatbot):
         for task in self._typing_tasks.values():
             task.cancel()
         self._typing_tasks.clear()
+        self._stream_previews.clear()
+        self._stream_preview_texts.clear()
+        self._stream_preview_channels.clear()
         if not self.bot.is_closed():
             asyncio.create_task(self.bot.close())
+
+    def _format_stream_preview(self, text: str) -> str:
+        """Format accumulated streaming text with head-truncation, code-fence auto-close, and cursor."""
+        formatted = self.format_text(text)
+        # Reserve up to 8 characters for ellipsis ("…"), closing fence ("\n```\n"), and cursor (" ▌").
+        max_body = STREAM_PREVIEW_MAX_LENGTH - 8
+        if len(formatted) > max_body:
+            formatted = formatted[:max_body] + "…"
+        if formatted.count("```") % 2 == 1:
+            return f"{formatted}\n```\n▌"
+        return f"{formatted} ▌"
+
+    async def _cleanup_stream_preview(self, session_id: str) -> None:
+        """Pop and delete any active streaming preview message for `session_id` without raising."""
+        preview_msg = self._stream_previews.pop(session_id, None)
+        self._stream_preview_texts.pop(session_id, None)
+        self._stream_preview_channels.pop(session_id, None)
+        if preview_msg is None:
+            return
+        try:
+            await self._call_with_timeout(
+                preview_msg.delete(),
+                error_msg="Timeout deleting stream preview message",
+            )
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to delete stream preview message for session {session_id}: {e}")
+
+    async def handle_stream_preview(
+        self,
+        channel_id: str,
+        session_id: str,
+        turn_id: str,
+        text: str | None,
+    ) -> None:
+        """Create, edit, or delete the ephemeral streaming preview message in Discord.
+
+        Preview messages are intentionally kept separate from `_intermediate_messages` and
+        `_turn_special_msg` so post-delivery cleanup never deletes an edited-in-place final reply.
+        """
+        _ = turn_id
+        if text is None:
+            await self._cleanup_stream_preview(session_id)
+            return
+
+        agent = self.gateway.agent
+        if agent:
+            worker = agent.workers.get(session_id)
+            if worker and not worker.queue_empty():
+                return
+
+        if not text.strip():
+            return
+
+        rendered = self._format_stream_preview(text)
+        if session_id in self._stream_previews:
+            if self._stream_preview_channels.get(session_id) != str(channel_id):
+                await self._cleanup_stream_preview(session_id)
+            else:
+                if self._stream_preview_texts.get(session_id) == rendered:
+                    return
+                preview_msg = self._stream_previews[session_id]
+                try:
+                    await self._call_with_timeout(
+                        preview_msg.edit(content=rendered),
+                        error_msg="Timeout editing stream preview message",
+                    )
+                    self._stream_preview_texts[session_id] = rendered
+                except discord.NotFound:
+                    self._stream_previews.pop(session_id, None)
+                    self._stream_preview_texts.pop(session_id, None)
+                    self._stream_preview_channels.pop(session_id, None)
+                except Exception as e:
+                    logger.warning(f"Failed to edit stream preview in channel {channel_id}: {e}")
+                return
+
+        try:
+            channel = await self._get_discord_channel(channel_id)
+            if not channel:
+                return
+            sent_msg = await self._call_with_timeout(
+                channel.send(rendered),
+                error_msg="Timeout sending stream preview message",
+            )
+            self._stream_previews[session_id] = sent_msg
+            self._stream_preview_texts[session_id] = rendered
+            self._stream_preview_channels[session_id] = str(channel_id)
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to send stream preview in channel {channel_id}: {e}")
 
     def format_text(self, text: str) -> str:
         """Clean, normalize, render `<spoiler>` as native `||...||`, and apply LaTeX filter."""
@@ -593,6 +697,7 @@ class DiscordChatbot(Chatbot):
                 is_interrupted = True
 
         if is_interrupted:
+            await self._cleanup_stream_preview(session_id)
             intermediate_msgs = self._intermediate_messages.pop(channel_id, [])
             if intermediate_msgs:
                 for msg in intermediate_msgs:
@@ -800,8 +905,34 @@ class DiscordChatbot(Chatbot):
 
         await self.ingest_message(dto, raw_message=message)
 
+    def _should_discard_preview_before_render(self, message: Message) -> bool:
+        """Return True if an active preview cannot be edited in place for `message`.
+
+        Previews must be deleted and replaced by fresh messages when the target channel changed,
+        when the reply contains rich segments (files, voice, questions, details, or rendered tables),
+        or when there is no non-empty text segment to edit into the preview.
+        """
+        preview_channel = self._stream_preview_channels.get(message.session_id)
+        if preview_channel is not None and preview_channel != str(message.channel_id):
+            return True
+        content = message.content if isinstance(message.content, str) else ""
+        if parse_markdown_tables(content):
+            return True
+        segments = parse_message_content(content)
+        if any(seg.get("type") != "text" for seg in segments):
+            return True
+        return not any(seg.get("type") == "text" and str(seg.get("content", "")).strip() for seg in segments)
+
     async def handle_message(self, message: Message) -> None:
         """Process outgoing message from Gateway and send to target Discord thread."""
+        if (
+            not self.is_intermediate_message(message)
+            and message.role == MessageRole.ASSISTANT
+            and message.type == MessageType.TEXT
+            and message.session_id in self._stream_previews
+            and self._should_discard_preview_before_render(message)
+        ):
+            await self._cleanup_stream_preview(message.session_id)
         await self.render_outgoing_message(message)
     async def _call_with_timeout(self, coro, timeout_duration=15.0, error_msg="Discord API call timed out"):
         """Wrap a coroutine in asyncio.timeout to enforce a timeout."""
@@ -902,6 +1033,16 @@ class DiscordChatbot(Chatbot):
                     f"Skipping intermediate message rendering for session {session_id} due to pending interruption."
                 )
                 return
+
+        msg_meta = getattr(message, "metadata", None)
+        if (
+            message.role == MessageRole.ASSISTANT
+            and message.type == MessageType.THOUGHT
+            and isinstance(msg_meta, dict)
+            and msg_meta.get("final_response") is True
+        ):
+            await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
+            return
 
         if session_id not in self._turn_special_items:
             self._turn_special_items[session_id] = []
@@ -1081,8 +1222,46 @@ class DiscordChatbot(Chatbot):
             return
 
         is_special = self.is_intermediate_message(message)
+        preview_msg: discord.Message | None = None
+        if (
+            not is_special
+            and message.role == MessageRole.ASSISTANT
+            and message.type == MessageType.TEXT
+            and message.session_id in self._stream_previews
+        ):
+            # Pop BEFORE editing so `on_message_delivered` leftover cleanup never deletes the final reply.
+            preview_channel = self._stream_preview_channels.pop(message.session_id, None)
+            self._stream_preview_texts.pop(message.session_id, None)
+            popped_preview = self._stream_previews.pop(message.session_id, None)
+            if popped_preview is not None:
+                if preview_channel is not None and preview_channel != str(channel_id):
+                    try:
+                        await self._call_with_timeout(
+                            popped_preview.delete(),
+                            error_msg="Timeout deleting mismatched stream preview",
+                        )
+                    except discord.NotFound:
+                        pass
+                    except Exception as e:
+                        logger.warning(f"Failed to delete mismatched stream preview: {e}")
+                else:
+                    preview_msg = popped_preview
+
         for chunk in chunks:
             if chunk.strip():
+                if preview_msg is not None:
+                    target_preview = preview_msg
+                    preview_msg = None
+                    try:
+                        await self._call_with_timeout(
+                            target_preview.edit(content=chunk),
+                            error_msg="Timeout replacing stream preview with final text",
+                        )
+                        continue
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to replace stream preview in channel {channel_id}, falling back to send: {e}"
+                        )
                 sent_msg = await self._call_with_timeout(
                     channel.send(chunk),
                     error_msg="Timeout sending text chunk"
@@ -1229,6 +1408,7 @@ class DiscordChatbot(Chatbot):
         """Post-delivery lifecycle callback: clean up typing indicator, intermediate lists, and update metrics."""
         self._details_seq.pop(message.id, None)
         if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT:
+            await self._cleanup_stream_preview(message.session_id)
             task = self._typing_tasks.pop(message.channel_id, None)
             if task:
                 task.cancel()
@@ -1300,6 +1480,7 @@ class DiscordChatbot(Chatbot):
             await super().on_message_delivery_failed(message, exception)
 
         if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT:
+            await self._cleanup_stream_preview(message.session_id)
             task = self._typing_tasks.pop(message.channel_id, None)
             if task:
                 task.cancel()

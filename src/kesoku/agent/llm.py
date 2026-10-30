@@ -10,9 +10,10 @@ import io
 import json
 import os
 import re
+import threading
 import typing
 from abc import ABC
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any, Literal
 
 from anthropic import AnthropicVertex
@@ -29,6 +30,68 @@ from kesoku.logger import setup_logger
 _NON_ASCII_RE = re.compile(r'[^\x00-\x7F]')
 
 logger = setup_logger(__name__)
+
+GEMINI_THINKING_LEVELS: frozenset[str] = frozenset({"minimal", "low", "medium", "high"})
+CLAUDE_THINKING_LEVELS: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
+StreamCallback = Callable[[str, str], Awaitable[None]]
+
+
+async def _drain_blocking_stream(
+    open_stream: Callable[[], Iterator[Any]],
+    on_item: Callable[[Any], Awaitable[None]],
+) -> None:
+    """Iterate a blocking SDK stream in a worker thread while awaiting `on_item` on the event loop.
+
+    Args:
+        open_stream: Zero-arg callable invoked on a worker thread that returns an iterator of stream items.
+        on_item: Async callback awaited on the event loop for each yielded item in order.
+    """
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+    stop_event = threading.Event()
+
+    def _pump() -> None:
+        try:
+            stream_iter = open_stream()
+            try:
+                for item in stream_iter:
+                    if stop_event.is_set():
+                        break
+                    loop.call_soon_threadsafe(queue.put_nowait, ("item", item))
+            finally:
+                close_fn = getattr(stream_iter, "close", None)
+                if callable(close_fn):
+                    try:
+                        close_fn()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            loop.call_soon_threadsafe(queue.put_nowait, ("error", exc))
+        else:
+            loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
+
+    pump_task = asyncio.create_task(asyncio.to_thread(_pump))
+    stream_error: Exception | None = None
+    finished_pump = False
+    try:
+        while True:
+            kind, payload = await queue.get()
+            if kind == "item":
+                await on_item(payload)
+            elif kind == "error":
+                finished_pump = True
+                stream_error = payload
+                break
+            elif kind == "done":
+                finished_pump = True
+                break
+    finally:
+        stop_event.set()
+        if finished_pump:
+            await pump_task
+
+    if stream_error is not None:
+        raise stream_error
 
 
 class ToolCallRequest(BaseModel):
@@ -481,6 +544,8 @@ class BaseLLM(ABC):
         history: list[Message] | None = None,
         tools: list[Callable] | None = None,
         cached_content: str | None = None,
+        stream: bool = False,
+        on_stream_chunk: StreamCallback | None = None,
     ) -> LLMResponse:
         """Generate a response from the LLM given prompt and context.
 
@@ -490,6 +555,8 @@ class BaseLLM(ABC):
             history: Optional list of prior messages in the session.
             tools: Optional list of callable Python tool functions.
             cached_content: Optional identifier for cached context content.
+            stream: Whether to stream tokens via `_call_llm_stream`.
+            on_stream_chunk: Optional async callback receiving `(delta_text, accumulated_text)`.
 
         Returns:
             An LLMResponse containing text and/or requested tool calls.
@@ -501,7 +568,11 @@ class BaseLLM(ABC):
             tools=tools,
             cached_content=cached_content,
         )
-        raw_res = await self._call_llm(native_input)
+        raw_res = await (
+            self._call_llm_stream(native_input, on_stream_chunk)
+            if stream
+            else self._call_llm(native_input)
+        )
         return self._parse_native_response(raw_res)
 
     def _build_native_input(
@@ -517,6 +588,15 @@ class BaseLLM(ABC):
     async def _call_llm(self, native_input: Any) -> Any:
         """Call the underlying LLM client with the native input structures."""
         raise NotImplementedError()
+
+    async def _call_llm_stream(
+        self,
+        native_input: Any,
+        on_stream_chunk: StreamCallback | None = None,
+    ) -> Any:
+        """Stream from the underlying LLM client; defaults to non-streaming `_call_llm`."""
+        _ = on_stream_chunk
+        return await self._call_llm(native_input)
 
     def _parse_native_response(self, raw_response: Any) -> LLMResponse:
         """Translate the provider-native response into a standardized LLMResponse."""
@@ -724,6 +804,99 @@ class GeminiLLM(BaseLLM):
         except Exception as e:
             logger.error(f"GeminiLLM generation failed: {e}")
             raise
+
+    async def _call_llm_stream(
+        self,
+        native_input: dict[str, Any],
+        on_stream_chunk: StreamCallback | None = None,
+    ) -> Any:
+        """Stream a Gemini response, forwarding non-thought text deltas and assembling a synthetic response."""
+        parts: list[Any] = []
+        accumulated = ""
+        saw_candidate = False
+        last_usage: Any = None
+        last_finish_reason: Any = None
+        last_finish_message: Any = None
+        last_safety_ratings: Any = None
+        last_prompt_feedback: Any = None
+
+        def _open_stream() -> Iterator[Any]:
+            logger.info(f"GeminiLLM raw streaming request config: {native_input['config']}")
+            return self.client.models.generate_content_stream(
+                model=self.model_name,
+                contents=native_input["contents"],
+                config=native_input["config"],
+            )
+
+        async def _on_chunk(chunk: Any) -> None:
+            nonlocal accumulated, saw_candidate, last_usage, last_finish_reason
+            nonlocal last_finish_message, last_safety_ratings, last_prompt_feedback
+
+            usage = getattr(chunk, "usage_metadata", None)
+            if usage is not None:
+                last_usage = usage
+            prompt_feedback = getattr(chunk, "prompt_feedback", None)
+            if prompt_feedback is not None:
+                last_prompt_feedback = prompt_feedback
+
+            candidates = getattr(chunk, "candidates", None)
+            if not candidates:
+                return
+
+            saw_candidate = True
+            c0 = candidates[0]
+            finish_reason = getattr(c0, "finish_reason", None)
+            if finish_reason is not None:
+                last_finish_reason = finish_reason
+            finish_message = getattr(c0, "finish_message", None)
+            if finish_message is not None:
+                last_finish_message = finish_message
+            safety_ratings = getattr(c0, "safety_ratings", None)
+            if safety_ratings is not None:
+                last_safety_ratings = safety_ratings
+
+            content = getattr(c0, "content", None)
+            chunk_parts = getattr(content, "parts", None) if content is not None else None
+            if not chunk_parts:
+                return
+
+            for part in chunk_parts:
+                # Preserve all parts verbatim (including thought=True and empty-text signature parts)
+                # so `_parse_native_response` sees the exact same structure as non-streaming responses.
+                parts.append(part)
+                part_text = getattr(part, "text", None)
+                is_thought = bool(getattr(part, "thought", False))
+                if isinstance(part_text, str) and part_text and not is_thought:
+                    accumulated += part_text
+                    if on_stream_chunk is not None:
+                        try:
+                            await on_stream_chunk(part_text, accumulated)
+                        except Exception as cb_err:
+                            logger.warning(f"Stream chunk callback failed in GeminiLLM: {cb_err}")
+
+        try:
+            await _drain_blocking_stream(_open_stream, _on_chunk)
+        except Exception as e:
+            logger.error(f"GeminiLLM streaming generation failed: {e}")
+            raise
+
+        candidates_out = (
+            [
+                types.Candidate.model_construct(
+                    content=types.Content.model_construct(role="model", parts=parts),
+                    finish_reason=last_finish_reason,
+                    finish_message=last_finish_message,
+                    safety_ratings=last_safety_ratings,
+                )
+            ]
+            if saw_candidate or parts
+            else []
+        )
+        return types.GenerateContentResponse.model_construct(
+            candidates=candidates_out,
+            usage_metadata=last_usage,
+            prompt_feedback=last_prompt_feedback,
+        )
 
     async def create_cache(
         self,
@@ -1141,6 +1314,48 @@ class ClaudeLLM(BaseLLM):
             logger.error(f"ClaudeLLM generation failed: {e}")
             raise
 
+    async def _call_llm_stream(
+        self,
+        native_input: dict[str, Any],
+        on_stream_chunk: StreamCallback | None = None,
+    ) -> Any:
+        """Stream an Anthropic Claude response via `messages.stream`, returning the final Message."""
+        final_message: Any = None
+
+        def _open_stream() -> Iterator[tuple[str, Any]]:
+            accumulated_local = ""
+            with self.client.messages.stream(**native_input) as stream_ctx:
+                for ev in stream_ctx:
+                    if getattr(ev, "type", None) == "text":
+                        delta = getattr(ev, "text", "")
+                        if isinstance(delta, str) and delta:
+                            accumulated_local += delta
+                            snapshot = getattr(ev, "snapshot", None)
+                            acc_str = snapshot if isinstance(snapshot, str) else accumulated_local
+                            yield ("text", (delta, acc_str))
+                yield ("final", stream_ctx.get_final_message())
+
+        async def _on_item(item: tuple[str, Any]) -> None:
+            nonlocal final_message
+            kind, payload = item
+            if kind == "text":
+                delta, snapshot = payload
+                if on_stream_chunk is not None:
+                    try:
+                        await on_stream_chunk(delta, snapshot)
+                    except Exception as cb_err:
+                        logger.warning(f"Stream chunk callback failed in ClaudeLLM: {cb_err}")
+            elif kind == "final":
+                final_message = payload
+
+        try:
+            await _drain_blocking_stream(_open_stream, _on_item)
+        except Exception as e:
+            logger.error(f"ClaudeLLM streaming generation failed: {e}")
+            raise
+
+        return final_message
+
     def _parse_native_response(self, raw_response: Any) -> LLMResponse:
         tool_calls = []
         text_parts = []
@@ -1246,8 +1461,10 @@ class MockLLM(BaseLLM):
         history: list[Message] | None = None,
         tools: list[Callable] | None = None,
         cached_content: str | None = None,
+        **kwargs: Any,
     ) -> LLMResponse:
         """Return canned mock response."""
+        _ = kwargs
         logger.debug(
             f"MockLLM received prompt: {prompt}, history count: {len(history or [])}, cached_content: {cached_content}"
         )
@@ -1270,6 +1487,7 @@ def get_llm(
     config: KesokuConfig | None = None,
     use_context_compression: bool = False,
     model_name: str | None = None,
+    thinking_level: str | None = None,
 ) -> BaseLLM:
     """Get an LLM instance based on config or specified provider.
 
@@ -1278,6 +1496,7 @@ def get_llm(
         config: Optional configuration container. If None, uses get_config().
         use_context_compression: Whether to resolve using context compression settings.
         model_name: Optional model identifier override for the resolved provider.
+        thinking_level: Optional thinking/reasoning effort override validated per provider.
 
     Returns:
         An instance of BaseLLM (GeminiLLM, ClaudeLLM, or MockLLM).
@@ -1298,6 +1517,14 @@ def get_llm(
             gemini_cfg = gemini_cfg.model_copy(update={"model_name": model_name})
         elif use_context_compression and gemini_cfg.context_model_name:
             gemini_cfg = gemini_cfg.model_copy(update={"model_name": gemini_cfg.context_model_name})
+        if thinking_level is not None:
+            if thinking_level in GEMINI_THINKING_LEVELS:
+                gemini_cfg = gemini_cfg.model_copy(update={"thinking_level": thinking_level})
+            else:
+                logger.warning(
+                    f"Ignoring unsupported thinking_level '{thinking_level}' for Gemini "
+                    f"(allowed: {sorted(GEMINI_THINKING_LEVELS)})."
+                )
         return GeminiLLM(config=gemini_cfg)
     elif provider_lower == "claude":
         claude_cfg = config.claude
@@ -1305,6 +1532,14 @@ def get_llm(
             claude_cfg = claude_cfg.model_copy(update={"model_name": model_name})
         elif use_context_compression and claude_cfg.context_model_name:
             claude_cfg = claude_cfg.model_copy(update={"model_name": claude_cfg.context_model_name})
+        if thinking_level is not None:
+            if thinking_level in CLAUDE_THINKING_LEVELS:
+                claude_cfg = claude_cfg.model_copy(update={"thinking_level": thinking_level})
+            else:
+                logger.warning(
+                    f"Ignoring unsupported thinking_level '{thinking_level}' for Claude "
+                    f"(allowed: {sorted(CLAUDE_THINKING_LEVELS)})."
+                )
         return ClaudeLLM(config=claude_cfg)
     elif provider_lower == "mock":
         return MockLLM()

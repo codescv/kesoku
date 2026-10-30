@@ -8,7 +8,8 @@ import os
 import re
 import time
 import traceback
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import tzlocal
 
@@ -27,7 +28,7 @@ from kesoku.agent.state_snapshot import render_repo_rules, render_running_jobs, 
 from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.tools.file import expand_path_variables
 from kesoku.agent.turn_logger import TurnLogger
-from kesoku.config import KesokuConfig
+from kesoku.config import DiscordChannelOverride, KesokuConfig
 from kesoku.context import KesokuContext
 from kesoku.utils.async_fs import async_exists, async_read_text_file, async_write_text_file
 from kesoku.utils.path import PathResolver
@@ -134,6 +135,85 @@ def estimate_fixed_prompt_overhead(system_prompt: str | None, tools_list: list |
     return estimate_tokens_calibrated("\n".join(text_parts))
 
 
+class _StreamPreviewPublisher:
+    """Throttled, non-blocking publisher for ephemeral streaming response previews.
+
+    Publishes the first non-empty text chunk immediately so TTFT is visible right away, then throttles
+    subsequent updates to `min_interval` seconds and skips updates while a prior publish task is still
+    in flight (so Discord REST latency or rate-limit backoff never stalls LLM token consumption).
+    """
+
+    def __init__(
+        self,
+        gateway: Gateway,
+        chatbot_id: str,
+        channel_id: str,
+        session_id: str,
+        turn_id: str,
+        min_interval: float = 1.5,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """Initialize a per-generation stream preview publisher."""
+        self.gateway = gateway
+        self.chatbot_id = chatbot_id
+        self.channel_id = channel_id
+        self.session_id = session_id
+        self.turn_id = turn_id
+        self.min_interval = min_interval
+        self._clock = clock
+        self._last_publish_ts: float | None = None
+        self._inflight_task: asyncio.Task[None] | None = None
+        self._published_any: bool = False
+        self._discarded: bool = False
+
+    async def _publish(self, text: str | None) -> None:
+        """Forward preview text (or None to clear) to `gateway.publish_stream` safely."""
+        try:
+            await self.gateway.publish_stream(
+                self.chatbot_id,
+                self.channel_id,
+                self.session_id,
+                self.turn_id,
+                text,
+            )
+        except Exception as e:
+            logger.warning(f"Stream preview publish failed for session {self.session_id}: {e}")
+
+    async def on_chunk(self, delta: str, accumulated: str) -> None:
+        """Handle a streamed text delta; schedules at most one in-flight preview update."""
+        _ = delta
+        if self._discarded or not accumulated:
+            return
+        if self._inflight_task is not None and not self._inflight_task.done():
+            return
+        now = self._clock()
+        if self._last_publish_ts is not None and (now - self._last_publish_ts) < self.min_interval:
+            return
+        self._last_publish_ts = now
+        self._published_any = True
+        self._inflight_task = asyncio.create_task(self._publish(accumulated))
+        # Yield once so fast/in-memory handlers start immediately without awaiting slow I/O.
+        await asyncio.sleep(0)
+
+    async def wait_inflight(self) -> None:
+        """Await any currently running preview publish task so final delivery cannot race with it."""
+        task = self._inflight_task
+        self._inflight_task = None
+        if task is not None and not task.done():
+            try:
+                await task
+            except Exception as e:
+                logger.warning(f"In-flight stream preview task failed for session {self.session_id}: {e}")
+
+    async def discard(self) -> None:
+        """Clear any published preview on non-final continuations (tool calls, retries, hooks, errors)."""
+        self._discarded = True
+        await self.wait_inflight()
+        if self._published_any:
+            self._published_any = False
+            await self._publish(None)
+
+
 class TurnExecutor:
     """Orchestrates conversational turn execution, including LLM inference, thought logging, and tool calling."""
 
@@ -170,6 +250,19 @@ class TurnExecutor:
         # across all LLM calls of a turn so the implicit prefix cache keeps hitting; reset on pivot.
         self._snapshot_cache: list[ContextEntry] | None = None
         self._has_summaries: bool | None = None
+        self._compaction_pending: bool = False
+
+    def _is_compaction_pending(self, worker: "SessionWorker") -> bool:
+        """Return True if a prior turn deferred or failed post-turn compaction."""
+        return self._compaction_pending or (getattr(worker, "_compaction_pending", False) is True)
+
+    def _set_compaction_pending(self, worker: "SessionWorker", pending: bool) -> None:
+        """Persist the compaction safety-net flag on both this executor and the session worker."""
+        self._compaction_pending = pending
+        try:
+            worker._compaction_pending = pending  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
     async def _get_session_turns_count(self) -> int:
         """Retrieve the count of user turns in the current session.
@@ -194,6 +287,29 @@ class TurnExecutor:
             return True
         return False
 
+    def _resolve_channel_override(self, current_msg: Message) -> DiscordChannelOverride | None:
+        """Return the first matching DiscordChannelOverride for `current_msg`, regardless of fields set.
+
+        Matches direct `channel_id`, `channel_name`, and thread `parent_channel_id` / `parent_channel_name`.
+        """
+        cfg = self.context.config
+        discord_cfg = cfg.get_discord_config(current_msg.chatbot_id)
+        if not discord_cfg:
+            return None
+
+        raw_meta = getattr(current_msg, "metadata", None)
+        metadata = raw_meta if isinstance(raw_meta, dict) else {}
+        channel_id = current_msg.channel_id
+        channel_name = metadata.get("channel_name", "")
+        parent_id = metadata.get("parent_channel_id")
+        parent_name = metadata.get("parent_channel_name")
+
+        identifiers = {ident for ident in (channel_id, channel_name, parent_id, parent_name) if ident}
+        for override in discord_cfg.channels:
+            if any(ident in override.channels for ident in identifiers):
+                return override
+        return None
+
     def _resolve_llm(self, current_msg: Message) -> BaseLLM:
         """Resolve the appropriate LLM instance for the current message, applying overrides.
 
@@ -203,40 +319,50 @@ class TurnExecutor:
         Returns:
             A BaseLLM instance to use for this turn.
         """
-        cfg = self.context.config
-        discord_cfg = cfg.get_discord_config(current_msg.chatbot_id)
-        if discord_cfg:
-            channel_id = current_msg.channel_id
-            channel_name = current_msg.metadata.get("channel_name", "")
-            parent_id = current_msg.metadata.get("parent_channel_id")
-            parent_name = current_msg.metadata.get("parent_channel_name")
-
-            for override in discord_cfg.channels:
-                identifiers = {channel_id, channel_name}
-                if parent_id:
-                    identifiers.add(parent_id)
-                if parent_name:
-                    identifiers.add(parent_name)
-                if any(ident in override.channels for ident in identifiers if ident):
-                    if override.llm or override.model_name:
-                        logger.info(
-                            f"Applying LLM override (provider={override.llm}, model={override.model_name}) "
-                            f"for Discord channel {channel_id} ('{channel_name}')"
-                        )
-                        try:
-                            if override.model_name:
-                                return self.context.get_llm(
-                                    provider=override.llm,
-                                    model_name=override.model_name,
-                                )
-                            return self.context.get_llm(provider=override.llm)
-                        except Exception as e:
-                            logger.error(
-                                f"Failed to get override LLM (provider='{override.llm}', "
-                                f"model='{override.model_name}'): {e}"
-                            )
+        override = self._resolve_channel_override(current_msg)
+        if override is not None and (
+            override.llm is not None or override.model_name is not None or override.thinking_level is not None
+        ):
+            raw_meta = getattr(current_msg, "metadata", None)
+            metadata = raw_meta if isinstance(raw_meta, dict) else {}
+            channel_name = metadata.get("channel_name", "")
+            logger.info(
+                f"Applying LLM override (provider={override.llm}, model={override.model_name}, "
+                f"thinking_level={override.thinking_level}) for Discord channel "
+                f"{current_msg.channel_id} ('{channel_name}')"
+            )
+            kwargs: dict[str, Any] = {}
+            if override.llm is not None:
+                kwargs["provider"] = override.llm
+            if override.model_name is not None:
+                kwargs["model_name"] = override.model_name
+            if override.thinking_level is not None:
+                kwargs["thinking_level"] = override.thinking_level
+            try:
+                return self.context.get_llm(**kwargs)
+            except Exception as e:
+                logger.error(
+                    f"Failed to get override LLM (provider='{override.llm}', "
+                    f"model='{override.model_name}', thinking_level='{override.thinking_level}'): {e}"
+                )
 
         return self.context.get_llm()
+
+    def _resolve_stream(self, current_msg: Message, llm: BaseLLM) -> bool:
+        """Resolve whether LLM streaming preview is enabled for `current_msg` and `llm`.
+
+        Precedence: requires a registered Gateway stream handler for `chatbot_id`; then channel
+        `override.stream` if explicitly set; otherwise provider `llm.config.stream` (default False).
+        """
+        has_handler_fn = getattr(self.gateway, "has_stream_handler", None)
+        if callable(has_handler_fn):
+            if has_handler_fn(current_msg.chatbot_id) is False:
+                return False
+
+        override = self._resolve_channel_override(current_msg)
+        if override is not None and override.stream is not None:
+            return override.stream
+        return bool(getattr(getattr(llm, "config", None), "stream", False))
 
     async def process_turn(
         self,
@@ -269,6 +395,12 @@ class TurnExecutor:
             cached_messages_len = 0
 
         empty_attempts = 0
+        active_publisher: _StreamPreviewPublisher | None = None
+        completed_final_response = False
+        last_raw_history: list[Message] | None = None
+        last_system_prompt: str | None = None
+        last_tools_list: list[Any] = []
+        last_llm: BaseLLM | None = None
         try:
             self.tool_runner.tool_context.user_turn = await self._get_session_turns_count()
             while worker.running:
@@ -280,6 +412,8 @@ class TurnExecutor:
                         f"Pivoted from message {prev_msg_id} to {current_msg.id} during turn loop. "
                         f"Resetting turn metrics and empty-response counter."
                     )
+                    chatbot_id = current_msg.chatbot_id
+                    channel_id = current_msg.channel_id
                     self.tool_runner.tool_context.original_msg_id = current_msg.id
                     self.tool_runner.tool_context.user_turn = await self._get_session_turns_count()
                     self._snapshot_cache = None
@@ -341,34 +475,57 @@ class TurnExecutor:
                 tools_list = self.tool_runner.tool_registry.get_tools_list()
 
                 # Retrieve and build the raw session history
-                history = await build_history(
+                raw_history = await build_history(
                     gateway=self.gateway,
                     session_id=self.session_id,
                     heal_orphans=True,
                 )
-                # Check and automatically compact history in-place if it exceeds threshold
-                history, compacted_occurred = await self._check_and_auto_compact_history(
-                    history=history,
-                    system_prompt=system_prompt,
-                    tools_list=tools_list,
-                    llm=llm,
+
+                # Safety net: only run pre-turn compaction if a previous turn skipped/failed post-turn compaction.
+                if self._is_compaction_pending(worker):
+                    self._set_compaction_pending(worker, False)
+                    compacted_pre = await self._run_auto_compaction(
+                        history=raw_history,
+                        system_prompt=system_prompt,
+                        tools_list=tools_list,
+                        llm=llm,
+                        cfg=cfg,
+                        staging_dir=session_staging_dir,
+                    )
+                    if compacted_pre:
+                        raw_history = await build_history(
+                            gateway=self.gateway,
+                            session_id=self.session_id,
+                            heal_orphans=False,
+                        )
+                        if active_cache_name:
+                            logger.info("Pre-turn fallback compaction occurred. Deleting obsolete context cache...")
+                            cache_llm = (
+                                worker.active_cache_llm
+                                if isinstance(getattr(worker, "active_cache_llm", None), BaseLLM)
+                                else llm
+                            )
+                            try:
+                                await cache_llm.delete_cache(active_cache_name)
+                            except Exception as de:
+                                logger.warning(f"Failed to delete obsolete cache after fallback compaction: {de}")
+                            active_cache_name = None
+                            cached_messages_len = 0
+                            worker.active_cache_name = None
+                            worker.active_cache_llm = None
+                            worker.cached_messages_len = 0
+
+                last_raw_history = raw_history
+                last_system_prompt = system_prompt
+                last_tools_list = tools_list
+                last_llm = llm
+
+                # Assemble scaffold from existing summary nodes (no summarization LLM calls before first token)
+                history = await self._assemble_scaffold_history(
+                    history=raw_history,
                     cfg=cfg,
                     current_msg=current_msg,
-                    staging_dir=session_staging_dir,
                 )
-
-                # If history was compacted, the existing cache is obsolete and must be deleted.
-                if compacted_occurred and active_cache_name:
-                    logger.info("Session history was compacted. Deleting obsolete context cache...")
-                    try:
-                        await llm.delete_cache(active_cache_name)
-                    except Exception as de:
-                        logger.warning(f"Failed to delete obsolete cache: {de}")
-                    active_cache_name = None
-                    cached_messages_len = 0
-                    worker.active_cache_name = None
-                    worker.active_cache_llm = None
-                    worker.cached_messages_len = 0
 
                 await self._inject_context_and_trigger_consolidation(
                     history,
@@ -464,13 +621,32 @@ class TurnExecutor:
                     generate_tools = tools_list
                     generate_cached_content = None
 
-                # LLM inference
+                # LLM inference (optionally streaming live preview updates to Gateway)
+                stream = self._resolve_stream(current_msg, llm)
+                publisher = (
+                    _StreamPreviewPublisher(
+                        gateway=self.gateway,
+                        chatbot_id=chatbot_id,
+                        channel_id=channel_id,
+                        session_id=self.session_id,
+                        turn_id=current_msg.id,
+                    )
+                    if stream
+                    else None
+                )
+                active_publisher = publisher
+                gen_kwargs: dict[str, Any] = (
+                    {"stream": True, "on_stream_chunk": publisher.on_chunk}
+                    if publisher is not None
+                    else {}
+                )
                 try:
                     res = await llm.generate(
                         system_prompt=generate_system_prompt,
                         history=generate_history,
                         tools=generate_tools,
                         cached_content=generate_cached_content,
+                        **gen_kwargs,
                     )
                 except Exception as e:
                     if active_cache_name and ("expired" in str(e) or "cache" in str(e).lower()):
@@ -478,6 +654,16 @@ class TurnExecutor:
                             f"LLM generation failed, possibly due to cache expiration: {e}. "
                             "Retrying without context cache."
                         )
+                        if publisher is not None:
+                            await publisher.discard()
+                            publisher = _StreamPreviewPublisher(
+                                gateway=self.gateway,
+                                chatbot_id=chatbot_id,
+                                channel_id=channel_id,
+                                session_id=self.session_id,
+                                turn_id=current_msg.id,
+                            )
+                            active_publisher = publisher
                         active_cache_name = None
                         cached_messages_len = 0
                         worker.active_cache_name = None
@@ -487,11 +673,17 @@ class TurnExecutor:
                         generate_system_prompt = system_prompt
                         generate_tools = tools_list
                         generate_cached_content = None
+                        retry_kwargs: dict[str, Any] = (
+                            {"stream": True, "on_stream_chunk": publisher.on_chunk}
+                            if publisher is not None
+                            else {}
+                        )
                         res = await llm.generate(
                             system_prompt=generate_system_prompt,
                             history=generate_history,
                             tools=generate_tools,
                             cached_content=generate_cached_content,
+                            **retry_kwargs,
                         )
                     else:
                         raise
@@ -516,6 +708,9 @@ class TurnExecutor:
                     turn_tokens += res.total_tokens
 
                 if res.tool_calls:
+                    if publisher is not None:
+                        await publisher.discard()
+                        active_publisher = None
                     turn_tool_calls += len(res.tool_calls)
                     should_continue = await self._execute_tool_calls(res, current_msg, worker, session_staging_dir)
                     if should_continue:
@@ -523,6 +718,8 @@ class TurnExecutor:
                     else:
                         break
                 else:
+                    if publisher is not None:
+                        await publisher.wait_inflight()
                     should_continue, empty_attempts = await self._handle_final_response(
                         res=res,
                         current_msg=current_msg,
@@ -533,12 +730,65 @@ class TurnExecutor:
                         start_time=start_time,
                         llm=llm,
                         empty_attempts=empty_attempts,
+                        publisher=publisher,
                     )
                     if should_continue:
+                        if publisher is not None:
+                            await publisher.discard()
+                            active_publisher = None
                         continue
                     else:
+                        active_publisher = None
+                        completed_final_response = True
                         break
+
+            # Post-turn compaction: run after final response is delivered so summarization never adds to TTFT.
+            if completed_final_response and last_raw_history is not None and last_llm is not None:
+                if not worker.queue_empty():
+                    logger.info(
+                        f"Skipping post-turn compaction for session {self.session_id} due to queued message; "
+                        "deferring to next turn."
+                    )
+                    self._set_compaction_pending(worker, True)
+                else:
+                    try:
+                        compacted_post = await self._run_auto_compaction(
+                            history=last_raw_history,
+                            system_prompt=last_system_prompt,
+                            tools_list=last_tools_list,
+                            llm=last_llm,
+                            cfg=cfg,
+                            staging_dir=session_staging_dir,
+                        )
+                        if compacted_post and active_cache_name:
+                            logger.info("Post-turn history compaction occurred. Deleting obsolete context cache...")
+                            cache_llm = (
+                                worker.active_cache_llm
+                                if isinstance(getattr(worker, "active_cache_llm", None), BaseLLM)
+                                else last_llm
+                            )
+                            try:
+                                await cache_llm.delete_cache(active_cache_name)
+                            except Exception as de:
+                                logger.warning(f"Failed to delete obsolete cache after post-turn compaction: {de}")
+                            active_cache_name = None
+                            cached_messages_len = 0
+                            worker.active_cache_name = None
+                            worker.active_cache_llm = None
+                            worker.cached_messages_len = 0
+                    except Exception as ce:
+                        logger.warning(
+                            f"Post-turn history compaction failed for session {self.session_id}: {ce}. "
+                            "Will retry pre-turn on next message."
+                        )
+                        self._set_compaction_pending(worker, True)
         except asyncio.CancelledError:
+            if active_publisher is not None:
+                try:
+                    await active_publisher.discard()
+                except Exception:
+                    pass
+                active_publisher = None
             # Interrupted turn: save turn metrics to the initiating user message
             turn_metrics = {
                 "session_turns": await self._get_session_turns_count(),
@@ -560,6 +810,9 @@ class TurnExecutor:
                 await self.context.db.update_message_metadata(user_msg.id, user_msg.metadata)
             raise
         except Exception as e:
+            if active_publisher is not None:
+                await active_publisher.discard()
+                active_publisher = None
             logger.error(f"Error in session turn {self.session_id}: {e}", exc_info=True)
             tb_str = traceback.format_exc()
             error_filename = f"error_{current_msg.id}.txt"
@@ -901,23 +1154,18 @@ class TurnExecutor:
         self._snapshot_cache = entries
         return entries
 
-    async def _check_and_auto_compact_history(
+    async def _run_auto_compaction(
         self,
         history: list[Message],
         system_prompt: str | None,
-        tools_list: list,
+        tools_list: list[Any],
         llm: BaseLLM,
         cfg: KesokuConfig,
-        current_msg: Message,
         staging_dir: str | None = None,
-    ) -> tuple[list[Message], bool]:
-        """Check context window usage and automatically compact history using custom turn-based compressor.
-
-        Returns:
-            A tuple of (active message history list, compacted_occurred bool).
-        """
+    ) -> bool:
+        """Run automatic turn-based history compaction in-place when thresholds are exceeded."""
         if not history:
-            return history, False
+            return False
 
         compressor = HistoryCompressor(self.context.db)
 
@@ -929,8 +1177,7 @@ class TurnExecutor:
             logger.warning(f"Failed to resolve context compression LLM, using session LLM: {e}")
             compression_llm = llm
 
-        # Trigger automatic compaction
-        compacted_occurred = await compressor.auto_compact_session(
+        return await compressor.auto_compact_session(
             session_id=self.session_id,
             history=history,
             llm=compression_llm,
@@ -939,13 +1186,26 @@ class TurnExecutor:
             overhead_tokens=estimate_fixed_prompt_overhead(system_prompt, tools_list),
         )
 
-        # Retrieve all root summary nodes from the database for this session
+    async def _assemble_scaffold_history(
+        self,
+        history: list[Message],
+        cfg: KesokuConfig,
+        current_msg: Message,
+    ) -> list[Message]:
+        """Assemble the in-memory prompt history using existing root summary nodes from SQLite.
+
+        Returns a new list so downstream in-place context injection never mutates `raw_history`.
+        """
+        if not history:
+            return []
+
         root_summaries = await self.context.db.get_root_summary_nodes(self.session_id)
         self._has_summaries = bool(root_summaries)
 
         if not root_summaries:
-            return history, compacted_occurred
+            return list(history)
 
+        compressor = HistoryCompressor(self.context.db)
         # Re-segment and assemble the scaffold context. A turn that carries a summary_node_id is represented by the
         # scaffold and never verbatim, wherever it sits (manual/forced compaction may reach into the tail).
         turns = compressor.segment_turns(history)
@@ -974,7 +1234,7 @@ class TurnExecutor:
         scaffold_content = "\n".join(scaffold_parts)
 
         # Build assembled messages in memory
-        assembled_history = []
+        assembled_history: list[Message] = []
         assembled_history.extend(protected_head)
 
         # Append Scaffold as a USER message with an ASSISTANT acknowledgement
@@ -1004,6 +1264,39 @@ class TurnExecutor:
         assembled_history.append(ack_msg)
         assembled_history.extend(uncompressed_rest)
 
+        return assembled_history
+
+    async def _check_and_auto_compact_history(
+        self,
+        history: list[Message],
+        system_prompt: str | None,
+        tools_list: list,
+        llm: BaseLLM,
+        cfg: KesokuConfig,
+        current_msg: Message,
+        staging_dir: str | None = None,
+    ) -> tuple[list[Message], bool]:
+        """Check context window usage, compact history if needed, and return assembled prompt history.
+
+        Returns:
+            A tuple of (active message history list, compacted_occurred bool).
+        """
+        if not history:
+            return history, False
+
+        compacted_occurred = await self._run_auto_compaction(
+            history=history,
+            system_prompt=system_prompt,
+            tools_list=tools_list,
+            llm=llm,
+            cfg=cfg,
+            staging_dir=staging_dir,
+        )
+        assembled_history = await self._assemble_scaffold_history(
+            history=history,
+            cfg=cfg,
+            current_msg=current_msg,
+        )
         return assembled_history, compacted_occurred
 
     async def _execute_tool_calls(
@@ -1294,6 +1587,7 @@ class TurnExecutor:
         start_time: float,
         llm: BaseLLM,
         empty_attempts: int,
+        publisher: _StreamPreviewPublisher | None = None,
     ) -> tuple[bool, int]:
         """Handle final assistant response including stop hooks, thought logging, retry logic, and metrics.
 
@@ -1325,6 +1619,8 @@ class TurnExecutor:
 
                         if retries < max_retries:
                             self._hook_retries[out.name] = retries + 1
+                            if publisher is not None:
+                                await publisher.discard()
                             await self._post_draft_before_hook(res, current_msg)
                             msg = Message(
                                 session_id=self.session_id,
@@ -1353,6 +1649,8 @@ class TurnExecutor:
                     and not self._stop_reminder_fired
                 ):
                     self._stop_reminder_fired = True
+                    if publisher is not None:
+                        await publisher.discard()
                     await self._post_draft_before_hook(res, current_msg)
                     msg = Message(
                         session_id=self.session_id,
@@ -1374,7 +1672,7 @@ class TurnExecutor:
                     return True, empty_attempts
 
         if res.thought:
-            thought_metadata = {}
+            thought_metadata: dict[str, Any] = {"final_response": True}
             if res.thought_signature:
                 thought_metadata["thought_signature"] = res.thought_signature
             thought_msg = Message(
@@ -1401,12 +1699,16 @@ class TurnExecutor:
                     f"LLM returned empty content in session {self.session_id} "
                     f"(finish_reason={res.finish_reason}, attempt {empty_attempts}). Retrying."
                 )
+                if publisher is not None:
+                    await publisher.discard()
                 return True, empty_attempts
             if empty_attempts == EMPTY_RESPONSE_RETRIES + 1:
                 logger.warning(
                     f"LLM still returned empty content in session {self.session_id} "
                     f"(finish_reason={res.finish_reason}, attempt {empty_attempts}). Nudging model."
                 )
+                if publisher is not None:
+                    await publisher.discard()
                 nudge_msg = Message(
                     session_id=self.session_id,
                     chatbot_id=chatbot_id,
