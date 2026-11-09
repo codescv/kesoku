@@ -2754,3 +2754,149 @@ async def test_process_turn_streaming_tool_discard_and_final_thought_metadata(te
     assert thoughts[1].content == "Final synthesis thought"
     assert thoughts[1].metadata.get("final_response") is True
 
+
+async def test_user_clock_header_gating_elapsed_and_cache_prefix_immutability(tmp_path: Path) -> None:
+    """Verify user_clock_file header gating, cronjob/compression skipping, and explicit-cache prefix stability."""
+    import datetime as _dt
+    import json
+    from zoneinfo import ZoneInfo
+
+    from kesoku.agent.compressor import SCAFFOLD_HEADER
+    from kesoku.agent.history import prepare_history_for_llm
+    from kesoku.constants import MessageRole, MessageStatus, MessageType
+
+    ex = await _inject_executor(tmp_path, session_role=None, channel_role="role_a")
+    ex.context.config.agent.auto_context_search = False
+    ts_cur = _dt.datetime(2026, 11, 9, 21, 29, 58, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+    ts_prev = ts_cur - 31 * 60
+
+    # 1. Default (user_clock_file == ""): header is byte-identical to v0.1.5 (no user_local_* or since_prev_user_msg).
+    hist_off = [
+        _tmsg(MessageRole.USER, "Earlier hello", ts_prev, session_id="sessinj", msg_id="u_off_1"),
+        _tmsg(MessageRole.ASSISTANT, "Hi there", ts_prev + 5, session_id="sessinj", msg_id="a_off_1"),
+        _tmsg(MessageRole.USER, "Current question", ts_cur, session_id="sessinj", msg_id="u_off_2"),
+    ]
+    out_off = await ex._inject_context_and_trigger_consolidation(
+        hist_off, hist_off[-1], MagicMock(), session_staging_dir=str(tmp_path / "staging")
+    )
+    assert out_off is not None
+    assert "user_local_time=" not in out_off.content
+    assert "user_timezone=" not in out_off.content
+    assert "user_place=" not in out_off.content
+    assert "since_prev_user_msg=" not in out_off.content
+    expected_msg_time = _dt.datetime.fromtimestamp(ts_cur).astimezone().strftime("%Y-%m-%d %H:%M:%S (%A) %Z")
+    assert f'time="{expected_msg_time}"' in out_off.content
+
+    # 2. Configured user_clock_file, but file does not exist yet -> still byte-identical to v0.1.5.
+    ex.context.config.agent.user_clock_file = "state/user_clock.json"
+    hist_missing = [
+        _tmsg(MessageRole.USER, "Earlier hello", ts_prev, session_id="sessinj", msg_id="u_m_1"),
+        _tmsg(MessageRole.ASSISTANT, "Hi there", ts_prev + 5, session_id="sessinj", msg_id="a_m_1"),
+        _tmsg(MessageRole.USER, "Current question", ts_cur, session_id="sessinj", msg_id="u_m_2"),
+    ]
+    out_missing = await ex._inject_context_and_trigger_consolidation(
+        hist_missing, hist_missing[-1], MagicMock(), session_staging_dir=str(tmp_path / "staging")
+    )
+    assert out_missing is not None
+    assert out_missing.content == out_off.content
+
+    # 3. Valid state/user_clock.json (Asia/Kolkata +05:30): adds user_local_*, skips cronjob/system senders.
+    clock_path = tmp_path / "state" / "user_clock.json"
+    clock_path.parent.mkdir(parents=True, exist_ok=True)
+    clock_path.write_text(
+        json.dumps(
+            {
+                "tz": "Asia/Kolkata",
+                "place": "新德里",
+                "home_tz": "Asia/Shanghai",
+                "home_place": "家",
+                "expires_at": "2026-11-10T06:00:00+08:00",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    cron_msg = Message(
+        id="u_cron",
+        session_id="sessinj",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="cronjob",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Scheduled morning ping",
+        status=MessageStatus.RESPONDED,
+        timestamp=ts_cur - 60,
+        metadata={"sender_name": "cronjob"},
+    )
+    hist_ist = [
+        _tmsg(MessageRole.USER, "Earlier hello", ts_prev, session_id="sessinj", msg_id="u_ist_1"),
+        _tmsg(MessageRole.ASSISTANT, "Hi there", ts_prev + 5, session_id="sessinj", msg_id="a_ist_1"),
+        cron_msg,
+        _tmsg(MessageRole.ASSISTANT, "Cron reply", ts_cur - 55, session_id="sessinj", msg_id="a_cron"),
+        _tmsg(MessageRole.USER, "Boarding gate check", ts_cur, session_id="sessinj", msg_id="u_ist_2"),
+    ]
+    out_ist = await ex._inject_context_and_trigger_consolidation(
+        hist_ist, hist_ist[-1], MagicMock(), session_staging_dir=str(tmp_path / "staging")
+    )
+    assert out_ist is not None
+    assert f'time="{expected_msg_time}"' in out_ist.content
+    assert 'user_local_time="2026-11-09 18:59:58 (Monday) IST UTC+05:30"' in out_ist.content
+    assert 'user_timezone="Asia/Kolkata"' in out_ist.content
+    assert 'user_place="新德里"' in out_ist.content
+    assert 'since_prev_user_msg="31m"' in out_ist.content
+
+    # 4. When all turns between protected_head and current_msg were compressed into scaffold, omit since_prev_user_msg.
+    scaffold_msg = Message(
+        id="scaf_1",
+        session_id="sessinj",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="system",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content=f"{SCAFFOLD_HEADER}\n[Recent Summary]",
+        status=MessageStatus.RESPONDED,
+        timestamp=ts_cur - 10,
+        metadata={"is_scaffold": True},
+    )
+    ack_msg = _tmsg(
+        MessageRole.ASSISTANT, "Understood.", ts_cur - 9, session_id="sessinj", msg_id="ack_1"
+    )
+    hist_comp = [
+        _tmsg(MessageRole.USER, "Day 1 turn 0", ts_cur - 86400, session_id="sessinj", msg_id="u_t0"),
+        _tmsg(MessageRole.ASSISTANT, "Day 1 reply", ts_cur - 86390, session_id="sessinj", msg_id="a_t0"),
+        scaffold_msg,
+        ack_msg,
+        _tmsg(MessageRole.USER, "Fresh turn after compression", ts_cur, session_id="sessinj", msg_id="u_after"),
+    ]
+    out_comp = await ex._inject_context_and_trigger_consolidation(
+        hist_comp, hist_comp[-1], MagicMock(), session_staging_dir=str(tmp_path / "staging")
+    )
+    assert out_comp is not None
+    assert 'user_timezone="Asia/Kolkata"' in out_comp.content
+    assert "since_prev_user_msg=" not in out_comp.content
+
+    # 5. Explicit-cache prefix (`prepared_all[:-1]`) stays byte-identical when clock file changes between turns.
+    post_raw = [
+        _tmsg(MessageRole.USER, "Turn 1 user", ts_prev, session_id="sessinj", msg_id="c_u1"),
+        _tmsg(MessageRole.ASSISTANT, "Turn 1 assistant", ts_prev + 5, session_id="sessinj", msg_id="c_a1"),
+    ]
+    sentinel = Message(
+        id="__cache_sentinel__",
+        session_id="sessinj",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="user",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="<current_message>\n</current_message>",
+        status=MessageStatus.PENDING_AGENT,
+    )
+    prepared_before = prepare_history_for_llm([*post_raw, sentinel], staging_dir=str(tmp_path / "staging"))[:-1]
+
+    clock_path.write_text(json.dumps({"tz": "Europe/London", "place": "伦敦"}, ensure_ascii=False), encoding="utf-8")
+    prepared_after = prepare_history_for_llm([*post_raw, sentinel], staging_dir=str(tmp_path / "staging"))[:-1]
+    assert [m.model_dump() for m in prepared_before] == [m.model_dump() for m in prepared_after]
+
+

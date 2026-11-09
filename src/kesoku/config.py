@@ -228,6 +228,13 @@ class AgentConfig(BaseModel):
             "to reduce in-context self-imitation"
         ),
     )
+    user_clock_file: str = Field(
+        default="",
+        description=(
+            "Optional path (relative to agent working directory or absolute) to a JSON file tracking the user's "
+            "physical IANA timezone and location; empty disables user-local clock attributes on <current_message>"
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_recent_user_message_budget(self) -> "AgentConfig":

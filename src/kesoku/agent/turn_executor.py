@@ -34,6 +34,7 @@ from kesoku.context import KesokuContext
 from kesoku.utils.async_fs import async_exists, async_read_text_file, async_write_text_file
 from kesoku.utils.path import PathResolver
 from kesoku.utils.text import truncate_middle
+from kesoku.utils.time_utils import humanize_gap, load_user_clock, user_local_stamp
 from kesoku.utils.ui_markup import collapse_ui_blocks, extract_ui_options, parse_multi_selection
 
 if TYPE_CHECKING:
@@ -117,6 +118,27 @@ def sanitize_rag_snippet_line(speaker: str, content: str, max_agent_chars: int =
     if speaker == "Agent" and len(cleaned) > max_agent_chars:
         cleaned = cleaned[:max_agent_chars] + "…[truncated]"
     return cleaned
+
+
+def _escape_xml_attr(value: str) -> str:
+    """Escape double quotes and newlines inside an XML-like header attribute value."""
+    return str(value).replace("&", "&amp;").replace('"', "&quot;").replace("\n", " ").strip()
+
+
+def _find_prev_human_user_timestamp(history: list[Message], current_idx: int) -> float | None:
+    """Return timestamp of the last prior non-system/cronjob USER message before `current_idx`, or None."""
+    for prev in reversed(history[:current_idx]):
+        meta = prev.metadata or {}
+        if meta.get("is_scaffold") or SCAFFOLD_HEADER in (prev.content or ""):
+            break
+        if prev.role != MessageRole.USER:
+            continue
+        raw_sender = str(prev.sender or "").strip().lower()
+        raw_sender_name = str(meta.get("sender_name") or "").strip().lower()
+        if raw_sender in ("cronjob", "system") or raw_sender_name in ("cronjob", "system"):
+            continue
+        return float(prev.timestamp)
+    return None
 
 
 def estimate_fixed_prompt_overhead(system_prompt: str | None, tools_list: list | None) -> int:
@@ -1452,12 +1474,33 @@ class TurnExecutor:
         except Exception:
             tz_name = msg_time.tzname() or "UTC"
 
+        extra_clock_attrs = ""
+        raw_clock_file = (cfg.agent.user_clock_file or "").strip() if cfg and cfg.agent else ""
+        if raw_clock_file:
+            clock_path = raw_clock_file
+            if not os.path.isabs(clock_path) and cfg.agent_working_dir:
+                clock_path = os.path.join(cfg.agent_working_dir, clock_path)
+            uc = load_user_clock(clock_path, now_epoch=copied_msg.timestamp)
+            if uc is not None:
+                local_stamp = user_local_stamp(copied_msg.timestamp, uc)
+                attr_parts = [
+                    f'user_local_time="{_escape_xml_attr(local_stamp)}"',
+                    f'user_timezone="{_escape_xml_attr(str(uc["tz"]))}"',
+                ]
+                if uc.get("place"):
+                    attr_parts.append(f'user_place="{_escape_xml_attr(str(uc["place"]))}"')
+                prev_user_ts = _find_prev_human_user_timestamp(history, msg_idx)
+                if prev_user_ts is not None:
+                    gap_str = humanize_gap(max(0.0, float(copied_msg.timestamp) - prev_user_ts))
+                    attr_parts.append(f'since_prev_user_msg="{gap_str}"')
+                extra_clock_attrs = " " + " ".join(attr_parts)
+
         copied_msg.content = (
             f"{instructions_prefix}"
             f"{context_blocks_prefix}"
             f"{full_prefix}"
             f"{augmented_context_prefix}"
-            f'<current_message from="{sender_name}" time="{time_str}" timezone="{tz_name}">\n'
+            f'<current_message from="{sender_name}" time="{time_str}" timezone="{tz_name}"{extra_clock_attrs}>\n'
             f"{copied_msg.content}\n"
             "</current_message>"
         )
@@ -1465,7 +1508,7 @@ class TurnExecutor:
         latest_user_msg = copied_msg
         logger.info(
             f"Wrapped active user message {copied_msg.id} in <current_message "
-            f'from="{sender_name}" time="{time_str}" timezone="{tz_name}"> '
+            f'from="{sender_name}" time="{time_str}" timezone="{tz_name}"{extra_clock_attrs}> '
             f"(bootstrap: {is_bootstrap})"
         )
 
