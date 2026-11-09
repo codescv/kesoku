@@ -46,6 +46,13 @@ STAGING_EXCLUDED_PREFIXES: tuple[str, ...] = (
 )
 # Exact names excluded from the staging listing (pinned notes, repo rules state, and tool-maintained context dir).
 STAGING_EXCLUDED_NAMES: frozenset[str] = frozenset({"notes.md", "context", "repo_rules.json"})
+# Suffixes of deferred-media sidecar and temporary partial files omitted from staging listings.
+STAGING_EXCLUDED_SUFFIXES: tuple[str, ...] = (
+    ".pending.json",
+    ".error.json",
+    ".job.json",
+    ".part",
+)
 # Upper bound on files counted inside one first-level directory (keeps huge trees cheap to list).
 DIR_FILE_COUNT_CAP = 1000
 
@@ -183,6 +190,8 @@ def is_internal_staging_name(name: str) -> bool:
     """Return True for staging entries that kesoku writes itself (or that are hidden) and must not be listed."""
     if name.startswith(".") or name in STAGING_EXCLUDED_NAMES:
         return True
+    if name.endswith(STAGING_EXCLUDED_SUFFIXES):
+        return True
     return name.startswith(STAGING_EXCLUDED_PREFIXES)
 
 
@@ -202,6 +211,8 @@ def _count_files(path: str, cap: int | None = None) -> tuple[int, bool]:
         # Deterministic, and skip hidden directories such as .git / .venv.
         dirs[:] = sorted(d for d in dirs if not d.startswith("."))
         for name in files:
+            if name.endswith(STAGING_EXCLUDED_SUFFIXES):
+                continue
             if os.path.isfile(os.path.join(root, name)):
                 count += 1
                 if count >= limit:

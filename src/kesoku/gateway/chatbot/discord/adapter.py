@@ -9,6 +9,8 @@ import os
 from collections import defaultdict
 from typing import Any
 
+import aiohttp
+
 import discord
 from kesoku.config import DiscordChannelOverride, DiscordConfig, get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
@@ -20,6 +22,10 @@ from kesoku.gateway.chatbot.base import (
     InboundMessageAttachment,
     InboundMessageDTO,
     parse_message_content,
+)
+from kesoku.gateway.chatbot.deferred_media import (
+    format_deferred_failure_message,
+    sanitize_placeholder,
 )
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
@@ -416,8 +422,21 @@ def _build_discord_custom_prompt(
     return discord_prompt
 
 
+def _is_transient_discord_upload_error(exc: Exception) -> bool:
+    """Return True when a Discord attachment upload error is transient and retryable."""
+    if isinstance(exc, FileNotFoundError):
+        return False
+    if isinstance(exc, (TimeoutError, aiohttp.ClientError, ConnectionError, OSError)):
+        return True
+    if isinstance(exc, discord.HTTPException) and (exc.status >= 500 or exc.status == 429):
+        return True
+    return False
+
+
 class DiscordChatbot(Chatbot):
     """Discord chatbot adapter connecting to Kesoku Gateway broker."""
+
+    supports_deferred_media: bool = True
 
     def __init__(
         self,
@@ -1281,17 +1300,23 @@ class DiscordChatbot(Chatbot):
         if not await async_exists(file_path):
             logger.error(f"File not found: {file_path}")
             raise FileNotFoundError(f"File not found: {file_path}")
+        discord_file = discord.File(file_path)
         try:
-            discord_file = discord.File(file_path)
             await self._call_with_timeout(
                 channel.send(file=discord_file),
-                error_msg=f"Timeout sending file {file_path}"
+                timeout_duration=60.0,
+                error_msg=f"Timeout sending file {file_path}",
             )
         except DeliveryAbortedError:
             raise
         except Exception as e:
             logger.error(f"Failed to send file {file_path} to Discord: {e}", exc_info=True)
             raise
+        finally:
+            try:
+                discord_file.close()
+            except Exception:
+                pass
 
     async def send_voice_segment(self, channel_id: str, file_path: str, message: Message) -> None:
         """Deliver a voice segment to the target Discord thread (falling back to standard attachment if failed)."""
@@ -1305,7 +1330,8 @@ class DiscordChatbot(Chatbot):
         try:
             await self._call_with_timeout(
                 send_voice_message(channel, file_path),
-                error_msg=f"Timeout sending voice message {file_path}"
+                timeout_duration=60.0,
+                error_msg=f"Timeout sending voice message {file_path}",
             )
         except DeliveryAbortedError:
             raise
@@ -1314,17 +1340,198 @@ class DiscordChatbot(Chatbot):
                 f"Failed to send native voice message for {file_path}: {e}. "
                 "Falling back to standard file attachment."
             )
+            discord_file = discord.File(file_path)
             try:
-                discord_file = discord.File(file_path)
                 await self._call_with_timeout(
                     channel.send(file=discord_file),
-                    error_msg=f"Timeout sending voice file fallback {file_path}"
+                    timeout_duration=60.0,
+                    error_msg=f"Timeout sending voice file fallback {file_path}",
                 )
             except DeliveryAbortedError:
                 raise
             except Exception as fe:
                 logger.error(f"Failed to send voice file fallback for {file_path}: {fe}", exc_info=True)
                 raise
+            finally:
+                try:
+                    discord_file.close()
+                except Exception:
+                    pass
+
+    async def _ensure_bot_ready(self) -> None:
+        """Wait for the Discord client login/gateway session when initialized or mocked."""
+        if self.bot.is_ready():
+            return
+        wait_fn = getattr(self.bot, "wait_until_ready", None)
+        if not callable(wait_fn):
+            return
+        is_default_wait = getattr(wait_fn, "__func__", None) is discord.Client.wait_until_ready
+        if not is_default_wait:
+            await wait_fn()
+            return
+        ready_ev = getattr(self.bot, "_ready", discord.utils.MISSING)
+        if ready_ev is discord.utils.MISSING:
+            # When start() just spawned the subscriber task, bot.start() may enter __aenter__ on the next tick.
+            if self._subscriber_task is not None and not self._subscriber_task.done() and not self.bot.is_closed():
+                for _ in range(40):
+                    if getattr(self.bot, "_ready", discord.utils.MISSING) is not discord.utils.MISSING:
+                        break
+                    await asyncio.sleep(0.05)
+            ready_ev = getattr(self.bot, "_ready", discord.utils.MISSING)
+        if ready_ev is not discord.utils.MISSING and not self.bot.is_ready():
+            await wait_fn()
+
+    async def send_deferred_placeholder(
+        self,
+        channel_id: str,
+        segment: dict[str, Any],
+        message: Message,
+        marker: dict[str, Any],
+    ) -> discord.Message | None:
+        """Send an in-order Discord placeholder message for a pending deferred attachment."""
+        _ = (channel_id, segment)
+        channel = await self._get_discord_channel(message.channel_id, getattr(message, "metadata", None))
+        if not channel:
+            return None
+        placeholder_text = sanitize_placeholder(marker)
+        async with asyncio.timeout(15.0):
+            # Intentionally NOT added to _intermediate_messages or _turn_special_msg.
+            return await channel.send(placeholder_text)
+
+    def serialize_deferred_handle(self, handle: Any) -> dict[str, Any] | None:
+        """Serialize a ``discord.Message`` or ``PartialMessage`` into channel/message IDs."""
+        if handle is None:
+            return None
+        msg_id = getattr(handle, "id", None)
+        chan = getattr(handle, "channel", None)
+        chan_id = getattr(chan, "id", None) if chan is not None else getattr(handle, "channel_id", None)
+        if chan_id is None or msg_id is None:
+            return None
+        return {"channel_id": str(chan_id), "message_id": str(msg_id)}
+
+    async def restore_deferred_handle(self, raw_handle: dict[str, Any] | None) -> discord.PartialMessage | None:
+        """Reconstruct a zero-HTTP ``discord.PartialMessage`` from persisted IDs after bot login."""
+        if not isinstance(raw_handle, dict):
+            return None
+        cid = raw_handle.get("channel_id")
+        mid = raw_handle.get("message_id")
+        if not cid or not mid:
+            return None
+        await self._ensure_bot_ready()
+        return self.bot.get_partial_messageable(int(cid)).get_partial_message(int(mid))
+
+    async def deliver_deferred_attachment(
+        self,
+        channel_id: str,
+        file_path: str,
+        message: Message,
+        handle: Any,
+        kind: str,
+    ) -> None:
+        """Edit the Discord placeholder in place with the finished attachment (with retries and fallbacks)."""
+        await self._ensure_bot_ready()
+        if not await async_exists(file_path):
+            raise FileNotFoundError(f"Deferred file not found: {file_path}")
+
+        if kind == "voice":
+            await self.send_voice_segment(channel_id, file_path, message)
+            if handle is not None:
+                try:
+                    async with asyncio.timeout(15.0):
+                        await handle.delete()
+                except discord.NotFound:
+                    pass
+                except Exception as de:
+                    logger.debug(f"Best-effort placeholder delete after voice delivery failed: {de}")
+            return
+
+        if handle is not None:
+            for attempt in range(1, 4):
+                discord_file = discord.File(file_path)
+                try:
+                    async with asyncio.timeout(60.0):
+                        # Do NOT pass view= so message components stay untouched/absent.
+                        await handle.edit(content=None, attachments=[discord_file])
+                    return
+                except discord.NotFound:
+                    logger.info(
+                        f"Discord deferred placeholder was deleted before '{file_path}' finished; "
+                        "falling back to send_file_segment."
+                    )
+                    await self.send_file_segment(channel_id, file_path, message)
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if attempt < 3 and _is_transient_discord_upload_error(exc):
+                        logger.warning(
+                            f"Transient Discord placeholder edit failure for '{file_path}' "
+                            f"(attempt {attempt}/3): {exc}. Retrying..."
+                        )
+                        await asyncio.sleep(0.5 * attempt)
+                        continue
+                    logger.warning(
+                        f"Permanent Discord placeholder edit failure for '{file_path}': {exc}. "
+                        "Falling back to channel.send."
+                    )
+                    break
+                finally:
+                    try:
+                        discord_file.close()
+                    except Exception:
+                        pass
+
+            channel = await self._get_discord_channel_with_abort(message)
+            if not channel:
+                return
+            ref_file = discord.File(file_path)
+            try:
+                async with asyncio.timeout(60.0):
+                    await channel.send(file=ref_file, reference=handle, mention_author=False)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as ref_exc:
+                logger.warning(
+                    f"Discord reply-reference fallback failed for '{file_path}': {ref_exc}. "
+                    "Falling back to plain send_file_segment."
+                )
+            finally:
+                try:
+                    ref_file.close()
+                except Exception:
+                    pass
+
+        await self.send_file_segment(channel_id, file_path, message)
+
+    async def fail_deferred_attachment(
+        self,
+        handle: Any,
+        reason: str,
+        message: Message,
+        segment: dict[str, Any],
+    ) -> None:
+        """Replace the Discord placeholder text with a sanitized failure notice."""
+        await self._ensure_bot_ready()
+        err_text = format_deferred_failure_message(segment.get("path", ""), reason)
+        if handle is not None:
+            try:
+                async with asyncio.timeout(15.0):
+                    await handle.edit(content=err_text)
+                return
+            except discord.NotFound:
+                logger.debug(
+                    f"Discord deferred placeholder already deleted on failure for '{segment.get('path')}'; skipping."
+                )
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to edit Discord placeholder on failure for '{segment.get('path')}': {exc}. "
+                    "Falling back to send_text_chunks."
+                )
+        await self.send_text_chunks(message.channel_id, [err_text], message)
 
     async def send_details_segment(self, channel_id: str, title: str, body: str, message: Message) -> None:
         """Deliver a `<details>` section as `▸ TITLE` with a persistent toggle button that expands it in place."""

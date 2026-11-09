@@ -144,5 +144,6 @@ class SlackChatbot(Chatbot):
 如果需要处理复杂的输入中状态 (Typing spinner) 或卡片更新动作，可以覆盖重写以下内置回调方法：
 
 *   `supports_intermediate_messages()`：如果平台支持在同一张卡片内更新中间步骤或日志，返回 `true`。
+*   `supports_deferred_media`：类布尔属性（默认 `False`；`DiscordChatbot` 与 `WechatChatbot` 为 `True`）。启用后，`run_shell_command` 会注入 `KESOKU_DEFERRED_MEDIA=1`，带有 `<target>.pending.json` / `<target>.error.json` 侧车文件的 `[file:]` / `[voice:]` 附件将优先投递正文并由后台协程调用 `send_deferred_placeholder`、`deliver_deferred_attachment` 与 `fail_deferred_attachment` 完成异步替换或追加投递（并通过 `serialize_deferred_handle` / `restore_deferred_handle` 支持服务重启恢复）。
 *   `pre_ingest_hook()`：在用户发起会话、消息入队前运行（例如立即开启输入状态动画）。
 *   `on_message_delivered()`：在消息发送成功、转换为 DELIVERED 状态后运行（例如关闭输入状态动画，或发送会话计时统计）。

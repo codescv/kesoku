@@ -50,9 +50,37 @@ class Gateway:
         self.db_path = self.workspace_config.db_path
         self._listeners: set[Listener] = set()
         self._stream_handlers: dict[str, StreamHandler] = {}
+        self._deferred_media_chatbots: set[str] = set()
+        self._chatbots: dict[str, Any] = {}
         self.context.sync_db.verify_db()
         self.agent: Any | None = None
         self.cron_manager: Any | None = None
+
+    def register_chatbot(self, chatbot: Any) -> None:
+        """Register an active chatbot adapter instance for session lifecycle callbacks.
+
+        Args:
+            chatbot: Chatbot adapter instance with a ``chatbot_id`` attribute.
+        """
+        chatbot_id = getattr(chatbot, "chatbot_id", None)
+        if isinstance(chatbot_id, str) and chatbot_id:
+            self._chatbots[chatbot_id] = chatbot
+
+    def register_deferred_media(self, chatbot_id: str, supported: bool = True) -> None:
+        """Register whether ``chatbot_id`` supports deferred media sidecars (``.pending.json``).
+
+        Args:
+            chatbot_id: Unique chatbot identifier (e.g., 'discord', 'wechat').
+            supported: True when the adapter renders deferred placeholders/watchers.
+        """
+        if supported:
+            self._deferred_media_chatbots.add(chatbot_id)
+        else:
+            self._deferred_media_chatbots.discard(chatbot_id)
+
+    def supports_deferred_media(self, chatbot_id: str) -> bool:
+        """Return True if ``chatbot_id`` has registered deferred-media support."""
+        return chatbot_id in self._deferred_media_chatbots
 
     def register_stream_handler(self, chatbot_id: str, handler: StreamHandler) -> None:
         """Register an ephemeral streaming preview handler for a chatbot adapter.
@@ -241,12 +269,31 @@ class Gateway:
         finally:
             self._listeners.discard(listener)
 
+    async def _cancel_session_deferred_media(self, session_id: str) -> None:
+        """Cancel active deferred-media watchers and terminate detached workers for ``session_id``."""
+        from kesoku.gateway.chatbot.deferred_media import cancel_session_deferred_entries_in_db
+
+        for bot in list(self._chatbots.values()):
+            cancel_fn = getattr(bot, "cancel_deferred_for_session", None)
+            if callable(cancel_fn):
+                try:
+                    await cancel_fn(session_id)
+                except Exception as e:
+                    logger.warning(f"Failed to cancel deferred media on chatbot for session {session_id}: {e}")
+
+        try:
+            await cancel_session_deferred_entries_in_db(self.db, session_id)
+        except Exception as e:
+            logger.warning(f"Failed DB-level deferred media cleanup for session {session_id}: {e}")
+
     async def abort_session(self, session_id: str) -> None:
         """Abort any active processing for the session (e.g. if the channel is deleted).
 
         Args:
             session_id: Target session ID.
         """
+        await self._cancel_session_deferred_media(session_id)
+
         try:
             await self.context.active_jobs.stop_all_for_session(session_id)
         except Exception as e:
@@ -269,6 +316,8 @@ class Gateway:
         Args:
             session_id: The target session ID.
         """
+        await self._cancel_session_deferred_media(session_id)
+
         try:
             await self.context.active_jobs.stop_all_for_session(session_id)
         except Exception as e:

@@ -8,6 +8,7 @@ from kesoku.agent.llm import get_llm
 from kesoku.agent.tools.registry import ToolContext, default_registry
 from kesoku.constants import MessageRole, MessageType
 from kesoku.db import Message
+from kesoku.gateway.chatbot.deferred_media import wait_for_deferred_file
 from kesoku.utils.async_fs import async_exists
 from kesoku.utils.path import PathResolver
 
@@ -35,12 +36,36 @@ async def analyze_media(
 
     resolved_path = None
     abs_path = PathResolver.resolve(path)
-    if await async_exists(abs_path):
+    ready_deferred_path, deferred_error = await wait_for_deferred_file(
+        [abs_path],
+        poll_interval=0.5,
+        max_wait_cap=240.0,
+        interrupt_check=context.interrupt_check,
+    )
+    if deferred_error:
+        return f"Error: Media file '{path}' failed to generate: {deferred_error}"
+    if ready_deferred_path:
+        resolved_path = ready_deferred_path
+    elif await async_exists(abs_path):
         resolved_path = abs_path
-    elif context.session_workspace:
-        staging_path = os.path.join(PathResolver.get_session_staging_dir(context.session_workspace), path)
-        if await async_exists(staging_path):
-            resolved_path = staging_path
+    elif context.session_workspace and not os.path.isabs(path):
+        try:
+            staging_path = os.path.join(PathResolver.get_session_staging_dir(context.session_workspace), path)
+        except OSError:
+            staging_path = None
+        if staging_path:
+            ready_staging_path, staging_error = await wait_for_deferred_file(
+                [staging_path],
+                poll_interval=0.5,
+                max_wait_cap=240.0,
+                interrupt_check=context.interrupt_check,
+            )
+            if staging_error:
+                return f"Error: Media file '{path}' failed to generate: {staging_error}"
+            if ready_staging_path:
+                resolved_path = ready_staging_path
+            elif await async_exists(staging_path):
+                resolved_path = staging_path
 
     if not resolved_path or not await async_exists(resolved_path):
         return f"Error: Media file '{path}' does not exist."

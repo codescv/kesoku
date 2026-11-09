@@ -1,6 +1,7 @@
 """Base class for Kesoku chatbot adapters."""
 
 import asyncio
+import copy
 import datetime
 import difflib
 import os
@@ -21,6 +22,21 @@ from kesoku.config import get_config
 from kesoku.constants import SYSTEM_START_TIME, MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.chatbot.context_reporter import ContextHtmlReporter
+from kesoku.gateway.chatbot.deferred_media import (
+    DEAD_WORKER_GRACE_SEC,
+    RECOVERY_LOOKBACK_SEC,
+    clamp_timeout_sec,
+    format_deferred_failure_message,
+    is_deferred_sidecar_name,
+    is_deferred_target_ready,
+    is_pid_alive,
+    read_json_dict,
+    resolve_deferred_sync,
+    safe_unlink,
+    sanitize_error_reason,
+    terminate_deferred_worker,
+    unlink_if_job_matches,
+)
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 from kesoku.utils.async_fs import (
@@ -221,6 +237,11 @@ class CommandRegistry:
 class Chatbot(ABC):
     """Abstract base class for chatbot adapters connecting to Kesoku Gateway."""
 
+    supports_deferred_media: bool = False
+    _deferred_poll_initial_sec: float = 0.5
+    _deferred_poll_max_sec: float = 2.0
+    _deferred_dead_grace_sec: float = DEAD_WORKER_GRACE_SEC
+
     def __init__(self, chatbot_id: str, gateway: Gateway, session_id: str | None = None) -> None:
         """Initialize the chatbot with a unique identifier, gateway instance, and optional session ID.
 
@@ -233,9 +254,24 @@ class Chatbot(ABC):
         self.gateway = gateway
         self.session_id = session_id
         self._listener_task: asyncio.Task[None] | None = None
+        self._recovery_task: asyncio.Task[None] | None = None
+        self._deferred_tasks: dict[str, set[asyncio.Task[None]]] = {}
+        self._deferred_watched_keys: set[tuple[str, int]] = set()
+        self._metadata_locks: dict[str, asyncio.Lock] = {}
+        self._deferred_messages: dict[str, Message] = {}
+        self._register_gateway_capabilities()
 
         self.commands = CommandRegistry()
         self._register_default_commands()
+
+    def _register_gateway_capabilities(self) -> None:
+        """Register this chatbot instance and its deferred-media capability on the Gateway."""
+        register_bot_fn = getattr(self.gateway, "register_chatbot", None)
+        if callable(register_bot_fn):
+            register_bot_fn(self)
+        register_deferred_fn = getattr(self.gateway, "register_deferred_media", None)
+        if callable(register_deferred_fn):
+            register_deferred_fn(self.chatbot_id, bool(self.supports_deferred_media))
 
     def _register_default_commands(self) -> None:
         """Register platform-agnostic standard commands."""
@@ -645,6 +681,12 @@ class Chatbot(ABC):
             except Exception as e:
                 logger.warning(f"Failed to clean up background jobs in clear_session_by_channel: {e}")
 
+            # 2b. Cancel active deferred media watchers and workers for the cleared session
+            try:
+                await self.cancel_deferred_for_session(session.id)
+            except Exception as e:
+                logger.warning(f"Failed to cancel deferred media in clear_session_by_channel: {e}")
+
             # Resolve role and set appropriate session title
             role = await self.gateway.db.get_channel_role(self.chatbot_id, channel_id)
             role_name = role if isinstance(role, str) else "default"
@@ -989,6 +1031,8 @@ class Chatbot(ABC):
                     files = []
                     for root, _, filenames in os.walk(s_dir):
                         for f in filenames:
+                            if is_deferred_sidecar_name(f):
+                                continue
                             files.append(os.path.realpath(os.path.join(root, f)))
                     return files
 
@@ -1191,6 +1235,9 @@ class Chatbot(ABC):
         and routes non-user messages to handle_message.
         """
         self._listener_task = asyncio.current_task()
+        self._register_gateway_capabilities()
+        if self.supports_deferred_media and (self._recovery_task is None or self._recovery_task.done()):
+            self._recovery_task = asyncio.create_task(self._recover_deferred_media())
         filters = {}
         if self.session_id:
             filters["session_id"] = self.session_id
@@ -1265,9 +1312,23 @@ class Chatbot(ABC):
             logger.warning(f"Chatbot '{self.chatbot_id}' subscriber task exited; outbound delivery has stopped.")
 
     def stop(self) -> None:
-        """Stop the subscriber listener task."""
+        """Stop the subscriber listener task and cancel in-memory deferred watchers.
+
+        Note:
+            Service stop/restart cancels ONLY in-memory ``asyncio.Task`` instances
+            without signaling detached worker PIDs or altering ``metadata`` so
+            startup recovery can re-attach watchers on the next boot.
+        """
         if self._listener_task and not self._listener_task.done():
             self._listener_task.cancel()
+        if self._recovery_task and not self._recovery_task.done():
+            self._recovery_task.cancel()
+        for task_set in list(self._deferred_tasks.values()):
+            for task in list(task_set):
+                if not task.done():
+                    task.cancel()
+        self._deferred_tasks.clear()
+        self._deferred_watched_keys.clear()
 
     @abstractmethod
     async def handle_message(self, message: Message) -> None:
@@ -1290,6 +1351,478 @@ class Chatbot(ABC):
         """Send a voice message/file to the specified channel."""
         pass
 
+    async def send_deferred_placeholder(
+        self,
+        channel_id: str,
+        segment: dict[str, Any],
+        message: Message,
+        marker: dict[str, Any],
+    ) -> Any:
+        """Send an optional placeholder message for a pending deferred attachment."""
+        _ = (channel_id, segment, message, marker)
+        return None
+
+    def serialize_deferred_handle(self, handle: Any) -> dict[str, Any] | None:
+        """Serialize a platform placeholder handle into JSON-storable metadata."""
+        _ = handle
+        return None
+
+    async def restore_deferred_handle(self, raw_handle: dict[str, Any] | None) -> Any:
+        """Restore a platform placeholder handle from persisted metadata on startup."""
+        _ = raw_handle
+        return None
+
+    async def deliver_deferred_attachment(
+        self,
+        channel_id: str,
+        file_path: str,
+        message: Message,
+        handle: Any,
+        kind: str,
+    ) -> None:
+        """Deliver a ready deferred attachment via the platform adapter."""
+        _ = handle
+        if kind == "voice":
+            await self.send_voice_segment(channel_id, file_path, message)
+        else:
+            await self.send_file_segment(channel_id, file_path, message)
+
+    async def fail_deferred_attachment(
+        self,
+        handle: Any,
+        reason: str,
+        message: Message,
+        segment: dict[str, Any],
+    ) -> None:
+        """Report a deferred attachment failure to the user without triggering self-healing."""
+        _ = handle
+        notice = format_deferred_failure_message(segment.get("path", ""), reason)
+        await self.send_text_chunks(message.channel_id, [notice], message)
+
+    async def _get_staging_dir_for_session(self, session_id: str) -> str | None:
+        """Resolve the session staging directory for ``session_id`` if available."""
+        try:
+            get_sess = getattr(self.gateway.db, "get_session", None)
+            if not callable(get_sess):
+                return None
+            session = await get_sess(session_id)
+            if session and getattr(session, "workspace_name", None):
+                return self.get_session_staging_dir(session.workspace_name)
+        except Exception as exc:
+            logger.debug(f"Failed to resolve staging dir for session {session_id}: {exc}")
+        return None
+
+    async def _resolve_deferred(
+        self,
+        raw_path: str,
+        session_id: str,
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        """Inspect deferred sidecars for ``raw_path`` strictly before fuzzy path matching."""
+        staging_dir = await self._get_staging_dir_for_session(session_id)
+        return await asyncio.to_thread(resolve_deferred_sync, raw_path, staging_dir)
+
+    def _get_metadata_lock(self, message_id: str) -> asyncio.Lock:
+        """Return a per-message asyncio lock guarding concurrent ``message.metadata`` updates."""
+        lock = self._metadata_locks.get(message_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._metadata_locks[message_id] = lock
+        return lock
+
+    async def _persist_message_metadata_locked(self, msg_obj: Message) -> None:
+        """Persist a deep copy of ``msg_obj.metadata`` to SQLite while holding its metadata lock."""
+        update_fn = getattr(self.gateway.db, "update_message_metadata", None)
+        if not callable(update_fn):
+            return
+        try:
+            await update_fn(msg_obj.id, copy.deepcopy(msg_obj.metadata))
+        except Exception as exc:
+            logger.warning(f"Failed to persist deferred metadata for message {msg_obj.id}: {exc}")
+
+    async def _start_deferred_tracking(
+        self,
+        segment: dict[str, Any],
+        message: Message,
+        target_path: str,
+        marker: dict[str, Any],
+    ) -> None:
+        """Send placeholder, persist pending metadata entry, and spawn non-blocking watcher task."""
+        handle: Any = None
+        try:
+            handle = await self.send_deferred_placeholder(message.channel_id, segment, message, marker)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                f"Failed to send deferred placeholder for '{segment.get('path')}' "
+                f"(will deliver without placeholder when ready): {exc}"
+            )
+            handle = None
+
+        job_id = str(marker.get("job_id") or uuid.uuid4().hex[:12])
+        kind = str(segment.get("type") or "file")
+        entry: dict[str, Any] = {
+            "id": job_id,
+            "path": target_path,
+            "raw_path": str(segment.get("path") or target_path),
+            "kind": kind,
+            "state": "pending",
+            "marker": copy.deepcopy(marker) if isinstance(marker, dict) else {},
+            "handle": self.serialize_deferred_handle(handle),
+        }
+
+        lock = self._get_metadata_lock(message.id)
+        async with lock:
+            canonical_msg = self._deferred_messages.setdefault(message.id, message)
+            if not isinstance(canonical_msg.metadata, dict):
+                canonical_msg.metadata = {}
+            entries = canonical_msg.metadata.get("deferred_media")
+            if not isinstance(entries, list):
+                entries = []
+                canonical_msg.metadata["deferred_media"] = entries
+            entry_index = len(entries)
+            entries.append(entry)
+            await self._persist_message_metadata_locked(canonical_msg)
+
+        self._spawn_deferred_watcher(
+            message=canonical_msg,
+            entry_index=entry_index,
+            target_path=target_path,
+            initial_marker=entry["marker"],
+            handle=handle,
+            segment=segment,
+        )
+
+    def _spawn_deferred_watcher(
+        self,
+        message: Message,
+        entry_index: int,
+        target_path: str,
+        initial_marker: dict[str, Any],
+        handle: Any,
+        segment: dict[str, Any],
+    ) -> None:
+        """Spawn and register an ``asyncio.Task`` watching ``(message.id, entry_index)``."""
+        watch_key = (message.id, entry_index)
+        if watch_key in self._deferred_watched_keys:
+            return
+        self._deferred_watched_keys.add(watch_key)
+
+        task = asyncio.create_task(
+            self._watch_deferred_attachment(
+                message=message,
+                entry_index=entry_index,
+                target_path=target_path,
+                initial_marker=initial_marker,
+                handle=handle,
+                segment=segment,
+            )
+        )
+        session_tasks = self._deferred_tasks.setdefault(message.session_id, set())
+        session_tasks.add(task)
+
+        def _cleanup_done(done_task: asyncio.Task[None]) -> None:
+            self._deferred_watched_keys.discard(watch_key)
+            bucket = self._deferred_tasks.get(message.session_id)
+            if bucket is not None:
+                bucket.discard(done_task)
+                if not bucket:
+                    self._deferred_tasks.pop(message.session_id, None)
+            if not any(mid == message.id for mid, _ in self._deferred_watched_keys):
+                msg_lock = self._metadata_locks.get(message.id)
+                if msg_lock is not None and not msg_lock.locked():
+                    self._metadata_locks.pop(message.id, None)
+                self._deferred_messages.pop(message.id, None)
+
+        task.add_done_callback(_cleanup_done)
+
+    async def _set_deferred_entry_state(self, message: Message, entry_index: int, new_state: str) -> None:
+        """Update ``message.metadata['deferred_media'][entry_index]['state']`` under lock and persist."""
+        lock = self._get_metadata_lock(message.id)
+        async with lock:
+            canonical_msg = self._deferred_messages.get(message.id, message)
+            if not isinstance(canonical_msg.metadata, dict):
+                return
+            entries = canonical_msg.metadata.get("deferred_media")
+            if not isinstance(entries, list) or not (0 <= entry_index < len(entries)):
+                return
+            entry = entries[entry_index]
+            if isinstance(entry, dict):
+                entry["state"] = new_state
+                await self._persist_message_metadata_locked(canonical_msg)
+
+    async def _safe_fail_deferred(
+        self,
+        handle: Any,
+        reason: str,
+        message: Message,
+        segment: dict[str, Any],
+    ) -> None:
+        """Invoke ``fail_deferred_attachment`` catching and logging any adapter exceptions."""
+        try:
+            await self.fail_deferred_attachment(handle, sanitize_error_reason(reason), message, segment)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                f"Adapter fail_deferred_attachment raised error for '{segment.get('path')}': {exc}",
+                exc_info=True,
+            )
+
+    async def _watch_deferred_attachment(
+        self,
+        message: Message,
+        entry_index: int,
+        target_path: str,
+        initial_marker: dict[str, Any],
+        handle: Any,
+        segment: dict[str, Any],
+    ) -> None:
+        """Poll a pending deferred attachment and deliver or fail without blocking ``Chatbot.start()``."""
+        pending_path = f"{target_path}.pending.json"
+        error_path = f"{target_path}.error.json"
+        expected_job_id = str(initial_marker.get("job_id") or "").strip()
+        kind = str(segment.get("type") or "file")
+        effective_marker: dict[str, Any] = copy.deepcopy(initial_marker) if isinstance(initial_marker, dict) else {}
+        timeout_sec = clamp_timeout_sec(effective_marker)
+        try:
+            created_at = float(effective_marker.get("created_at") or 0.0)
+        except (TypeError, ValueError):
+            created_at = 0.0
+        if created_at <= 0.0:
+            created_at = time.time()
+
+        try:
+            tracked_pid = int(effective_marker.get("pid") or 0)
+        except (TypeError, ValueError):
+            tracked_pid = 0
+
+        dead_since: float | None = None
+        missing_since: float | None = None
+        poll_delay = max(0.01, float(self._deferred_poll_initial_sec))
+        max_poll_delay = max(poll_delay, float(self._deferred_poll_max_sec))
+        grace_sec = max(0.05, float(self._deferred_dead_grace_sec))
+
+        try:
+            while True:
+                live_marker = await asyncio.to_thread(read_json_dict, pending_path)
+                if isinstance(live_marker, dict) and live_marker:
+                    live_job_id = str(live_marker.get("job_id") or "").strip()
+                    if expected_job_id and live_job_id and live_job_id != expected_job_id:
+                        await self._set_deferred_entry_state(message, entry_index, "failed")
+                        await self._safe_fail_deferred(handle, "已被新任务取代", message, segment)
+                        return
+                    effective_marker = live_marker
+                    timeout_sec = clamp_timeout_sec(effective_marker)
+                    try:
+                        live_pid = int(live_marker.get("pid") or 0)
+                        if live_pid > 0:
+                            tracked_pid = live_pid
+                            if isinstance(initial_marker, dict):
+                                initial_marker["pid"] = live_pid
+                    except (TypeError, ValueError):
+                        pass
+                    missing_since = None
+
+                if await asyncio.to_thread(is_deferred_target_ready, target_path, pending_path, effective_marker):
+                    await asyncio.to_thread(unlink_if_job_matches, pending_path, expected_job_id)
+                    await asyncio.to_thread(unlink_if_job_matches, error_path, expected_job_id)
+                    final_path = await async_realpath(target_path)
+                    try:
+                        await self.deliver_deferred_attachment(
+                            message.channel_id,
+                            final_path,
+                            message,
+                            handle,
+                            kind,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.error(
+                            f"Deferred delivery failed for '{target_path}' in session {message.session_id}: {exc}",
+                            exc_info=True,
+                        )
+                        await self._set_deferred_entry_state(message, entry_index, "failed")
+                        await self._safe_fail_deferred(handle, "附件上传失败", message, segment)
+                        return
+
+                    await self._set_deferred_entry_state(message, entry_index, "delivered")
+                    return
+
+                err_dict = await asyncio.to_thread(read_json_dict, error_path)
+                if err_dict is not None:
+                    err_job_id = str(err_dict.get("job_id") or "").strip()
+                    if not expected_job_id or not err_job_id or err_job_id == expected_job_id:
+                        await asyncio.to_thread(unlink_if_job_matches, error_path, expected_job_id)
+                        await asyncio.to_thread(unlink_if_job_matches, pending_path, expected_job_id)
+                        reason = sanitize_error_reason(err_dict.get("error"), default="后台生成失败")
+                        await self._set_deferred_entry_state(message, entry_index, "failed")
+                        await self._safe_fail_deferred(handle, reason, message, segment)
+                        return
+
+                now_mono = time.monotonic()
+                if tracked_pid > 0 and not await asyncio.to_thread(is_pid_alive, tracked_pid):
+                    if dead_since is None:
+                        dead_since = now_mono
+                    elif now_mono - dead_since >= grace_sec:
+                        await asyncio.to_thread(unlink_if_job_matches, pending_path, expected_job_id)
+                        await self._set_deferred_entry_state(message, entry_index, "failed")
+                        await self._safe_fail_deferred(handle, "后台生成进程异常退出", message, segment)
+                        return
+                else:
+                    dead_since = None
+
+                if live_marker is None:
+                    if missing_since is None:
+                        missing_since = now_mono
+                    elif now_mono - missing_since >= grace_sec:
+                        recheck = await asyncio.to_thread(read_json_dict, pending_path)
+                        await self._set_deferred_entry_state(message, entry_index, "failed")
+                        if (
+                            isinstance(recheck, dict)
+                            and recheck
+                            and expected_job_id
+                            and str(recheck.get("job_id") or "").strip() not in ("", expected_job_id)
+                        ):
+                            await self._safe_fail_deferred(handle, "已被新任务取代", message, segment)
+                        else:
+                            await self._safe_fail_deferred(handle, "生成任务中断", message, segment)
+                        return
+
+                if time.time() > created_at + timeout_sec:
+                    await terminate_deferred_worker(target_path, effective_marker)
+                    await self._set_deferred_entry_state(message, entry_index, "failed")
+                    await self._safe_fail_deferred(handle, "生成超时", message, segment)
+                    return
+
+                if dead_since is not None or missing_since is not None:
+                    sleep_for = min(poll_delay, max(0.02, grace_sec / 4.0))
+                else:
+                    sleep_for = poll_delay
+                    poll_delay = min(max_poll_delay, poll_delay * 1.5)
+                await asyncio.sleep(sleep_for)
+        except asyncio.CancelledError:
+            # Service stop or explicit session cancel: do NOT touch worker PID or metadata here.
+            raise
+        except Exception as exc:
+            logger.error(
+                f"Unexpected error in deferred watcher for '{target_path}' (message {message.id}): {exc}",
+                exc_info=True,
+            )
+
+    async def cancel_deferred_for_session(self, session_id: str) -> None:
+        """Cancel active deferred watchers, terminate worker PIDs/units, and mark ``cancelled`` for ``session_id``."""
+        tasks = list(self._deferred_tasks.pop(session_id, set()))
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        msg_by_id: dict[str, Message] = {
+            mid: m for mid, m in list(self._deferred_messages.items()) if m.session_id == session_id
+        }
+        get_msgs_fn = getattr(self.gateway.db, "get_messages_by_filters", None)
+        if callable(get_msgs_fn):
+            try:
+                db_msgs = await get_msgs_fn({"session_id": session_id, "role": MessageRole.ASSISTANT})
+                if isinstance(db_msgs, list):
+                    for dm in db_msgs:
+                        msg_by_id.setdefault(dm.id, dm)
+            except Exception as exc:
+                logger.debug(f"Failed to load session messages in cancel_deferred_for_session({session_id}): {exc}")
+
+        for msg in msg_by_id.values():
+            lock = self._get_metadata_lock(msg.id)
+            async with lock:
+                meta = getattr(msg, "metadata", None)
+                if not isinstance(meta, dict):
+                    continue
+                entries = meta.get("deferred_media")
+                if not isinstance(entries, list):
+                    continue
+                changed = False
+                for entry in entries:
+                    if isinstance(entry, dict) and entry.get("state") == "pending":
+                        target = str(entry.get("path") or "")
+                        marker = entry.get("marker") if isinstance(entry.get("marker"), dict) else {}
+                        if target:
+                            await terminate_deferred_worker(target, marker)
+                        entry["state"] = "cancelled"
+                        changed = True
+                if changed:
+                    await self._persist_message_metadata_locked(msg)
+
+    async def _recover_deferred_media(self) -> None:
+        """Scan last 24h messages for pending deferred attachments and re-attach watchers on startup."""
+        if not self.supports_deferred_media:
+            return
+        cutoff = time.time() - RECOVERY_LOOKBACK_SEC
+        messages: list[Message] = []
+        try:
+            fast_fn = getattr(self.gateway.db, "get_pending_deferred_media_messages", None)
+            if callable(fast_fn):
+                res = await fast_fn(self.chatbot_id, cutoff)
+                if isinstance(res, list):
+                    messages = res
+            else:
+                get_msgs_fn = getattr(self.gateway.db, "get_messages_by_filters", None)
+                if callable(get_msgs_fn):
+                    res = await get_msgs_fn({"chatbot_id": self.chatbot_id, "role": MessageRole.ASSISTANT})
+                    if isinstance(res, list):
+                        messages = [m for m in res if getattr(m, "timestamp", 0.0) >= cutoff]
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"Failed to scan pending deferred media on startup for '{self.chatbot_id}': {exc}")
+            return
+
+        for msg in messages:
+            if self.session_id and msg.session_id != self.session_id:
+                continue
+            meta = getattr(msg, "metadata", None)
+            if not isinstance(meta, dict):
+                continue
+            entries = meta.get("deferred_media")
+            if not isinstance(entries, list):
+                continue
+
+            canonical_msg = self._deferred_messages.setdefault(msg.id, msg)
+            canonical_entries = canonical_msg.metadata.get("deferred_media", [])
+            for idx, entry in enumerate(canonical_entries):
+                if not isinstance(entry, dict) or entry.get("state") != "pending":
+                    continue
+                if (canonical_msg.id, idx) in self._deferred_watched_keys:
+                    continue
+                target_path = str(entry.get("path") or "").strip()
+                if not target_path:
+                    continue
+                raw_handle = entry.get("handle") if isinstance(entry.get("handle"), dict) else None
+                handle: Any = None
+                if raw_handle is not None:
+                    try:
+                        handle = await self.restore_deferred_handle(raw_handle)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.warning(
+                            f"Failed to restore deferred handle for message {canonical_msg.id} entry {idx}: {exc}"
+                        )
+                        handle = None
+                kind = str(entry.get("kind") or "file")
+                raw_path = str(entry.get("raw_path") or target_path)
+                marker = entry.get("marker") if isinstance(entry.get("marker"), dict) else {}
+                segment = {"type": kind, "path": raw_path}
+                self._spawn_deferred_watcher(
+                    message=canonical_msg,
+                    entry_index=idx,
+                    target_path=target_path,
+                    initial_marker=marker,
+                    handle=handle,
+                    segment=segment,
+                )
+
     async def _attempt_send_attachment(self, segment: dict[str, Any], message: Message) -> None:
         """Attempt to deliver a file or voice attachment segment, with automatic Self-Healing on failure.
 
@@ -1305,7 +1838,25 @@ class Chatbot(ABC):
             DeliveryAbortedError: Raised to abort delivery of remaining segments in this message.
         """
         raw_path = segment["path"]
-        resolved_path = await self.resolve_outbound_path(raw_path, message.session_id)
+        if self.supports_deferred_media:
+            deferred_state = await self._resolve_deferred(raw_path, message.session_id)
+            if deferred_state is not None:
+                state_kind, target_path, sidecar_data = deferred_state
+                if state_kind == "failed":
+                    await asyncio.to_thread(safe_unlink, f"{target_path}.error.json")
+                    raw_err = sidecar_data.get("error") if isinstance(sidecar_data, dict) else None
+                    reason = sanitize_error_reason(raw_err, default="后台生成失败")
+                    await self._safe_fail_deferred(None, reason, message, segment)
+                    return
+                if state_kind == "pending":
+                    await self._start_deferred_tracking(segment, message, target_path, sidecar_data)
+                    return
+                resolved_path = target_path
+            else:
+                resolved_path = await self.resolve_outbound_path(raw_path, message.session_id)
+        else:
+            resolved_path = await self.resolve_outbound_path(raw_path, message.session_id)
+
         try:
             if segment["type"] == "file":
                 await self.send_file_segment(message.channel_id, resolved_path, message)
@@ -1374,6 +1925,8 @@ class Chatbot(ABC):
                 results = []
                 for root, _, filenames in os.walk(s_dir):
                     for f in filenames:
+                        if is_deferred_sidecar_name(f):
+                            continue
                         results.append(os.path.relpath(os.path.join(root, f), s_dir))
                 return sorted(results)[:20]
 

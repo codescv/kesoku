@@ -364,6 +364,13 @@ class TurnExecutor:
             return override.stream
         return bool(getattr(getattr(llm, "config", None), "stream", False))
 
+    def _resolve_supports_deferred_media(self, chatbot_id: str) -> bool:
+        """Return True when the gateway explicitly reports deferred-media support for ``chatbot_id``."""
+        supports_fn = getattr(self.gateway, "supports_deferred_media", None)
+        if callable(supports_fn):
+            return supports_fn(chatbot_id) is True
+        return False
+
     async def process_turn(
         self,
         current_msg: Message,
@@ -403,6 +410,7 @@ class TurnExecutor:
         last_llm: BaseLLM | None = None
         try:
             self.tool_runner.tool_context.user_turn = await self._get_session_turns_count()
+            self.tool_runner.tool_context.supports_deferred_media = self._resolve_supports_deferred_media(chatbot_id)
             while worker.running:
                 # Check-in before atomic action (Thought Interruption)
                 prev_msg_id = current_msg.id
@@ -416,6 +424,9 @@ class TurnExecutor:
                     channel_id = current_msg.channel_id
                     self.tool_runner.tool_context.original_msg_id = current_msg.id
                     self.tool_runner.tool_context.user_turn = await self._get_session_turns_count()
+                    self.tool_runner.tool_context.supports_deferred_media = self._resolve_supports_deferred_media(
+                        chatbot_id
+                    )
                     self._snapshot_cache = None
                     self._turn_tools_used.clear()
                     self._turn_writes = False

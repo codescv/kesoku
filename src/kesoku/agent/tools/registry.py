@@ -25,6 +25,10 @@ class ToolContext(BaseModel):
     gateway: Any = Field(None, exclude=True)
     is_subagent: bool = Field(default=False, description="True if this tool is running inside a sub-agent")
     foreground_only: bool = Field(default=False, description="True if shell commands must not be backgrounded")
+    supports_deferred_media: bool = Field(
+        default=False,
+        description="True if the active target chatbot supports deferred media (.pending.json) delivery",
+    )
     interrupt_check: Callable[[], bool] | None = Field(
         default=None, exclude=True, description="Returns True if user interrupted"
     )

@@ -28,6 +28,7 @@ from kesoku.constants import MessageRole, MessageType
 from kesoku.db import Message
 from kesoku.gateway.attachment_manager import AttachmentManager
 from kesoku.gateway.chatbot.base import Chatbot, InboundMessageAttachment, InboundMessageDTO
+from kesoku.gateway.chatbot.deferred_media import format_deferred_failure_message
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 from kesoku.utils.async_fs import (
@@ -619,6 +620,8 @@ async def qr_login(
 class WechatChatbot(Chatbot):
     """WeChat chatbot adapter for Kesoku AI Agent framework."""
 
+    supports_deferred_media: bool = True
+
     def __init__(self, chatbot_id: str, gateway: Gateway, wechat_config: WechatConfig | None = None) -> None:
         """Initialize WechatChatbot adapter."""
         super().__init__(chatbot_id, gateway)
@@ -1113,6 +1116,44 @@ You are interacting with the user via WeChat (Weixin).
     async def send_voice_segment(self, channel_id: str, file_path: str, message: Message) -> None:
         """Deliver a voice segment, routing it directly as a generic file attachment."""
         await self.send_file_segment(channel_id, file_path, message)
+
+    async def send_deferred_placeholder(
+        self,
+        channel_id: str,
+        segment: dict[str, Any],
+        message: Message,
+        marker: dict[str, Any],
+    ) -> None:
+        """Return None so WeChat omits noisy non-editable placeholder messages."""
+        _ = (channel_id, segment, message, marker)
+        return None
+
+    async def deliver_deferred_attachment(
+        self,
+        channel_id: str,
+        file_path: str,
+        message: Message,
+        handle: Any,
+        kind: str,
+    ) -> None:
+        """Append-deliver a deferred file or voice attachment to WeChat once ready."""
+        _ = handle
+        if kind == "voice":
+            await self.send_voice_segment(channel_id, file_path, message)
+        else:
+            await self.send_file_segment(channel_id, file_path, message)
+
+    async def fail_deferred_attachment(
+        self,
+        handle: Any,
+        reason: str,
+        message: Message,
+        segment: dict[str, Any],
+    ) -> None:
+        """Send a sanitized plain-text failure notice when a deferred attachment fails on WeChat."""
+        _ = handle
+        notice = format_deferred_failure_message(segment.get("path", ""), reason)
+        await self.send_text_chunks(message.channel_id, [notice], message)
 
     async def send_question_segment(
         self,

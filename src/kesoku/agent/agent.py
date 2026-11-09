@@ -174,6 +174,10 @@ class SessionWorker:
                 await self.context.db.update_message_status(current_msg.id, MessageStatus.ERROR)
                 return
 
+            supports_deferred_fn = getattr(self.gateway, "supports_deferred_media", None)
+            supports_deferred = bool(
+                callable(supports_deferred_fn) and supports_deferred_fn(current_msg.chatbot_id) is True
+            )
             folder_name = session.workspace_name
             tool_context = ToolContext(
                 session_id=self.session_id,
@@ -181,6 +185,7 @@ class SessionWorker:
                 original_msg_id=current_msg.id,
                 active_jobs=self.context.active_jobs,
                 gateway=self.gateway,
+                supports_deferred_media=supports_deferred,
                 kesoku_context=self.context,
             )
 

@@ -879,6 +879,32 @@ class DatabaseManager:
             rows = cursor.fetchall()
             return [self._row_to_message(row) for row in rows]
 
+    def get_pending_deferred_media_messages(self, chatbot_id: str, since_timestamp: float) -> list[Message]:
+        """Retrieve recent assistant messages for ``chatbot_id`` containing ``deferred_media`` metadata.
+
+        Args:
+            chatbot_id: Target chatbot identifier.
+            since_timestamp: Minimum Unix timestamp to scan (e.g. ``now - 86400``).
+
+        Returns:
+            List of matching Message objects ordered chronologically.
+        """
+        with self.connection_provider.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM messages
+                WHERE chatbot_id = ?
+                  AND role = ?
+                  AND timestamp >= ?
+                  AND metadata LIKE '%"deferred_media"%'
+                ORDER BY timestamp ASC
+                """,
+                (chatbot_id, MessageRole.ASSISTANT, since_timestamp),
+            )
+            rows = cursor.fetchall()
+            return [self._row_to_message(row) for row in rows]
+
     def recover_orphaned_processing_messages(self, threshold_seconds: float = 300.0) -> int:
         """Recover messages that got stuck in 'processing' status by reverting them to 'pending_agent'.
 
@@ -1904,6 +1930,22 @@ class AsyncDatabaseManager:
             A list of matching messages.
         """
         return await asyncio.to_thread(self.sync_db.get_messages_by_filters, filters, limit, exclude_roles)
+
+    async def get_pending_deferred_media_messages(self, chatbot_id: str, since_timestamp: float) -> list[Message]:
+        """Retrieve recent assistant messages for ``chatbot_id`` containing ``deferred_media`` metadata.
+
+        Args:
+            chatbot_id: Target chatbot identifier.
+            since_timestamp: Minimum Unix timestamp to scan (e.g. ``now - 86400``).
+
+        Returns:
+            A list of matching messages ordered chronologically.
+        """
+        return await asyncio.to_thread(
+            self.sync_db.get_pending_deferred_media_messages,
+            chatbot_id,
+            since_timestamp,
+        )
 
     async def recover_orphaned_processing_messages(self, threshold_seconds: float = 300.0) -> int:
         """Recover messages stuck in 'processing' status for too long.

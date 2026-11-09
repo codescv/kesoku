@@ -525,6 +525,10 @@ async def run_shell_command(
         env["STAGING_DIR"] = PathResolver.get_session_staging_dir(context.session_workspace)
     if context and isinstance(getattr(context, "user_turn", None), int):
         env["USER_TURN"] = str(context.user_turn)
+    if not getattr(context, "foreground_only", False) and getattr(context, "supports_deferred_media", False) is True:
+        env["KESOKU_DEFERRED_MEDIA"] = "1"
+    else:
+        env.pop("KESOKU_DEFERRED_MEDIA", None)
 
     # Prepare unique background job identifiers and log paths
     job_id = f"job_{int(time.time())}_{uuid.uuid4().hex[:8]}"

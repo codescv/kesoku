@@ -144,5 +144,6 @@ class SlackChatbot(Chatbot):
 If your platform supports typing indicators or card updates, override these hooks:
 
 *   `supports_intermediate_messages()`: Return `true` if the platform supports collapsible cards or inline updates for thoughts/tool logs.
+*   `supports_deferred_media`: Class boolean (default `False`; `True` on `DiscordChatbot` and `WechatChatbot`). When enabled, `run_shell_command` exports `KESOKU_DEFERRED_MEDIA=1` and `[file:]` / `[voice:]` tags backed by `<target>.pending.json` / `<target>.error.json` sidecars deliver text immediately while a background watcher calls `send_deferred_placeholder`, `deliver_deferred_attachment`, and `fail_deferred_attachment` (with restart recovery via `serialize_deferred_handle` / `restore_deferred_handle`).
 *   `pre_ingest_hook()`: Run setup actions (like starting the Slack typing spinner) when an inbound prompt is received.
 *   `on_message_delivered()`: Run cleanup actions (like stopping the typing spinner) when delivery finishes.
