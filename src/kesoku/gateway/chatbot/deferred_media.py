@@ -15,6 +15,7 @@ is streamed and delivered first:
 
 import asyncio
 import copy
+import difflib
 import json
 import os
 import re
@@ -46,6 +47,7 @@ MAX_TIMEOUT_SEC = 600.0
 READY_MTIME_EPSILON_SEC = 0.05
 DEAD_WORKER_GRACE_SEC = 3.0
 RECOVERY_LOOKBACK_SEC = 86400.0
+DEFERRED_FUZZY_THRESHOLD = 0.80
 
 _SAFE_SYSTEMD_UNIT_RE = re.compile(r"^[A-Za-z0-9_.@-]+$")
 _ENV_SECRET_ASSIGN_RE = re.compile(
@@ -352,6 +354,45 @@ def resolve_deferred_sync(
                 if not os.path.isfile(sub_target):
                     err = read_json_dict(best_error) or {}
                     return ("failed", sub_target, err)
+
+            # Fallback [C-7]: fuzzy match (>= 0.80) against active *.pending.json targets in staging_dir
+            now = time.time()
+            fuzzy_hits: list[tuple[float, float, str]] = []
+            for root, dirs, filenames in os.walk(staging_dir):
+                dirs[:] = [d for d in dirs if not d.startswith(".")]
+                for fname in filenames:
+                    if not fname.endswith(".pending.json"):
+                        continue
+                    full_p = os.path.join(root, fname)
+                    try:
+                        mtime = os.path.getmtime(full_p)
+                    except OSError:
+                        continue
+                    marker = read_json_dict(full_p) or {}
+                    if now - mtime > clamp_timeout_sec(marker):
+                        continue
+                    sub_target = full_p[: -len(".pending.json")]
+                    target_base = os.path.basename(sub_target)
+                    if not target_base:
+                        continue
+                    ratio = difflib.SequenceMatcher(None, base, target_base).ratio()
+                    if ratio >= DEFERRED_FUZZY_THRESHOLD:
+                        fuzzy_hits.append((ratio, mtime, full_p))
+
+            if fuzzy_hits:
+                fuzzy_hits.sort(key=lambda item: (item[0], item[1]), reverse=True)
+                best_ratio, _, best_pending = fuzzy_hits[0]
+                sub_target = best_pending[: -len(".pending.json")]
+                marker = read_json_dict(best_pending) or {}
+                logger.warning(
+                    f"Fuzzy-resolved deferred attachment '{raw_path}' -> '{sub_target}' (score={best_ratio:.2f})"
+                )
+                if is_deferred_target_ready(sub_target, best_pending, marker):
+                    job_id = str(marker.get("job_id") or "")
+                    unlink_if_job_matches(best_pending, job_id)
+                    unlink_if_job_matches(f"{sub_target}.error.json", job_id)
+                    return ("ready", os.path.realpath(sub_target), marker)
+                return ("pending", sub_target, marker)
 
     return None
 

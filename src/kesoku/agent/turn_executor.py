@@ -251,6 +251,8 @@ class TurnExecutor:
         self._snapshot_cache: list[ContextEntry] | None = None
         self._has_summaries: bool | None = None
         self._compaction_pending: bool = False
+        self._last_turn_prompt_blocked: bool = False
+        self._bg_compaction_tasks: set[asyncio.Task[Any]] = set()
 
     def _is_compaction_pending(self, worker: "SessionWorker") -> bool:
         """Return True if a prior turn deferred or failed post-turn compaction."""
@@ -404,6 +406,7 @@ class TurnExecutor:
         empty_attempts = 0
         active_publisher: _StreamPreviewPublisher | None = None
         completed_final_response = False
+        self._last_turn_prompt_blocked = False
         last_raw_history: list[Message] | None = None
         last_system_prompt: str | None = None
         last_tools_list: list[Any] = []
@@ -437,6 +440,7 @@ class TurnExecutor:
                     self.tool_runner.tool_context.subagent_llm_calls = 0
                     self.tool_runner.tool_context.subagent_tokens = 0
                     empty_attempts = 0
+                    self._last_turn_prompt_blocked = False
                     turn_tool_calls = 0
                     turn_tokens = 0
                     last_context_tokens = 0
@@ -744,6 +748,8 @@ class TurnExecutor:
                         llm=llm,
                         empty_attempts=empty_attempts,
                         publisher=publisher,
+                        worker=worker,
+                        session_staging_dir=session_staging_dir,
                     )
                     if should_continue:
                         if publisher is not None:
@@ -756,7 +762,12 @@ class TurnExecutor:
                         break
 
             # Post-turn compaction: run after final response is delivered so summarization never adds to TTFT.
-            if completed_final_response and last_raw_history is not None and last_llm is not None:
+            if (
+                completed_final_response
+                and not self._last_turn_prompt_blocked
+                and last_raw_history is not None
+                and last_llm is not None
+            ):
                 if not worker.queue_empty():
                     logger.info(
                         f"Skipping post-turn compaction for session {self.session_id} due to queued message; "
@@ -1011,9 +1022,10 @@ class TurnExecutor:
         sessions). Falls back to the channel role lookup (with parent-thread inheritance) otherwise, which
         covers thread sessions whose channel has no explicit `channel_roles` row.
         """
+        bot_default = self.context.config.get_chatbot_default_role(current_msg.chatbot_id)
         try:
             session = await self.context.db.get_session(self.session_id)
-            if session and session.role_name and session.role_name != "default":
+            if session and session.role_name and session.role_name not in ("default", bot_default):
                 return session.role_name
         except Exception as e:
             logger.warning(f"Failed to read session role for '{self.session_id}': {e}")
@@ -1021,6 +1033,7 @@ class TurnExecutor:
             current_msg.chatbot_id,
             current_msg.channel_id,
             self.session_id,
+            default=bot_default,
         )
 
     def _resolve_memories_dir(self, role: str) -> str:
@@ -1386,6 +1399,27 @@ class TurnExecutor:
             logger.info("Interruption detected before launching concurrent tool execution.")
             for coro in exec_tasks:
                 coro.close()
+            for call, tc_msg in tool_call_msgs:
+                cancel_meta: dict[str, Any] = {
+                    "tool_name": call.name,
+                    "tool_error": "cancelled",
+                }
+                if call.tool_call_id:
+                    cancel_meta["tool_call_id"] = call.tool_call_id
+                await self.gateway.post(
+                    Message(
+                        session_id=self.session_id,
+                        chatbot_id=current_msg.chatbot_id,
+                        channel_id=current_msg.channel_id,
+                        sender=call.name,
+                        role=MessageRole.TOOL,
+                        type=MessageType.TOOL_RESULT,
+                        content=f"Tool `{call.name}` was cancelled before it ran because the user sent a new message.",
+                        status=MessageStatus.RESPONDED,
+                        parent_id=tc_msg.id,
+                        metadata=cancel_meta,
+                    )
+                )
             # Mark the initiating message as interrupted to prevent it from being stuck in processing status
             await self.context.db.update_message_status(current_msg.id, MessageStatus.INTERRUPTED)
             return False
@@ -1589,6 +1623,160 @@ class TurnExecutor:
                 )
             )
 
+    async def _compact_after_consecutive_block(
+        self,
+        *,
+        llm: BaseLLM,
+        cfg: KesokuConfig,
+        worker: Any = None,
+        staging_dir: str | None = None,
+    ) -> None:
+        """Best-effort background compaction (`protect_tail_turns=0`) after a second consecutive PROMPT_BLOCKED."""
+        try:
+            bg_history = await build_history(self.gateway, self.session_id, heal_orphans=False)
+            if not bg_history:
+                return
+            compressor = HistoryCompressor(self.context.db)
+            try:
+                compression_llm = self.context.get_llm(use_context_compression=True)
+            except Exception as llm_err:
+                logger.warning(f"Failed to resolve context compression LLM, using session LLM: {llm_err}")
+                compression_llm = llm
+            turns = compressor.segment_turns(bg_history)
+            if not turns:
+                return
+            pf = 0 if len(turns) <= cfg.agent.protect_front_turns else cfg.agent.protect_front_turns
+            nodes = await compressor.force_compact_session(
+                self.session_id,
+                bg_history,
+                compression_llm,
+                cfg,
+                staging_dir=staging_dir,
+                protect_front_turns=pf,
+                protect_tail_turns=0,
+            )
+            if nodes > 0 and worker is not None:
+                cache_name = getattr(worker, "active_cache_name", None)
+                if isinstance(cache_name, str) and cache_name:
+                    cache_llm = (
+                        worker.active_cache_llm
+                        if isinstance(getattr(worker, "active_cache_llm", None), BaseLLM)
+                        else llm
+                    )
+                    try:
+                        await cache_llm.delete_cache(cache_name)
+                    except Exception:
+                        pass
+                    worker.active_cache_name = None
+                    worker.active_cache_llm = None
+                    worker.cached_messages_len = 0
+        except Exception as bg_err:
+            logger.warning(
+                f"Background compaction after consecutive PROMPT_BLOCKED failed in session {self.session_id}: {bg_err}"
+            )
+
+    async def _handle_prompt_blocked_response(
+        self,
+        *,
+        res: LLMResponse,
+        current_msg: Message,
+        last_context_tokens: int,
+        last_cached_tokens: int,
+        turn_tool_calls: int,
+        turn_tokens: int,
+        start_time: float,
+        llm: BaseLLM,
+        publisher: _StreamPreviewPublisher | None,
+        worker: Any,
+        session_staging_dir: str | None,
+    ) -> None:
+        """Handle an input-blocked prompt without retries or prompt pollution."""
+        finish_str = res.finish_reason or "PROMPT_BLOCKED"
+        reason = finish_str.split(":", 1)[1] if ":" in finish_str else "BLOCKED"
+        self._last_turn_prompt_blocked = True
+        logger.warning(
+            f"Prompt blocked by LLM provider in session {self.session_id} "
+            f"(finish_reason={finish_str}); skipping retries and marking turn rows prompt_blocked."
+        )
+        if publisher is not None:
+            await publisher.discard()
+
+        raw_msgs = await self.context.db.get_session_messages(self.session_id)
+        last_assistant_idx = -1
+        for idx, m in enumerate(raw_msgs):
+            if (
+                m.role == MessageRole.ASSISTANT
+                and m.type == MessageType.TEXT
+                and m.parent_id != current_msg.id
+            ):
+                last_assistant_idx = idx
+
+        prior_msgs = raw_msgs[: last_assistant_idx + 1] if last_assistant_idx >= 0 else []
+        prev_user = next((m for m in reversed(prior_msgs) if m.role == MessageRole.USER), None)
+        prev_was_blocked = bool(prev_user and prev_user.metadata and prev_user.metadata.get("prompt_blocked"))
+
+        turn_msgs_by_id: dict[str, Message] = {}
+        for m in raw_msgs[last_assistant_idx + 1 :]:
+            if m.role in (MessageRole.USER, MessageRole.TOOL, MessageRole.SYSTEM) or (
+                m.role == MessageRole.ASSISTANT and m.sender != "Notification"
+            ):
+                turn_msgs_by_id[m.id] = m
+        turn_msgs_by_id.setdefault(current_msg.id, current_msg)
+
+        for tm in turn_msgs_by_id.values():
+            updated_meta = dict(tm.metadata or {})
+            updated_meta["prompt_blocked"] = reason
+            await self.context.db.update_message_metadata(tm.id, updated_meta)
+
+        limit = getattr(llm, "context_window_limit", 1048576)
+        context_percent = (last_context_tokens / limit) * 100 if limit else 0.0
+        notice_content = (
+            f"⚠️ 模型提供方拒绝了本次请求的输入内容（{reason}），这是对最近几轮上下文的判定，重试不会改变结果。"
+            "请换个说法；若仍被拒绝，发送 `/compact`（会连同最近几轮一起压缩）或 `/clear` 开新会话。"
+        )
+        final_msg = Message(
+            session_id=self.session_id,
+            chatbot_id=current_msg.chatbot_id,
+            channel_id=current_msg.channel_id,
+            sender="Notification",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            status=MessageStatus.PENDING,
+            parent_id=current_msg.id,
+            content=notice_content,
+            metadata={
+                "delivery_notice": True,
+                "prompt_blocked": reason,
+                "turn_metrics": {
+                    "session_turns": await self._get_session_turns_count(),
+                    "context_tokens": last_context_tokens,
+                    "cached_tokens": last_cached_tokens,
+                    "context_limit": limit,
+                    "context_percent": context_percent,
+                    "turn_tool_calls": turn_tool_calls,
+                    "turn_tokens": turn_tokens,
+                    "turn_time": time.time() - start_time,
+                    "status": "prompt_blocked",
+                    "subagent_calls": self._subagent_calls,
+                    "subagent_tokens": self._subagent_tokens,
+                },
+            },
+        )
+        await self.gateway.post(final_msg)
+        await self.context.db.update_message_status(current_msg.id, MessageStatus.PROCESSED)
+
+        if prev_was_blocked:
+            bg_task = asyncio.create_task(
+                self._compact_after_consecutive_block(
+                    llm=llm,
+                    cfg=self.context.config,
+                    worker=worker,
+                    staging_dir=session_staging_dir,
+                )
+            )
+            self._bg_compaction_tasks.add(bg_task)
+            bg_task.add_done_callback(self._bg_compaction_tasks.discard)
+
     async def _handle_final_response(
         self,
         res: LLMResponse,
@@ -1601,6 +1789,8 @@ class TurnExecutor:
         llm: BaseLLM,
         empty_attempts: int,
         publisher: _StreamPreviewPublisher | None = None,
+        worker: Any = None,
+        session_staging_dir: str | None = None,
     ) -> tuple[bool, int]:
         """Handle final assistant response including stop hooks, thought logging, retry logic, and metrics.
 
@@ -1614,6 +1804,22 @@ class TurnExecutor:
         chatbot_id = current_msg.chatbot_id
         channel_id = current_msg.channel_id
         cfg = self.context.config
+
+        if (res.finish_reason or "").startswith("PROMPT_BLOCKED"):
+            await self._handle_prompt_blocked_response(
+                res=res,
+                current_msg=current_msg,
+                last_context_tokens=last_context_tokens,
+                last_cached_tokens=last_cached_tokens,
+                turn_tool_calls=turn_tool_calls,
+                turn_tokens=turn_tokens,
+                start_time=start_time,
+                llm=llm,
+                publisher=publisher,
+                worker=worker,
+                session_staging_dir=session_staging_dir,
+            )
+            return False, empty_attempts
 
         if res.content and res.content.strip():
             # P2-2 Stop Hooks

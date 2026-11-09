@@ -168,8 +168,16 @@ class Gateway:
             sess_kwargs["id"] = session_id
         sess = Session(**sess_kwargs)
 
-        if role is None and chatbot_id and channel_id:
-            role = await self.db.get_channel_role_with_inheritance(chatbot_id, channel_id, sess.id)
+        if role is None:
+            if chatbot_id and channel_id:
+                role = await self.db.get_channel_role_with_inheritance(
+                    chatbot_id,
+                    channel_id,
+                    sess.id,
+                    default=self.context.config.get_chatbot_default_role(chatbot_id),
+                )
+            elif chatbot_id:
+                role = self.context.config.get_chatbot_default_role(chatbot_id)
         if role:
             sess.role_name = role
 

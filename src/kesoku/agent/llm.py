@@ -112,12 +112,15 @@ _ensure_genai_utf8_streaming()
 async def _drain_blocking_stream(
     open_stream: Callable[[], Iterator[Any]],
     on_item: Callable[[Any], Awaitable[None]],
+    *,
+    idle_timeout: float | None = None,
 ) -> None:
     """Iterate a blocking SDK stream in a worker thread while awaiting `on_item` on the event loop.
 
     Args:
         open_stream: Zero-arg callable invoked on a worker thread that returns an iterator of stream items.
         on_item: Async callback awaited on the event loop for each yielded item in order.
+        idle_timeout: Optional per-item idle timeout in seconds; raises `TimeoutError` if exceeded.
     """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
@@ -148,7 +151,10 @@ async def _drain_blocking_stream(
     finished_pump = False
     try:
         while True:
-            kind, payload = await queue.get()
+            if idle_timeout is not None and idle_timeout > 0:
+                kind, payload = await asyncio.wait_for(queue.get(), timeout=idle_timeout)
+            else:
+                kind, payload = await queue.get()
             if kind == "item":
                 await on_item(payload)
             elif kind == "error":
@@ -763,6 +769,8 @@ class GeminiLLM(BaseLLM):
         _ensure_genai_utf8_streaming()
 
         try:
+            timeout_secs = float(getattr(config, "request_timeout_seconds", 300.0) or 300.0)
+            http_opts = types.HttpOptions(timeout=int(timeout_secs * 1000))
             if config.auth_mode == "vertex":
                 logger.info(
                     f"Initializing Gemini client in Vertex AI mode "
@@ -772,12 +780,13 @@ class GeminiLLM(BaseLLM):
                     vertexai=True,
                     project=config.project_id,
                     location=config.location,
+                    http_options=http_opts,
                 )
             else:
                 key = config.api_key or os.getenv("GEMINI_API_KEY")
                 if not key:
                     logger.warning("GEMINI_API_KEY is not set. GeminiLLM calls may fail if not authenticated.")
-                self.client = genai.Client(api_key=key)
+                self.client = genai.Client(api_key=key, http_options=http_opts)
         except ImportError:
             logger.error("google-genai package is not installed.")
             raise
@@ -873,8 +882,9 @@ class GeminiLLM(BaseLLM):
                 config=native_input["config"],
             )
 
+        timeout_secs = float(getattr(self.config, "request_timeout_seconds", 300.0) or 300.0)
         try:
-            return await asyncio.to_thread(_call)
+            return await asyncio.wait_for(asyncio.to_thread(_call), timeout=timeout_secs)
         except Exception as e:
             logger.error(f"GeminiLLM generation failed: {e}")
             raise
@@ -948,8 +958,9 @@ class GeminiLLM(BaseLLM):
                         except Exception as cb_err:
                             logger.warning(f"Stream chunk callback failed in GeminiLLM: {cb_err}")
 
+        timeout_secs = float(getattr(self.config, "request_timeout_seconds", 300.0) or 300.0)
         try:
-            await _drain_blocking_stream(_open_stream, _on_chunk)
+            await _drain_blocking_stream(_open_stream, _on_chunk, idle_timeout=timeout_secs)
         except Exception as e:
             logger.error(f"GeminiLLM streaming generation failed: {e}")
             raise
@@ -1074,6 +1085,22 @@ class GeminiLLM(BaseLLM):
             candidate = candidates[0]
             if candidate.finish_reason is not None:
                 finish_reason = str(getattr(candidate.finish_reason, "value", candidate.finish_reason))
+        if finish_reason is None:
+            pf = getattr(raw_response, "prompt_feedback", None)
+            br = getattr(pf, "block_reason", None) if pf is not None else None
+            if br is not None:
+                br_name = getattr(br, "name", None)
+                br_val = getattr(br, "value", None)
+                if isinstance(br_name, str) and br_name:
+                    br_str: str | None = br_name
+                elif isinstance(br_val, str) and br_val:
+                    br_str = br_val
+                elif isinstance(br, str) and br:
+                    br_str = br
+                else:
+                    br_str = None
+                if br_str:
+                    finish_reason = f"PROMPT_BLOCKED:{br_str}"
 
         if not text_content.strip() and not tool_calls:
             part_shapes = []

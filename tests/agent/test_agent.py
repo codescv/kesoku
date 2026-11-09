@@ -340,8 +340,10 @@ async def test_orphaned_tool_call_healing(temp_db: str) -> None:
     tr_msgs = [m for m in history if m.type == "tool_result"]
     assert len(tr_msgs) == 1
     assert tr_msgs[0].parent_id == tc_msg.id
-    assert "interrupted due to service restart" in tr_msgs[0].content
-    assert tr_msgs[0].metadata.get("tool_error") == "Tool execution was interrupted due to service restart."
+    assert "did not finish (the turn was interrupted before its result was recorded)" in tr_msgs[0].content
+    assert "service restart" not in tr_msgs[0].content
+    assert "did not finish" in (tr_msgs[0].metadata.get("tool_error") or "")
+    assert "service restart" not in (tr_msgs[0].metadata.get("tool_error") or "")
 
 
 @pytest.mark.asyncio

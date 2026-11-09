@@ -32,6 +32,8 @@ class KesokuContext:
         """
         self._config = config
         self.sync_db: DatabaseManager = db or DatabaseManager(self.config.workspace.db_path)
+        if self._config is not None:
+            self.sync_db._config = self._config
         self.db: AsyncDatabaseManager = AsyncDatabaseManager(self.sync_db)
         self.tool_registry: ToolRegistry = tool_registry or default_registry
         self._llm = llm

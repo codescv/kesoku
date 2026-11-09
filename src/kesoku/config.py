@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 import tomllib
-from typing import Literal
+from typing import Any, Literal
 
 import tomli_w
 from pydantic import BaseModel, Field, model_validator
@@ -314,6 +314,10 @@ class GeminiConfig(BaseModel):
         default=False,
         description="Stream LLM responses (live preview on chatbots that support it)",
     )
+    request_timeout_seconds: float = Field(
+        default=300.0,
+        description="Timeout in seconds for Gemini API requests and streaming idle chunks",
+    )
 
 
 class ClaudeConfig(BaseModel):
@@ -370,6 +374,10 @@ class DiscordConfig(BaseModel):
     enabled: bool = Field(default=False, description="Whether to launch the Discord chatbot in daemon mode")
     bot_token: str | None = Field(default=None, description="Discord bot token")
     chatbot_id: str = Field(default="discord", description="Unique chatbot identifier")
+    default_role: str = Field(
+        default="default",
+        description="Default roleplay persona for channels without an explicit role binding",
+    )
     user_allowlist: list[str] = Field(default_factory=list, description="List of allowed Discord user IDs or usernames")
     channels: list[DiscordChannelOverride] = Field(
         default_factory=list,
@@ -416,6 +424,10 @@ class GoogleChatConfig(BaseModel):
 
     enabled: bool = Field(default=False, description="Whether to launch the Google Chat chatbot in daemon mode")
     chatbot_id: str = Field(default="google_chat", description="Unique chatbot identifier")
+    default_role: str = Field(
+        default="default",
+        description="Default roleplay persona for channels without an explicit role binding",
+    )
     project_id: str | None = Field(default=None, description="GCP Project ID for Pub/Sub")
     topic_id: str | None = Field(default=None, description="GCP Pub/Sub Topic ID")
     subscription_id: str | None = Field(default=None, description="GCP Pub/Sub Pull Subscription ID")
@@ -432,6 +444,10 @@ class WechatConfig(BaseModel):
 
     enabled: bool = Field(default=False, description="Whether to launch the WeChat chatbot in daemon mode")
     chatbot_id: str = Field(default="wechat", description="Unique chatbot identifier")
+    default_role: str = Field(
+        default="default",
+        description="Default roleplay persona for channels without an explicit role binding",
+    )
     account_id: str | None = Field(default=None, description="WeChat/iLink bot account ID")
     token: str | None = Field(default=None, description="WeChat/iLink bot auth token")
     base_url: str = Field(default="https://ilinkai.weixin.qq.com", description="WeChat/iLink API base URL")
@@ -583,6 +599,16 @@ class KesokuConfig(BaseModel):
             return self.wechat
         return None
 
+    def get_chatbot_default_role(self, chatbot_id: str) -> str:
+        """Return the configured default_role for the matching chatbot adapter, or 'default'."""
+        if not chatbot_id:
+            return "default"
+        for getter in (self.get_discord_config, self.get_google_chat_config, self.get_wechat_config):
+            bot_cfg = getter(chatbot_id)
+            if bot_cfg is not None:
+                return bot_cfg.default_role or "default"
+        return "default"
+
     def resolve_paths(self, config_file_path: str) -> None:
         """Resolve workspace relative paths against the directory containing the config file.
 
@@ -615,6 +641,15 @@ def get_config() -> KesokuConfig:
         logger.debug("Global configuration not loaded yet. Initializing defaults.")
         _global_config = KesokuConfig()
     return _global_config
+
+
+def resolve_gateway_default_role(gateway: Any, chatbot_id: str) -> str:
+    """Resolve per-chatbot `default_role` from `gateway.context.config` when present, else `get_config()`."""
+    gw_ctx = getattr(gateway, "context", None)
+    cfg = getattr(gw_ctx, "config", None) if gw_ctx is not None else None
+    if isinstance(cfg, KesokuConfig):
+        return cfg.get_chatbot_default_role(chatbot_id)
+    return get_config().get_chatbot_default_role(chatbot_id)
 
 
 def load_config(config_path: str) -> KesokuConfig:

@@ -18,7 +18,7 @@ from kesoku.agent.context_dir import build_context_prefix
 from kesoku.agent.history import build_history
 from kesoku.agent.prompt import build_sys_prompt
 from kesoku.agent.tools.registry import ToolContext
-from kesoku.config import get_config
+from kesoku.config import get_config, resolve_gateway_default_role
 from kesoku.constants import SYSTEM_START_TIME, MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.chatbot.context_reporter import ContextHtmlReporter
@@ -144,6 +144,12 @@ def parse_message_content(content: str) -> list[dict[str, Any]]:
 
 class DeliveryAbortedError(Exception):
     """Exception raised to immediately halt outgoing message delivery."""
+
+    pass
+
+
+class ChannelUnavailableError(DeliveryAbortedError):
+    """Raised when the target channel or DM is permanently unavailable (deleted or forbidden)."""
 
     pass
 
@@ -688,8 +694,12 @@ class Chatbot(ABC):
                 logger.warning(f"Failed to cancel deferred media in clear_session_by_channel: {e}")
 
             # Resolve role and set appropriate session title
-            role = await self.gateway.db.get_channel_role(self.chatbot_id, channel_id)
-            role_name = role if isinstance(role, str) else "default"
+            bot_default = resolve_gateway_default_role(self.gateway, self.chatbot_id)
+            role_name = await self.gateway.db.get_channel_role_with_inheritance(
+                self.chatbot_id, channel_id, session.id, default=bot_default
+            )
+            if not isinstance(role_name, str) or not role_name:
+                role_name = bot_default or "default"
 
             is_dm = await self.is_dm_channel(channel_id)
             display_role = role_name.capitalize() if role_name != "default" else "Default"
@@ -703,12 +713,15 @@ class Chatbot(ABC):
                     title = f"{self.chatbot_id} Session"
 
             # 3. Create and bind new session (overwrites active mapping)
-            new_session = await self.gateway.create_session(
-                session_id=None,
-                title=title,
-                chatbot_id=self.chatbot_id,
-                channel_id=channel_id,
-            )
+            create_kwargs: dict[str, Any] = {
+                "session_id": None,
+                "title": title,
+                "chatbot_id": self.chatbot_id,
+                "channel_id": channel_id,
+            }
+            if role_name != "default":
+                create_kwargs["role"] = role_name
+            new_session = await self.gateway.create_session(**create_kwargs)
             return f"♻️ New session '{new_session.id}' started. Old session '{session.id}' preserved."
         return "⚠️ No active session found for this chat."
 
@@ -732,6 +745,18 @@ class Chatbot(ABC):
         if await self._session_turn_in_progress(session.id):
             return "⏳ A turn is in progress; run /compact after it finishes."
 
+        # Guardrail G2: inspect raw persisted messages (before build_history drops prompt_blocked rows)
+        raw_msgs_res = (
+            await self.gateway.db.get_session_messages(session.id)
+            if hasattr(self.gateway.db, "get_session_messages")
+            else []
+        )
+        raw_msgs = raw_msgs_res if isinstance(raw_msgs_res, list) else []
+        latest_user = next((m for m in reversed(raw_msgs) if m.role == MessageRole.USER), None)
+        latest_user_blocked = bool(
+            latest_user and latest_user.metadata and latest_user.metadata.get("prompt_blocked")
+        )
+
         # Fetch active history
         history = await build_history(self.gateway, session.id, heal_orphans=False)
         if not history:
@@ -744,15 +769,43 @@ class Chatbot(ABC):
         cfg = self.gateway.context.config
         llm = get_llm(provider=cfg.agent.context_llm or cfg.agent.llm, config=cfg, use_context_compression=True)
         staging_dir = self.get_session_staging_dir(session.workspace_name)
-        directive = instructions.strip() or None
-        turns_before = sum(
-            1 for t in compressor.segment_turns(history) if any(m.summary_node_id is not None for m in t)
-        )
+
+        stripped = instructions.strip()
+        compact_all = False
+        if stripped.lower() == "all":
+            compact_all = True
+            directive = None
+        elif stripped.lower().startswith("all "):
+            compact_all = True
+            directive = stripped[4:].strip() or None
+        else:
+            directive = stripped or None
+
+        segmented_turns = compressor.segment_turns(history)
+        turns_before = sum(1 for t in segmented_turns if any(m.summary_node_id is not None for m in t))
+        include_tail = latest_user_blocked or compact_all
 
         try:
-            nodes = await compressor.force_compact_session(
-                session.id, history, llm, cfg, directive=directive, staging_dir=staging_dir
-            )
+            if include_tail:
+                pf = (
+                    0
+                    if (compact_all or len(segmented_turns) <= cfg.agent.protect_front_turns)
+                    else cfg.agent.protect_front_turns
+                )
+                nodes = await compressor.force_compact_session(
+                    session.id,
+                    history,
+                    llm,
+                    cfg,
+                    directive=directive,
+                    staging_dir=staging_dir,
+                    protect_front_turns=pf,
+                    protect_tail_turns=0,
+                )
+            else:
+                nodes = await compressor.force_compact_session(
+                    session.id, history, llm, cfg, directive=directive, staging_dir=staging_dir
+                )
         except Exception as e:
             logger.error(f"Failed manual compaction for session {session.id}: {e}")
             return f"⚠️ Failed to compact history: {e}"
@@ -764,7 +817,8 @@ class Chatbot(ABC):
         turns_after = sum(
             1 for t in compressor.segment_turns(history) if any(m.summary_node_id is not None for m in t)
         )
-        reply = f"🔄 Compacted {turns_after - turns_before} turn(s) into {nodes} summary node(s)."
+        reply = f"🔄 Compacted {turns_after - turns_before} turn(s) into {nodes} summary node(s)"
+        reply += " (including recent turns)." if include_tail else "."
         if directive:
             reply += f'\nFocus: "{directive}"'
         return reply
@@ -937,7 +991,7 @@ class Chatbot(ABC):
                     if isinstance(parent_role, str):
                         role = parent_role
             if not role:
-                role = "default"
+                role = resolve_gateway_default_role(self.gateway, self.chatbot_id)
 
             session = await self.gateway.create_session(
                 session_id=None,
@@ -1198,7 +1252,25 @@ class Chatbot(ABC):
                         # Split into chunks matching platform limits (default 2000)
                         chunks = self.split_text_into_chunks(formatted_text, max_length=self.get_max_text_length())
 
-                        await self.send_text_chunks(message.channel_id, chunks, message)
+                        try:
+                            await self.send_text_chunks(message.channel_id, chunks, message)
+                        except ChannelUnavailableError:
+                            raise
+                        except Exception as text_err:
+                            logger.error(
+                                f"Text delivery failed for message {message.id} "
+                                f"on channel {message.channel_id}: {text_err}"
+                            )
+                            if not (message.metadata and message.metadata.get("delivery_notice")):
+                                try:
+                                    await self.send_text_chunks(
+                                        message.channel_id, ["⚠️ 回复发送失败，请再说一次"], message
+                                    )
+                                except Exception:
+                                    pass
+                            if isinstance(text_err, DeliveryAbortedError):
+                                raise
+                            raise DeliveryAbortedError(f"Text delivery failed: {text_err}") from text_err
 
                 elif segment["type"] == "file":
                     await self._attempt_send_attachment(segment, message)
@@ -1857,30 +1929,44 @@ class Chatbot(ABC):
         else:
             resolved_path = await self.resolve_outbound_path(raw_path, message.session_id)
 
+        _path_errors = (FileNotFoundError, IsADirectoryError, NotADirectoryError, PermissionError)
         try:
             if segment["type"] == "file":
                 await self.send_file_segment(message.channel_id, resolved_path, message)
             elif segment["type"] == "voice":
                 await self.send_voice_segment(message.channel_id, resolved_path, message)
-        except DeliveryAbortedError:
+        except ChannelUnavailableError:
             raise
         except Exception as e:
-            logger.warning(
-                f"Attachment delivery failed for '[{segment['type']}: {raw_path}]' "
-                f"(resolved: {resolved_path}): {e}"
-            )
-            is_already_healing = await self._is_self_healing_retry(message)
-            if is_already_healing:
-                logger.error(
-                    f"Agent self-healing failed for attachment '[{segment['type']}: {raw_path}]'. "
-                    f"Delivering error notice to user."
+            file_exists = bool(resolved_path) and await asyncio.to_thread(os.path.isfile, resolved_path)
+            if isinstance(e, _path_errors) or not file_exists:
+                logger.warning(
+                    f"Attachment delivery failed for '[{segment['type']}: {raw_path}]' "
+                    f"(resolved: {resolved_path}): {e}"
                 )
-                err_notice = f"⚠️ 文件发送失败 ({os.path.basename(raw_path)}): {e}"
-                await self.send_text_chunks(message.channel_id, [err_notice], message)
+                is_already_healing = await self._is_self_healing_retry(message)
+                if is_already_healing:
+                    logger.error(
+                        f"Agent self-healing failed for attachment '[{segment['type']}: {raw_path}]'. "
+                        f"Delivering error notice to user."
+                    )
+                    err_notice = f"⚠️ 文件发送失败 ({os.path.basename(raw_path)}): {e}"
+                    await self.send_text_chunks(message.channel_id, [err_notice], message)
+                else:
+                    logger.info(f"Initiating Agent self-healing for attachment '[{segment['type']}: {raw_path}]'.")
+                    await self._inject_self_healing_notification(segment, raw_path, resolved_path, message, e)
+                    raise DeliveryAbortedError(f"Self-healing initiated for failed attachment: {raw_path}")
             else:
-                logger.info(f"Initiating Agent self-healing for attachment '[{segment['type']}: {raw_path}]'.")
-                await self._inject_self_healing_notification(segment, raw_path, resolved_path, message, e)
-                raise DeliveryAbortedError(f"Self-healing initiated for failed attachment: {raw_path}")
+                logger.warning(
+                    f"Transport failure sending existing attachment '[{segment['type']}: {raw_path}]' "
+                    f"(resolved: {resolved_path}): {e}"
+                )
+                await self.send_text_chunks(
+                    message.channel_id,
+                    [f"⚠️ 附件发送失败（网络错误，已重试）: {os.path.basename(raw_path)}"],
+                    message,
+                )
+                return
 
     async def _is_self_healing_retry(self, message: Message) -> bool:
         """Check if the current message is generated from an attachment self-healing retry.
@@ -1922,13 +2008,56 @@ class Chatbot(ABC):
                 return []
 
             def _list_files(s_dir: str) -> list[str]:
-                results = []
-                for root, _, filenames in os.walk(s_dir):
+                now = time.time()
+                excluded_dirs = {"context", "game"}
+                excluded_prefixes = ("background_job_", "cmd_output_", "hist_")
+                pending_entries: dict[str, float] = {}
+                file_entries: dict[str, float] = {}
+
+                for root, dirs, filenames in os.walk(s_dir):
+                    dirs[:] = [
+                        d
+                        for d in dirs
+                        if not d.startswith(".") and d not in excluded_dirs
+                    ]
                     for f in filenames:
-                        if is_deferred_sidecar_name(f):
+                        if f.startswith("."):
                             continue
-                        results.append(os.path.relpath(os.path.join(root, f), s_dir))
-                return sorted(results)[:20]
+                        full_path = os.path.join(root, f)
+                        if f.endswith(".pending.json"):
+                            target_full = full_path[: -len(".pending.json")]
+                            target_base = os.path.basename(target_full)
+                            if target_base.startswith(".") or target_base.startswith(excluded_prefixes):
+                                continue
+                            try:
+                                p_mtime = os.path.getmtime(full_path)
+                            except OSError:
+                                continue
+                            marker = read_json_dict(full_path) or {}
+                            if now - p_mtime <= clamp_timeout_sec(marker) and not is_deferred_target_ready(
+                                target_full, full_path, marker
+                            ):
+                                rel_target = os.path.relpath(target_full, s_dir)
+                                pending_entries[rel_target] = max(pending_entries.get(rel_target, 0.0), p_mtime)
+                            continue
+                        if is_deferred_sidecar_name(f) or f.startswith(excluded_prefixes):
+                            continue
+                        try:
+                            f_mtime = os.path.getmtime(full_path)
+                        except OSError:
+                            f_mtime = 0.0
+                        rel_file = os.path.relpath(full_path, s_dir)
+                        file_entries[rel_file] = f_mtime
+
+                combined: list[tuple[float, str]] = []
+                for rel_target, p_mtime in pending_entries.items():
+                    combined.append((p_mtime, f"{rel_target} (生成中)"))
+                for rel_file, f_mtime in file_entries.items():
+                    if rel_file in pending_entries:
+                        continue
+                    combined.append((f_mtime, rel_file))
+                combined.sort(key=lambda item: (item[0], item[1]), reverse=True)
+                return [label for _, label in combined[:20]]
 
             return await asyncio.to_thread(_list_files, staging_dir)
         except Exception as e:
@@ -1959,7 +2088,8 @@ class Chatbot(ABC):
             f"File transmission failed for attachment tag '[{segment['type']}: {raw_path}]' "
             f"(resolved path '{resolved_path}'): {exception}\n"
             f"Please inspect your generated filenames and reply with the correct "
-            f"'[{segment['type']}: <actual_filename>]' tag to deliver the file to the user.\n"
+            f"'[{segment['type']}: <actual_filename>]' tag to deliver the file to the user. "
+            f"Re-send the full reply including any ```ui block of the failed message.\n"
             f"Available files in your staging directory:\n{files_str}"
         )
 
@@ -2056,9 +2186,18 @@ class Chatbot(ABC):
         """Format the inbound message content, including attachments list if present."""
         msg_content = dto.text
         if dto.attachments:
-            files_str = "\n".join(
-                f"[Attachment: {a.filename} ({a.mime_type}) saved at {a.path}]" for a in dto.attachments
-            )
+            lines = []
+            for a in dto.attachments:
+                mime_lower = (a.mime_type or "").lower()
+                if mime_lower.startswith(("image/", "audio/")):
+                    lines.append(
+                        f"[Attachment: {a.filename} ({a.mime_type}) saved at {a.path} "
+                        "— image/audio attachments are already visible to you in this message; "
+                        "do not call analyze_media on them]"
+                    )
+                else:
+                    lines.append(f"[Attachment: {a.filename} ({a.mime_type}) saved at {a.path}]")
+            files_str = "\n".join(lines)
             if msg_content:
                 msg_content += f"\n\nAttachments:\n{files_str}"
             else:

@@ -61,7 +61,18 @@ def _resolve_session_role_sync(context: ToolContext | None) -> str | None:
         sync_db = getattr(context.gateway.db, "sync_db", None)
         if sync_db is None:
             return None
+        gw_ctx = getattr(context.gateway, "context", None)
+        cfg = gw_ctx.config if gw_ctx is not None else None
         sess = sync_db.get_session(context.session_id)
+        mapping = sync_db.get_channel_by_session(context.session_id)
+        bot_default = cfg.get_chatbot_default_role(mapping[0]) if (cfg is not None and mapping) else "default"
+        if sess and sess.role_name and sess.role_name not in ("default", bot_default):
+            return sess.role_name
+        if mapping:
+            chatbot_id, channel_id = mapping
+            return sync_db.get_channel_role_with_inheritance(
+                chatbot_id, channel_id, context.session_id, default=bot_default
+            )
         return sess.role_name if sess and sess.role_name else None
     except Exception as e:
         logger.warning(f"Failed to resolve session role for skills: {e}")
@@ -72,11 +83,12 @@ async def _resolve_role(role_param: str | None, context: ToolContext | None) -> 
     """Resolve the correct role scope based on the context rules."""
     if context and context.gateway:
         db = context.gateway.db
+        gw_ctx = getattr(context.gateway, "context", None)
+        cfg = gw_ctx.config if gw_ctx is not None else None
+        sess = None
         if context.session_id:
             try:
                 sess = await db.get_session(context.session_id)
-                if sess and sess.role_name and sess.role_name != "default":
-                    return sess.role_name
             except Exception as e:
                 logger.warning(f"Failed to resolve session role: {e}")
 
@@ -85,8 +97,11 @@ async def _resolve_role(role_param: str | None, context: ToolContext | None) -> 
                 msg_list = await db.get_messages_by_filters({"id": context.original_msg_id})
                 if msg_list:
                     msg = msg_list[0]
+                    bot_default = cfg.get_chatbot_default_role(msg.chatbot_id) if cfg is not None else None
+                    if sess and sess.role_name and sess.role_name not in ("default", bot_default or "default"):
+                        return sess.role_name
                     return await db.get_channel_role_with_inheritance(
-                        msg.chatbot_id, msg.channel_id, context.session_id
+                        msg.chatbot_id, msg.channel_id, context.session_id, default=bot_default
                     )
             except Exception as e:
                 logger.warning(f"Failed to resolve active role: {e}")
@@ -95,9 +110,16 @@ async def _resolve_role(role_param: str | None, context: ToolContext | None) -> 
                 mapping = await db.get_channel_by_session(context.session_id)
                 if mapping:
                     chatbot_id, channel_id = mapping
-                    return await db.get_channel_role_with_inheritance(chatbot_id, channel_id, context.session_id)
+                    bot_default = cfg.get_chatbot_default_role(chatbot_id) if cfg is not None else None
+                    if sess and sess.role_name and sess.role_name not in ("default", bot_default or "default"):
+                        return sess.role_name
+                    return await db.get_channel_role_with_inheritance(
+                        chatbot_id, channel_id, context.session_id, default=bot_default
+                    )
             except Exception as e:
                 logger.warning(f"Failed to resolve active role from session_id: {e}")
+        if sess and sess.role_name and sess.role_name != "default":
+            return sess.role_name
 
     return role_param if role_param else "default"
 

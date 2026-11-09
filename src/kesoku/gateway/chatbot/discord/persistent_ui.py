@@ -262,15 +262,30 @@ def build_question_view(
     return view
 
 
-async def _edit_interaction_message(interaction: discord.Interaction, **kwargs: Any) -> None:
-    """Update the component's original message after `interaction.response.defer()`."""
-    try:
+async def _edit_interaction_message(interaction: discord.Interaction, *, acked: bool = True, **kwargs: Any) -> None:
+    """Update the component's original message after `interaction.response.defer()` (or via REST if unacked)."""
+    if acked:
+        try:
+            await interaction.edit_original_response(**kwargs)
+            return
+        except Exception:
+            pass
+    if interaction.message is not None:
+        await interaction.message.edit(**kwargs)
+    elif acked:
         await interaction.edit_original_response(**kwargs)
-    except Exception:
-        if interaction.message is not None:
-            await interaction.message.edit(**kwargs)
-        else:
-            raise
+
+
+async def _notify(interaction: discord.Interaction, acked: bool, text: str) -> None:
+    """Send a feedback notice via ephemeral followup when acknowledged, else best-effort `channel.send`."""
+    if acked:
+        await interaction.followup.send(text, ephemeral=True)
+        return
+    if interaction.channel is not None and hasattr(interaction.channel, "send"):
+        try:
+            await interaction.channel.send(text)  # type: ignore[union-attr]
+        except Exception as send_err:
+            logger.warning(f"Failed best-effort channel notice after expired interaction: {send_err}")
 
 
 async def handle_question_answer(
@@ -281,20 +296,27 @@ async def handle_question_answer(
     Single-select posts the option text; multiselect posts one `选择：A；B` message.
     """
     try:
-        await interaction.response.defer()
+        acked = True
+        try:
+            await interaction.response.defer()
+        except discord.NotFound as e:
+            if getattr(e, "code", None) != 10062:
+                raise
+            acked = False
+            logger.warning("interaction expired (10062); continuing without ack")
         chatbot = chatbot_for(interaction)
         db = chatbot.gateway.db if chatbot else None
         spec = await db.get_ui_prompt(session_id, message_id) if db else None
         if chatbot is None or spec is None:
-            await interaction.followup.send("⚠️ This question is no longer available.", ephemeral=True)
+            await _notify(interaction, acked, "⚠️ This question is no longer available.")
             return
         if spec.get("answered"):
-            await interaction.followup.send(f"✓ Already answered: {spec['answered']}", ephemeral=True)
+            await _notify(interaction, acked, f"✓ Already answered: {spec['answered']}")
             return
         options: list[str] = list(spec.get("options", []))
         valid = [i for i in dict.fromkeys(indices) if 0 <= i < len(options)]
         if not valid:
-            await interaction.followup.send("⚠️ Invalid selection.", ephemeral=True)
+            await _notify(interaction, acked, "⚠️ Invalid selection.")
             return
         if spec.get("multi"):
             valid = sorted(valid)[: int(spec.get("max", len(options)))]
@@ -309,6 +331,7 @@ async def handle_question_answer(
         await db.save_ui_prompt(session_id, message_id, spec)
         await _edit_interaction_message(
             interaction,
+            acked=acked,
             embed=build_question_embed(spec),
             view=build_question_view(session_id, message_id, spec),
         )

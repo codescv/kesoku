@@ -23,6 +23,7 @@ from kesoku.agent.tools.registry import ToolContext, default_registry
 from kesoku.config import get_config
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
+from kesoku.gateway.chatbot.deferred_media import safe_unlink
 from kesoku.utils.async_fs import (
     async_exists,
     async_read_text_file,
@@ -615,6 +616,8 @@ async def run_shell_command(
                     except Exception:
                         pass
                 await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+                safe_unlink(log_filepath_stdout)
+                safe_unlink(log_filepath_stderr)
                 return (
                     f"Command killed after {int(threshold)} s "
                     "(sub-agent commands cannot run in the background)"
@@ -699,6 +702,8 @@ async def run_shell_command(
             stderr = await async_read_text_file(log_filepath_stderr)
         except Exception as e:
             stderr = f"Failed to read stderr logs: {e}"
+    safe_unlink(log_filepath_stdout)
+    safe_unlink(log_filepath_stderr)
 
     out_str = f"=== STDOUT ===\n{stdout}\n=== STDERR ===\n{stderr}"
 

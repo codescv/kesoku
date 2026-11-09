@@ -133,6 +133,10 @@ async def build_history(
                 "Synthesizing interruption response."
             )
             tool_name = tc.metadata.get("tool_name", "unknown_tool")
+            orphan_msg = (
+                f"Tool `{tool_name}` did not finish (the turn was interrupted before its result was recorded); "
+                "if it had side effects, re-check state before repeating it."
+            )
             interrupted_msg = Message(
                 session_id=session_id,
                 chatbot_id=tc.chatbot_id,
@@ -140,22 +144,32 @@ async def build_history(
                 sender=tool_name,
                 role=MessageRole.TOOL,
                 type=MessageType.TOOL_RESULT,
-                content=f"Tool `{tool_name}` execution was interrupted due to service restart.",
+                content=orphan_msg,
                 status=MessageStatus.RESPONDED,
                 parent_id=tc.id,
                 metadata={
                     "tool_name": tool_name,
-                    "tool_error": "Tool execution was interrupted due to service restart.",
+                    "tool_error": orphan_msg,
                 },
             )
             await gateway.post(interrupted_msg)
 
     # 2. Load chronological history (limit=0 retrieves all matching messages in the session)
     raw_history = await gateway.db.get_session_history(session_id, limit=0, order=order, active_only=active_only)
-    # Exclude system-generated assistant notification messages from LLM prompt history
-    raw_history = [m for m in raw_history if not (m.role == MessageRole.ASSISTANT and m.sender == "Notification")]
+    # Exclude system-generated assistant notification messages and prompt-blocked rows from LLM prompt history
+    filtered_history: list[Message] = []
+    for m in raw_history:
+        if m.role == MessageRole.ASSISTANT and m.sender == "Notification":
+            continue
+        if m.metadata and m.metadata.get("prompt_blocked"):
+            continue
+        if m.role == MessageRole.ASSISTANT and m.status == MessageStatus.ERROR:
+            m = m.model_copy(
+                update={"content": f"[未送达：以下这条回复因发送失败，用户没有看到]\n{m.content or ''}"}
+            )
+        filtered_history.append(m)
 
-    return raw_history
+    return filtered_history
 
 
 def segment_logical_turns(history: list[Message]) -> list[list[Message]]:

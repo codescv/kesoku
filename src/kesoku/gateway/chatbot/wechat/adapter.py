@@ -975,7 +975,12 @@ You are interacting with the user via WeChat (Weixin).
 
         # Resolve channel role
         db_role = await self.gateway.db.get_channel_role(self.chatbot_id, channel_id)
-        role = db_role if isinstance(db_role, str) else "default"
+        if isinstance(db_role, str):
+            role = db_role
+        else:
+            from kesoku.config import resolve_gateway_default_role
+
+            role = resolve_gateway_default_role(self.gateway, self.chatbot_id)
 
         context_token = str(message.get("context_token") or "").strip()
 

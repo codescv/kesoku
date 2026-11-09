@@ -5,6 +5,7 @@ import os
 import re
 
 from kesoku.agent.tools.registry import ToolContext, default_registry
+from kesoku.config import get_config
 from kesoku.utils.path import PathResolver
 
 # `$STAGING_DIR`, `$AWD`, and `$MEMORY_DIR` (plain or braced) placeholders used in prompts/skills.
@@ -34,21 +35,26 @@ _MATCH_CONTEXT_LINES = 2
 
 
 def _resolve_role_sync(context: ToolContext | None) -> str:
-    """Resolve the active role synchronously from `ToolContext` (defaults to `'default'`)."""
+    """Resolve the active role synchronously from `ToolContext` (defaults to chatbot `default_role`)."""
     if not context or not context.gateway or not context.session_id:
         return "default"
     try:
+        gw_ctx = getattr(context.gateway, "context", None)
+        cfg = gw_ctx.config if gw_ctx is not None else get_config()
         db = getattr(context.gateway, "db", None)
         sync_db = getattr(db, "_sync", getattr(db, "sync_db", db))
         if sync_db is None:
             return "default"
         sess = sync_db.get_session(context.session_id)
-        if sess and sess.role_name and sess.role_name != "default":
-            return sess.role_name
         mapping = sync_db.get_channel_by_session(context.session_id)
+        bot_default = cfg.get_chatbot_default_role(mapping[0]) if mapping else "default"
+        if sess and sess.role_name and sess.role_name not in ("default", bot_default):
+            return sess.role_name
         if mapping:
             chatbot_id, channel_id = mapping
-            return sync_db.get_channel_role_with_inheritance(chatbot_id, channel_id, context.session_id)
+            return sync_db.get_channel_role_with_inheritance(
+                chatbot_id, channel_id, context.session_id, default=bot_default
+            )
         if sess and sess.role_name:
             return sess.role_name
     except Exception:

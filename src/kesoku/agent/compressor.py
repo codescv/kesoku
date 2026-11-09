@@ -642,6 +642,8 @@ class HistoryCompressor:
         *,
         directive: str | None = None,
         staging_dir: str | None = None,
+        protect_front_turns: int | None = None,
+        protect_tail_turns: int | None = None,
     ) -> int:
         """Summarise every uncompressed turn between the protected head and tail, regardless of the watermark.
 
@@ -656,6 +658,8 @@ class HistoryCompressor:
             config: Kesoku configuration.
             directive: Optional user focus text (`/compact <instructions>`); sanitised before use.
             staging_dir: Optional session staging directory (unused; kept for signature symmetry).
+            protect_front_turns: Optional per-call override for `config.agent.protect_front_turns`.
+            protect_tail_turns: Optional per-call override for `config.agent.protect_tail_turns`.
 
         Returns:
             The number of Level-0 nodes created (0 if nothing was compressible).
@@ -664,8 +668,11 @@ class HistoryCompressor:
             await self._apply_known_links(session_id, history)
             agent = config.agent
             turns = self.segment_turns(history)
-            protect_front = agent.protect_front_turns
-            tail_start = max(protect_front, len(turns) - max(0, agent.protect_tail_turns))
+            protect_front = (
+                agent.protect_front_turns if protect_front_turns is None else max(0, protect_front_turns)
+            )
+            eff_tail = agent.protect_tail_turns if protect_tail_turns is None else max(0, protect_tail_turns)
+            tail_start = max(protect_front, len(turns) - eff_tail)
             candidates = [
                 i
                 for i in range(protect_front, tail_start)

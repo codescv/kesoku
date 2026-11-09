@@ -23,6 +23,8 @@ async def analyze_media(
 ) -> str:
     """Analyze a multimedia file (image, audio, video) by asking questions using an LLM.
 
+    Use only for files that are not part of the current user message and that you did not just generate yourself.
+
     Args:
         path: Target path to the multimedia file (image, audio, video).
         prompt: Question or analysis prompt to execute against the file.

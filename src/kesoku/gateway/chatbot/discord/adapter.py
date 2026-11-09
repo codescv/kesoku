@@ -12,11 +12,12 @@ from typing import Any
 import aiohttp
 
 import discord
-from kesoku.config import DiscordChannelOverride, DiscordConfig, get_config
+from kesoku.config import DiscordChannelOverride, DiscordConfig, get_config, resolve_gateway_default_role
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.attachment_manager import AttachmentManager
 from kesoku.gateway.chatbot.base import (
+    ChannelUnavailableError,
     Chatbot,
     DeliveryAbortedError,
     InboundMessageAttachment,
@@ -422,13 +423,29 @@ def _build_discord_custom_prompt(
     return discord_prompt
 
 
-def _is_transient_discord_upload_error(exc: Exception) -> bool:
-    """Return True when a Discord attachment upload error is transient and retryable."""
+_TRANSIENT_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+
+
+def _is_transient_discord_error(exc: BaseException) -> bool:
+    """Return True when a Discord REST/transport error is transient and safe to retry."""
     if isinstance(exc, FileNotFoundError):
         return False
-    if isinstance(exc, (TimeoutError, aiohttp.ClientError, ConnectionError, OSError)):
+    if isinstance(exc, (discord.DiscordServerError, aiohttp.ClientConnectionError, TimeoutError)):
         return True
-    if isinstance(exc, discord.HTTPException) and (exc.status >= 500 or exc.status == 429):
+    if isinstance(exc, (aiohttp.ClientError, ConnectionError)):
+        return True
+    if isinstance(exc, discord.HTTPException) and exc.status in _TRANSIENT_STATUSES:
+        return True
+    return False
+
+
+def _is_transient_discord_upload_error(exc: Exception) -> bool:
+    """Return True when a Discord attachment upload error is transient and retryable."""
+    if _is_transient_discord_error(exc):
+        return True
+    if isinstance(exc, OSError) and not isinstance(exc, (FileNotFoundError, IsADirectoryError, PermissionError)):
+        return True
+    if isinstance(exc, discord.HTTPException) and exc.status >= 500:
         return True
     return False
 
@@ -878,7 +895,7 @@ class DiscordChatbot(Chatbot):
         custom_prompt = _build_discord_custom_prompt(target_channel, message.author)
 
         # Resolve role
-        role = "default"
+        role = resolve_gateway_default_role(self.gateway, self.chatbot_id)
         db_role = await self.gateway.db.get_channel_role(self.chatbot_id, channel_id)
         if isinstance(db_role, str):
             role = db_role
@@ -962,6 +979,37 @@ class DiscordChatbot(Chatbot):
             logger.error(f"{error_msg} (timeout={timeout_duration}s)")
             raise DeliveryAbortedError(f"{error_msg}: {te}") from te
 
+    async def _send_with_retry(
+        self,
+        make_coro: Any,
+        *,
+        attempts: int = 3,
+        base_delay: float = 1.0,
+        timeout_duration: float = 15.0,
+        error_msg: str = "Discord API call timed out",
+    ) -> Any:
+        """Execute a Discord send coroutine factory with per-attempt timeout and transient backoff retries."""
+        last: Exception | None = None
+        for i in range(attempts):
+            try:
+                async with asyncio.timeout(timeout_duration):
+                    return await make_coro()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                last = e
+                if i == attempts - 1 or not _is_transient_discord_error(e):
+                    break
+                logger.warning(
+                    f"Transient Discord send error ({error_msg}, attempt {i + 1}/{attempts}): {e}. Retrying..."
+                )
+                await asyncio.sleep(base_delay * (2**i))
+        if isinstance(last, TimeoutError):
+            logger.error(f"{error_msg} (timeout={timeout_duration}s, attempts={attempts})")
+            raise DeliveryAbortedError(f"{error_msg}: {last}") from last
+        assert last is not None
+        raise last
+
 
     async def _get_discord_channel(self, channel_id_str: str, metadata: dict[str, Any] | None = None) -> Any | None:
         try:
@@ -1021,7 +1069,9 @@ class DiscordChatbot(Chatbot):
                 "Aborting session."
             )
             await self.gateway.abort_session(message.session_id)
-            raise
+            if isinstance(de, ChannelUnavailableError):
+                raise
+            raise ChannelUnavailableError(str(de)) from (de.__cause__ or de)
 
     def supports_intermediate_messages(self) -> bool:
         """Determine if the platform supports intermediate rendering of thoughts and tools."""
@@ -1281,9 +1331,9 @@ class DiscordChatbot(Chatbot):
                         logger.warning(
                             f"Failed to replace stream preview in channel {channel_id}, falling back to send: {e}"
                         )
-                sent_msg = await self._call_with_timeout(
-                    channel.send(chunk),
-                    error_msg="Timeout sending text chunk"
+                sent_msg = await self._send_with_retry(
+                    lambda chunk_text=chunk: channel.send(chunk_text),
+                    error_msg="Timeout sending text chunk",
                 )
                 if is_special:
                     self._intermediate_messages[message.channel_id].append(sent_msg)
@@ -1300,10 +1350,20 @@ class DiscordChatbot(Chatbot):
         if not await async_exists(file_path):
             logger.error(f"File not found: {file_path}")
             raise FileNotFoundError(f"File not found: {file_path}")
-        discord_file = discord.File(file_path)
+
+        async def _send_once() -> Any:
+            discord_file = discord.File(file_path)
+            try:
+                return await channel.send(file=discord_file)
+            finally:
+                try:
+                    discord_file.close()
+                except Exception:
+                    pass
+
         try:
-            await self._call_with_timeout(
-                channel.send(file=discord_file),
+            await self._send_with_retry(
+                _send_once,
                 timeout_duration=60.0,
                 error_msg=f"Timeout sending file {file_path}",
             )
@@ -1312,11 +1372,6 @@ class DiscordChatbot(Chatbot):
         except Exception as e:
             logger.error(f"Failed to send file {file_path} to Discord: {e}", exc_info=True)
             raise
-        finally:
-            try:
-                discord_file.close()
-            except Exception:
-                pass
 
     async def send_voice_segment(self, channel_id: str, file_path: str, message: Message) -> None:
         """Deliver a voice segment to the target Discord thread (falling back to standard attachment if failed)."""
@@ -1328,8 +1383,8 @@ class DiscordChatbot(Chatbot):
             logger.error(f"Voice file not found: {file_path}")
             raise FileNotFoundError(f"Voice file not found: {file_path}")
         try:
-            await self._call_with_timeout(
-                send_voice_message(channel, file_path),
+            await self._send_with_retry(
+                lambda: send_voice_message(channel, file_path),
                 timeout_duration=60.0,
                 error_msg=f"Timeout sending voice message {file_path}",
             )
@@ -1340,10 +1395,20 @@ class DiscordChatbot(Chatbot):
                 f"Failed to send native voice message for {file_path}: {e}. "
                 "Falling back to standard file attachment."
             )
-            discord_file = discord.File(file_path)
+
+            async def _send_voice_fallback_once() -> Any:
+                discord_file = discord.File(file_path)
+                try:
+                    return await channel.send(file=discord_file)
+                finally:
+                    try:
+                        discord_file.close()
+                    except Exception:
+                        pass
+
             try:
-                await self._call_with_timeout(
-                    channel.send(file=discord_file),
+                await self._send_with_retry(
+                    _send_voice_fallback_once,
                     timeout_duration=60.0,
                     error_msg=f"Timeout sending voice file fallback {file_path}",
                 )
@@ -1352,11 +1417,6 @@ class DiscordChatbot(Chatbot):
             except Exception as fe:
                 logger.error(f"Failed to send voice file fallback for {file_path}: {fe}", exc_info=True)
                 raise
-            finally:
-                try:
-                    discord_file.close()
-                except Exception:
-                    pass
 
     async def _ensure_bot_ready(self) -> None:
         """Wait for the Discord client login/gateway session when initialized or mocked."""
@@ -1394,9 +1454,12 @@ class DiscordChatbot(Chatbot):
         if not channel:
             return None
         placeholder_text = sanitize_placeholder(marker)
-        async with asyncio.timeout(15.0):
-            # Intentionally NOT added to _intermediate_messages or _turn_special_msg.
-            return await channel.send(placeholder_text)
+        # Intentionally NOT added to _intermediate_messages or _turn_special_msg.
+        return await self._send_with_retry(
+            lambda: channel.send(placeholder_text),
+            timeout_duration=15.0,
+            error_msg="Timeout sending deferred placeholder",
+        )
 
     def serialize_deferred_handle(self, handle: Any) -> dict[str, Any] | None:
         """Serialize a ``discord.Message`` or ``PartialMessage`` into channel/message IDs."""
@@ -1484,10 +1547,23 @@ class DiscordChatbot(Chatbot):
             channel = await self._get_discord_channel_with_abort(message)
             if not channel:
                 return
-            ref_file = discord.File(file_path)
+
+            async def _send_ref_once() -> Any:
+                ref_file = discord.File(file_path)
+                try:
+                    return await channel.send(file=ref_file, reference=handle, mention_author=False)
+                finally:
+                    try:
+                        ref_file.close()
+                    except Exception:
+                        pass
+
             try:
-                async with asyncio.timeout(60.0):
-                    await channel.send(file=ref_file, reference=handle, mention_author=False)
+                await self._send_with_retry(
+                    _send_ref_once,
+                    timeout_duration=60.0,
+                    error_msg=f"Timeout sending deferred reply-reference {file_path}",
+                )
                 return
             except asyncio.CancelledError:
                 raise
@@ -1496,11 +1572,6 @@ class DiscordChatbot(Chatbot):
                     f"Discord reply-reference fallback failed for '{file_path}': {ref_exc}. "
                     "Falling back to plain send_file_segment."
                 )
-            finally:
-                try:
-                    ref_file.close()
-                except Exception:
-                    pass
 
         await self.send_file_segment(channel_id, file_path, message)
 
@@ -1552,8 +1623,8 @@ class DiscordChatbot(Chatbot):
                 view = build_details_view(message.session_id, details_key)
             else:
                 view = DetailsView(title=title_fmt, body=body_fmt)
-            await self._call_with_timeout(
-                channel.send(render_details_content(title_fmt, body_fmt, expanded=False), view=view),
+            await self._send_with_retry(
+                lambda: channel.send(render_details_content(title_fmt, body_fmt, expanded=False), view=view),
                 error_msg="Timeout sending details view",
             )
         except DeliveryAbortedError:
@@ -1561,6 +1632,18 @@ class DiscordChatbot(Chatbot):
         except Exception as de:
             logger.error(f"Failed to send details view to Discord: {de}", exc_info=True)
             await super().send_details_segment(channel_id, title, body, message)
+
+    async def send_ui_prompt(
+        self,
+        channel: Any,
+        embed: discord.Embed,
+        view: discord.ui.View,
+    ) -> Any:
+        """Send an interactive UI prompt embed + view with transient-error retries."""
+        return await self._send_with_retry(
+            lambda: channel.send(embed=embed, view=view),
+            error_msg="Timeout sending question view",
+        )
 
     async def send_question_segment(
         self,
@@ -1595,10 +1678,7 @@ class DiscordChatbot(Chatbot):
                     question=question,
                     choices=choices,
                 )
-            await self._call_with_timeout(
-                channel.send(embed=build_question_embed(spec), view=view),
-                error_msg="Timeout sending question view"
-            )
+            await self.send_ui_prompt(channel, build_question_embed(spec), view)
         except DeliveryAbortedError:
             raise
         except Exception as qe:

@@ -215,19 +215,29 @@ def build_sys_prompt(
     # Resolve current role
     if role is None:
         role = "default"
-        if session and session.role_name and session.role_name != "default":
-            # The session's own persona binding is authoritative (role switches create/swap sessions).
-            # This also covers thread sessions that have no direct channel mapping.
-            role = session.role_name
-        elif session:
+        if session:
             db = DatabaseManager(cfg.workspace.db_path)
+            db._config = cfg
+            mapping = None
             try:
                 mapping = db.get_channel_by_session(session.id)
-                if mapping:
-                    chatbot_id, channel_id = mapping
-                    role = db.get_channel_role_with_inheritance(chatbot_id, channel_id, session.id)
             except Exception as e:
-                logger.warning(f"Failed to retrieve session channel role in build_sys_prompt: {e}")
+                logger.warning(f"Failed to retrieve session channel mapping in build_sys_prompt: {e}")
+            bot_default = cfg.get_chatbot_default_role(mapping[0]) if mapping else "default"
+            if session.role_name and session.role_name not in ("default", bot_default):
+                # The session's own persona binding is authoritative (role switches create/swap sessions).
+                # This also covers thread sessions that have no direct channel mapping.
+                role = session.role_name
+            elif mapping:
+                try:
+                    chatbot_id, channel_id = mapping
+                    role = db.get_channel_role_with_inheritance(
+                        chatbot_id, channel_id, session.id, default=bot_default
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to retrieve session channel role in build_sys_prompt: {e}")
+            elif session.role_name:
+                role = session.role_name
 
     # Read role's intro.md
     intro_content = ""

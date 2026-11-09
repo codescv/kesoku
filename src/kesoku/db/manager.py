@@ -79,6 +79,16 @@ class DatabaseManager:
         """
         self.db_path = db_path
         self.connection_provider = ConnectionProvider(db_path)
+        self._config: Any = None
+
+    def _get_chatbot_default_role(self, chatbot_id: str) -> str:
+        """Resolve per-chatbot default_role from bound KesokuConfig or global config."""
+        cfg = self._config
+        if cfg is None:
+            from kesoku.config import get_config
+
+            cfg = get_config()
+        return str(cfg.get_chatbot_default_role(chatbot_id))
 
     def _get_connection(self) -> sqlite3.Connection:
         """Expose connection for backward-compatible test mock manipulations."""
@@ -781,6 +791,10 @@ class DatabaseManager:
                     (content, session_id),
                 )
 
+    def get_session_messages(self, session_id: str) -> list[Message]:
+        """Retrieve all raw persisted messages for a session in chronological turn order."""
+        return self.get_session_history(session_id, limit=0)
+
     def get_session_history(
         self,
         session_id: str,
@@ -1252,8 +1266,17 @@ class DatabaseManager:
             row = cursor.fetchone()
             return row["role"] if row else None
 
-    def get_channel_role_with_inheritance(self, chatbot_id: str, channel_id: str, session_id: str | None = None) -> str:
+    def get_channel_role_with_inheritance(
+        self,
+        chatbot_id: str,
+        channel_id: str,
+        session_id: str | None = None,
+        *,
+        default: str | None = None,
+    ) -> str:
         """Retrieve the active role bound to a channel/thread with parent inheritance support."""
+        resolved_default = default if default is not None else self._get_chatbot_default_role(chatbot_id)
+
         # 1. Direct lookup
         role = self.get_channel_role(chatbot_id, channel_id)
         if role:
@@ -1298,12 +1321,12 @@ class DatabaseManager:
                     cursor = conn.cursor()
                     cursor.execute("SELECT role_name FROM sessions WHERE id = ?", (session_id,))
                     row = cursor.fetchone()
-                    if row and row["role_name"] and row["role_name"] != "default":
+                    if row and row["role_name"] and row["role_name"] not in ("default", resolved_default):
                         return str(row["role_name"])
                 except Exception as e:
                     logger.warning(f"Failed to retrieve session role fallback: {e}")
 
-        return "default"
+        return resolved_default
 
     def get_channel_by_session(self, session_id: str) -> tuple[str, str] | None:
         """Retrieve the chatbot_id and channel_id mapping for a given session ID."""
@@ -1882,6 +1905,10 @@ class AsyncDatabaseManager:
         """
         await asyncio.to_thread(self.sync_db.update_session_system_prompt, session_id, content)
 
+    async def get_session_messages(self, session_id: str) -> list[Message]:
+        """Retrieve all raw persisted messages for a session."""
+        return await asyncio.to_thread(self.sync_db.get_session_messages, session_id)
+
     async def get_session_history(
         self,
         session_id: str,
@@ -2089,7 +2116,12 @@ class AsyncDatabaseManager:
         return await asyncio.to_thread(self.sync_db.get_channel_role, chatbot_id, channel_id)
 
     async def get_channel_role_with_inheritance(
-        self, chatbot_id: str, channel_id: str, session_id: str | None = None
+        self,
+        chatbot_id: str,
+        channel_id: str,
+        session_id: str | None = None,
+        *,
+        default: str | None = None,
     ) -> str:
         """Get the role for a channel, inheriting from parent channels if necessary.
 
@@ -2097,12 +2129,15 @@ class AsyncDatabaseManager:
             chatbot_id: The ID of the chatbot.
             channel_id: The ID of the channel.
             session_id: Optional session ID to help resolve role.
+            default: Optional explicit fallback role override.
 
         Returns:
             The resolved role name.
         """
         return await asyncio.to_thread(
-            self.sync_db.get_channel_role_with_inheritance, chatbot_id, channel_id, session_id
+            lambda: self.sync_db.get_channel_role_with_inheritance(
+                chatbot_id, channel_id, session_id, default=default
+            )
         )
 
     async def get_channel_by_session(self, session_id: str) -> tuple[str, str] | None:
