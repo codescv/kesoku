@@ -5,8 +5,9 @@ Connects Discord channels and threads with Kesoku Gateway using Pub/Sub.
 
 import asyncio
 import datetime
+import inspect
 import os
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from typing import Any
 
 import aiohttp
@@ -26,6 +27,7 @@ from kesoku.gateway.chatbot.base import (
 )
 from kesoku.gateway.chatbot.deferred_media import (
     format_deferred_failure_message,
+    sanitize_error_reason,
     sanitize_placeholder,
 )
 from kesoku.gateway.gateway import Gateway
@@ -70,6 +72,8 @@ TOOL_EMOJI_MAP: dict[str, str] = {
 }
 DEFAULT_TOOL_EMOJI = "🛠️"
 MAX_VISIBLE_TOOL_CALLS = 12
+MAX_TRACKED_VOICE_ANCHORS = 256
+ATTACHMENT_DOWNLOAD_CONCURRENCY = 6
 
 # Discord message types that represent an actual user-authored chat message.
 USER_CHAT_MESSAGE_TYPES: tuple[discord.MessageType, ...] = (
@@ -454,6 +458,7 @@ class DiscordChatbot(Chatbot):
     """Discord chatbot adapter connecting to Kesoku Gateway broker."""
 
     supports_deferred_media: bool = True
+    _voice_inline_grace_sec: float = 4.0
 
     def __init__(
         self,
@@ -518,6 +523,7 @@ class DiscordChatbot(Chatbot):
         self._stream_previews: dict[str, discord.Message] = {}
         self._stream_preview_texts: dict[str, str] = {}
         self._stream_preview_channels: dict[str, str] = {}
+        self._last_text_msg: OrderedDict[str, Any] = OrderedDict()
         register_stream_fn = getattr(gateway, "register_stream_handler", None)
         if callable(register_stream_fn):
             register_stream_fn(self.chatbot_id, self.handle_stream_preview)
@@ -567,6 +573,7 @@ class DiscordChatbot(Chatbot):
         self._stream_previews.clear()
         self._stream_preview_texts.clear()
         self._stream_preview_channels.clear()
+        self._last_text_msg.clear()
         if not self.bot.is_closed():
             asyncio.create_task(self.bot.close())
 
@@ -769,13 +776,17 @@ class DiscordChatbot(Chatbot):
     async def process_attachments_hook(
         self, session: Any, dto: InboundMessageDTO, raw_message: Any
     ) -> list[InboundMessageAttachment]:
-        """Hook to process and save attachments using the resolved session workspace."""
+        """Hook to process, download concurrently, and prewarm image attachments."""
         message = raw_message  # raw_message is the discord.Message
-        attachments_metadata = []
-        if message.attachments:
-            for attachment in message.attachments:
+        if not message or not getattr(message, "attachments", None):
+            return []
 
-                async def save_cb(target_path: str, att=attachment) -> None:
+        sem = asyncio.Semaphore(ATTACHMENT_DOWNLOAD_CONCURRENCY)
+
+        async def _download_one(attachment: Any) -> InboundMessageAttachment:
+            async with sem:
+
+                async def save_cb(target_path: str, att: Any = attachment) -> None:
                     await att.save(target_path)
 
                 saved = await self.attachment_manager.save_attachment(
@@ -784,13 +795,18 @@ class DiscordChatbot(Chatbot):
                     save_callback=save_cb,
                     collision_id=str(attachment.id),
                 )
-                attachments_metadata.append(
-                    InboundMessageAttachment(
-                        path=saved["path"],
-                        mime_type=attachment.content_type or "application/octet-stream",
-                        filename=attachment.filename,
-                    )
+                return InboundMessageAttachment(
+                    path=saved["path"],
+                    mime_type=attachment.content_type or "application/octet-stream",
+                    filename=attachment.filename,
                 )
+
+        attachments_metadata = list(await asyncio.gather(*(_download_one(att) for att in message.attachments)))
+        saved_paths = [att.path for att in attachments_metadata if att.path]
+        if saved_paths:
+            from kesoku.agent.llm import prewarm_image_attachments
+
+            await asyncio.to_thread(prewarm_image_attachments, saved_paths)
         return attachments_metadata
 
     async def post_ingest_hook(self, session: Any, message: Message, dto: InboundMessageDTO) -> None:
@@ -918,6 +934,7 @@ class DiscordChatbot(Chatbot):
 
         msg_metadata = {
             "discord_message_id": str(message.id),
+            "discord_message_channel_id": str(message.channel.id),
             "discord_author_id": str(message.author.id),
             "channel_name": channel_name,
             "sender_name": f"{message.author.display_name} (ID: {message.author.id})",
@@ -1284,6 +1301,147 @@ class DiscordChatbot(Chatbot):
 
         await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
 
+    def _record_last_text_msg(self, outgoing_message_id: str, discord_msg: Any) -> None:
+        """Record the latest sent Discord text chunk for an outgoing assistant message (bounded LRU)."""
+        if not outgoing_message_id or discord_msg is None:
+            return
+        self._last_text_msg[outgoing_message_id] = discord_msg
+        self._last_text_msg.move_to_end(outgoing_message_id)
+        while len(self._last_text_msg) > MAX_TRACKED_VOICE_ANCHORS:
+            self._last_text_msg.popitem(last=False)
+
+    def _find_live_anchor_msg(self, message_id: str | None) -> Any | None:
+        """Find a live sent message object matching ``message_id`` in ``_last_text_msg`` if present."""
+        if not message_id:
+            return None
+        for msg_obj in reversed(self._last_text_msg.values()):
+            if str(getattr(msg_obj, "id", "")) == str(message_id):
+                return msg_obj
+        return None
+
+    async def _resolve_voice_anchor(self, message: Message) -> tuple[str, str | None, Any]:
+        """Resolve `(channel_id, anchor_message_id, live_msg)` for a `[voice:]` segment in `message`.
+
+        Prefers the immediately preceding text chunk sent for THIS outgoing assistant `message.id`.
+        When `[voice:]` appears before any text chunk in `message.id`, falls back to the triggering
+        inbound user `discord_message_id` from `message.metadata` (or parent user message in DB).
+        """
+        live_msg = self._last_text_msg.get(message.id) if getattr(message, "id", None) else None
+        if live_msg is not None:
+            mid = getattr(live_msg, "id", None)
+            chan = getattr(live_msg, "channel", None)
+            cid = getattr(chan, "id", None) if chan is not None else getattr(live_msg, "channel_id", None)
+            return (str(cid or message.channel_id), str(mid) if mid is not None else None, live_msg)
+
+        raw_meta = getattr(message, "metadata", None)
+        meta = raw_meta if isinstance(raw_meta, dict) else {}
+        inbound_mid = meta.get("discord_message_id")
+        inbound_cid = meta.get("discord_message_channel_id") or message.channel_id
+
+        if not inbound_mid and getattr(message, "parent_id", None):
+            get_msg_fn = getattr(getattr(self.gateway, "db", None), "get_message", None)
+            if callable(get_msg_fn):
+                try:
+                    res = get_msg_fn(message.parent_id)
+                    parent_msg = await res if inspect.isawaitable(res) else res
+                    parent_meta = getattr(parent_msg, "metadata", None) if parent_msg is not None else None
+                    if isinstance(parent_meta, dict) and parent_meta.get("discord_message_id"):
+                        inbound_mid = parent_meta.get("discord_message_id")
+                        inbound_cid = (
+                            parent_meta.get("discord_message_channel_id")
+                            or getattr(parent_msg, "channel_id", None)
+                            or message.channel_id
+                        )
+                except Exception as exc:
+                    logger.debug(f"Failed to look up parent discord_message_id for {message.id}: {exc}")
+
+        return (str(inbound_cid or message.channel_id), str(inbound_mid) if inbound_mid else None, None)
+
+    async def _best_effort_add_reaction(
+        self,
+        channel_id: str | None,
+        message_id: str | None,
+        emoji: str,
+        *,
+        live_msg: Any = None,
+    ) -> None:
+        """Best-effort add a reaction to an anchor message without raising."""
+        if not channel_id or not message_id:
+            return
+        try:
+            await self._ensure_bot_ready()
+            target_live = live_msg or self._find_live_anchor_msg(message_id)
+            is_default_partial = (
+                getattr(self.bot.get_partial_messageable, "__func__", None)
+                is discord.Client.get_partial_messageable
+            )
+            if (
+                is_default_partial
+                and target_live is not None
+                and not isinstance(target_live, (discord.Message, discord.PartialMessage))
+                and inspect.iscoroutinefunction(getattr(target_live, "add_reaction", None))
+            ):
+                async with asyncio.timeout(10.0):
+                    await target_live.add_reaction(emoji)
+                return
+
+            partial = self.bot.get_partial_messageable(int(channel_id)).get_partial_message(int(message_id))
+            async with asyncio.timeout(10.0):
+                await partial.add_reaction(emoji)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug(f"Best-effort add_reaction({emoji!r}) on {channel_id}/{message_id} failed: {exc}")
+
+    async def _best_effort_remove_reaction(
+        self,
+        channel_id: str | None,
+        message_id: str | None,
+        emoji: str,
+    ) -> None:
+        """Best-effort remove the bot's own reaction from an anchor message without raising."""
+        if not channel_id or not message_id:
+            return
+        try:
+            await self._ensure_bot_ready()
+            member: Any = self.bot.user if self.bot.user is not None else discord.Object(id=0)
+            target_live = self._find_live_anchor_msg(message_id)
+            is_default_partial = (
+                getattr(self.bot.get_partial_messageable, "__func__", None)
+                is discord.Client.get_partial_messageable
+            )
+            if (
+                is_default_partial
+                and target_live is not None
+                and not isinstance(target_live, (discord.Message, discord.PartialMessage))
+                and inspect.iscoroutinefunction(getattr(target_live, "remove_reaction", None))
+            ):
+                async with asyncio.timeout(10.0):
+                    await target_live.remove_reaction(emoji, member)
+                return
+
+            partial = self.bot.get_partial_messageable(int(channel_id)).get_partial_message(int(message_id))
+            async with asyncio.timeout(10.0):
+                await partial.remove_reaction(emoji, member)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug(f"Best-effort remove_reaction({emoji!r}) on {channel_id}/{message_id} failed: {exc}")
+
+    async def _send_failure_notice_preserving_anchor(self, message: Message, text: str) -> None:
+        """Send a deferred failure text notice via `send_text_chunks` without overwriting `_last_text_msg`."""
+        mid = getattr(message, "id", None)
+        had_prev = bool(mid and mid in self._last_text_msg)
+        prev_val = self._last_text_msg.get(mid) if had_prev and mid else None
+        try:
+            await self.send_text_chunks(message.channel_id, [text], message)
+        finally:
+            if mid:
+                if had_prev:
+                    self._last_text_msg[mid] = prev_val
+                else:
+                    self._last_text_msg.pop(mid, None)
+
     async def send_text_chunks(self, channel_id: str, chunks: list[str], message: Message) -> None:
         """Deliver formatted text chunks sequentially to the target channel."""
         channel = await self._get_discord_channel_with_abort(message)
@@ -1316,6 +1474,7 @@ class DiscordChatbot(Chatbot):
                 else:
                     preview_msg = popped_preview
 
+        last_sent_msg: Any = None
         for chunk in chunks:
             if chunk.strip():
                 if preview_msg is not None:
@@ -1326,6 +1485,7 @@ class DiscordChatbot(Chatbot):
                             target_preview.edit(content=chunk),
                             error_msg="Timeout replacing stream preview with final text",
                         )
+                        last_sent_msg = target_preview
                         continue
                     except Exception as e:
                         logger.warning(
@@ -1335,11 +1495,15 @@ class DiscordChatbot(Chatbot):
                     lambda chunk_text=chunk: channel.send(chunk_text),
                     error_msg="Timeout sending text chunk",
                 )
+                last_sent_msg = sent_msg
                 if is_special:
                     self._intermediate_messages[message.channel_id].append(sent_msg)
                     self._turn_special_msg[message.session_id] = sent_msg
                     if message.role == MessageRole.TOOL and message.type == MessageType.TOOL_CALL:
                         self._sent_tool_calls[message.id] = sent_msg
+
+        if not is_special and last_sent_msg is not None and getattr(message, "id", None):
+            self._record_last_text_msg(message.id, last_sent_msg)
 
     async def send_file_segment(self, channel_id: str, file_path: str, message: Message) -> None:
         """Deliver a file attachment segment to the target Discord thread."""
@@ -1373,7 +1537,14 @@ class DiscordChatbot(Chatbot):
             logger.error(f"Failed to send file {file_path} to Discord: {e}", exc_info=True)
             raise
 
-    async def send_voice_segment(self, channel_id: str, file_path: str, message: Message) -> None:
+    async def send_voice_segment(
+        self,
+        channel_id: str,
+        file_path: str,
+        message: Message,
+        *,
+        message_reference: dict[str, Any] | None = None,
+    ) -> None:
         """Deliver a voice segment to the target Discord thread (falling back to standard attachment if failed)."""
         channel = await self._get_discord_channel_with_abort(message)
         if not channel:
@@ -1383,11 +1554,37 @@ class DiscordChatbot(Chatbot):
             logger.error(f"Voice file not found: {file_path}")
             raise FileNotFoundError(f"Voice file not found: {file_path}")
         try:
-            await self._send_with_retry(
-                lambda: send_voice_message(channel, file_path),
-                timeout_duration=60.0,
-                error_msg=f"Timeout sending voice message {file_path}",
-            )
+            if message_reference:
+                try:
+                    await self._send_with_retry(
+                        lambda: send_voice_message(channel, file_path, message_reference=message_reference),
+                        timeout_duration=60.0,
+                        error_msg=f"Timeout sending voice message {file_path}",
+                    )
+                except discord.HTTPException as http_exc:
+                    err_lower = str(http_exc).lower()
+                    if (
+                        http_exc.status == 400
+                        or "message_reference" in err_lower
+                        or "reference" in err_lower
+                    ):
+                        logger.warning(
+                            f"Discord rejected voice message_reference for {file_path} "
+                            f"(status={http_exc.status}): {http_exc}. Retrying once without message_reference."
+                        )
+                        await self._send_with_retry(
+                            lambda: send_voice_message(channel, file_path),
+                            timeout_duration=60.0,
+                            error_msg=f"Timeout sending voice message {file_path}",
+                        )
+                    else:
+                        raise
+            else:
+                await self._send_with_retry(
+                    lambda: send_voice_message(channel, file_path),
+                    timeout_duration=60.0,
+                    error_msg=f"Timeout sending voice message {file_path}",
+                )
         except DeliveryAbortedError:
             raise
         except Exception as e:
@@ -1447,9 +1644,20 @@ class DiscordChatbot(Chatbot):
         segment: dict[str, Any],
         message: Message,
         marker: dict[str, Any],
-    ) -> discord.Message | None:
-        """Send an in-order Discord placeholder message for a pending deferred attachment."""
-        _ = (channel_id, segment)
+    ) -> Any:
+        """Send an in-order placeholder for files, or add a `🎤` reaction anchor for deferred voice."""
+        _ = channel_id
+        if segment.get("type") == "voice":
+            anchor_cid, anchor_mid, live_msg = await self._resolve_voice_anchor(message)
+            if anchor_mid:
+                await self._best_effort_add_reaction(anchor_cid, anchor_mid, "🎤", live_msg=live_msg)
+            return {
+                "kind": "voice_anchor",
+                "channel_id": str(anchor_cid),
+                "message_id": str(anchor_mid) if anchor_mid else None,
+                "reaction": "🎤",
+            }
+
         channel = await self._get_discord_channel(message.channel_id, getattr(message, "metadata", None))
         if not channel:
             return None
@@ -1462,9 +1670,18 @@ class DiscordChatbot(Chatbot):
         )
 
     def serialize_deferred_handle(self, handle: Any) -> dict[str, Any] | None:
-        """Serialize a ``discord.Message`` or ``PartialMessage`` into channel/message IDs."""
+        """Serialize a `voice_anchor` dict or `discord.Message`/`PartialMessage` into JSON metadata."""
         if handle is None:
             return None
+        if isinstance(handle, dict) and handle.get("kind") == "voice_anchor":
+            cid = handle.get("channel_id")
+            mid = handle.get("message_id")
+            return {
+                "kind": "voice_anchor",
+                "channel_id": str(cid) if cid else None,
+                "message_id": str(mid) if mid else None,
+                "reaction": str(handle.get("reaction") or "🎤"),
+            }
         msg_id = getattr(handle, "id", None)
         chan = getattr(handle, "channel", None)
         chan_id = getattr(chan, "id", None) if chan is not None else getattr(handle, "channel_id", None)
@@ -1472,10 +1689,20 @@ class DiscordChatbot(Chatbot):
             return None
         return {"channel_id": str(chan_id), "message_id": str(msg_id)}
 
-    async def restore_deferred_handle(self, raw_handle: dict[str, Any] | None) -> discord.PartialMessage | None:
-        """Reconstruct a zero-HTTP ``discord.PartialMessage`` from persisted IDs after bot login."""
+    async def restore_deferred_handle(self, raw_handle: dict[str, Any] | None) -> Any:
+        """Restore a `voice_anchor` dict or reconstruct a `discord.PartialMessage` after bot login."""
         if not isinstance(raw_handle, dict):
             return None
+        if raw_handle.get("kind") == "voice_anchor":
+            await self._ensure_bot_ready()
+            cid = raw_handle.get("channel_id")
+            mid = raw_handle.get("message_id")
+            return {
+                "kind": "voice_anchor",
+                "channel_id": str(cid) if cid else None,
+                "message_id": str(mid) if mid else None,
+                "reaction": str(raw_handle.get("reaction") or "🎤"),
+            }
         cid = raw_handle.get("channel_id")
         mid = raw_handle.get("message_id")
         if not cid or not mid:
@@ -1491,14 +1718,35 @@ class DiscordChatbot(Chatbot):
         handle: Any,
         kind: str,
     ) -> None:
-        """Edit the Discord placeholder in place with the finished attachment (with retries and fallbacks)."""
+        """Deliver a finished deferred attachment (reply-referenced voice or edited image placeholder)."""
         await self._ensure_bot_ready()
         if not await async_exists(file_path):
             raise FileNotFoundError(f"Deferred file not found: {file_path}")
 
         if kind == "voice":
+            if isinstance(handle, dict) and handle.get("kind") == "voice_anchor":
+                anchor_cid = str(handle.get("channel_id") or channel_id)
+                anchor_mid = str(handle["message_id"]) if handle.get("message_id") else None
+                reaction = str(handle.get("reaction") or "🎤")
+                if anchor_mid:
+                    ref_payload: dict[str, Any] = {
+                        "channel_id": anchor_cid,
+                        "message_id": anchor_mid,
+                        "fail_if_not_exists": False,
+                    }
+                    await self.send_voice_segment(
+                        channel_id,
+                        file_path,
+                        message,
+                        message_reference=ref_payload,
+                    )
+                    await self._best_effort_remove_reaction(anchor_cid, anchor_mid, reaction)
+                else:
+                    await self.send_voice_segment(channel_id, file_path, message)
+                return
+
             await self.send_voice_segment(channel_id, file_path, message)
-            if handle is not None:
+            if handle is not None and callable(getattr(handle, "delete", None)):
                 try:
                     async with asyncio.timeout(15.0):
                         await handle.delete()
@@ -1582,8 +1830,67 @@ class DiscordChatbot(Chatbot):
         message: Message,
         segment: dict[str, Any],
     ) -> None:
-        """Replace the Discord placeholder text with a sanitized failure notice."""
+        """Report deferred attachment failure (reaction swap + concise notice for voice, placeholder edit for file)."""
         await self._ensure_bot_ready()
+        is_voice = segment.get("type") == "voice" or (
+            isinstance(handle, dict) and handle.get("kind") == "voice_anchor"
+        )
+        if is_voice:
+            safe_reason = sanitize_error_reason(reason)
+            voice_err_text = f"⚠️ 语音生成失败（{safe_reason}）"
+            anchor_cid: str | None = None
+            anchor_mid: str | None = None
+            if isinstance(handle, dict) and handle.get("kind") == "voice_anchor":
+                anchor_cid = str(handle.get("channel_id") or message.channel_id)
+                anchor_mid = str(handle["message_id"]) if handle.get("message_id") else None
+                reaction = str(handle.get("reaction") or "🎤")
+                if anchor_mid:
+                    await self._best_effort_remove_reaction(anchor_cid, anchor_mid, reaction)
+                    await self._best_effort_add_reaction(anchor_cid, anchor_mid, "⚠️")
+            elif handle is None:
+                anchor_cid, anchor_mid, live_msg = await self._resolve_voice_anchor(message)
+                if anchor_mid:
+                    await self._best_effort_add_reaction(anchor_cid, anchor_mid, "⚠️", live_msg=live_msg)
+            elif callable(getattr(handle, "edit", None)):
+                try:
+                    async with asyncio.timeout(15.0):
+                        await handle.edit(content=voice_err_text)
+                    return
+                except discord.NotFound:
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(f"Failed to edit legacy voice placeholder on failure: {exc}")
+
+            is_default_send_chunks = (
+                getattr(self.send_text_chunks, "__func__", None) is DiscordChatbot.send_text_chunks
+            )
+            if is_default_send_chunks and anchor_mid and str(anchor_cid) == str(message.channel_id):
+                try:
+                    channel = await self._get_discord_channel(
+                        message.channel_id, getattr(message, "metadata", None)
+                    )
+                    if channel is not None:
+                        ref_obj = discord.MessageReference(
+                            message_id=int(anchor_mid),
+                            channel_id=int(message.channel_id),
+                            fail_if_not_exists=False,
+                        )
+                        await self._send_with_retry(
+                            lambda: channel.send(voice_err_text, reference=ref_obj, mention_author=False),
+                            timeout_duration=15.0,
+                            error_msg="Timeout sending voice failure notice",
+                        )
+                        return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as ref_err:
+                    logger.debug(f"Voice failure reference send fell back to plain text: {ref_err}")
+
+            await self._send_failure_notice_preserving_anchor(message, voice_err_text)
+            return
+
         err_text = format_deferred_failure_message(segment.get("path", ""), reason)
         if handle is not None:
             try:
@@ -1602,7 +1909,7 @@ class DiscordChatbot(Chatbot):
                     f"Failed to edit Discord placeholder on failure for '{segment.get('path')}': {exc}. "
                     "Falling back to send_text_chunks."
                 )
-        await self.send_text_chunks(message.channel_id, [err_text], message)
+        await self._send_failure_notice_preserving_anchor(message, err_text)
 
     async def send_details_segment(self, channel_id: str, title: str, body: str, message: Message) -> None:
         """Deliver a `<details>` section as `▸ TITLE` with a persistent toggle button that expands it in place."""

@@ -1019,6 +1019,7 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
     gw = Gateway(context=KesokuContext(config=cfg))
     await gw.create_session("sess_cache_compact", title="Cache and Compact")
 
+    # Turn 0: initial turn runs uncached on R1, then creates `mock_cache_0` post-turn
     msg1 = Message(
         session_id="sess_cache_compact",
         chatbot_id="cli",
@@ -1026,34 +1027,10 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
         sender="u1",
         role=MessageRole.USER,
         content="User message 1 that is quite long to accumulate tokens for caching " * 10,
-        status="processed",
+        status="pending_agent",
         timestamp=time.time() - 10,
     )
     await gw.post(msg1)
-
-    msg2 = Message(
-        session_id="sess_cache_compact",
-        chatbot_id="cli",
-        channel_id="ch1",
-        sender="Kesoku",
-        role=MessageRole.ASSISTANT,
-        content="Assistant response 1 that is also quite long " * 10,
-        status="delivered",
-        timestamp=time.time() - 5,
-    )
-    await gw.post(msg2)
-
-    active_msg = Message(
-        session_id="sess_cache_compact",
-        chatbot_id="cli",
-        channel_id="ch1",
-        sender="u1",
-        role=MessageRole.USER,
-        content="Active user query",
-        status="pending_agent",
-        timestamp=time.time(),
-    )
-    await gw.post(active_msg)
 
     class GeminiLLM(BaseLLM):
         context_window_limit: int = 1000
@@ -1070,7 +1047,7 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
             history: list[Message] | None = None,
             tools: list[Any] | None = None,
         ) -> int:
-            return 150 if len(self.created_caches) == 0 else 50
+            raise AssertionError("GeminiLLM.count_tokens() RPC must never be called for explicit cache management!")
 
         async def create_cache(
             self,
@@ -1115,6 +1092,11 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
 
             if len(self.captured_generates) == 1:
                 return LLMResponse(
+                    content="Assistant response 1 that is also quite long " * 10,
+                    total_tokens=10,
+                )
+            if len(self.captured_generates) == 2:
+                return LLMResponse(
                     content="I need to call a tool",
                     tool_calls=[
                         ToolCallRequest(
@@ -1157,6 +1139,7 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
     ) -> bool:
         nonlocal compaction_calls
         compaction_calls += 1
+        msg_ids = [m.id for m in history if m.role in (MessageRole.USER, MessageRole.ASSISTANT)][:2]
         node = SummaryNode(
             id="node-1-uuid",
             session_id=session_id,
@@ -1169,23 +1152,56 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
             parent_id=None,
         )
         await gw.db.insert_summary_node(node)
-        await gw.db.update_messages_summary_node([msg1.id, msg2.id], "node-1-uuid")
+        await gw.db.update_messages_summary_node(msg_ids, "node-1-uuid")
         return True
 
     context = KesokuContext(config=cfg, llm=llm)
-    executor = TurnExecutor("sess_cache_compact", gw, tool_runner, turn_logger, context=context)
-
     worker = MagicMock()
     worker.active_cache_name = None
     worker.active_cache_llm = None
     worker.cached_messages_len = 0
-    type(worker).running = PropertyMock(side_effect=[True, True, False])
 
     async def mock_pivot(m: Message) -> Message:
         return m
 
     worker.drain_queue_and_pivot.side_effect = mock_pivot
     worker.queue_empty.return_value = True
+
+    # Run Turn 0: R1 runs uncached (zero blocking create_cache before R1!), then post-turn creates `mock_cache_0`
+    executor0 = TurnExecutor("sess_cache_compact", gw, tool_runner, turn_logger, context=context)
+    type(worker).running = PropertyMock(side_effect=[True, False])
+    with (
+        patch("kesoku.context.get_config", return_value=cfg),
+        patch("kesoku.agent.compressor.HistoryCompressor.auto_compact_session", return_value=False),
+    ):
+        await executor0.process_turn(
+            current_msg=msg1,
+            worker=worker,
+            session_staging_dir="/tmp/sess_cache_compact",
+        )
+
+    assert llm.captured_generates[0]["cached_content"] is None
+    assert len(llm.created_caches) == 1
+    assert llm.created_caches[0]["name"] == "mock_cache_0"
+    assert worker.active_cache_name == "mock_cache_0"
+
+    # Now Turn 1: reuses `mock_cache_0` across tool iterations R1 & R2, then compacts post-turn
+    active_msg = Message(
+        session_id="sess_cache_compact",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role=MessageRole.USER,
+        content="Active user query",
+        status="pending_agent",
+        timestamp=time.time(),
+    )
+    await gw.post(active_msg)
+
+    # Raise threshold before Turn 1 post-turn so post-compaction short scaffold stays uncached
+    cfg.gemini.context_caching_threshold = 5000
+    executor = TurnExecutor("sess_cache_compact", gw, tool_runner, turn_logger, context=context)
+    type(worker).running = PropertyMock(side_effect=[True, True, False])
 
     with (
         patch("kesoku.context.get_config", return_value=cfg),
@@ -1200,13 +1216,12 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
             session_staging_dir="/tmp/sess_cache_compact",
         )
 
-    # Cache created once on iteration 1 and reused across iteration 2 (no mid-turn compaction!)
+    # Cache created post-Turn-0 was reused across both rounds of Turn 1
     assert len(llm.created_caches) == 1
-    assert llm.created_caches[0]["name"] == "mock_cache_0"
-    assert len(llm.captured_generates) == 2
-    assert llm.captured_generates[0]["cached_content"] == "mock_cache_0"
-    assert llm.captured_generates[0]["tools"] is None
+    assert len(llm.captured_generates) == 3
     assert llm.captured_generates[1]["cached_content"] == "mock_cache_0"
+    assert llm.captured_generates[1]["tools"] is None
+    assert llm.captured_generates[2]["cached_content"] == "mock_cache_0"
 
     # Post-turn compaction ran once after final response, invalidated cache, and reset worker cache fields
     mock_compact.assert_awaited_once()
@@ -1240,12 +1255,12 @@ async def test_turn_executor_context_caching_with_compaction(temp_db: str) -> No
             session_staging_dir="/tmp/sess_cache_compact",
         )
 
-    gen_call_3 = llm.captured_generates[2]
-    assert gen_call_3["cached_content"] is None
-    assert gen_call_3["history"][0].role == MessageRole.USER
-    assert "[Note: This conversation uses custom turn-based" in gen_call_3["history"][0].content
-    assert "Compacted user query" in gen_call_3["history"][0].content
-    assert not any(m.id in (msg1.id, msg2.id) for m in gen_call_3["history"])
+    gen_call_4 = llm.captured_generates[3]
+    assert gen_call_4["cached_content"] is None
+    assert gen_call_4["history"][0].role == MessageRole.USER
+    assert "[Note: This conversation uses custom turn-based" in gen_call_4["history"][0].content
+    assert "Compacted user query" in gen_call_4["history"][0].content
+    assert not any(m.id == msg1.id for m in gen_call_4["history"])
 
 
 @pytest.mark.asyncio
@@ -1351,20 +1366,9 @@ async def test_turn_executor_cache_expiration_retry(temp_db: str) -> None:
         sender="u1",
         role="user",
         content="Long prompt prefix that is cached.",
-        status="responded",
-    )
-    await gw.post(msg1)
-
-    msg2 = Message(
-        session_id="sess_cache_expire",
-        chatbot_id="cli",
-        channel_id="ch1",
-        sender="u1",
-        role="user",
-        content="The current pending message.",
         status="pending_agent",
     )
-    await gw.post(msg2)
+    await gw.post(msg1)
 
     class GeminiLLM(BaseLLM):
         def __init__(self) -> None:
@@ -1380,7 +1384,7 @@ async def test_turn_executor_cache_expiration_retry(temp_db: str) -> None:
             history: list[Message] | None = None,
             tools: list[Any] | None = None,
         ) -> int:
-            return 100
+            raise AssertionError("GeminiLLM.count_tokens() RPC must never be called!")
 
         async def create_cache(
             self,
@@ -1425,11 +1429,13 @@ async def test_turn_executor_cache_expiration_retry(temp_db: str) -> None:
             )
 
             if len(self.captured_generates) == 1:
+                assert cached_content is None
+                return LLMResponse(content="First turn reply", total_tokens=10)
+            if len(self.captured_generates) == 2:
                 assert cached_content == "mock_cache_0"
                 raise RuntimeError("400 INVALID_ARGUMENT. Cache content mock_cache_0 is expired.")
-            else:
-                assert cached_content is None
-                return LLMResponse(content="Recovered from expired cache!", total_tokens=10)
+            assert cached_content is None
+            return LLMResponse(content="Recovered from expired cache!", total_tokens=10)
 
     llm = GeminiLLM()
     tool_runner = MagicMock()
@@ -1437,10 +1443,10 @@ async def test_turn_executor_cache_expiration_retry(temp_db: str) -> None:
     turn_logger = MagicMock(spec=TurnLogger)
 
     context = KesokuContext(config=cfg, llm=llm)
-    executor = TurnExecutor("sess_cache_expire", gw, tool_runner, turn_logger, context=context)
-
     worker = MagicMock()
-    type(worker).running = PropertyMock(side_effect=[True, False])
+    worker.active_cache_name = None
+    worker.active_cache_llm = None
+    worker.cached_messages_len = 0
 
     async def mock_pivot(m: Message) -> Message:
         return m
@@ -1448,9 +1454,12 @@ async def test_turn_executor_cache_expiration_retry(temp_db: str) -> None:
     worker.drain_queue_and_pivot.side_effect = mock_pivot
     worker.queue_empty.return_value = True
 
+    # Turn 1 builds `mock_cache_0` post-turn
+    executor1 = TurnExecutor("sess_cache_expire", gw, tool_runner, turn_logger, context=context)
+    type(worker).running = PropertyMock(side_effect=[True, False])
     with patch("kesoku.context.get_config", return_value=cfg):
-        await executor.process_turn(
-            current_msg=msg2,
+        await executor1.process_turn(
+            current_msg=msg1,
             worker=worker,
             session_staging_dir="/tmp/sess_cache_expire",
         )
@@ -1459,15 +1468,39 @@ async def test_turn_executor_cache_expiration_retry(temp_db: str) -> None:
     assert len(llm.created_caches) == 1
     assert llm.created_caches[0]["name"] == "mock_cache_0"
 
-    assert len(llm.captured_generates) == 2
-    assert llm.captured_generates[0]["cached_content"] == "mock_cache_0"
-    assert llm.captured_generates[1]["cached_content"] is None
+    # Turn 2 attempts `mock_cache_0`, hits expired error, retries same round uncached,
+    # and recreates `mock_cache_1` post-turn.
+    msg2 = Message(
+        session_id="sess_cache_expire",
+        chatbot_id="cli",
+        channel_id="ch1",
+        sender="u1",
+        role="user",
+        content="The current pending message.",
+        status="pending_agent",
+    )
+    await gw.post(msg2)
+
+    executor2 = TurnExecutor("sess_cache_expire", gw, tool_runner, turn_logger, context=context)
+    type(worker).running = PropertyMock(side_effect=[True, False])
+    with patch("kesoku.context.get_config", return_value=cfg):
+        await executor2.process_turn(
+            current_msg=msg2,
+            worker=worker,
+            session_staging_dir="/tmp/sess_cache_expire",
+        )
+
+    assert len(llm.captured_generates) == 3
+    assert llm.captured_generates[1]["cached_content"] == "mock_cache_0"
+    assert llm.captured_generates[2]["cached_content"] is None
+    assert len(llm.created_caches) == 2
+    assert worker.active_cache_name == "mock_cache_1"
 
     history = await gw.db.get_session_history("sess_cache_expire")
     assistant_msgs = [m for m in history if m.role == "assistant"]
-    assert len(assistant_msgs) == 1
-    assert assistant_msgs[0].content == "Recovered from expired cache!"
-    assert assistant_msgs[0].status == "pending"
+    assert len(assistant_msgs) == 2
+    assert assistant_msgs[-1].content == "Recovered from expired cache!"
+    assert assistant_msgs[-1].status == "pending"
 
 
 @pytest.mark.asyncio

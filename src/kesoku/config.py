@@ -306,9 +306,13 @@ class GeminiConfig(BaseModel):
         default=4096,
         description="Minimum token threshold of static history prefix before context caching is triggered",
     )
+    context_cache_ttl_seconds: int = Field(
+        default=1200,
+        description="Time-to-Live (TTL) in seconds for the explicit context cache (default 1200s = 20m)",
+    )
     context_caching_ttl: int = Field(
-        default=3600,
-        description="Time-to-Live (TTL) in seconds for the explicit context cache",
+        default=1200,
+        description="Legacy alias for context_cache_ttl_seconds",
     )
     stream: bool = Field(
         default=False,
@@ -318,6 +322,28 @@ class GeminiConfig(BaseModel):
         default=300.0,
         description="Timeout in seconds for Gemini API requests and streaming idle chunks",
     )
+
+    @model_validator(mode="after")
+    def _sync_cache_ttl_aliases(self) -> "GeminiConfig":
+        """Keep `context_cache_ttl_seconds` and legacy `context_caching_ttl` synchronized."""
+        if "context_cache_ttl_seconds" in self.model_fields_set:
+            self.context_caching_ttl = self.context_cache_ttl_seconds
+        elif "context_caching_ttl" in self.model_fields_set:
+            self.context_cache_ttl_seconds = self.context_caching_ttl
+        return self
+
+
+def resolve_gemini_cache_ttl(cfg: GeminiConfig | None) -> int:
+    """Resolve effective explicit cache TTL in seconds, honoring runtime mutations to either alias."""
+    if cfg is None:
+        return 1200
+    ttl_new = int(getattr(cfg, "context_cache_ttl_seconds", 1200) or 1200)
+    ttl_legacy = int(getattr(cfg, "context_caching_ttl", 1200) or 1200)
+    if ttl_new != 1200:
+        return max(60, ttl_new)
+    if ttl_legacy != 1200:
+        return max(60, ttl_legacy)
+    return 1200
 
 
 class ClaudeConfig(BaseModel):

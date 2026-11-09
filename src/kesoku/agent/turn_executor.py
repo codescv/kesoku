@@ -9,6 +9,7 @@ import re
 import time
 import traceback
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import tzlocal
@@ -28,7 +29,7 @@ from kesoku.agent.state_snapshot import render_repo_rules, render_running_jobs, 
 from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.tools.file import expand_path_variables
 from kesoku.agent.turn_logger import TurnLogger
-from kesoku.config import DiscordChannelOverride, KesokuConfig
+from kesoku.config import DiscordChannelOverride, KesokuConfig, resolve_gemini_cache_ttl
 from kesoku.context import KesokuContext
 from kesoku.utils.async_fs import async_exists, async_read_text_file, async_write_text_file
 from kesoku.utils.path import PathResolver
@@ -133,6 +134,180 @@ def estimate_fixed_prompt_overhead(system_prompt: str | None, tools_list: list |
             signature = ""
         text_parts.append(f"{name}{signature}\n{inspect.getdoc(tool) or ''}")
     return estimate_tokens_calibrated("\n".join(text_parts))
+
+
+EXPLICIT_CACHE_MIN_PREFIX_TOKENS = 4600
+EXPLICIT_CACHE_REFRESH_MIN_SUFFIX_TOKENS = 8192
+EXPLICIT_CACHE_REFRESH_RATIO = 0.25
+EXPLICIT_CACHE_TTL_RENEW_BELOW_SECONDS = 600.0
+
+
+@dataclass
+class ExplicitCacheEntry:
+    """In-memory metadata for an explicit context cache isolated by `(session_id, model)`."""
+
+    cache_name: str
+    model_name: str
+    llm: BaseLLM
+    cached_messages_len: int
+    cached_est_tokens: int
+    created_at: float
+    expires_at: float
+
+
+_session_cache_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_session_cache_lock(session_id: str) -> asyncio.Lock:
+    """Return a per-session asyncio.Lock serializing explicit cache state reads and mutations."""
+    lock = _session_cache_locks.get(session_id)
+    if lock is not None and not lock.locked():
+        bound_loop = getattr(lock, "_loop", None)
+        if bound_loop is not None and bound_loop is not asyncio.get_running_loop():
+            lock = None
+    if lock is None:
+        lock = asyncio.Lock()
+        _session_cache_locks[session_id] = lock
+    return lock
+
+
+def discard_session_cache_state(session_id: str) -> None:
+    """Drop per-session cache lock when a session is deleted."""
+    lock = _session_cache_locks.get(session_id)
+    if lock is not None and not lock.locked():
+        _session_cache_locks.pop(session_id, None)
+
+
+def _cache_model_key(llm: BaseLLM) -> str:
+    """Build a model isolation key so channel overrides never reuse incompatible CachedContents."""
+    model_id = (
+        getattr(llm, "model_name", None)
+        or getattr(getattr(llm, "config", None), "model_name", None)
+        or "default"
+    )
+    return f"{llm.__class__.__name__}:{model_id}"
+
+
+def _is_cache_invalid_error(exc: BaseException) -> bool:
+    """Return True if an LLM generation exception indicates an expired or missing CachedContent."""
+    msg_lower = str(exc).lower()
+    return (
+        "404" in msg_lower
+        or "not found" in msg_lower
+        or "not_found" in msg_lower
+        or "cachedcontent" in msg_lower
+        or "cached_content" in msg_lower
+        or "expired" in msg_lower
+        or "cache" in msg_lower
+    )
+
+
+def estimate_messages_tokens_local(messages: list[Message]) -> int:
+    """Estimate tokens of prepared messages locally without blocking network RPCs."""
+    return sum(estimate_tokens_calibrated(m.content) for m in messages)
+
+
+def estimate_prefix_tokens_local(
+    prefix_messages: list[Message],
+    system_prompt: str | None,
+    tools_list: list[Any] | None,
+) -> int:
+    """Estimate total tokens of system instruction + tools + static prefix messages locally."""
+    return estimate_fixed_prompt_overhead(system_prompt, tools_list) + estimate_messages_tokens_local(prefix_messages)
+
+
+def _sync_worker_active_fields(worker: Any, entry: ExplicitCacheEntry | None) -> None:
+    """Synchronize legacy worker attributes (`active_cache_name`, etc.) with `entry`."""
+    if worker is None:
+        return
+    try:
+        if entry is None:
+            worker.active_cache_name = None
+            worker.active_cache_llm = None
+            worker.cached_messages_len = 0
+            worker.cache_expires_at = 0.0
+        else:
+            worker.active_cache_name = entry.cache_name
+            worker.active_cache_llm = entry.llm
+            worker.cached_messages_len = entry.cached_messages_len
+            worker.cache_expires_at = entry.expires_at
+    except Exception:
+        pass
+
+
+def _ensure_worker_cache_map(
+    worker: Any,
+    default_llm: BaseLLM | None = None,
+    default_ttl: int = 1200,
+) -> dict[str, ExplicitCacheEntry]:
+    """Return `worker.explicit_caches` dict, hydrating any pre-populated legacy attributes."""
+    raw_map = getattr(worker, "explicit_caches", None)
+    if not isinstance(raw_map, dict):
+        raw_map = {}
+        try:
+            worker.explicit_caches = raw_map
+        except Exception:
+            pass
+
+    legacy_name = getattr(worker, "active_cache_name", None)
+    if isinstance(legacy_name, str) and legacy_name:
+        already_tracked = any(
+            isinstance(ent, ExplicitCacheEntry) and ent.cache_name == legacy_name for ent in raw_map.values()
+        )
+        if not already_tracked:
+            legacy_llm = getattr(worker, "active_cache_llm", None)
+            target_llm = legacy_llm if isinstance(legacy_llm, BaseLLM) else default_llm
+            if target_llm is not None:
+                c_len = getattr(worker, "cached_messages_len", 0)
+                c_len_int = c_len if isinstance(c_len, int) and not isinstance(c_len, bool) else 0
+                raw_exp = getattr(worker, "cache_expires_at", 0.0)
+                now_ts = time.time()
+                exp_ts = (
+                    float(raw_exp)
+                    if isinstance(raw_exp, (int, float)) and not isinstance(raw_exp, bool) and raw_exp > 0
+                    else (now_ts + default_ttl)
+                )
+                m_name = str(getattr(target_llm, "model_name", None) or "default")
+                raw_map[_cache_model_key(target_llm)] = ExplicitCacheEntry(
+                    cache_name=legacy_name,
+                    model_name=m_name,
+                    llm=target_llm,
+                    cached_messages_len=c_len_int,
+                    cached_est_tokens=0,
+                    created_at=now_ts,
+                    expires_at=exp_ts,
+                )
+    return raw_map
+
+
+async def _clear_worker_explicit_caches(worker: Any, fallback_llm: BaseLLM | None = None) -> None:
+    """Delete all explicit caches tracked on `worker` and reset cache attributes."""
+    if worker is None:
+        return
+    deleted: set[str] = set()
+    raw_map = getattr(worker, "explicit_caches", None)
+    if isinstance(raw_map, dict):
+        for entry in list(raw_map.values()):
+            c_name = getattr(entry, "cache_name", None)
+            c_llm = getattr(entry, "llm", None) or fallback_llm
+            if isinstance(c_name, str) and c_name and c_name not in deleted and c_llm is not None:
+                deleted.add(c_name)
+                try:
+                    await c_llm.delete_cache(c_name)
+                except Exception as de:
+                    logger.warning(f"Failed to delete explicit context cache {c_name}: {de}")
+        raw_map.clear()
+
+    legacy_name = getattr(worker, "active_cache_name", None)
+    if isinstance(legacy_name, str) and legacy_name and legacy_name not in deleted:
+        legacy_llm = getattr(worker, "active_cache_llm", None)
+        c_llm = legacy_llm if isinstance(legacy_llm, BaseLLM) else fallback_llm
+        if c_llm is not None:
+            try:
+                await c_llm.delete_cache(legacy_name)
+            except Exception as de:
+                logger.warning(f"Failed to delete explicit context cache {legacy_name}: {de}")
+    _sync_worker_active_fields(worker, None)
 
 
 class _StreamPreviewPublisher:
@@ -253,6 +428,71 @@ class TurnExecutor:
         self._compaction_pending: bool = False
         self._last_turn_prompt_blocked: bool = False
         self._bg_compaction_tasks: set[asyncio.Task[Any]] = set()
+        self._turn_rounds: list[dict[str, Any]] = []
+        self._turn_used_explicit_cache: bool = False
+        self._turn_model_name: str = ""
+        self._turn_thinking_level: str | None = None
+        self._turn_stream: bool = False
+        self._turn_cache_mode: str = "disabled"
+        self._last_round_tool_errors: int = 0
+
+    @staticmethod
+    def _resolve_cache_mode(cfg: KesokuConfig, llm: BaseLLM) -> str:
+        """Resolve effective context cache mode string for telemetry."""
+        cls_name = llm.__class__.__name__
+        if cls_name == "GeminiLLM":
+            if not cfg.gemini.context_caching:
+                return "disabled"
+            return str(cfg.gemini.context_caching_mode or "explicit")
+        llm_cfg = getattr(llm, "config", None)
+        if llm_cfg is not None and getattr(llm_cfg, "context_caching", False):
+            return str(getattr(llm_cfg, "context_caching_mode", None) or "ephemeral")
+        return "disabled"
+
+    async def _build_turn_metrics(
+        self,
+        *,
+        last_context_tokens: int,
+        last_cached_tokens: int,
+        turn_tool_calls: int,
+        turn_tokens: int,
+        start_time: float,
+        status: str,
+        llm: BaseLLM | None = None,
+    ) -> dict[str, Any]:
+        """Construct backward-compatible `turn_metrics` enriched with per-round telemetry."""
+        metrics: dict[str, Any] = {
+            "session_turns": await self._get_session_turns_count(),
+            "context_tokens": last_context_tokens,
+            "cached_tokens": last_cached_tokens,
+            "turn_tool_calls": turn_tool_calls,
+            "turn_tokens": turn_tokens,
+            "turn_time": time.time() - start_time,
+            "status": status,
+            "model_name": self._turn_model_name
+            or (
+                str(
+                    getattr(llm, "model_name", None)
+                    or getattr(getattr(llm, "config", None), "model_name", None)
+                    or llm.__class__.__name__
+                )
+                if llm is not None
+                else ""
+            ),
+            "thinking_level": self._turn_thinking_level,
+            "stream": self._turn_stream,
+            "cache_mode": self._turn_cache_mode,
+            "used_explicit_cache": self._turn_used_explicit_cache,
+            "rounds": [dict(r) for r in self._turn_rounds],
+        }
+        if llm is not None:
+            limit = getattr(llm, "context_window_limit", 1048576)
+            context_percent = (last_context_tokens / limit) * 100 if limit else 0.0
+            metrics["context_limit"] = limit
+            metrics["context_percent"] = context_percent
+            metrics["subagent_calls"] = self._subagent_calls
+            metrics["subagent_tokens"] = self._subagent_tokens
+        return metrics
 
     def _is_compaction_pending(self, worker: "SessionWorker") -> bool:
         """Return True if a prior turn deferred or failed post-turn compaction."""
@@ -396,12 +636,15 @@ class TurnExecutor:
         last_context_tokens = 0
         last_cached_tokens = 0
 
-        active_cache_name = getattr(worker, "active_cache_name", None)
-        if active_cache_name is not None and not isinstance(active_cache_name, str):
-            active_cache_name = None
-        cached_messages_len = getattr(worker, "cached_messages_len", 0)
-        if not isinstance(cached_messages_len, int):
-            cached_messages_len = 0
+        self._turn_rounds = []
+        self._turn_used_explicit_cache = False
+        self._turn_model_name = ""
+        self._turn_thinking_level = None
+        self._turn_stream = False
+        self._turn_cache_mode = "disabled"
+        self._last_round_tool_errors = 0
+        last_round_used_explicit_cache = False
+        last_round_generate_est_tokens = 0
 
         empty_attempts = 0
         active_publisher: _StreamPreviewPublisher | None = None
@@ -445,43 +688,24 @@ class TurnExecutor:
                     turn_tokens = 0
                     last_context_tokens = 0
                     last_cached_tokens = 0
+                    self._turn_rounds.clear()
+                    self._turn_used_explicit_cache = False
+                    self._last_round_tool_errors = 0
+                    last_round_used_explicit_cache = False
+                    last_round_generate_est_tokens = 0
                     start_time = time.time()
-                    if active_cache_name:
-                        try:
-                            # We can resolve LLM for deletion using current_msg resolved LLM or recreate it
-                            temp_llm = self._resolve_llm(current_msg)
-                            await temp_llm.delete_cache(active_cache_name)
-                        except Exception as de:
-                            logger.warning(f"Failed to delete cache on pivot: {de}")
-                        active_cache_name = None
-                        cached_messages_len = 0
-                        worker.active_cache_name = None
-                        worker.active_cache_llm = None
-                        worker.cached_messages_len = 0
 
                 # Resolve LLM dynamically for the current message
                 llm = self._resolve_llm(current_msg)
-
-                if active_cache_name and worker.active_cache_llm:
-                    old_model = getattr(worker.active_cache_llm, "model_name", None)
-                    new_model = getattr(llm, "model_name", None)
-                    if (
-                        worker.active_cache_llm.__class__.__name__ != llm.__class__.__name__
-                        or old_model != new_model
-                    ):
-                        logger.info(
-                            f"LLM changed from {worker.active_cache_llm.__class__.__name__} ({old_model}) "
-                            f"to {llm.__class__.__name__} ({new_model}). Resetting obsolete context cache..."
-                        )
-                        try:
-                            await worker.active_cache_llm.delete_cache(active_cache_name)
-                        except Exception as de:
-                            logger.warning(f"Failed to delete obsolete context cache on provider change: {de}")
-                        active_cache_name = None
-                        cached_messages_len = 0
-                        worker.active_cache_name = None
-                        worker.active_cache_llm = None
-                        worker.cached_messages_len = 0
+                stream = self._resolve_stream(current_msg, llm)
+                self._turn_model_name = str(
+                    getattr(llm, "model_name", None)
+                    or getattr(getattr(llm, "config", None), "model_name", None)
+                    or llm.__class__.__name__
+                )
+                self._turn_thinking_level = getattr(getattr(llm, "config", None), "thinking_level", None)
+                self._turn_stream = stream
+                self._turn_cache_mode = self._resolve_cache_mode(cfg, llm)
 
                 # Retrieve system prompt directly from session
                 session = await self.context.db.get_session(self.session_id)
@@ -515,22 +739,9 @@ class TurnExecutor:
                             heal_orphans=False,
                             active_only=True,
                         )
-                        if active_cache_name:
-                            logger.info("Pre-turn fallback compaction occurred. Deleting obsolete context cache...")
-                            cache_llm = (
-                                worker.active_cache_llm
-                                if isinstance(getattr(worker, "active_cache_llm", None), BaseLLM)
-                                else llm
-                            )
-                            try:
-                                await cache_llm.delete_cache(active_cache_name)
-                            except Exception as de:
-                                logger.warning(f"Failed to delete obsolete cache after fallback compaction: {de}")
-                            active_cache_name = None
-                            cached_messages_len = 0
-                            worker.active_cache_name = None
-                            worker.active_cache_llm = None
-                            worker.cached_messages_len = 0
+                        logger.info("Pre-turn fallback compaction occurred. Clearing obsolete explicit caches...")
+                        async with _get_session_cache_lock(self.session_id):
+                            await _clear_worker_explicit_caches(worker, fallback_llm=llm)
 
                 last_raw_history = raw_history
                 last_system_prompt = system_prompt
@@ -558,88 +769,66 @@ class TurnExecutor:
                     strip_old_questions=cfg.agent.strip_historical_question_options,
                 )
 
-                # Implicit caching mode: rely on Vertex's automatic prefix caching and drop any explicit cache.
-                implicit_caching = cfg.gemini.context_caching_mode == "implicit"
-                if implicit_caching and active_cache_name:
-                    logger.info("context_caching_mode=implicit: deleting existing explicit context cache...")
-                    try:
-                        await llm.delete_cache(active_cache_name)
-                    except Exception as de:
-                        logger.warning(f"Failed to delete explicit cache in implicit mode: {de}")
-                    active_cache_name = None
-                    cached_messages_len = 0
-                    worker.active_cache_name = None
-                    worker.active_cache_llm = None
-                    worker.cached_messages_len = 0
+                # Read per-(session, model) explicit cache snapshot without blocking R1..RN on cache creation RPCs.
+                implicit_caching = (not cfg.gemini.context_caching) or (cfg.gemini.context_caching_mode == "implicit")
+                active_cache_name: str | None = None
+                cached_messages_len: int = 0
+                model_key = _cache_model_key(llm)
+                ttl_cfg_secs = resolve_gemini_cache_ttl(cfg.gemini)
 
-                # Setup context cache if enabled, Gemini model, and not already created
-                if (
-                    cfg.gemini.context_caching
-                    and not implicit_caching
-                    and llm.__class__.__name__ == "GeminiLLM"
-                    and active_cache_name is None
-                ):
-                    prefix_messages = []
-                    last_user_idx = None
-                    for idx, msg in enumerate(llm_history):
-                        if msg.role == MessageRole.USER:
-                            last_user_idx = idx
-                    if last_user_idx is not None:
-                        prefix_messages = llm_history[:last_user_idx]
+                if implicit_caching:
+                    async with _get_session_cache_lock(self.session_id):
+                        raw_existing = getattr(worker, "explicit_caches", None)
+                        legacy_existing = getattr(worker, "active_cache_name", None)
+                        if (isinstance(raw_existing, dict) and raw_existing) or (
+                            isinstance(legacy_existing, str) and legacy_existing
+                        ):
+                            logger.info("Explicit caching disabled/implicit: deleting existing explicit caches...")
+                            await _clear_worker_explicit_caches(worker, fallback_llm=llm)
+                elif llm.__class__.__name__ == "GeminiLLM":
+                    async with _get_session_cache_lock(self.session_id):
+                        caches_map = _ensure_worker_cache_map(worker, default_llm=llm, default_ttl=ttl_cfg_secs)
+                        entry = caches_map.get(model_key)
+                        if entry is not None:
+                            if entry.expires_at > 0 and time.time() >= entry.expires_at:
+                                logger.info(
+                                    f"Explicit cache {entry.cache_name} locally expired; skipping uncached."
+                                )
+                                caches_map.pop(model_key, None)
+                                _sync_worker_active_fields(worker, next(iter(caches_map.values()), None))
+                            elif len(llm_history) < entry.cached_messages_len:
+                                logger.info(
+                                    "History length is shorter than cache prefix. Deleting obsolete context cache..."
+                                )
+                                caches_map.pop(model_key, None)
+                                _sync_worker_active_fields(worker, next(iter(caches_map.values()), None))
+                                try:
+                                    await entry.llm.delete_cache(entry.cache_name)
+                                except Exception as de:
+                                    logger.warning(f"Failed to delete obsolete cache: {de}")
+                            elif len(llm_history) > entry.cached_messages_len:
+                                active_cache_name = entry.cache_name
+                                cached_messages_len = entry.cached_messages_len
 
-                    if prefix_messages:
-                        prefix_tokens = llm.count_tokens(
-                            system_prompt=system_prompt,
-                            history=prefix_messages,
-                        )
-                        if prefix_tokens >= cfg.gemini.context_caching_threshold:
-                            logger.info(
-                                f"Session prefix has {prefix_tokens} tokens. Creating explicit context cache..."
-                            )
-                            active_cache_name = await llm.create_cache(
-                                contents=prefix_messages,
-                                system_prompt=system_prompt,
-                                tools=tools_list,
-                                display_name=f"kesoku_{self.session_id}",
-                                ttl_seconds=cfg.gemini.context_caching_ttl,
-                            )
-                            if active_cache_name:
-                                cached_messages_len = len(prefix_messages)
-                                worker.active_cache_name = active_cache_name
-                                worker.active_cache_llm = llm
-                                worker.cached_messages_len = cached_messages_len
-
-                # If the prepared history length is somehow less than cached_messages_len, the cache is obsolete.
-                if active_cache_name and len(llm_history) < cached_messages_len:
-                    logger.info("History length is shorter than cache prefix. Deleting obsolete context cache...")
-                    try:
-                        await llm.delete_cache(active_cache_name)
-                    except Exception as de:
-                        logger.warning(f"Failed to delete obsolete cache: {de}")
-                    active_cache_name = None
-                    cached_messages_len = 0
-                    worker.active_cache_name = None
-                    worker.active_cache_llm = None
-                    worker.cached_messages_len = 0
-
-                # Partition history if using context cache
+                # Partition history if using an active explicit context cache for this model
                 logger.info(
-                    f"Context caching debug: active_cache_name={active_cache_name}, "
+                    f"Context caching debug: model={model_key}, active_cache_name={active_cache_name}, "
                     f"llm_history_len={len(llm_history)}, cached_messages_len={cached_messages_len}"
                 )
-                if active_cache_name and len(llm_history) >= cached_messages_len:
+                if active_cache_name and len(llm_history) > cached_messages_len:
                     generate_history = llm_history[cached_messages_len:]
                     generate_system_prompt = system_prompt
                     generate_tools = None
                     generate_cached_content = active_cache_name
+                    used_round_explicit_cache = True
                 else:
                     generate_history = llm_history
                     generate_system_prompt = system_prompt
                     generate_tools = tools_list
                     generate_cached_content = None
+                    used_round_explicit_cache = False
 
                 # LLM inference (optionally streaming live preview updates to Gateway)
-                stream = self._resolve_stream(current_msg, llm)
                 publisher = (
                     _StreamPreviewPublisher(
                         gateway=self.gateway,
@@ -652,8 +841,18 @@ class TurnExecutor:
                     else None
                 )
                 active_publisher = publisher
+                llm_call_t0 = time.perf_counter()
+                first_stream_chunk_ms: float | None = None
+
+                async def _on_stream_chunk_timed(delta: str, accumulated: str) -> None:
+                    nonlocal first_stream_chunk_ms
+                    if first_stream_chunk_ms is None and delta:
+                        first_stream_chunk_ms = round((time.perf_counter() - llm_call_t0) * 1000.0, 2)
+                    if active_publisher is not None:
+                        await active_publisher.on_chunk(delta, accumulated)
+
                 gen_kwargs: dict[str, Any] = (
-                    {"stream": True, "on_stream_chunk": publisher.on_chunk}
+                    {"stream": True, "on_stream_chunk": _on_stream_chunk_timed}
                     if publisher is not None
                     else {}
                 )
@@ -666,10 +865,10 @@ class TurnExecutor:
                         **gen_kwargs,
                     )
                 except Exception as e:
-                    if active_cache_name and ("expired" in str(e) or "cache" in str(e).lower()):
+                    if generate_cached_content and _is_cache_invalid_error(e):
                         logger.warning(
-                            f"LLM generation failed, possibly due to cache expiration: {e}. "
-                            "Retrying without context cache."
+                            f"LLM generation with CachedContent '{generate_cached_content}' failed ({e}). "
+                            "Invalidating cache and retrying same round uncached."
                         )
                         if publisher is not None:
                             await publisher.discard()
@@ -681,17 +880,27 @@ class TurnExecutor:
                                 turn_id=current_msg.id,
                             )
                             active_publisher = publisher
+                        async with _get_session_cache_lock(self.session_id):
+                            caches_map = _ensure_worker_cache_map(
+                                worker, default_llm=llm, default_ttl=ttl_cfg_secs
+                            )
+                            popped = caches_map.pop(model_key, None)
+                            if (
+                                popped is not None
+                                or getattr(worker, "active_cache_name", None) == generate_cached_content
+                            ):
+                                _sync_worker_active_fields(worker, next(iter(caches_map.values()), None))
                         active_cache_name = None
                         cached_messages_len = 0
-                        worker.active_cache_name = None
-                        worker.active_cache_llm = None
-                        worker.cached_messages_len = 0
+                        used_round_explicit_cache = False
                         generate_history = llm_history
                         generate_system_prompt = system_prompt
                         generate_tools = tools_list
                         generate_cached_content = None
+                        llm_call_t0 = time.perf_counter()
+                        first_stream_chunk_ms = None
                         retry_kwargs: dict[str, Any] = (
-                            {"stream": True, "on_stream_chunk": publisher.on_chunk}
+                            {"stream": True, "on_stream_chunk": _on_stream_chunk_timed}
                             if publisher is not None
                             else {}
                         )
@@ -704,6 +913,17 @@ class TurnExecutor:
                         )
                     else:
                         raise
+
+                round_llm_ms = round((time.perf_counter() - llm_call_t0) * 1000.0, 2)
+                round_ttft_ms = (
+                    round(float(res.ttft_ms), 2)
+                    if res.ttft_ms is not None
+                    else (first_stream_chunk_ms if first_stream_chunk_ms is not None else round_llm_ms)
+                )
+                if used_round_explicit_cache:
+                    self._turn_used_explicit_cache = True
+                last_round_used_explicit_cache = used_round_explicit_cache
+                last_round_generate_est_tokens = estimate_messages_tokens_local(generate_history)
 
                 # Log the raw LLM turn using TurnLogger if enabled
                 if cfg.agent.raw_llm_logs and self.turn_logger:
@@ -718,18 +938,35 @@ class TurnExecutor:
                     except Exception as le:
                         logger.error(f"Failed to log LLM turn: {le}", exc_info=True)
 
-                # Accumulate token metrics
+                # Accumulate token & per-round metrics
                 last_context_tokens = res.prompt_tokens or 0
                 last_cached_tokens = res.cached_tokens or 0
                 if res.total_tokens:
                     turn_tokens += res.total_tokens
+
+                round_record: dict[str, Any] = {
+                    "round": len(self._turn_rounds) + 1,
+                    "prompt_tokens": res.prompt_tokens or 0,
+                    "cached_tokens": res.cached_tokens or 0,
+                    "output_tokens": res.candidates_tokens or 0,
+                    "llm_ms": round_llm_ms,
+                    "ttft_ms": round_ttft_ms,
+                    "tool_ms": 0.0,
+                    "tool_count": len(res.tool_calls),
+                    "tool_errors": 0,
+                }
+                self._turn_rounds.append(round_record)
 
                 if res.tool_calls:
                     if publisher is not None:
                         await publisher.discard()
                         active_publisher = None
                     turn_tool_calls += len(res.tool_calls)
+                    self._last_round_tool_errors = 0
+                    tool_t0 = time.perf_counter()
                     should_continue = await self._execute_tool_calls(res, current_msg, worker, session_staging_dir)
+                    round_record["tool_ms"] = round((time.perf_counter() - tool_t0) * 1000.0, 2)
+                    round_record["tool_errors"] = self._last_round_tool_errors
                     if should_continue:
                         continue
                     else:
@@ -761,7 +998,8 @@ class TurnExecutor:
                         completed_final_response = True
                         break
 
-            # Post-turn compaction: run after final response is delivered so summarization never adds to TTFT.
+            # Post-turn phase: run auto-compaction and explicit context cache lifecycle AFTER reply delivery
+            # so neither summarization nor cache creation/refresh/TTL renewal ever adds to TTFT.
             if (
                 completed_final_response
                 and not self._last_turn_prompt_blocked
@@ -770,11 +1008,12 @@ class TurnExecutor:
             ):
                 if not worker.queue_empty():
                     logger.info(
-                        f"Skipping post-turn compaction for session {self.session_id} due to queued message; "
-                        "deferring to next turn."
+                        f"Skipping post-turn compaction and cache management for session {self.session_id} "
+                        "due to queued message; deferring to next turn."
                     )
                     self._set_compaction_pending(worker, True)
                 else:
+                    compacted_post = False
                     try:
                         compacted_post = await self._run_auto_compaction(
                             history=last_raw_history,
@@ -784,28 +1023,32 @@ class TurnExecutor:
                             cfg=cfg,
                             staging_dir=session_staging_dir,
                         )
-                        if compacted_post and active_cache_name:
-                            logger.info("Post-turn history compaction occurred. Deleting obsolete context cache...")
-                            cache_llm = (
-                                worker.active_cache_llm
-                                if isinstance(getattr(worker, "active_cache_llm", None), BaseLLM)
-                                else last_llm
-                            )
-                            try:
-                                await cache_llm.delete_cache(active_cache_name)
-                            except Exception as de:
-                                logger.warning(f"Failed to delete obsolete cache after post-turn compaction: {de}")
-                            active_cache_name = None
-                            cached_messages_len = 0
-                            worker.active_cache_name = None
-                            worker.active_cache_llm = None
-                            worker.cached_messages_len = 0
                     except Exception as ce:
                         logger.warning(
                             f"Post-turn history compaction failed for session {self.session_id}: {ce}. "
                             "Will retry pre-turn on next message."
                         )
                         self._set_compaction_pending(worker, True)
+
+                    try:
+                        await self._manage_post_turn_explicit_cache(
+                            worker=worker,
+                            llm=last_llm,
+                            cfg=cfg,
+                            current_msg=current_msg,
+                            system_prompt=last_system_prompt,
+                            tools_list=last_tools_list,
+                            session_staging_dir=session_staging_dir,
+                            compacted_post=compacted_post,
+                            used_explicit_cache_last_round=last_round_used_explicit_cache,
+                            last_context_tokens=last_context_tokens,
+                            last_cached_tokens=last_cached_tokens,
+                            last_generate_est_tokens=last_round_generate_est_tokens,
+                        )
+                    except Exception as cache_err:
+                        logger.warning(
+                            f"Post-turn explicit cache management failed for session {self.session_id}: {cache_err}"
+                        )
         except asyncio.CancelledError:
             if active_publisher is not None:
                 try:
@@ -814,15 +1057,15 @@ class TurnExecutor:
                     pass
                 active_publisher = None
             # Interrupted turn: save turn metrics to the initiating user message
-            turn_metrics = {
-                "session_turns": await self._get_session_turns_count(),
-                "context_tokens": last_context_tokens,
-                "cached_tokens": last_cached_tokens,
-                "turn_tool_calls": turn_tool_calls,
-                "turn_tokens": turn_tokens,
-                "turn_time": time.time() - start_time,
-                "status": "interrupted",
-            }
+            turn_metrics = await self._build_turn_metrics(
+                last_context_tokens=last_context_tokens,
+                last_cached_tokens=last_cached_tokens,
+                turn_tool_calls=turn_tool_calls,
+                turn_tokens=turn_tokens,
+                start_time=start_time,
+                status="interrupted",
+                llm=last_llm,
+            )
             history = await self.context.db.get_session_history(self.session_id, limit=20)
             user_msg = None
             for msg in reversed(history):
@@ -869,6 +1112,219 @@ class TurnExecutor:
             )
             await self.gateway.post(error_msg)
             await self.context.db.update_message_status(current_msg.id, MessageStatus.ERROR)
+
+    async def _manage_post_turn_explicit_cache(
+        self,
+        *,
+        worker: Any,
+        llm: BaseLLM,
+        cfg: KesokuConfig,
+        current_msg: Message,
+        system_prompt: str | None,
+        tools_list: list[Any],
+        session_staging_dir: str | None,
+        compacted_post: bool,
+        used_explicit_cache_last_round: bool,
+        last_context_tokens: int,
+        last_cached_tokens: int,
+        last_generate_est_tokens: int,
+    ) -> None:
+        """Execute post-turn explicit context cache creation, rolling refresh, or sliding TTL renewal.
+
+        Serialized per-session via `_get_session_cache_lock` and uses local calibrated token estimation
+        so `GeminiLLM.count_tokens()` RPCs never block the asyncio event loop.
+        """
+        async with _get_session_cache_lock(self.session_id):
+            if compacted_post:
+                logger.info("Post-turn history compaction occurred. Clearing obsolete explicit context caches...")
+                await _clear_worker_explicit_caches(worker, fallback_llm=llm)
+
+            if (
+                not cfg.gemini.context_caching
+                or cfg.gemini.context_caching_mode == "implicit"
+                or llm.__class__.__name__ != "GeminiLLM"
+            ):
+                return
+
+            post_raw = await build_history(
+                gateway=self.gateway,
+                session_id=self.session_id,
+                heal_orphans=False,
+                active_only=True,
+            )
+            if not post_raw:
+                return
+
+            post_assembled = await self._assemble_scaffold_history(
+                history=post_raw,
+                cfg=cfg,
+                current_msg=current_msg,
+            )
+
+            sentinel_msg = Message(
+                id="__cache_sentinel__",
+                session_id=self.session_id,
+                chatbot_id=current_msg.chatbot_id,
+                channel_id=current_msg.channel_id,
+                sender="user",
+                role=MessageRole.USER,
+                type=MessageType.TEXT,
+                content="<current_message>\n</current_message>",
+                status=MessageStatus.PENDING_AGENT,
+            )
+            prepared_all = prepare_history_for_llm(
+                [*post_assembled, sentinel_msg],
+                staging_dir=session_staging_dir,
+                strip_old_questions=cfg.agent.strip_historical_question_options,
+            )
+            prefix_messages = (
+                prepared_all[:-1]
+                if prepared_all and prepared_all[-1].id == "__cache_sentinel__"
+                else prepared_all
+            )
+            if not prefix_messages:
+                return
+
+            prefix_est = estimate_prefix_tokens_local(prefix_messages, system_prompt, tools_list)
+            ttl_secs = resolve_gemini_cache_ttl(cfg.gemini)
+            configured_min = int(getattr(cfg.gemini, "context_caching_threshold", 4096) or 4096)
+            min_tokens = EXPLICIT_CACHE_MIN_PREFIX_TOKENS if configured_min == 4096 else configured_min
+
+            caches_map = _ensure_worker_cache_map(worker, default_llm=llm, default_ttl=ttl_secs)
+            model_key = _cache_model_key(llm)
+            model_label = str(getattr(llm, "model_name", None) or "default")
+            entry = caches_map.get(model_key)
+
+            if entry is not None:
+                now_check = time.time()
+                if len(prefix_messages) < entry.cached_messages_len or (
+                    entry.expires_at > 0 and now_check >= entry.expires_at
+                ):
+                    if len(prefix_messages) < entry.cached_messages_len:
+                        try:
+                            await entry.llm.delete_cache(entry.cache_name)
+                        except Exception as de:
+                            logger.debug(f"Failed deleting shorter obsolete cache {entry.cache_name}: {de}")
+                    caches_map.pop(model_key, None)
+                    _sync_worker_active_fields(worker, next(iter(caches_map.values()), None))
+                    entry = None
+
+            if entry is None:
+                if prefix_est >= min_tokens:
+                    logger.info(
+                        f"Post-turn creating explicit context cache for {model_key} "
+                        f"(est_tokens={prefix_est} >= {min_tokens}, ttl={ttl_secs}s)..."
+                    )
+                    created_name = await llm.create_cache(
+                        contents=prefix_messages,
+                        system_prompt=system_prompt,
+                        tools=tools_list,
+                        display_name=f"kesoku_{self.session_id}",
+                        ttl_seconds=ttl_secs,
+                    )
+                    if created_name:
+                        now_ts = time.time()
+                        new_entry = ExplicitCacheEntry(
+                            cache_name=created_name,
+                            model_name=model_label,
+                            llm=llm,
+                            cached_messages_len=len(prefix_messages),
+                            cached_est_tokens=prefix_est,
+                            created_at=now_ts,
+                            expires_at=now_ts + ttl_secs,
+                        )
+                        caches_map[model_key] = new_entry
+                        _sync_worker_active_fields(worker, new_entry)
+                return
+
+            # Existing entry: decide between Rolling Refresh vs Sliding TTL Renewal.
+            cached_est = (
+                last_cached_tokens
+                if (used_explicit_cache_last_round and last_cached_tokens > 0)
+                else max(entry.cached_est_tokens, 1)
+            )
+            refresh_threshold = max(
+                EXPLICIT_CACHE_REFRESH_MIN_SUFFIX_TOKENS,
+                int(EXPLICIT_CACHE_REFRESH_RATIO * cached_est),
+            )
+            suffix_msgs = prefix_messages[entry.cached_messages_len :]
+            suffix_text_est = estimate_messages_tokens_local(suffix_msgs)
+            if used_explicit_cache_last_round and last_context_tokens > last_cached_tokens > 0:
+                usage_uncached = last_context_tokens - last_cached_tokens
+                ephemeral_delta = max(0, last_generate_est_tokens - suffix_text_est)
+                uncached_suffix = max(suffix_text_est, usage_uncached - ephemeral_delta)
+            else:
+                uncached_suffix = suffix_text_est
+
+            if uncached_suffix >= refresh_threshold and prefix_est >= min_tokens:
+                logger.info(
+                    f"Post-turn rolling refresh for {model_key}: uncached_suffix={uncached_suffix} >= "
+                    f"threshold={refresh_threshold} (cached_est={cached_est}). Creating new cache first..."
+                )
+                new_name = await llm.create_cache(
+                    contents=prefix_messages,
+                    system_prompt=system_prompt,
+                    tools=tools_list,
+                    display_name=f"kesoku_{self.session_id}",
+                    ttl_seconds=ttl_secs,
+                )
+                if new_name:
+                    old_name = entry.cache_name
+                    old_llm = entry.llm
+                    now_ts = time.time()
+                    new_entry = ExplicitCacheEntry(
+                        cache_name=new_name,
+                        model_name=model_label,
+                        llm=llm,
+                        cached_messages_len=len(prefix_messages),
+                        cached_est_tokens=prefix_est,
+                        created_at=now_ts,
+                        expires_at=now_ts + ttl_secs,
+                    )
+                    # Atomically swap state BEFORE deleting old cache
+                    caches_map[model_key] = new_entry
+                    _sync_worker_active_fields(worker, new_entry)
+                    if old_name and old_name != new_name:
+                        try:
+                            await old_llm.delete_cache(old_name)
+                        except Exception as de:
+                            logger.warning(f"Failed deleting superseded explicit cache {old_name}: {de}")
+                return
+
+            remaining_ttl = entry.expires_at - time.time()
+            if used_explicit_cache_last_round and remaining_ttl < EXPLICIT_CACHE_TTL_RENEW_BELOW_SECONDS:
+                logger.info(
+                    f"Post-turn renewing TTL for {entry.cache_name} "
+                    f"(remaining={remaining_ttl:.1f}s < {EXPLICIT_CACHE_TTL_RENEW_BELOW_SECONDS}s)..."
+                )
+                renewed = await llm.update_cache_ttl(entry.cache_name, ttl_seconds=ttl_secs)
+                if renewed:
+                    entry.expires_at = time.time() + ttl_secs
+                    _sync_worker_active_fields(worker, entry)
+                else:
+                    caches_map.pop(model_key, None)
+                    _sync_worker_active_fields(worker, next(iter(caches_map.values()), None))
+                    if prefix_est >= min_tokens:
+                        recreated_name = await llm.create_cache(
+                            contents=prefix_messages,
+                            system_prompt=system_prompt,
+                            tools=tools_list,
+                            display_name=f"kesoku_{self.session_id}",
+                            ttl_seconds=ttl_secs,
+                        )
+                        if recreated_name:
+                            now_ts = time.time()
+                            recreated_entry = ExplicitCacheEntry(
+                                cache_name=recreated_name,
+                                model_name=model_label,
+                                llm=llm,
+                                cached_messages_len=len(prefix_messages),
+                                cached_est_tokens=prefix_est,
+                                created_at=now_ts,
+                                expires_at=now_ts + ttl_secs,
+                            )
+                            caches_map[model_key] = recreated_entry
+                            _sync_worker_active_fields(worker, recreated_entry)
 
     async def _inject_context_and_trigger_consolidation(
         self,
@@ -1563,6 +2019,10 @@ class TurnExecutor:
             rm.timestamp = time.time() + (idx * 0.001)
             await self.gateway.post(rm)
 
+        self._last_round_tool_errors = sum(
+            1 for rm in result_msgs if getattr(rm, "metadata", None) and rm.metadata.get("tool_error")
+        )
+
         # Check if history was compacted and session was transitioned
         tool_ctx = self.tool_runner.tool_context
         val = getattr(tool_ctx, "transitioned_to_session", None)
@@ -1656,20 +2116,8 @@ class TurnExecutor:
                 protect_tail_turns=0,
             )
             if nodes > 0 and worker is not None:
-                cache_name = getattr(worker, "active_cache_name", None)
-                if isinstance(cache_name, str) and cache_name:
-                    cache_llm = (
-                        worker.active_cache_llm
-                        if isinstance(getattr(worker, "active_cache_llm", None), BaseLLM)
-                        else llm
-                    )
-                    try:
-                        await cache_llm.delete_cache(cache_name)
-                    except Exception:
-                        pass
-                    worker.active_cache_name = None
-                    worker.active_cache_llm = None
-                    worker.cached_messages_len = 0
+                async with _get_session_cache_lock(self.session_id):
+                    await _clear_worker_explicit_caches(worker, fallback_llm=llm)
         except Exception as bg_err:
             logger.warning(
                 f"Background compaction after consecutive PROMPT_BLOCKED failed in session {self.session_id}: {bg_err}"
@@ -1728,8 +2176,15 @@ class TurnExecutor:
             updated_meta["prompt_blocked"] = reason
             await self.context.db.update_message_metadata(tm.id, updated_meta)
 
-        limit = getattr(llm, "context_window_limit", 1048576)
-        context_percent = (last_context_tokens / limit) * 100 if limit else 0.0
+        blocked_metrics = await self._build_turn_metrics(
+            last_context_tokens=last_context_tokens,
+            last_cached_tokens=last_cached_tokens,
+            turn_tool_calls=turn_tool_calls,
+            turn_tokens=turn_tokens,
+            start_time=start_time,
+            status="prompt_blocked",
+            llm=llm,
+        )
         notice_content = (
             f"⚠️ 模型提供方拒绝了本次请求的输入内容（{reason}），这是对最近几轮上下文的判定，重试不会改变结果。"
             "请换个说法；若仍被拒绝，发送 `/compact`（会连同最近几轮一起压缩）或 `/clear` 开新会话。"
@@ -1747,19 +2202,7 @@ class TurnExecutor:
             metadata={
                 "delivery_notice": True,
                 "prompt_blocked": reason,
-                "turn_metrics": {
-                    "session_turns": await self._get_session_turns_count(),
-                    "context_tokens": last_context_tokens,
-                    "cached_tokens": last_cached_tokens,
-                    "context_limit": limit,
-                    "context_percent": context_percent,
-                    "turn_tool_calls": turn_tool_calls,
-                    "turn_tokens": turn_tokens,
-                    "turn_time": time.time() - start_time,
-                    "status": "prompt_blocked",
-                    "subagent_calls": self._subagent_calls,
-                    "subagent_tokens": self._subagent_tokens,
-                },
+                "turn_metrics": blocked_metrics,
             },
         )
         await self.gateway.post(final_msg)
@@ -1953,8 +2396,22 @@ class TurnExecutor:
                 f"(finish_reason={res.finish_reason}). Please rephrase and try again."
             )
 
-        limit = getattr(llm, "context_window_limit", 1048576)
-        context_percent = (last_context_tokens / limit) * 100 if limit else 0.0
+        turn_metrics = await self._build_turn_metrics(
+            last_context_tokens=last_context_tokens,
+            last_cached_tokens=last_cached_tokens,
+            turn_tool_calls=turn_tool_calls,
+            turn_tokens=turn_tokens,
+            start_time=start_time,
+            status="finished",
+            llm=llm,
+        )
+        final_meta: dict[str, Any] = {"turn_metrics": turn_metrics}
+        cur_meta = getattr(current_msg, "metadata", None)
+        if isinstance(cur_meta, dict):
+            if cur_meta.get("discord_message_id"):
+                final_meta["discord_message_id"] = cur_meta["discord_message_id"]
+            if cur_meta.get("discord_message_channel_id"):
+                final_meta["discord_message_channel_id"] = cur_meta["discord_message_channel_id"]
 
         final_msg = Message(
             session_id=self.session_id,
@@ -1966,21 +2423,7 @@ class TurnExecutor:
             content=final_content,
             status=MessageStatus.PENDING,
             parent_id=current_msg.id,
-            metadata={
-                "turn_metrics": {
-                    "session_turns": await self._get_session_turns_count(),
-                    "context_tokens": last_context_tokens,
-                    "cached_tokens": last_cached_tokens,
-                    "context_limit": limit,
-                    "context_percent": context_percent,
-                    "turn_tool_calls": turn_tool_calls,
-                    "turn_tokens": turn_tokens,
-                    "turn_time": time.time() - start_time,
-                    "status": "finished",
-                    "subagent_calls": self._subagent_calls,
-                    "subagent_tokens": self._subagent_tokens,
-                }
-            },
+            metadata=final_meta,
         )
         await self.gateway.post(final_msg)
         await self.context.db.update_message_status(current_msg.id, MessageStatus.PROCESSED)

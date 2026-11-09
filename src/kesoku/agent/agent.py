@@ -7,6 +7,7 @@ anti-stall mechanisms.
 
 import asyncio
 import os
+from typing import Any
 
 from kesoku.agent.llm import BaseLLM
 from kesoku.agent.namer import SessionNamer
@@ -54,8 +55,37 @@ class SessionWorker:
         self.active_cache_name: str | None = None
         self.active_cache_llm: BaseLLM | None = None
         self.cached_messages_len: int = 0
+        self.cache_expires_at: float = 0.0
+        self.explicit_caches: dict[str, Any] = {}
         self._auto_naming_in_progress = False
         self._auto_naming_done = False
+
+    async def clear_explicit_caches(self) -> None:
+        """Delete all explicit context caches tracked by this session worker."""
+        deleted: set[str] = set()
+        caches_map = self.explicit_caches if isinstance(self.explicit_caches, dict) else {}
+        for entry in list(caches_map.values()):
+            c_name = getattr(entry, "cache_name", None)
+            c_llm = getattr(entry, "llm", None)
+            if isinstance(c_name, str) and c_name and c_name not in deleted and c_llm is not None:
+                deleted.add(c_name)
+                try:
+                    await c_llm.delete_cache(c_name)
+                except Exception as e:
+                    logger.warning(f"Failed to delete context cache {c_name} for session {self.session_id}: {e}")
+        if isinstance(self.explicit_caches, dict):
+            self.explicit_caches.clear()
+
+        if isinstance(self.active_cache_name, str) and self.active_cache_name and self.active_cache_name not in deleted:
+            if self.active_cache_llm is not None:
+                try:
+                    await self.active_cache_llm.delete_cache(self.active_cache_name)
+                except Exception as e:
+                    logger.warning(f"Failed to delete context cache on worker cleanup: {e}")
+        self.active_cache_name = None
+        self.active_cache_llm = None
+        self.cached_messages_len = 0
+        self.cache_expires_at = 0.0
 
 
     @property
@@ -102,15 +132,7 @@ class SessionWorker:
             if not self.task.done():
                 self.task.cancel()
 
-        if self.active_cache_name and self.active_cache_llm:
-            logger.info("Cleaning up session context cache on worker stop...")
-            try:
-                await self.active_cache_llm.delete_cache(self.active_cache_name)
-            except Exception as e:
-                logger.warning(f"Failed to delete context cache on worker stop: {e}")
-            self.active_cache_name = None
-            self.active_cache_llm = None
-            self.cached_messages_len = 0
+        await self.clear_explicit_caches()
 
     def queue_empty(self) -> bool:
         """Check if the message queue is empty.

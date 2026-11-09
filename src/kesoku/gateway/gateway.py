@@ -326,6 +326,19 @@ class Gateway:
         """
         await self._cancel_session_deferred_media(session_id)
 
+        if self.agent:
+            try:
+                await self.agent.stop_session_worker(session_id, immediate=True)
+            except Exception as e:
+                logger.warning(f"Failed to stop session worker in delete_session: {e}")
+
+        try:
+            from kesoku.agent.turn_executor import discard_session_cache_state
+
+            discard_session_cache_state(session_id)
+        except Exception:
+            pass
+
         try:
             await self.context.active_jobs.stop_all_for_session(session_id)
         except Exception as e:

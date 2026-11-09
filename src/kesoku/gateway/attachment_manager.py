@@ -1,5 +1,6 @@
 """Attachment manager for sanitizing and saving incoming media and file attachments."""
 
+import asyncio
 import logging
 import os
 from collections.abc import Awaitable, Callable
@@ -22,6 +23,19 @@ class AttachmentManager:
                           resolves from system configuration.
         """
         self._sessions_dir = sessions_dir
+        self._reserved_paths: set[str] = set()
+        self._reserve_lock: asyncio.Lock | None = None
+
+    def _get_reserve_lock(self) -> asyncio.Lock:
+        lock = self._reserve_lock
+        if lock is not None and not lock.locked():
+            bound_loop = getattr(lock, "_loop", None)
+            if bound_loop is not None and bound_loop is not asyncio.get_running_loop():
+                lock = None
+        if lock is None:
+            lock = asyncio.Lock()
+            self._reserve_lock = lock
+        return lock
 
     def _get_sessions_dir(self) -> str:
         if self._sessions_dir:
@@ -57,21 +71,29 @@ class AttachmentManager:
         if not safe_filename:
             safe_filename = f"attachment_{collision_id or 'unnamed'}"
 
-        filepath = os.path.join(session_staging_dir, safe_filename)
-
-        # Avoid file collisions
-        if await async_exists(filepath):
-            base, ext = os.path.splitext(safe_filename)
-            suffix = collision_id or "collision"
-            safe_filename = f"{base}_{suffix}{ext}"
+        # Atomically reserve target path across concurrent in-flight downloads before slow I/O
+        async with self._get_reserve_lock():
             filepath = os.path.join(session_staging_dir, safe_filename)
-
-        if data is not None:
-            await async_write_binary_file(filepath, data)
-        elif save_callback is not None:
-            await save_callback(filepath)
-        else:
-            raise ValueError("Either 'data' or 'save_callback' must be provided.")
+            if filepath in self._reserved_paths or await async_exists(filepath):
+                base, ext = os.path.splitext(safe_filename)
+                suffix = collision_id or "collision"
+                safe_filename = f"{base}_{suffix}{ext}"
+                filepath = os.path.join(session_staging_dir, safe_filename)
+                counter = 1
+                while filepath in self._reserved_paths or await async_exists(filepath):
+                    safe_filename = f"{base}_{suffix}_{counter}{ext}"
+                    filepath = os.path.join(session_staging_dir, safe_filename)
+                    counter += 1
+            self._reserved_paths.add(filepath)
+        try:
+            if data is not None:
+                await async_write_binary_file(filepath, data)
+            elif save_callback is not None:
+                await save_callback(filepath)
+            else:
+                raise ValueError("Either 'data' or 'save_callback' must be provided.")
+        finally:
+            self._reserved_paths.discard(filepath)
 
         logger.info(f"Saved attachment {filename} as {safe_filename} in {workspace_name}")
         return {

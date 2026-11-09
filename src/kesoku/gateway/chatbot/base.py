@@ -36,6 +36,7 @@ from kesoku.gateway.chatbot.deferred_media import (
     sanitize_error_reason,
     terminate_deferred_worker,
     unlink_if_job_matches,
+    wait_for_deferred_file,
 )
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
@@ -247,6 +248,7 @@ class Chatbot(ABC):
     _deferred_poll_initial_sec: float = 0.5
     _deferred_poll_max_sec: float = 2.0
     _deferred_dead_grace_sec: float = DEAD_WORKER_GRACE_SEC
+    _voice_inline_grace_sec: float = 0.0
 
     def __init__(self, chatbot_id: str, gateway: Gateway, session_id: str | None = None) -> None:
         """Initialize the chatbot with a unique identifier, gateway instance, and optional session ID.
@@ -814,6 +816,14 @@ class Chatbot(ABC):
                 "ℹ️ Nothing to compact: all turns are already summarised or inside the protected head/tail "
                 f"({cfg.agent.protect_front_turns} + {cfg.agent.protect_tail_turns} turns)."
             )
+        agent = getattr(self.gateway, "agent", None)
+        worker = agent.workers.get(session.id) if agent is not None and hasattr(agent, "workers") else None
+        clear_caches_fn = getattr(worker, "clear_explicit_caches", None) if worker is not None else None
+        if callable(clear_caches_fn):
+            try:
+                await clear_caches_fn()
+            except Exception as ce:
+                logger.warning(f"Failed to clear explicit caches after /compact for session {session.id}: {ce}")
         turns_after = sum(
             1 for t in compressor.segment_turns(history) if any(m.summary_node_id is not None for m in t)
         )
@@ -1914,6 +1924,40 @@ class Chatbot(ABC):
             deferred_state = await self._resolve_deferred(raw_path, message.session_id)
             if deferred_state is not None:
                 state_kind, target_path, sidecar_data = deferred_state
+                grace = float(self._voice_inline_grace_sec or 0.0)
+                if segment.get("type") == "voice" and state_kind == "pending" and grace > 0.0:
+                    marker_timeout = clamp_timeout_sec(sidecar_data)
+                    try:
+                        created_at = float(sidecar_data.get("created_at") or 0.0)
+                    except (TypeError, ValueError):
+                        created_at = 0.0
+                    if created_at > 0.0:
+                        remaining_timeout = max(0.0, (created_at + marker_timeout) - time.time())
+                        effective_wait = min(grace, remaining_timeout)
+                    else:
+                        effective_wait = min(grace, marker_timeout)
+                    wait_err: str | None = None
+                    if effective_wait > 0.0:
+                        poll_iv = min(0.25, max(0.02, float(self._deferred_poll_initial_sec)))
+                        dead_grace = max(0.05, float(self._deferred_dead_grace_sec))
+                        _, wait_err = await wait_for_deferred_file(
+                            [target_path],
+                            poll_interval=poll_iv,
+                            max_wait_cap=effective_wait,
+                            grace_sec=dead_grace,
+                        )
+                    # CRITICAL: Never treat inline grace expiry `(None, "生成超时")` as failure.
+                    # Re-inspect sidecar state for exact 3-state dispatch: ready / pending / failed.
+                    rechecked = await self._resolve_deferred(raw_path, message.session_id)
+                    if rechecked is not None:
+                        state_kind, target_path, sidecar_data = rechecked
+                    elif await asyncio.to_thread(os.path.isfile, target_path):
+                        state_kind = "ready"
+                        target_path = await async_realpath(target_path)
+                    else:
+                        await self._safe_fail_deferred(None, wait_err or "生成任务中断", message, segment)
+                        return
+
                 if state_kind == "failed":
                     await asyncio.to_thread(safe_unlink, f"{target_path}.error.json")
                     raw_err = sidecar_data.get("error") if isinstance(sidecar_data, dict) else None

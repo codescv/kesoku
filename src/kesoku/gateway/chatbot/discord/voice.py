@@ -126,14 +126,19 @@ async def _get_audio_duration(file_path: str) -> float:
 async def send_voice_message(
     channel: discord.Thread | discord.DMChannel | discord.GroupChannel | discord.TextChannel,
     file_path: str,
+    message_reference: dict[str, Any] | None = None,
 ) -> discord.Message:
     """Send an audio file to a Discord channel/thread as a native voice message.
 
-    Converts the audio file to OGG Opus format using FFmpeg before uploading.
+    Converts the audio file to OGG Opus format using FFmpeg before uploading. If an
+    optional ``message_reference`` dict is rejected by Discord (e.g. HTTP 400 with
+    ``flags=8192`` or cross-channel reference), retries once immediately without
+    ``message_reference`` using a fresh ``VoiceFile`` payload.
 
     Args:
         channel: The Discord channel or thread to send the message to.
         file_path: The absolute local file path of the audio file.
+        message_reference: Optional Discord message_reference payload dict.
 
     Returns:
         The sent discord.Message object.
@@ -176,21 +181,40 @@ async def send_voice_message(
         duration = await _get_audio_duration(temp_ogg_path)
         waveform = _generate_pseudo_waveform()
 
-        discord_file = VoiceFile(
-            temp_ogg_path,
-            filename="voice.ogg",
-            duration_secs=duration,
-            waveform=waveform,
-        )
-        nonce = secrets.randbits(64)
+        async def _send_payload(ref_payload: dict[str, Any] | None) -> Any:
+            discord_file = VoiceFile(
+                temp_ogg_path,
+                filename="voice.ogg",
+                duration_secs=duration,
+                waveform=waveform,
+            )
+            nonce = secrets.randbits(64)
+            param_kwargs: dict[str, Any] = {
+                "file": discord_file,
+                "nonce": nonce,
+                "flags": flags,
+            }
+            if ref_payload:
+                param_kwargs["message_reference"] = ref_payload
+                param_kwargs["mention_author"] = False
+            with handle_message_parameters(**param_kwargs) as params:
+                return await state.http.send_message(channel.id, params=params)
 
-        # Prepare parameters with the voice flag and send via low-level HTTP client
-        with handle_message_parameters(
-            file=discord_file,
-            nonce=nonce,
-            flags=flags,
-        ) as params:
-            data = await state.http.send_message(channel.id, params=params)
+        if message_reference:
+            try:
+                data = await _send_payload(message_reference)
+            except discord.HTTPException as exc:
+                err_lower = str(exc).lower()
+                if exc.status == 400 or "message_reference" in err_lower or "reference" in err_lower:
+                    logger.warning(
+                        f"Discord rejected message_reference on native voice message (status={exc.status}): {exc}. "
+                        "Retrying once without message_reference."
+                    )
+                    data = await _send_payload(None)
+                else:
+                    raise
+        else:
+            data = await _send_payload(None)
 
         return state.create_message(channel=channel, data=data)
     finally:

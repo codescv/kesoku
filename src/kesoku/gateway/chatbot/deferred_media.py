@@ -304,6 +304,13 @@ def resolve_deferred_sync(
                 unlink_if_job_matches(pending_path, job_id)
                 unlink_if_job_matches(error_path, job_id)
                 return ("ready", os.path.realpath(cand), marker)
+            err = read_json_dict(error_path)
+            if err is not None:
+                expected_jid = str(marker.get("job_id") or "").strip()
+                err_jid = str(err.get("job_id") or "").strip()
+                if not expected_jid or not err_jid or err_jid == expected_jid:
+                    unlink_if_job_matches(pending_path, expected_jid)
+                    return ("failed", cand, err)
             return ("pending", cand, marker)
         if os.path.isfile(cand):
             return None
