@@ -458,7 +458,6 @@ class DiscordChatbot(Chatbot):
     """Discord chatbot adapter connecting to Kesoku Gateway broker."""
 
     supports_deferred_media: bool = True
-    _voice_inline_grace_sec: float = 4.0
 
     def __init__(
         self,
@@ -1910,6 +1909,33 @@ class DiscordChatbot(Chatbot):
                     "Falling back to send_text_chunks."
                 )
         await self._send_failure_notice_preserving_anchor(message, err_text)
+
+    async def discard_deferred_placeholder(
+        self,
+        handle: Any,
+        message: Message,
+        segment: dict[str, Any],
+    ) -> None:
+        """Remove an inline `voice_anchor` reaction or delete a temporary placeholder message best-effort."""
+        _ = (message, segment)
+        if isinstance(handle, dict) and handle.get("kind") == "voice_anchor":
+            cid = handle.get("channel_id")
+            mid = handle.get("message_id")
+            await self._best_effort_remove_reaction(
+                str(cid) if cid else None,
+                str(mid) if mid else None,
+                str(handle.get("reaction") or "🎤"),
+            )
+        elif handle is not None and callable(getattr(handle, "delete", None)):
+            try:
+                async with asyncio.timeout(15.0):
+                    await handle.delete()
+            except discord.NotFound:
+                pass
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug(f"Best-effort placeholder delete in discard_deferred_placeholder failed: {exc}")
 
     async def send_details_segment(self, channel_id: str, title: str, body: str, message: Message) -> None:
         """Deliver a `<details>` section as `▸ TITLE` with a persistent toggle button that expands it in place."""

@@ -248,7 +248,8 @@ class Chatbot(ABC):
     _deferred_poll_initial_sec: float = 0.5
     _deferred_poll_max_sec: float = 2.0
     _deferred_dead_grace_sec: float = DEAD_WORKER_GRACE_SEC
-    _voice_inline_grace_sec: float = 0.0
+    _voice_inline_wait_sec: float = 60.0
+    _voice_inline_anchor_delay_sec: float = 1.0
 
     def __init__(self, chatbot_id: str, gateway: Gateway, session_id: str | None = None) -> None:
         """Initialize the chatbot with a unique identifier, gateway instance, and optional session ID.
@@ -1481,6 +1482,15 @@ class Chatbot(ABC):
         notice = format_deferred_failure_message(segment.get("path", ""), reason)
         await self.send_text_chunks(message.channel_id, [notice], message)
 
+    async def discard_deferred_placeholder(
+        self,
+        handle: Any,
+        message: Message,
+        segment: dict[str, Any],
+    ) -> None:
+        """Discard an inline placeholder or reaction anchor after successful synchronous delivery."""
+        _ = (handle, message, segment)
+
     async def _get_staging_dir_for_session(self, session_id: str) -> str | None:
         """Resolve the session staging directory for ``session_id`` if available."""
         try:
@@ -1527,19 +1537,23 @@ class Chatbot(ABC):
         message: Message,
         target_path: str,
         marker: dict[str, Any],
+        *,
+        placeholder_sent: bool = False,
+        handle: Any = None,
     ) -> None:
-        """Send placeholder, persist pending metadata entry, and spawn non-blocking watcher task."""
-        handle: Any = None
-        try:
-            handle = await self.send_deferred_placeholder(message.channel_id, segment, message, marker)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.warning(
-                f"Failed to send deferred placeholder for '{segment.get('path')}' "
-                f"(will deliver without placeholder when ready): {exc}"
-            )
+        """Send placeholder (unless already sent inline), persist pending metadata, and spawn watcher task."""
+        if not placeholder_sent:
             handle = None
+            try:
+                handle = await self.send_deferred_placeholder(message.channel_id, segment, message, marker)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to send deferred placeholder for '{segment.get('path')}' "
+                    f"(will deliver without placeholder when ready): {exc}"
+                )
+                handle = None
 
         job_id = str(marker.get("job_id") or uuid.uuid4().hex[:12])
         kind = str(segment.get("type") or "file")
@@ -1650,6 +1664,110 @@ class Chatbot(ABC):
                 f"Adapter fail_deferred_attachment raised error for '{segment.get('path')}': {exc}",
                 exc_info=True,
             )
+
+    async def _safe_discard_placeholder(
+        self,
+        handle: Any,
+        message: Message,
+        segment: dict[str, Any],
+    ) -> None:
+        """Invoke ``discard_deferred_placeholder`` catching and logging any adapter exceptions."""
+        try:
+            await self.discard_deferred_placeholder(handle, message, segment)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                f"Adapter discard_deferred_placeholder raised error for '{segment.get('path')}': {exc}",
+                exc_info=True,
+            )
+
+    async def _wait_voice_inline(
+        self,
+        segment: dict[str, Any],
+        message: Message,
+        raw_path: str,
+        target_path: str,
+        sidecar_data: dict[str, Any],
+    ) -> tuple[tuple[str, str, dict[str, Any]] | None, Any, bool, str | None, bool]:
+        """Wait inline for a pending voice segment (silent Phase A then anchored Phase B).
+
+        Returns:
+            Tuple of ``(rechecked_state, inline_handle, placeholder_attempted, wait_err, budget_exhausted)``.
+        """
+        wait_cap = max(0.0, float(self._voice_inline_wait_sec or 0.0))
+        marker_timeout = clamp_timeout_sec(sidecar_data)
+        try:
+            created_at = float(sidecar_data.get("created_at") or 0.0)
+        except (TypeError, ValueError):
+            created_at = 0.0
+        if created_at > 0.0:
+            remaining_timeout = max(0.0, (created_at + marker_timeout) - time.time())
+            effective_wait = min(wait_cap, remaining_timeout)
+        else:
+            effective_wait = min(wait_cap, marker_timeout)
+
+        deadline = time.monotonic() + effective_wait
+        poll_iv = min(0.25, max(0.02, float(self._deferred_poll_initial_sec)))
+        dead_grace = max(0.05, float(self._deferred_dead_grace_sec))
+
+        inline_handle: Any = None
+        placeholder_attempted = False
+        wait_err: str | None = None
+
+        anchor_delay = max(0.0, float(self._voice_inline_anchor_delay_sec or 0.0))
+        phase_a_cap = min(anchor_delay, effective_wait)
+        if phase_a_cap > 0.0:
+            _, wait_err = await wait_for_deferred_file(
+                [target_path],
+                poll_interval=poll_iv,
+                max_wait_cap=phase_a_cap,
+                grace_sec=dead_grace,
+            )
+
+        # CRITICAL: Never treat inline wait expiry `(None, "生成超时")` as failure.
+        # Re-inspect sidecar state for exact 3-state dispatch: ready / pending / failed.
+        rechecked = await self._resolve_deferred(raw_path, message.session_id)
+
+        if (
+            rechecked is not None
+            and rechecked[0] == "pending"
+            and wait_err in (None, "生成超时")
+            and (deadline - time.monotonic()) > 0.05
+        ):
+            placeholder_attempted = True
+            try:
+                inline_handle = await self.send_deferred_placeholder(
+                    message.channel_id,
+                    segment,
+                    message,
+                    rechecked[2],
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to send inline voice placeholder for '{segment.get('path')}' "
+                    f"(will continue waiting without placeholder): {exc}"
+                )
+                inline_handle = None
+
+            rem = max(0.05, deadline - time.monotonic())
+            _, wait_err = await wait_for_deferred_file(
+                [rechecked[1]],
+                poll_interval=poll_iv,
+                max_wait_cap=rem,
+                grace_sec=dead_grace,
+            )
+            rechecked = await self._resolve_deferred(raw_path, message.session_id)
+
+        return (
+            rechecked,
+            inline_handle,
+            placeholder_attempted,
+            wait_err,
+            time.monotonic() >= deadline - 0.05,
+        )
 
     async def _watch_deferred_attachment(
         self,
@@ -1920,52 +2038,74 @@ class Chatbot(ABC):
             DeliveryAbortedError: Raised to abort delivery of remaining segments in this message.
         """
         raw_path = segment["path"]
+        inline_handle: Any = None
+        inline_placeholder_attempted = False
+        wait_err: str | None = None
+        budget_exhausted = True
         if self.supports_deferred_media:
             deferred_state = await self._resolve_deferred(raw_path, message.session_id)
             if deferred_state is not None:
                 state_kind, target_path, sidecar_data = deferred_state
-                grace = float(self._voice_inline_grace_sec or 0.0)
-                if segment.get("type") == "voice" and state_kind == "pending" and grace > 0.0:
-                    marker_timeout = clamp_timeout_sec(sidecar_data)
-                    try:
-                        created_at = float(sidecar_data.get("created_at") or 0.0)
-                    except (TypeError, ValueError):
-                        created_at = 0.0
-                    if created_at > 0.0:
-                        remaining_timeout = max(0.0, (created_at + marker_timeout) - time.time())
-                        effective_wait = min(grace, remaining_timeout)
-                    else:
-                        effective_wait = min(grace, marker_timeout)
-                    wait_err: str | None = None
-                    if effective_wait > 0.0:
-                        poll_iv = min(0.25, max(0.02, float(self._deferred_poll_initial_sec)))
-                        dead_grace = max(0.05, float(self._deferred_dead_grace_sec))
-                        _, wait_err = await wait_for_deferred_file(
-                            [target_path],
-                            poll_interval=poll_iv,
-                            max_wait_cap=effective_wait,
-                            grace_sec=dead_grace,
-                        )
-                    # CRITICAL: Never treat inline grace expiry `(None, "生成超时")` as failure.
-                    # Re-inspect sidecar state for exact 3-state dispatch: ready / pending / failed.
-                    rechecked = await self._resolve_deferred(raw_path, message.session_id)
+                inline_wait = float(self._voice_inline_wait_sec or 0.0)
+                if segment.get("type") == "voice" and state_kind == "pending" and inline_wait > 0.0:
+                    (
+                        rechecked,
+                        inline_handle,
+                        inline_placeholder_attempted,
+                        wait_err,
+                        budget_exhausted,
+                    ) = await self._wait_voice_inline(
+                        segment,
+                        message,
+                        raw_path,
+                        target_path,
+                        sidecar_data,
+                    )
                     if rechecked is not None:
                         state_kind, target_path, sidecar_data = rechecked
                     elif await asyncio.to_thread(os.path.isfile, target_path):
                         state_kind = "ready"
                         target_path = await async_realpath(target_path)
                     else:
-                        await self._safe_fail_deferred(None, wait_err or "生成任务中断", message, segment)
+                        await self._safe_fail_deferred(
+                            inline_handle,
+                            wait_err or "生成任务中断",
+                            message,
+                            segment,
+                        )
                         return
 
                 if state_kind == "failed":
                     await asyncio.to_thread(safe_unlink, f"{target_path}.error.json")
                     raw_err = sidecar_data.get("error") if isinstance(sidecar_data, dict) else None
                     reason = sanitize_error_reason(raw_err, default="后台生成失败")
-                    await self._safe_fail_deferred(None, reason, message, segment)
+                    await self._safe_fail_deferred(inline_handle, reason, message, segment)
                     return
                 if state_kind == "pending":
-                    await self._start_deferred_tracking(segment, message, target_path, sidecar_data)
+                    if segment.get("type") == "voice" and (
+                        wait_err not in (None, "生成超时") or (not budget_exhausted and wait_err is not None)
+                    ):
+                        expected_job_id = str((sidecar_data or {}).get("job_id") or "")
+                        await asyncio.to_thread(
+                            unlink_if_job_matches,
+                            f"{target_path}.pending.json",
+                            expected_job_id,
+                        )
+                        await self._safe_fail_deferred(
+                            inline_handle,
+                            wait_err or "生成任务中断",
+                            message,
+                            segment,
+                        )
+                        return
+                    await self._start_deferred_tracking(
+                        segment,
+                        message,
+                        target_path,
+                        sidecar_data,
+                        placeholder_sent=inline_placeholder_attempted,
+                        handle=inline_handle,
+                    )
                     return
                 resolved_path = target_path
             else:
@@ -1978,7 +2118,11 @@ class Chatbot(ABC):
             if segment["type"] == "file":
                 await self.send_file_segment(message.channel_id, resolved_path, message)
             elif segment["type"] == "voice":
-                await self.send_voice_segment(message.channel_id, resolved_path, message)
+                try:
+                    await self.send_voice_segment(message.channel_id, resolved_path, message)
+                finally:
+                    if inline_handle is not None:
+                        await self._safe_discard_placeholder(inline_handle, message, segment)
         except ChannelUnavailableError:
             raise
         except Exception as e:

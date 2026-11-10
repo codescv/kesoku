@@ -273,6 +273,59 @@ async def test_discord_deferred_notfound_and_permanent_edit_fallbacks_and_voice(
 
 
 @pytest.mark.asyncio
+async def test_discord_discard_deferred_placeholder(tmp_path: Any) -> None:
+    """Verify `discard_deferred_placeholder` removes `voice_anchor`, deletes message handles, and swallows errors."""
+    gw, _ = await _make_gateway(tmp_path)
+    session = await gw.create_session(
+        session_id="s_disc", title="Discard", chatbot_id="discord_test", channel_id="1002"
+    )
+    bot = _make_discord_bot(gw)
+    bot.bot.is_ready = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+    partial_msg = MagicMock(id=7788)
+    partial_msg.remove_reaction = AsyncMock()
+    partial_msg.delete = AsyncMock()
+    partial_chan = MagicMock()
+    partial_chan.get_partial_message = MagicMock(return_value=partial_msg)
+    bot.bot.get_partial_messageable = MagicMock(return_value=partial_chan)  # type: ignore[method-assign]
+
+    msg = Message(
+        id="m_disc",
+        session_id=session.id,
+        chatbot_id="discord_test",
+        channel_id="1002",
+        sender="Assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="hi",
+    )
+    seg = {"type": "voice", "path": "clip.wav"}
+
+    # 1. voice_anchor dict -> remove_reaction awaited once, delete never called
+    anchor_handle = {"kind": "voice_anchor", "channel_id": "1002", "message_id": "7788", "reaction": "🎤"}
+    await bot.discard_deferred_placeholder(anchor_handle, msg, seg)
+    partial_msg.remove_reaction.assert_awaited_once()
+    assert partial_msg.remove_reaction.await_args.args[0] == "🎤"
+    partial_msg.delete.assert_not_awaited()
+
+    # 2. Message/PartialMessage handle with delete -> delete awaited once
+    msg_handle = MagicMock()
+    msg_handle.delete = AsyncMock()
+    await bot.discard_deferred_placeholder(msg_handle, msg, seg)
+    msg_handle.delete.assert_awaited_once()
+
+    # 3. Exceptions swallowed cleanly (both on delete and remove_reaction)
+    bad_handle = MagicMock()
+    bad_handle.delete = AsyncMock(side_effect=RuntimeError("delete boom"))
+    await bot.discard_deferred_placeholder(bad_handle, msg, seg)
+    bad_handle.delete.assert_awaited_once()
+
+    partial_msg.remove_reaction = AsyncMock(side_effect=RuntimeError("reaction boom"))
+    await bot._safe_discard_placeholder(anchor_handle, msg, seg)
+    partial_msg.remove_reaction.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_wechat_deferred_send_later_and_failure_text(tmp_path: Any) -> None:
     """Verify WeChat omits placeholder spam, appends file when ready, and sends text on failure."""
     gw, db = await _make_gateway(tmp_path)
@@ -345,6 +398,49 @@ async def test_wechat_deferred_send_later_and_failure_text(tmp_path: Any) -> Non
     _write_json(f"{img_err}.error.json", {"v": 1, "job_id": "wx2", "error": "quota exceeded"})
 
     await _wait_until(lambda: any("附件生成失败 (failed_card.png): quota exceeded" in t for t in sent_texts))
+
+    # Inline in-order voice on WeChat (`_voice_inline_wait_sec > 0`): waits inline and delivers before trailing text!
+    wx_events: list[str] = []
+    wbot._voice_inline_wait_sec = 2.0
+    wbot._voice_inline_anchor_delay_sec = 0.04
+    wbot.send_text_chunks = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda cid, chunks, m: [wx_events.append(f"text:{c.strip()}") for c in chunks]
+    )
+    wbot.send_file_segment = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda cid, fpath, m: wx_events.append(f"file:{fpath}")
+    )
+
+    wav_wx = os.path.join(staging_dir, "wx_clip.wav")
+    _write_json(
+        f"{wav_wx}.pending.json",
+        {"v": 1, "job_id": "wx_v1", "created_at": time.time(), "timeout_sec": 60, "pid": 0},
+    )
+
+    async def _finish_wx_voice() -> None:
+        await asyncio.sleep(0.10)
+        with open(wav_wx, "wb") as fh:
+            fh.write(b"RIFF_WX_VOICE")
+        os.unlink(f"{wav_wx}.pending.json")
+
+    bg_wx_v = asyncio.create_task(_finish_wx_voice())
+    msg3 = Message(
+        id="m_wx3_voice",
+        session_id=session.id,
+        chatbot_id="wechat_test",
+        channel_id="wx_u1",
+        sender="Assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content=f"双语行\n[voice: {wav_wx}]\n后文",
+    )
+    await db.save_message(msg3)
+    await wbot.render_outgoing_message(msg3)
+    await bg_wx_v
+
+    assert wx_events == ["text:双语行", f"file:{os.path.realpath(wav_wx)}", "text:后文"]
+    saved_wx_v = await db.get_message("m_wx3_voice")
+    assert saved_wx_v is not None
+    assert "deferred_media" not in (saved_wx_v.metadata or {})
 
 
 @pytest.mark.asyncio
