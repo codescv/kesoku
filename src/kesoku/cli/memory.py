@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import os
 import sys
 import time
@@ -13,7 +14,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from kesoku.agent.context_dir import collect_context_entries
+from kesoku.agent.context_dir import collect_context_entries_sync
 from kesoku.agent.context_policy import infer_backfill_turn_policies, normalize_policy
 from kesoku.agent.history import segment_logical_turns
 from kesoku.agent.memory_consolidator import (
@@ -228,15 +229,19 @@ def run_backfill_fts_sync(
         if not turns:
             continue
 
-        staging_dir = os.path.join(cfg.workspace.sessions_dir, sess.workspace_name)
-        disk_entries = asyncio.run(collect_context_entries(staging_dir, include_policy_only=True))
+        sessions_dir = cfg.workspace.sessions_dir
+        if not os.path.isabs(sessions_dir) and cfg.agent_working_dir:
+            sessions_dir = os.path.join(cfg.agent_working_dir, sessions_dir)
+        staging_dir = os.path.join(sessions_dir, sess.workspace_name)
+        disk_entries = collect_context_entries_sync(staging_dir, include_policy_only=True)
         inferred_policies = infer_backfill_turn_policies(turns, disk_entries=disk_entries, cfg=cfg)
 
         user_snippets: list[str] = []
         human_turn_count = 0
         first_msg = msgs[0]
         last_active = float(msgs[-1].timestamp)
-        last_policy = "full"
+        seen_turn_policies: list[str] = []
+        session_meta_updates: list[tuple[str, str]] = []
 
         for turn, inf_pol in zip(turns, inferred_policies, strict=True):
             explicit = next(
@@ -248,22 +253,30 @@ def run_backfill_fts_sync(
                 None,
             )
             turn_pol = explicit if explicit is not None else inf_pol
-            last_policy = turn_pol
+            turn_had_human = False
 
             for m in turn:
                 if is_excluded_from_memory(m) or m.sender == "Notification":
                     continue
+                if m.role == MessageRole.USER:
+                    meta = dict(m.metadata or {})
+                    if meta.get("context_policy") != turn_pol:
+                        meta["context_policy"] = turn_pol
+                        m.metadata = meta
+                        session_meta_updates.append((json.dumps(meta, ensure_ascii=False), m.id))
                 if m.role == MessageRole.USER and m.type == MessageType.TEXT:
                     human_turn_count += 1
-                    cleaned_u = " ".join(strip_injected_blocks(m.content or "").split()).strip()
-                    if cleaned_u:
-                        snip = (
-                            cleaned_u[: MAX_LAST_USER_MSG_CHARS - 1].rstrip() + "…"
-                            if len(cleaned_u) > MAX_LAST_USER_MSG_CHARS
-                            else cleaned_u
-                        )
-                        if not user_snippets or user_snippets[-1] != snip:
-                            user_snippets.append(snip)
+                    turn_had_human = True
+                    if turn_pol != "isolated":
+                        cleaned_u = " ".join(strip_injected_blocks(m.content or "").split()).strip()
+                        if cleaned_u:
+                            snip = (
+                                cleaned_u[: MAX_LAST_USER_MSG_CHARS - 1].rstrip() + "…"
+                                if len(cleaned_u) > MAX_LAST_USER_MSG_CHARS
+                                else cleaned_u
+                            )
+                            if not user_snippets or user_snippets[-1] != snip:
+                                user_snippets.append(snip)
 
                 if m.role in (MessageRole.USER, MessageRole.ASSISTANT) and m.type == MessageType.TEXT:
                     if isinstance(m.metadata, dict) and m.metadata.get("prompt_blocked"):
@@ -294,7 +307,21 @@ def run_backfill_fts_sync(
                         pending_fts_batch.clear()
                         _guarded_malloc_trim()
 
+            if turn_had_human:
+                seen_turn_policies.append(turn_pol)
+
+        if session_meta_updates:
+            with db.connection_provider.connection() as conn:
+                with conn:
+                    conn.executemany("UPDATE messages SET metadata = ? WHERE id = ?", session_meta_updates)
+
         if human_turn_count > 0:
+            if seen_turn_policies and all(p == "isolated" for p in seen_turn_policies):
+                digest_policy = "isolated"
+            elif any(p != "full" for p in seen_turn_policies):
+                digest_policy = "real_facts_only"
+            else:
+                digest_policy = "full"
             db.upsert_session_digest(
                 session_id=sess.id,
                 role=canonical_role,
@@ -305,7 +332,7 @@ def run_backfill_fts_sync(
                 last_active_at=last_active,
                 turn_count=human_turn_count,
                 last_user_msgs=user_snippets[-MAX_LAST_USER_MSGS:],
-                context_policy=last_policy,
+                context_policy=digest_policy,
                 updated_at=time.time(),
             )
             digests_written += 1
@@ -378,6 +405,13 @@ async def _run_backfill_async(
                     last_active_at=sess.updated_at or sess.created_at,
                 )
 
+            init_cur = db.get_extraction_cursor(sess.id)
+            dry_cursor: tuple[float, str] | None = (
+                (float(init_cur["last_extracted_msg_ts"]), str(init_cur["last_extracted_msg_id"]))
+                if (dry_run and init_cur)
+                else ((0.0, "") if dry_run else None)
+            )
+
             while True:
                 if budget_tokens > 0 and stats["tokens_spent"] >= budget_tokens:
                     console.print(
@@ -387,7 +421,8 @@ async def _run_backfill_async(
                     return stats
 
                 cur = db.get_extraction_cursor(sess.id)
-                before_id = str(cur["last_extracted_msg_id"]) if cur else ""
+                cur_last_id = str(cur["last_extracted_msg_id"]) if cur else ""
+                before_id = dry_cursor[1] if dry_cursor is not None else cur_last_id
                 outcome = await consolidator.run_episode_extract(
                     EpisodeExtract(
                         role=role,
@@ -397,6 +432,7 @@ async def _run_backfill_async(
                         force=True,
                     ),
                     dry_run=dry_run,
+                    cursor_override=dry_cursor,
                 )
                 if outcome.status == "empty_window":
                     break
@@ -404,6 +440,12 @@ async def _run_backfill_async(
                     stats["isolated_skipped"] += 1
                     console.print(f"  [dim]#session:{sess.id[:8]} '{sess.title}' -> isolated (0 tokens)[/dim]")
                     if dry_run:
+                        if not outcome.last_msg_id or outcome.last_msg_id == before_id:
+                            break
+                        dry_cursor = (outcome.last_msg_ts, outcome.last_msg_id)
+                        continue
+                    after_iso = db.get_extraction_cursor(sess.id)
+                    if not after_iso or str(after_iso["last_extracted_msg_id"]) == before_id:
                         break
                     continue
                 if outcome.status == "error":
@@ -424,7 +466,10 @@ async def _run_backfill_async(
                     )
                     for op in ops_list:
                         console.print(f"    • {op}")
-                    break
+                    if not outcome.last_msg_id or outcome.last_msg_id == before_id:
+                        break
+                    dry_cursor = (outcome.last_msg_ts, outcome.last_msg_id)
+                    continue
 
                 console.print(
                     f"  [green]#session:{sess.id[:8]}[/green] \"{sess.title}\" "
@@ -432,7 +477,7 @@ async def _run_backfill_async(
                 )
                 after_cur = db.get_extraction_cursor(sess.id)
                 after_id = str(after_cur["last_extracted_msg_id"]) if after_cur else ""
-                if not after_id or after_id == before_id or outcome.messages_processed < 200:
+                if not after_id or after_id == before_id:
                     break
     finally:
         await consolidator.stop(wait_seconds=5.0)

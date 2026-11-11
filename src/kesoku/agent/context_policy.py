@@ -164,24 +164,64 @@ def _touches_context_ambiguously(text: str) -> bool:
     return bool(re.search(r"(?:^|[/\s\"'])context/[a-zA-Z0-9_.-]+\.md\b", text))
 
 
+def _apply_marker_step(
+    tc_text: str,
+    compiled_markers: Sequence[tuple[re.Pattern[str], ContextPolicy, re.Pattern[str] | None]],
+    active_markers: dict[int, tuple[ContextPolicy, re.Pattern[str] | None]],
+) -> list[ContextPolicy]:
+    """Advance `active_markers` for one `TOOL_CALL` text and return newly started policies."""
+    for m_idx, (_, active_until) in list(active_markers.items()):
+        if active_until is not None and active_until.search(tc_text):
+            active_markers.pop(m_idx, None)
+
+    started: list[ContextPolicy] = []
+    for m_idx, (start_re, marker_pol, until_re) in enumerate(compiled_markers):
+        if start_re.search(tc_text):
+            started.append(marker_pol)
+            active_markers[m_idx] = (marker_pol, until_re)
+    return started
+
+
+def _matches_configured_marker(
+    tc_text: str,
+    compiled_markers: Sequence[tuple[re.Pattern[str], ContextPolicy, re.Pattern[str] | None]],
+) -> bool:
+    """Return True if `tc_text` matches any configured start or until regex."""
+    for start_re, _, until_re in compiled_markers:
+        if start_re.search(tc_text):
+            return True
+        if until_re is not None and until_re.search(tc_text):
+            return True
+    return False
+
+
 def infer_backfill_turn_policies(
     turns: Sequence[Sequence[Message]],
     disk_entries: Sequence[ContextEntry] = (),
     cfg: AgentConfig | KesokuConfig | None = None,
+    *,
+    prior_tool_calls: Sequence[Message] = (),
+    later_tool_calls: Sequence[Message] = (),
 ) -> list[ContextPolicy]:
     """Infer per-turn `ContextPolicy` across historical turns for `kesoku memory backfill`.
 
     Combines:
       (a) Persisted `metadata.context_policy` on turn messages when available.
-      (b) Tool-call markers in `[agent] memory_backfill_context_markers`, carried forward until
-          a matching `until` regex or session end.
-      (c) Remaining `context/*.md` files on disk in the session staging directory.
+      (b) Tool-call markers in `[agent] memory_backfill_context_markers` (seeded from
+          `prior_tool_calls` for multi-window extraction), carried forward until a matching `until`
+          regex or session end.
+      (c) Remaining `context/*.md` files on disk in `$STAGING_DIR` ONLY when zero configured markers
+          matched anywhere in the session (`prior_tool_calls`, `turns`, `later_tool_calls`), so
+          end-of-session files left by a late sub-scenario never retroactively poison earlier turns.
       (d) Ambiguous context-modifying turns default to `'real_facts_only'` (never `'full'`).
 
     Args:
-        turns: Chronological logical turns of the session.
+        turns: Chronological logical turns of the current window or session.
         disk_entries: Context entries currently present on disk in `$STAGING_DIR`.
         cfg: `AgentConfig` or `KesokuConfig`.
+        prior_tool_calls: Chronological `TOOL_CALL` messages before `turns` in the same session.
+        later_tool_calls: `TOOL_CALL` messages after `turns` in the same session (used to detect
+            whether the session's `context/` files are marker-managed).
 
     Returns:
         One `ContextPolicy` per input turn, in turn order.
@@ -207,7 +247,36 @@ def infer_backfill_turn_policies(
             )
         )
 
+    session_has_marker_match = False
     active_markers: dict[int, tuple[ContextPolicy, re.Pattern[str] | None]] = {}
+
+    for prior_tc in prior_tool_calls:
+        if prior_tc.type != MessageType.TOOL_CALL:
+            continue
+        tc_text = _tool_call_text(prior_tc)
+        if _matches_configured_marker(tc_text, compiled_markers):
+            session_has_marker_match = True
+        _apply_marker_step(tc_text, compiled_markers, active_markers)
+
+    if not session_has_marker_match:
+        for turn in turns:
+            for msg in turn:
+                if msg.type == MessageType.TOOL_CALL and _matches_configured_marker(
+                    _tool_call_text(msg), compiled_markers
+                ):
+                    session_has_marker_match = True
+                    break
+            if session_has_marker_match:
+                break
+
+    if not session_has_marker_match:
+        for later_tc in later_tool_calls:
+            if later_tc.type == MessageType.TOOL_CALL and _matches_configured_marker(
+                _tool_call_text(later_tc), compiled_markers
+            ):
+                session_has_marker_match = True
+                break
+
     out: list[ContextPolicy] = []
 
     for turn in turns:
@@ -225,17 +294,9 @@ def infer_backfill_turn_policies(
             if msg.type != MessageType.TOOL_CALL:
                 continue
             tc_text = _tool_call_text(msg)
-            matched_any_marker = False
-            for m_idx, (_, active_until) in list(active_markers.items()):
-                if active_until is not None and active_until.search(tc_text):
-                    matched_any_marker = True
-                    active_markers.pop(m_idx, None)
-
-            for m_idx, (start_re, marker_pol, until_re) in enumerate(compiled_markers):
-                if start_re.search(tc_text):
-                    matched_any_marker = True
-                    turn_matched_policies.append(marker_pol)
-                    active_markers[m_idx] = (marker_pol, until_re)
+            matched_any_marker = _matches_configured_marker(tc_text, compiled_markers)
+            started = _apply_marker_step(tc_text, compiled_markers, active_markers)
+            turn_matched_policies.extend(started)
             if not matched_any_marker and _touches_context_ambiguously(tc_text):
                 ambiguous = True
 
@@ -247,7 +308,7 @@ def infer_backfill_turn_policies(
             *turn_matched_policies,
             *(pol for pol, _ in active_markers.values()),
         ]
-        if disk_policy != "full":
+        if not session_has_marker_match and disk_policy != "full":
             candidates.append(disk_policy)
         if ambiguous:
             candidates.append("real_facts_only")

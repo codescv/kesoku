@@ -360,8 +360,7 @@ async def test_triggers_debounce_budget_backoff_and_consolidate_file_splitter(tm
     mem_dir = roles_dir / "coder" / "memories"
     (mem_dir / "user").mkdir(parents=True, exist_ok=True)
     distinct_pinned = [
-        f"- note_{i:02d}_topic_{i * 13}_detail_{i * 29}_ extra_{i * 47}_context_{i * 71} #inferred"
-        for i in range(25)
+        f"- note_{i:02d}_topic_{i * 13}_detail_{i * 29}_ extra_{i * 47}_context_{i * 71} #inferred" for i in range(25)
     ]
     pinned_lines = "\n".join(distinct_pinned)
     (mem_dir / "user" / "profile.md").write_text(
@@ -382,12 +381,10 @@ async def test_triggers_debounce_budget_backoff_and_consolidate_file_splitter(tm
     assert (mem_dir / "topics" / "次要.md").is_file()
 
     sec_a = "\n".join(
-        f"- alpha_{i:03d}_module_{i * 17}_index_{i * 31}_cache_{i * 53}_shard_{i * 97} #direct"
-        for i in range(60)
+        f"- alpha_{i:03d}_module_{i * 17}_index_{i * 31}_cache_{i * 53}_shard_{i * 97} #direct" for i in range(60)
     )
     sec_b = "\n".join(
-        f"- beta_{i:03d}_deploy_{i * 19}_canary_{i * 37}_probe_{i * 61}_drain_{i * 89} #direct"
-        for i in range(60)
+        f"- beta_{i:03d}_deploy_{i * 19}_canary_{i * 37}_probe_{i * 61}_drain_{i * 89} #direct" for i in range(60)
     )
     (mem_dir / "handbook.md").write_text(
         f"---\ndescription: Engineering handbook\n---\n## 架构模块\n{sec_a}\n\n## 部署模块\n{sec_b}\n",
@@ -493,3 +490,347 @@ def test_kesoku_memory_cli_subcommands(tmp_path, monkeypatch) -> None:
     )
     assert r_bf.exit_code == 0
     assert not (mem_dir / "user" / "profile.md").exists()  # dry-run never writes!
+
+
+def test_get_unextracted_messages_trims_to_clean_turn_boundary(tmp_path) -> None:
+    """Verify `get_unextracted_messages` trims mid-turn slices back to the last USER boundary."""
+    db = DatabaseManager(str(tmp_path / "trim.db"))
+    db.init_tables()
+    now = 1_760_000_000.0
+    db.create_session(Session(id="s_trim", title="Trim", created_at=now, updated_at=now, role_name="coder"))
+
+    def _m(mid: str, role: str, mtype: str, ts: float) -> None:
+        db.save_message(
+            Message(
+                id=mid,
+                session_id="s_trim",
+                chatbot_id="cli",
+                channel_id="ch1",
+                sender="user" if role == MessageRole.USER else "assistant",
+                role=role,
+                type=mtype,
+                content=f"msg {mid}",
+                timestamp=ts,
+                status=MessageStatus.PROCESSED if role == MessageRole.USER else MessageStatus.DELIVERED,
+            )
+        )
+
+    # Turn 1: 4 rows (u1, tc1, tr1, a1)
+    _m("u1", MessageRole.USER, MessageType.TEXT, now + 1)
+    _m("tc1", MessageRole.TOOL, MessageType.TOOL_CALL, now + 2)
+    _m("tr1", MessageRole.TOOL, MessageType.TOOL_RESULT, now + 3)
+    _m("a1", MessageRole.ASSISTANT, MessageType.TEXT, now + 4)
+    # Turn 2: 4 rows (u2, tc2, tr2, a2) -> limit=6 would cut right between tc2 and tr2!
+    _m("u2", MessageRole.USER, MessageType.TEXT, now + 5)
+    _m("tc2", MessageRole.TOOL, MessageType.TOOL_CALL, now + 6)
+    _m("tr2", MessageRole.TOOL, MessageType.TOOL_RESULT, now + 7)
+    _m("a2", MessageRole.ASSISTANT, MessageType.TEXT, now + 8)
+
+    w1 = db.get_unextracted_messages("s_trim", limit=6)
+    assert [m.id for m in w1] == ["u1", "tc1", "tr1", "a1"]
+
+    w2 = db.get_unextracted_messages("s_trim", after_ts=w1[-1].timestamp, after_id=w1[-1].id, limit=6)
+    assert [m.id for m in w2] == ["u2", "tc2", "tr2", "a2"]
+
+    # Single giant turn exceeding limit keeps all `limit` rows so forward progress is guaranteed
+    db.create_session(Session(id="s_giant", title="Giant", created_at=now, updated_at=now, role_name="coder"))
+    db.save_message(
+        Message(
+            id="gu1",
+            session_id="s_giant",
+            chatbot_id="cli",
+            channel_id="ch1",
+            sender="user",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content="giant",
+            timestamp=now + 1,
+            status=MessageStatus.PROCESSED,
+        )
+    )
+    for idx in range(6):
+        db.save_message(
+            Message(
+                id=f"gt_{idx}",
+                session_id="s_giant",
+                chatbot_id="cli",
+                channel_id="ch1",
+                sender="tool",
+                role=MessageRole.TOOL,
+                type=MessageType.TOOL_RESULT,
+                content="out",
+                timestamp=now + 2 + idx,
+                status=MessageStatus.DELIVERED,
+            )
+        )
+    giant_w1 = db.get_unextracted_messages("s_giant", limit=4)
+    assert len(giant_w1) == 4 and giant_w1[0].id == "gu1"
+
+
+@pytest.mark.asyncio
+async def test_multi_window_backfill_carries_prior_markers_ignores_late_disk_and_runs_all_dry_run_windows(
+    tmp_path, monkeypatch
+) -> None:
+    """Verify >200-msg sessions carry `prior_tool_calls`, ignore late `disk_entries`, and run all dry-run windows."""
+    import tomli_w
+    from rich.console import Console
+
+    from kesoku.agent.tools.memory import session_search, session_view
+    from kesoku.agent.tools.registry import ToolContext
+    from kesoku.cli.memory import _run_backfill_async, run_backfill_fts_sync
+    from kesoku.gateway.gateway import Gateway
+
+    monkeypatch.setattr("kesoku.utils.embedding.get_embedding", lambda text: [0.2] * 384)
+    monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", lambda texts: [[0.2] * 384 for _ in texts])
+
+    cfg_dict = {
+        "workspace": {"db_path": "kesoku.db", "roles_dir": "roles", "sessions_dir": "sessions"},
+        "agent": {
+            "memory_isolated_contexts": ["stage-*", "trpg-*"],
+            "memory_filtered_contexts": ["companion-*"],
+            "memory_backfill_context_markers": [
+                {
+                    "pattern": r"ctl\s+start\s+trpg\b",
+                    "policy": "isolated",
+                    "until": r"ctl\s+stop\s+trpg\b",
+                },
+                {
+                    "pattern": r"ctl\s+start\s+companion\b",
+                    "policy": "real_facts_only",
+                    "until": r"ctl\s+stop\s+companion\b",
+                },
+                {
+                    "pattern": r"ctl\s+start\s+stage\b",
+                    "policy": "isolated",
+                    "until": r"ctl\s+stop\s+stage\b",
+                },
+            ],
+        },
+    }
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(tomli_w.dumps(cfg_dict), encoding="utf-8")
+
+    from kesoku.config import load_config
+
+    cfg = load_config(str(cfg_path))
+    db = DatabaseManager(cfg.workspace.db_path)
+    db.init_tables()
+    now = 1_760_000_000.0
+
+    # Session 1 (`fab0e5a7`-style, >200 msgs = 115 turns / 232 rows):
+    # Turn 1 starts `companion` (`real_facts_only`), tours Taj Mahal & mentions `小笨鸟` in Window 1 & Window 2,
+    # and Turn 115 at the very end starts `stage` (`isolated`), leaving `10-stage#2.md` in relative `sessions/`!
+    sid_mixed = "fab0e5a7_agra"
+    db.create_session(
+        Session(id=sid_mixed, title="泰姬陵之行", created_at=now, updated_at=now + 500, role_name="tutor")
+    )
+    mixed_ctx_dir = tmp_path / "sessions" / sid_mixed / "context"
+    mixed_ctx_dir.mkdir(parents=True)
+    (mixed_ctx_dir / "10-stage#2.md").write_text("Stage contest leftover on disk\n", encoding="utf-8")
+
+    for i in range(1, 116):
+        ts_base = now + i * 3.0
+        u_text = "泰姬陵照片与小笨鸟昵称起源" if i in (5, 108) else f"阿格拉旅行见闻记录第 {i} 段"
+        if i == 115:
+            u_text = "进入虚拟舞台比赛"
+        db.save_message(
+            Message(
+                id=f"mx_u_{i:03d}",
+                session_id=sid_mixed,
+                chatbot_id="discord",
+                channel_id="ch_agra",
+                sender="user",
+                role=MessageRole.USER,
+                type=MessageType.TEXT,
+                content=u_text,
+                timestamp=ts_base,
+                status=MessageStatus.PROCESSED,
+            )
+        )
+        if i == 1:
+            db.save_message(
+                Message(
+                    id="mx_tc_001",
+                    session_id=sid_mixed,
+                    chatbot_id="discord",
+                    channel_id="ch_agra",
+                    sender="run_shell_command",
+                    role=MessageRole.TOOL,
+                    type=MessageType.TOOL_CALL,
+                    content="ctl start companion",
+                    timestamp=ts_base + 0.2,
+                    status=MessageStatus.RESPONDED,
+                    metadata={"tool_name": "run_shell_command", "tool_arguments": {"command": "ctl start companion"}},
+                )
+            )
+        elif i == 115:
+            db.save_message(
+                Message(
+                    id="mx_tc_115",
+                    session_id=sid_mixed,
+                    chatbot_id="discord",
+                    channel_id="ch_agra",
+                    sender="run_shell_command",
+                    role=MessageRole.TOOL,
+                    type=MessageType.TOOL_CALL,
+                    content="ctl start stage",
+                    timestamp=ts_base + 0.2,
+                    status=MessageStatus.RESPONDED,
+                    metadata={"tool_name": "run_shell_command", "tool_arguments": {"command": "ctl start stage"}},
+                )
+            )
+        db.save_message(
+            Message(
+                id=f"mx_a_{i:03d}",
+                session_id=sid_mixed,
+                chatbot_id="discord",
+                channel_id="ch_agra",
+                sender="assistant",
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
+                content="虚拟舞台虚构评委台词" if i == 115 else f"回复第 {i} 段",
+                timestamp=ts_base + 1.0,
+                status=MessageStatus.DELIVERED,
+            )
+        )
+
+    # Session 2 (`f4157b08`-style, >200 msgs = 110 turns / 221 rows):
+    # Turn 1 starts `trpg` (`isolated`) and stops BEFORE session end (so `sessions/` has NO leftover file on disk!).
+    # Window 2 has zero TOOL_CALLs and MUST still inherit `isolated` from Window 1 via `prior_tool_calls`!
+    sid_trpg = "f4157b08_trpg"
+    db.create_session(
+        Session(id=sid_trpg, title="长篇跑团", created_at=now + 600, updated_at=now + 1200, role_name="tutor")
+    )
+    for i in range(1, 111):
+        ts_base = now + 600 + i * 3.0
+        db.save_message(
+            Message(
+                id=f"tr_u_{i:03d}",
+                session_id=sid_trpg,
+                chatbot_id="discord",
+                channel_id="ch_trpg",
+                sender="user",
+                role=MessageRole.USER,
+                type=MessageType.TEXT,
+                content=f"精灵弓箭手第 {i} 轮行动",
+                timestamp=ts_base,
+                status=MessageStatus.PROCESSED,
+            )
+        )
+        if i == 1:
+            db.save_message(
+                Message(
+                    id="tr_tc_001",
+                    session_id=sid_trpg,
+                    chatbot_id="discord",
+                    channel_id="ch_trpg",
+                    sender="run_shell_command",
+                    role=MessageRole.TOOL,
+                    type=MessageType.TOOL_CALL,
+                    content="ctl start trpg",
+                    timestamp=ts_base + 0.2,
+                    status=MessageStatus.RESPONDED,
+                    metadata={"tool_name": "run_shell_command", "tool_arguments": {"command": "ctl start trpg"}},
+                )
+            )
+        db.save_message(
+            Message(
+                id=f"tr_a_{i:03d}",
+                session_id=sid_trpg,
+                chatbot_id="discord",
+                channel_id="ch_trpg",
+                sender="assistant",
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
+                content=f"地下城叙述 {i}",
+                timestamp=ts_base + 1.0,
+                status=MessageStatus.DELIVERED,
+            )
+        )
+
+    # 1. Run `backfill-fts` -> `fab0e5a7_agra` searchable by `泰姬陵`/`小笨鸟` with `include_isolated=False`!
+    run_backfill_fts_sync(cfg, db)
+    agra_digest = db.get_session_digest(sid_mixed)
+    assert agra_digest is not None
+    assert agra_digest["context_policy"] == "real_facts_only"
+    assert "进入虚拟舞台比赛" not in agra_digest["last_user_msgs"]
+
+    gw = Gateway(context=KesokuContext(config=cfg, db=db))
+    await gw.db.set_channel_role("discord", "ch_cur", "tutor")
+    await gw.db.create_session(
+        Session(id="cur_sess_01", title="Now", created_at=now + 2000, updated_at=now + 2000, role_name="tutor")
+    )
+    await gw.db.set_active_session_for_channel("discord", "ch_cur", "cur_sess_01")
+    t_ctx = ToolContext(
+        session_id="cur_sess_01",
+        session_workspace="cur_sess_01",
+        chatbot_id="discord",
+        channel_id="ch_cur",
+        gateway=gw,
+    )
+    s_out = await session_search(query="小笨鸟", context=t_ctx)
+    assert "#session:fab0e5a7" in s_out
+    v_out = await session_view(session_id="#session:fab0e5a7", around_message_id="mx_u_108", context=t_ctx)
+    assert "小笨鸟" in v_out
+    assert "虚拟舞台虚构评委台词" not in v_out  # Turn 115 (`isolated`) stays hidden!
+
+    # 2. Multi-window `--dry-run` traverses both windows of `fab0e5a7_agra` and skips both of `f4157b08_trpg`!
+    llm_calls: list[str] = []
+
+    class MultiWinLLM(BaseLLM):
+        async def generate(self, prompt: str | None = None, **kwargs: Any) -> LLMResponse:
+            llm_calls.append(prompt or "")
+            payload = {
+                "episode_summary": "阿格拉泰姬陵旅行",
+                "open_threads": [],
+                "ops": [
+                    {
+                        "op": "upsert_bullet",
+                        "file": "travel.md",
+                        "section": "行程",
+                        "text": "游览了阿格拉泰姬陵",
+                        "tags": ["#direct"],
+                    }
+                ],
+            }
+            return LLMResponse(
+                content=json.dumps(payload, ensure_ascii=False),
+                prompt_tokens=100,
+                completion_tokens=40,
+                total_tokens=140,
+            )
+
+    monkeypatch.setattr("kesoku.context.KesokuContext.get_llm", lambda *a, **kw: MultiWinLLM())
+    dry_stats = await _run_backfill_async(
+        cfg,
+        db,
+        role="tutor",
+        since_ts=0.0,
+        dry_run=True,
+        budget_tokens=100_000,
+        console=Console(quiet=True),
+    )
+    assert dry_stats["windows_extracted"] == 2  # Window 1 + Window 2 of `fab0e5a7_agra`!
+    assert dry_stats["isolated_skipped"] == 2  # Window 1 + Window 2 of `f4157b08_trpg` (0 LLM tokens)!
+    assert len(llm_calls) == 2
+    # Window 2 of `fab0e5a7_agra` carried `real_facts_only` forward AND redacted Turn 115 (`isolated`) as `[omitted]`!
+    assert "[scenario frame — keep only real-world facts]" in llm_calls[1]
+    assert "虚拟舞台虚构评委台词" not in llm_calls[1]
+    assert db.get_extraction_cursor(sid_mixed) is None  # dry-run left SQLite cursors untouched!
+
+    # 3. Live `backfill` also completes all windows cleanly across trimmed <200-msg turn boundaries
+    live_stats = await _run_backfill_async(
+        cfg,
+        db,
+        role="tutor",
+        since_ts=0.0,
+        dry_run=False,
+        budget_tokens=100_000,
+        console=Console(quiet=True),
+    )
+    assert live_stats["windows_extracted"] == 2
+    assert live_stats["isolated_skipped"] == 2
+    final_cur = db.get_extraction_cursor(sid_mixed)
+    assert final_cur is not None and final_cur["last_extracted_msg_id"] == "mx_a_115"
+    final_trpg_cur = db.get_extraction_cursor(sid_trpg)
+    assert final_trpg_cur is not None and final_trpg_cur["last_extracted_msg_id"] == "tr_a_110"

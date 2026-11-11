@@ -2343,7 +2343,8 @@ class DatabaseManager:
                 clauses.append("timestamp <= ?")
                 params.append(float(safe_upper))
 
-            params.append(max(1, min(200, int(limit))))
+            eff_limit = max(1, min(200, int(limit)))
+            params.append(eff_limit + 1)
             rows = conn.execute(
                 f"""
                 SELECT {self._MSG_EXPLICIT_COLS}
@@ -2353,6 +2354,31 @@ class DatabaseManager:
                 LIMIT ?
                 """,
                 tuple(params),
+            ).fetchall()
+            msgs = [self._row_to_message(r) for r in rows]
+            if len(msgs) > eff_limit:
+                next_msg = msgs.pop()
+                if next_msg.role != MessageRole.USER:
+                    last_user_idx = next(
+                        (i for i in range(len(msgs) - 1, -1, -1) if msgs[i].role == MessageRole.USER),
+                        None,
+                    )
+                    if last_user_idx is not None and last_user_idx > 0:
+                        msgs = msgs[:last_user_idx]
+            return msgs
+
+    def get_session_tool_calls(self, session_id: str) -> list[Message]:
+        """Fetch all `TOOL_CALL` rows of `session_id` ordered by `(timestamp ASC, id ASC)` (never `embedding`)."""
+        with self.connection_provider.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {self._MSG_EXPLICIT_COLS}
+                FROM messages
+                WHERE session_id = ?
+                  AND type = ?
+                ORDER BY timestamp ASC, id ASC
+                """,
+                (session_id, MessageType.TOOL_CALL),
             ).fetchall()
             return [self._row_to_message(r) for r in rows]
 
@@ -3137,6 +3163,10 @@ class AsyncDatabaseManager:
         return await asyncio.to_thread(
             self.sync_db.get_unextracted_messages, session_id, after_ts, after_id, safe_upper, limit
         )
+
+    async def get_session_tool_calls(self, session_id: str) -> list[Message]:
+        """Retrieve all `TOOL_CALL` messages of `session_id` asynchronously."""
+        return await asyncio.to_thread(self.sync_db.get_session_tool_calls, session_id)
 
     async def log_extraction(self, **kwargs: Any) -> None:
         """Append an extraction log entry asynchronously."""

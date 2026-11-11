@@ -219,6 +219,8 @@ class ExtractionOutcome:
     output_tokens: int = 0
     messages_processed: int = 0
     files_over_cap: list[str] | None = None
+    last_msg_ts: float = 0.0
+    last_msg_id: str = ""
 
 
 class EpisodeExtractor:
@@ -1154,6 +1156,7 @@ class MemoryConsolidator:
         *,
         dry_run: bool = False,
         safe_upper: float | tuple[float, str] | None = None,
+        cursor_override: tuple[float, str] | None = None,
     ) -> ExtractionOutcome:
         """Execute a single `EpisodeExtract` job safely (`C4`, `R2-1`, `H4`, `C5`)."""
         cfg = self.context.config
@@ -1190,8 +1193,11 @@ class MemoryConsolidator:
                 )
                 return ExtractionOutcome(status="budget_exhausted")
 
-        after_ts = float(cursor.get("last_extracted_msg_ts") or 0.0) if cursor else 0.0
-        after_id = str(cursor.get("last_extracted_msg_id") or "") if cursor else ""
+        if cursor_override is not None:
+            after_ts, after_id = float(cursor_override[0]), str(cursor_override[1])
+        else:
+            after_ts = float(cursor.get("last_extracted_msg_ts") or 0.0) if cursor else 0.0
+            after_id = str(cursor.get("last_extracted_msg_id") or "") if cursor else ""
 
         msgs = await self._run_on_worker(
             self.sync_db.get_unextracted_messages,
@@ -1208,10 +1214,29 @@ class MemoryConsolidator:
         if not turns:
             return ExtractionOutcome(status="empty_window")
 
-        # Resolve per-turn context_policy
-        staging_dir = os.path.join(cfg.workspace.sessions_dir, session_id)
+        # Resolve per-turn context_policy with cross-window tool-call marker carry-forward
+        sess_obj, all_tool_calls = await self._run_on_worker(
+            lambda: (self.sync_db.get_session(session_id), self.sync_db.get_session_tool_calls(session_id))
+        )
+        sessions_dir = cfg.workspace.sessions_dir
+        if not os.path.isabs(sessions_dir) and cfg.agent_working_dir:
+            sessions_dir = os.path.join(cfg.agent_working_dir, sessions_dir)
+        ws_name = sess_obj.workspace_name if sess_obj is not None else session_id
+        staging_dir = os.path.join(sessions_dir, ws_name)
+
+        first_key = (float(msgs[0].timestamp), msgs[0].id)
+        last_key = (float(msgs[-1].timestamp), msgs[-1].id)
+        prior_tcs = [m for m in all_tool_calls if (float(m.timestamp), m.id) < first_key]
+        later_tcs = [m for m in all_tool_calls if (float(m.timestamp), m.id) > last_key]
+
         disk_entries = await collect_context_entries(staging_dir, include_policy_only=True)
-        inferred_policies = infer_backfill_turn_policies(turns, disk_entries=disk_entries, cfg=cfg)
+        inferred_policies = infer_backfill_turn_policies(
+            turns,
+            disk_entries=disk_entries,
+            cfg=cfg,
+            prior_tool_calls=prior_tcs,
+            later_tool_calls=later_tcs,
+        )
 
         turn_policies: list[ContextPolicy] = []
         for turn, inf_pol in zip(turns, inferred_policies, strict=True):
@@ -1247,7 +1272,12 @@ class MemoryConsolidator:
                         status="skipped_isolated",
                     )
                 )
-            return ExtractionOutcome(status="skipped_isolated", messages_processed=len(msgs))
+            return ExtractionOutcome(
+                status="skipped_isolated",
+                messages_processed=len(msgs),
+                last_msg_ts=float(last_msg.timestamp),
+                last_msg_id=last_msg.id,
+            )
 
         rendered_turns = [
             format_turn_for_extraction(t, pol) for t, pol in zip(turns, turn_policies, strict=True)
@@ -1310,6 +1340,8 @@ class MemoryConsolidator:
                     input_tokens=in_tok,
                     output_tokens=out_tok,
                     messages_processed=len(msgs),
+                    last_msg_ts=float(last_msg.timestamp),
+                    last_msg_id=last_msg.id,
                 )
 
             def _apply_and_persist() -> MemoryWriteResult:
@@ -1385,6 +1417,8 @@ class MemoryConsolidator:
                 output_tokens=out_tok,
                 messages_processed=len(msgs),
                 files_over_cap=list(write_res.files_over_cap),
+                last_msg_ts=float(last_msg.timestamp),
+                last_msg_id=last_msg.id,
             )
         except Exception as e:
             err_msg = str(e)[:500]

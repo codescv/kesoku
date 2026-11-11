@@ -117,6 +117,68 @@ def _list_context_files(context_dir: str) -> list[str]:
     )
 
 
+def _read_stripped_sync(path: str) -> str:
+    """Read a text file synchronously and strip surrounding whitespace."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read().strip()
+    except Exception as e:
+        logger.warning(f"Failed to read context file '{path}': {e}")
+        return ""
+
+
+def collect_context_entries_sync(
+    staging_dir: str,
+    *,
+    include_policy_only: bool = False,
+) -> list[ContextEntry]:
+    """Collect context entries synchronously for offline backfill/consolidation paths."""
+    entries: list[ContextEntry] = []
+    if not staging_dir:
+        return entries
+
+    notes_path = os.path.join(staging_dir, NOTES_FILE_NAME)
+    if os.path.exists(notes_path):
+        notes = _read_stripped_sync(notes_path)
+        if notes:
+            entries.append(ContextEntry(NOTES_BLOCK_NAME, truncate_context_content(notes)))
+
+    context_dir = os.path.join(staging_dir, CONTEXT_DIR_NAME)
+    if not os.path.isdir(context_dir):
+        return entries
+    try:
+        filenames = _list_context_files(context_dir)
+    except Exception as e:
+        logger.warning(f"Failed to list context directory '{context_dir}': {e}")
+        return entries
+
+    for filename in filenames:
+        raw_content = _read_stripped_sync(os.path.join(context_dir, filename))
+        if not raw_content:
+            continue
+        fm, content = parse_context_frontmatter(raw_content)
+        raw_policy = fm.get("memory_policy", "").strip().lower()
+        policy: str | None = None
+        if raw_policy:
+            if raw_policy in _VALID_MEMORY_POLICIES:
+                policy = raw_policy
+            else:
+                logger.warning(f"Context file '{filename}' has unknown memory_policy '{raw_policy}'; ignoring")
+        if content or (include_policy_only and policy is not None):
+            name = context_block_name(filename)
+            if name == NOTES_BLOCK_NAME:
+                name = RESERVED_NAME_RENAME
+                logger.warning(f"Context file '{filename}' uses the reserved name 'notes'; rendering as '{name}'")
+            entries.append(
+                ContextEntry(
+                    name,
+                    truncate_context_content(content) if content else "",
+                    memory_policy=policy,
+                )
+            )
+    return entries
+
+
 async def _read_stripped(path: str) -> str:
     """Read a text file and strip surrounding whitespace; returns an empty string on failure."""
     try:

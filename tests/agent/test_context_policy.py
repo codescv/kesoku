@@ -224,3 +224,97 @@ def test_infer_backfill_nested_stacked_markers() -> None:
         "real_facts_only",
         "full",
     ]
+
+
+def test_end_of_session_disk_entries_do_not_retroactively_poison_marker_managed_turns() -> None:
+    """Verify end-of-session `disk_entries` never poisons earlier `full`/`real_facts_only` turns when markers match."""
+    from kesoku.agent.context_dir import ContextEntry
+
+    cfg = AgentConfig(
+        memory_isolated_contexts=["stage-*"],
+        memory_filtered_contexts=["companion-*"],
+        memory_backfill_context_markers=[
+            BackfillContextMarker(
+                pattern=r"ctl\s+start\s+companion\b",
+                policy="real_facts_only",
+                until=r"ctl\s+stop\s+companion\b",
+            ),
+            BackfillContextMarker(
+                pattern=r"ctl\s+start\s+stage\b",
+                policy="isolated",
+                until=r"ctl\s+stop\s+stage\b",
+            ),
+        ],
+    )
+
+    def _turn(idx: int, cmd: str | None = None) -> list[Message]:
+        msgs = [
+            Message(
+                id=f"u_{idx}",
+                session_id="s_agra",
+                chatbot_id="discord",
+                channel_id="c1",
+                sender="u1",
+                role=MessageRole.USER,
+                type=MessageType.TEXT,
+                content=f"turn {idx}",
+                timestamp=float(idx * 10),
+            )
+        ]
+        if cmd:
+            msgs.append(
+                Message(
+                    id=f"tc_{idx}",
+                    session_id="s_agra",
+                    chatbot_id="discord",
+                    channel_id="c1",
+                    sender="run_shell_command",
+                    role=MessageRole.TOOL,
+                    type=MessageType.TOOL_CALL,
+                    content=cmd,
+                    timestamp=float(idx * 10 + 1),
+                    metadata={"tool_name": "run_shell_command", "tool_arguments": {"command": cmd}},
+                )
+            )
+        return msgs
+
+    # Leftover isolated context file on disk from Turn 4's late `ctl start stage`
+    leftover_disk = [ContextEntry(name="stage-2", content="Stage contest active")]
+
+    # 1. Full session: Turn 1 plain (`full`), Turns 2-3 `companion` (`real_facts_only`), Turn 4 `stage` (`isolated`)
+    all_turns = [
+        _turn(1),
+        _turn(2, "ctl start companion"),
+        _turn(3),
+        _turn(4, "ctl start stage"),
+    ]
+    assert infer_backfill_turn_policies(all_turns, disk_entries=leftover_disk, cfg=cfg) == [
+        "full",
+        "real_facts_only",
+        "real_facts_only",
+        "isolated",
+    ]
+
+    # 2. Multi-window split: Window 1 has plain chat only, while `later_tool_calls` shows marker usage in Window 2
+    assert infer_backfill_turn_policies(
+        [all_turns[0]],
+        disk_entries=leftover_disk,
+        cfg=cfg,
+        later_tool_calls=[all_turns[3][1]],
+    ) == ["full"]
+
+    # 3. Window 2 with `prior_tool_calls` seeding `companion` (`real_facts_only`) despite `leftover_disk`
+    assert infer_backfill_turn_policies(
+        [all_turns[2]],
+        disk_entries=leftover_disk,
+        cfg=cfg,
+        prior_tool_calls=[all_turns[1][1]],
+        later_tool_calls=[all_turns[3][1]],
+    ) == ["real_facts_only"]
+
+    # 4. Out-of-band `disk_entries` WITH ZERO marker matches anywhere in the session -> `disk_entries` fallback applies!
+    no_marker_turns = [_turn(1), _turn(2)]
+    assert infer_backfill_turn_policies(no_marker_turns, disk_entries=leftover_disk, cfg=cfg) == [
+        "isolated",
+        "isolated",
+    ]
