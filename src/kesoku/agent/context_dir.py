@@ -29,6 +29,9 @@ TRUNCATED_MARKER = "[truncated]"
 
 # Structural parsing of filenames: optional leading numeric ordering prefix such as "20-" or "05_".
 _NUMERIC_PREFIX_RE = re.compile(r"^\d+[-_]")
+# Strict key-value line check for safe YAML frontmatter stripping in `context/*.md` (R2-4).
+_FRONTMATTER_KV_LINE_RE = re.compile(r"^([a-zA-Z0-9_-]+)\s*:(.*)$")
+_VALID_MEMORY_POLICIES = frozenset({"full", "real_facts_only", "isolated"})
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,53 @@ class ContextEntry:
 
     name: str
     content: str
+    memory_policy: str | None = None
+
+
+def parse_context_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    """Strip a leading `--- ... ---` frontmatter block only when every active line is `key: value`.
+
+    Prevents Markdown horizontal rules (`---`) from swallowing body lines (`R2-4`).
+
+    Args:
+        text: Raw stripped content of a `context/*.md` file.
+
+    Returns:
+        Tuple of `(frontmatter_dict, remaining_body)`.
+    """
+    if not text:
+        return {}, ""
+    lines = text.splitlines()
+    if len(lines) < 3 or lines[0].strip() != "---":
+        return {}, text
+
+    closing_idx: int | None = None
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == "---":
+            closing_idx = idx
+            break
+    if closing_idx is None:
+        return {}, text
+
+    parsed: dict[str, str] = {}
+    for line in lines[1:closing_idx]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        kv_match = _FRONTMATTER_KV_LINE_RE.match(stripped)
+        if not kv_match:
+            return {}, text
+        key = kv_match.group(1).strip()
+        val = kv_match.group(2).strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in {'"', "'"}:
+            val = val[1:-1].strip()
+        parsed[key] = val
+
+    if not parsed:
+        return {}, text
+
+    body = "\n".join(lines[closing_idx + 1 :]).strip()
+    return parsed, body
 
 
 def context_block_name(filename: str) -> str:
@@ -76,14 +126,21 @@ async def _read_stripped(path: str) -> str:
         return ""
 
 
-async def collect_context_entries(staging_dir: str) -> list[ContextEntry]:
+async def collect_context_entries(
+    staging_dir: str,
+    *,
+    include_policy_only: bool = False,
+) -> list[ContextEntry]:
     """Collect context entries for a session staging directory.
 
-    The notes file comes first (if non-empty), followed by every non-empty `context/*.md` file in filename
-    order. Each entry is already capped at `CONTEXT_FILE_MAX_CHARS`.
+    The notes file comes first (if non-empty, never frontmatter-stripped), followed by every non-empty
+    `context/*.md` file in filename order (with validated leading YAML frontmatter stripped and
+    `memory_policy` extracted). Each entry is capped at `CONTEXT_FILE_MAX_CHARS`.
 
     Args:
         staging_dir: Absolute path of the session staging directory.
+        include_policy_only: When True, retain `context/*.md` entries that become empty after stripping
+            frontmatter if they declare a valid `memory_policy`.
 
     Returns:
         Ordered list of context entries.
@@ -108,14 +165,30 @@ async def collect_context_entries(staging_dir: str) -> list[ContextEntry]:
         return entries
 
     for filename in filenames:
-        content = await _read_stripped(os.path.join(context_dir, filename))
-        if content:
+        raw_content = await _read_stripped(os.path.join(context_dir, filename))
+        if not raw_content:
+            continue
+        fm, content = parse_context_frontmatter(raw_content)
+        raw_policy = fm.get("memory_policy", "").strip().lower()
+        policy: str | None = None
+        if raw_policy:
+            if raw_policy in _VALID_MEMORY_POLICIES:
+                policy = raw_policy
+            else:
+                logger.warning(f"Context file '{filename}' has unknown memory_policy '{raw_policy}'; ignoring")
+        if content or (include_policy_only and policy is not None):
             name = context_block_name(filename)
             if name == NOTES_BLOCK_NAME:
                 # "notes" is reserved for the agent-editable $STAGING_DIR/notes.md block.
                 name = RESERVED_NAME_RENAME
                 logger.warning(f"Context file '{filename}' uses the reserved name 'notes'; rendering as '{name}'")
-            entries.append(ContextEntry(name, truncate_context_content(content)))
+            entries.append(
+                ContextEntry(
+                    name,
+                    truncate_context_content(content) if content else "",
+                    memory_policy=policy,
+                )
+            )
     return entries
 
 
@@ -142,7 +215,7 @@ def apply_total_budget(entries: list[ContextEntry], max_total_chars: int) -> lis
 
 def render_context_blocks(entries: list[ContextEntry]) -> str:
     """Render entries as consecutive `<context name="...">` blocks (empty string if none)."""
-    return "".join(f'<context name="{e.name}">\n{e.content}\n</context>\n' for e in entries)
+    return "".join(f'<context name="{e.name}">\n{e.content}\n</context>\n' for e in entries if e.content)
 
 
 def insert_extra_entries(entries: list[ContextEntry], extra_entries: Sequence[ContextEntry]) -> list[ContextEntry]:

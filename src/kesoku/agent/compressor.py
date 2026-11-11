@@ -904,6 +904,10 @@ class HistoryCompressor:
         await self.db.insert_summary_node(node)
         await self.db.update_messages_summary_node(message_ids, node.id)
         _record_links(session_id, message_ids, node.id)
+        db_dict = getattr(self.db, "__dict__", None)
+        consolidator = db_dict.get("_memory_consolidator") if isinstance(db_dict, dict) else None
+        if consolidator is not None and callable(getattr(consolidator, "attach_compaction_hint", None)):
+            consolidator.attach_compaction_hint(session_id, node.id)
 
         # Update in-memory message references to prevent buffer duplication
         for t in chunk:

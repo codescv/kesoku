@@ -6,7 +6,7 @@ import os
 import shutil
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Literal
 
 import numpy as np
@@ -14,7 +14,8 @@ import numpy as np
 from kesoku.agent.history_sorter import sort_session_messages
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db.connection import ConnectionProvider
-from kesoku.db.models import CrossSessionContext, Message, Session, SummaryNode
+from kesoku.db.models import Message, Session, SummaryNode
+from kesoku.utils.text import fts_tokenize
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,8 @@ class DatabaseManager:
         self.db_path = db_path
         self.connection_provider = ConnectionProvider(db_path)
         self._config: Any = None
+        self.digests_available: bool = True
+        self.fts_available: bool = True
 
     def _get_chatbot_default_role(self, chatbot_id: str) -> str:
         """Resolve per-chatbot default_role from bound KesokuConfig or global config."""
@@ -215,17 +218,6 @@ class DatabaseManager:
                     );
                     """
                 )
-                # Ensure cross_session_contexts table exists
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS cross_session_contexts (
-                        role TEXT PRIMARY KEY,
-                        content TEXT NOT NULL,
-                        updated_at REAL NOT NULL,
-                        status TEXT NOT NULL DEFAULT 'idle'
-                    );
-                    """
-                )
                 # Ensure summary_nodes table exists
                 conn.execute(
                     """
@@ -259,6 +251,174 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to apply database schema migrations: {e}")
             raise RuntimeError(f"Database schema migration error: {e}") from e
+
+        self._apply_memory_v2_v3_migrations(conn)
+
+    def _apply_memory_v2_v3_migrations(self, conn: sqlite3.Connection) -> None:
+        """Apply idempotent v2 (digests/cursors/visibility) and v3 (FTS5) migrations safely."""
+        try:
+            user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        except Exception as e:
+            logger.warning(f"Failed reading PRAGMA user_version: {e}")
+            user_version = 0
+
+        # --- Migration v2 (P0): memory_files columns, session_digests, extraction cursors/log, drop legacy table ---
+        v2_ok = True
+        try:
+            mf_cols = {row["name"] for row in conn.execute("PRAGMA table_info(memory_files)").fetchall()}
+            with conn:
+                if "visibility" not in mf_cols:
+                    conn.execute("ALTER TABLE memory_files ADD COLUMN visibility TEXT NOT NULL DEFAULT 'DEFAULT'")
+                if "size_bytes" not in mf_cols:
+                    conn.execute("ALTER TABLE memory_files ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_files_role_vis ON memory_files(role, visibility)")
+        except Exception as e:
+            v2_ok = False
+            logger.error(f"Migration v2 (memory_files columns) failed: {e}")
+
+        v2_statements = (
+            (
+                "session_digests",
+                """
+                CREATE TABLE IF NOT EXISTS session_digests (
+                    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    chatbot_id TEXT,
+                    channel_id TEXT,
+                    title TEXT NOT NULL DEFAULT '',
+                    started_at REAL NOT NULL,
+                    last_active_at REAL NOT NULL,
+                    turn_count INTEGER NOT NULL DEFAULT 0,
+                    last_user_msgs TEXT NOT NULL DEFAULT '[]',
+                    context_policy TEXT NOT NULL DEFAULT 'full',
+                    summary TEXT NOT NULL DEFAULT '',
+                    open_threads TEXT NOT NULL DEFAULT '[]',
+                    summary_upto_ts REAL,
+                    embedding BLOB,
+                    updated_at REAL NOT NULL
+                )
+                """,
+            ),
+            (
+                "idx_session_digests_role_active",
+                "CREATE INDEX IF NOT EXISTS idx_session_digests_role_active "
+                "ON session_digests(role, last_active_at DESC)",
+            ),
+            (
+                "memory_extraction_cursors",
+                """
+                CREATE TABLE IF NOT EXISTS memory_extraction_cursors (
+                    session_id TEXT PRIMARY KEY,
+                    role TEXT NOT NULL,
+                    last_extracted_msg_ts REAL NOT NULL DEFAULT 0,
+                    last_extracted_msg_id TEXT NOT NULL DEFAULT '',
+                    pending_user_turns INTEGER NOT NULL DEFAULT 0,
+                    pending_chars INTEGER NOT NULL DEFAULT 0,
+                    last_run_at REAL,
+                    last_reason TEXT,
+                    tokens_spent INTEGER NOT NULL DEFAULT 0,
+                    failures INTEGER NOT NULL DEFAULT 0
+                )
+                """,
+            ),
+            (
+                "memory_extraction_log",
+                """
+                CREATE TABLE IF NOT EXISTS memory_extraction_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    role TEXT,
+                    session_id TEXT,
+                    reason TEXT,
+                    started_at REAL,
+                    finished_at REAL,
+                    status TEXT,
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    ops_applied INTEGER,
+                    error TEXT
+                )
+                """,
+            ),
+            (
+                "drop_cross_session_contexts",
+                "DROP TABLE IF EXISTS cross_session_contexts",
+            ),
+        )
+        for label, stmt in v2_statements:
+            try:
+                with conn:
+                    conn.execute(stmt)
+            except Exception as e:
+                v2_ok = False
+                if label in ("session_digests", "idx_session_digests_role_active"):
+                    self.digests_available = False
+                logger.error(f"Migration v2 ({label}) failed; degrading gracefully: {e}")
+
+        if v2_ok and user_version < 2:
+            try:
+                with conn:
+                    conn.execute("PRAGMA user_version = 2")
+                user_version = 2
+            except Exception as e:
+                logger.warning(f"Failed setting PRAGMA user_version = 2: {e}")
+
+        # --- Migration v3 (P1): regular FTS5 tables + backfill state ---
+        v3_ok = True
+        v3_statements = (
+            (
+                "messages_fts",
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                    message_id UNINDEXED,
+                    session_id,
+                    persona_role,
+                    context_policy,
+                    speaker_role UNINDEXED,
+                    ts UNINDEXED,
+                    raw_excerpt UNINDEXED,
+                    text,
+                    tokenize='unicode61'
+                )
+                """,
+            ),
+            (
+                "session_digests_fts",
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS session_digests_fts USING fts5(
+                    session_id UNINDEXED,
+                    role,
+                    text,
+                    tokenize='unicode61'
+                )
+                """,
+            ),
+            (
+                "fts_backfill_state",
+                """
+                CREATE TABLE IF NOT EXISTS fts_backfill_state (
+                    name TEXT PRIMARY KEY,
+                    last_ts REAL NOT NULL DEFAULT 0,
+                    last_id TEXT NOT NULL DEFAULT '',
+                    done INTEGER NOT NULL DEFAULT 0
+                )
+                """,
+            ),
+        )
+        for label, stmt in v3_statements:
+            try:
+                with conn:
+                    conn.execute(stmt)
+            except Exception as e:
+                v3_ok = False
+                self.fts_available = False
+                logger.error(f"Migration v3 ({label}) failed; disabling FTS search gracefully: {e}")
+
+        if v2_ok and v3_ok and user_version < 3:
+            try:
+                with conn:
+                    conn.execute("PRAGMA user_version = 3")
+            except Exception as e:
+                logger.warning(f"Failed setting PRAGMA user_version = 3: {e}")
 
     def verify_db(self) -> None:
         """Verify that the database file exists, is non-empty, and contains required tables."""
@@ -407,16 +567,6 @@ class DatabaseManager:
                     )
                     conn.execute(
                         """
-                        CREATE TABLE IF NOT EXISTS cross_session_contexts (
-                            role TEXT PRIMARY KEY,
-                            content TEXT NOT NULL,
-                            updated_at REAL NOT NULL,
-                            status TEXT NOT NULL DEFAULT 'idle'
-                        );
-                        """
-                    )
-                    conn.execute(
-                        """
                         CREATE TABLE IF NOT EXISTS ui_prompts (
                             session_id TEXT NOT NULL,
                             message_id TEXT NOT NULL,
@@ -496,19 +646,72 @@ class DatabaseManager:
             with conn:
                 conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (updated_at, session_id))
 
+    def _refresh_digest_fts_in_tx(
+        self,
+        conn: sqlite3.Connection,
+        session_id: str,
+        role: str,
+        title: str,
+        summary: str,
+        last_user_msgs_json: str,
+    ) -> None:
+        """Refresh a single session's entry inside `session_digests_fts` within an open transaction."""
+        if not self.fts_available:
+            return
+        try:
+            msgs_list = json.loads(last_user_msgs_json) if last_user_msgs_json else []
+            if not isinstance(msgs_list, list):
+                msgs_list = []
+        except Exception:
+            msgs_list = []
+        combined = "\n".join(part for part in [title, summary, *(str(m) for m in msgs_list)] if part)
+        tokenized = fts_tokenize(combined, for_query=False)
+        try:
+            conn.execute("DELETE FROM session_digests_fts WHERE session_id = ?", (session_id,))
+            if tokenized:
+                conn.execute(
+                    "INSERT INTO session_digests_fts (session_id, role, text) VALUES (?, ?, ?)",
+                    (session_id, role or "default", tokenized),
+                )
+        except Exception as e:
+            logger.warning(f"Failed updating session_digests_fts for session '{session_id}': {e}")
+
     def update_session_title(self, session_id: str, title: str) -> None:
-        """Update the title of a session and set updated_at to now.
+        """Update the title of a session, keeping `session_digests` and `session_digests_fts` synchronized.
 
         Args:
             session_id: Session ID to update.
             title: New title.
         """
+        now = time.time()
         with self.connection_provider.connection() as conn:
             with conn:
                 conn.execute(
                     "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
-                    (title, time.time(), session_id),
+                    (title, now, session_id),
                 )
+                if self.digests_available:
+                    try:
+                        cursor = conn.execute(
+                            "SELECT role, summary, last_user_msgs FROM session_digests WHERE session_id = ?",
+                            (session_id,),
+                        )
+                        d_row = cursor.fetchone()
+                        if d_row is not None:
+                            conn.execute(
+                                "UPDATE session_digests SET title = ?, updated_at = ? WHERE session_id = ?",
+                                (title, now, session_id),
+                            )
+                            self._refresh_digest_fts_in_tx(
+                                conn,
+                                session_id=session_id,
+                                role=str(d_row["role"]),
+                                title=title,
+                                summary=str(d_row["summary"] or ""),
+                                last_user_msgs_json=str(d_row["last_user_msgs"] or "[]"),
+                            )
+                    except Exception as e:
+                        logger.warning(f"Failed syncing session_digests title for '{session_id}': {e}")
 
 
 
@@ -642,13 +845,29 @@ class DatabaseManager:
                     )
 
     def delete_session(self, session_id: str) -> None:
-        """Delete a session and all its associated messages from the database.
+        """Delete a session and all its associated messages, digests, cursors, and FTS rows.
 
         Args:
             session_id: The unique session identifier to delete.
         """
         with self.connection_provider.connection() as conn:
             with conn:
+                if self.fts_available:
+                    try:
+                        safe_sid = session_id.replace('"', '""')
+                        conn.execute(
+                            "DELETE FROM messages_fts WHERE messages_fts MATCH ?",
+                            (f'session_id:"{safe_sid}"',),
+                        )
+                        conn.execute("DELETE FROM session_digests_fts WHERE session_id = ?", (session_id,))
+                    except Exception as e:
+                        logger.warning(f"Failed deleting FTS rows for session '{session_id}': {e}")
+                if self.digests_available:
+                    try:
+                        conn.execute("DELETE FROM session_digests WHERE session_id = ?", (session_id,))
+                        conn.execute("DELETE FROM memory_extraction_cursors WHERE session_id = ?", (session_id,))
+                    except Exception as e:
+                        logger.warning(f"Failed deleting digest/cursor rows for session '{session_id}': {e}")
                 # Delete all messages belonging to this session
                 conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
                 # Delete interactive UI prompt specs of this session
@@ -667,6 +886,14 @@ class DatabaseManager:
         with self.connection_provider.connection() as conn:
             with conn:
                 placeholders = ",".join("?" for _ in message_ids)
+                if self.fts_available:
+                    try:
+                        conn.execute(
+                            f"DELETE FROM messages_fts WHERE message_id IN ({placeholders})",
+                            tuple(message_ids),
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed deleting messages_fts rows by id: {e}")
                 cursor = conn.execute(
                     f"DELETE FROM messages WHERE id IN ({placeholders})",
                     tuple(message_ids),
@@ -688,6 +915,18 @@ class DatabaseManager:
         """
         with self.connection_provider.connection() as conn:
             with conn:
+                if self.fts_available:
+                    try:
+                        safe_sid = session_id.replace('"', '""')
+                        fts_q = "DELETE FROM messages_fts WHERE messages_fts MATCH ? AND CAST(ts AS REAL) < ?"
+                        fts_params: list[Any] = [f'session_id:"{safe_sid}"', timestamp]
+                        if exclude_ids:
+                            excl_ph = ",".join("?" for _ in exclude_ids)
+                            fts_q += f" AND message_id NOT IN ({excl_ph})"
+                            fts_params.extend(exclude_ids)
+                        conn.execute(fts_q, tuple(fts_params))
+                    except Exception as e:
+                        logger.warning(f"Failed deleting older messages_fts rows in session '{session_id}': {e}")
                 query = "DELETE FROM messages WHERE session_id = ? AND timestamp < ?"
                 params = [session_id, timestamp]
                 if exclude_ids:
@@ -1071,27 +1310,51 @@ class DatabaseManager:
 
             return all_msgs
 
-    def get_memory_files_by_role(self, role: str) -> list[dict[str, Any]]:
-        """Retrieve all indexed memory file metadata rows for a role.
+    def get_memory_files_by_role(
+        self,
+        role: str,
+        *,
+        visibility: str | None = None,
+        exclude_pinned: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Retrieve indexed memory file metadata rows for a role.
 
         Args:
             role: Role persona identifier.
+            visibility: Optional exact visibility filter (e.g., `'PINNED'`, `'DEFAULT'`).
+            exclude_pinned: If True, exclude `'PINNED'` and `'HIDDEN'` rows.
 
         Returns:
             List of dictionaries representing rows from ``memory_files``.
         """
         with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
+            clauses = ["role = ?"]
+            params: list[Any] = [role]
+            if visibility is not None:
+                clauses.append("visibility = ?")
+                params.append(visibility)
+            elif exclude_pinned:
+                clauses.append("visibility = 'DEFAULT'")
             cursor.execute(
-                """
-                SELECT id, role, rel_path, description, content_hash, mtime, updated_at
+                f"""
+                SELECT id, role, rel_path, description, visibility, size_bytes, content_hash, mtime, updated_at
                 FROM memory_files
-                WHERE role = ?
+                WHERE {" AND ".join(clauses)}
                 ORDER BY mtime DESC, rel_path ASC
                 """,
-                (role,),
+                tuple(params),
             )
             return [dict(row) for row in cursor.fetchall()]
+
+    def get_memory_role_signature(self, role: str) -> tuple[int, float]:
+        """Return `(file_count, max_updated_at)` for `role` to validate in-memory caches cheaply."""
+        with self.connection_provider.connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*), COALESCE(MAX(updated_at), 0.0) FROM memory_files WHERE role = ?",
+                (role,),
+            ).fetchone()
+            return (int(row[0] or 0), float(row[1] or 0.0)) if row else (0, 0.0)
 
     def upsert_memory_file(
         self,
@@ -1102,6 +1365,9 @@ class DatabaseManager:
         mtime: float,
         updated_at: float,
         chunks: list[tuple[int, str, bytes]],
+        *,
+        visibility: str = "DEFAULT",
+        size_bytes: int = 0,
     ) -> int:
         """Insert or update a memory file entry and replace its chunk embeddings atomically.
 
@@ -1113,23 +1379,31 @@ class DatabaseManager:
             mtime: Filesystem modification timestamp.
             updated_at: Index update timestamp.
             chunks: List of ``(chunk_index, content, embedding_bytes)`` tuples.
+            visibility: `'DEFAULT'`, `'PINNED'`, or `'HIDDEN'`.
+            size_bytes: UTF-8 byte length of the raw file.
 
         Returns:
             The ``memory_files.id`` primary key of the upserted row.
         """
+        norm_vis = (visibility or "DEFAULT").strip().upper()
+        if norm_vis not in {"DEFAULT", "PINNED", "HIDDEN"}:
+            norm_vis = "DEFAULT"
         with self.connection_provider.connection() as conn:
             with conn:
                 conn.execute(
                     """
-                    INSERT INTO memory_files (role, rel_path, description, content_hash, mtime, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO memory_files
+                    (role, rel_path, description, visibility, size_bytes, content_hash, mtime, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(role, rel_path) DO UPDATE SET
                         description = excluded.description,
+                        visibility = excluded.visibility,
+                        size_bytes = excluded.size_bytes,
                         content_hash = excluded.content_hash,
                         mtime = excluded.mtime,
                         updated_at = excluded.updated_at
                     """,
-                    (role, rel_path, description, content_hash, mtime, updated_at),
+                    (role, rel_path, description, norm_vis, max(0, int(size_bytes)), content_hash, mtime, updated_at),
                 )
                 cursor = conn.cursor()
                 cursor.execute(
@@ -1181,23 +1455,27 @@ class DatabaseManager:
                 else:
                     conn.execute("DELETE FROM memory_files")
 
-    def get_memory_chunks_for_role(self, role: str) -> list[sqlite3.Row]:
-        """Fetch all memory chunks joined with their parent file metadata for a role.
+    def get_memory_chunks_for_role(self, role: str, *, include_pinned: bool = True) -> list[sqlite3.Row]:
+        """Fetch memory chunks joined with their parent file metadata for a role.
 
         Args:
             role: Role persona identifier.
+            include_pinned: When False, return only `visibility = 'DEFAULT'` chunks (excluding PINNED and HIDDEN).
 
         Returns:
             List of sqlite3.Row objects with file and chunk fields.
         """
+        vis_clause = "AND mf.visibility != 'HIDDEN'" if include_pinned else "AND mf.visibility = 'DEFAULT'"
         with self.connection_provider.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                """
+                f"""
                 SELECT
                     mf.id AS file_id,
                     mf.rel_path AS rel_path,
                     mf.description AS description,
+                    mf.visibility AS visibility,
+                    mf.size_bytes AS size_bytes,
                     mf.mtime AS mtime,
                     mf.updated_at AS updated_at,
                     mc.chunk_index AS chunk_index,
@@ -1205,7 +1483,7 @@ class DatabaseManager:
                     mc.embedding AS chunk_embedding
                 FROM memory_chunks mc
                 JOIN memory_files mf ON mc.file_id = mf.id
-                WHERE mf.role = ?
+                WHERE mf.role = ? {vis_clause}
                 ORDER BY mf.id ASC, mc.chunk_index ASC
                 """,
                 (role,),
@@ -1380,223 +1658,819 @@ class DatabaseManager:
             last_ts = row[1] if row and row[1] is not None else None
             return count, last_ts
 
-    def get_role_messages_since(
+    # --- Cross-Session Digests, FTS5, and Memory Extraction Cursor DAOs ---
+
+    _DIGEST_SCALAR_COLS = (
+        "session_id, role, chatbot_id, channel_id, title, started_at, last_active_at, "
+        "turn_count, last_user_msgs, context_policy, summary, open_threads, summary_upto_ts, updated_at"
+    )
+    _MSG_EXPLICIT_COLS = (
+        "id, session_id, chatbot_id, channel_id, sender, role, type, content, metadata, "
+        "timestamp, status, parent_id, summary_node_id"
+    )
+
+    def upsert_session_digest(
+        self,
+        session_id: str,
+        role: str,
+        *,
+        chatbot_id: str | None = None,
+        channel_id: str | None = None,
+        title: str | None = None,
+        started_at: float | None = None,
+        last_active_at: float | None = None,
+        turn_count: int | None = None,
+        last_user_msgs: list[str] | str | None = None,
+        context_policy: str | None = None,
+        summary: str | None = None,
+        open_threads: list[str] | str | None = None,
+        summary_upto_ts: float | None = None,
+        embedding: bytes | None = None,
+        updated_at: float | None = None,
+    ) -> None:
+        """Insert or partially update a `session_digests` record and refresh `session_digests_fts`."""
+        if not self.digests_available:
+            return
+        if chatbot_id and chatbot_id.strip().lower() == "cronjob":
+            return
+        now = updated_at if updated_at is not None else time.time()
+        safe_role = role or "default"
+
+        with self.connection_provider.connection() as conn:
+            with conn:
+                existing = conn.execute(
+                    f"SELECT {self._DIGEST_SCALAR_COLS} FROM session_digests WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+
+                if existing is None:
+                    eff_chatbot = chatbot_id
+                    eff_channel = channel_id
+                    eff_title = title if title is not None else ""
+                    eff_started = float(started_at if started_at is not None else now)
+                    eff_active = float(last_active_at if last_active_at is not None else eff_started)
+                    eff_turns = int(turn_count if turn_count is not None else 0)
+                    if isinstance(last_user_msgs, list):
+                        eff_user_msgs = json.dumps(last_user_msgs, ensure_ascii=False)
+                    elif isinstance(last_user_msgs, str):
+                        eff_user_msgs = last_user_msgs
+                    else:
+                        eff_user_msgs = "[]"
+                    eff_policy = context_policy or "full"
+                    eff_summary = summary if summary is not None else ""
+                    if isinstance(open_threads, list):
+                        eff_threads = json.dumps(open_threads, ensure_ascii=False)
+                    elif isinstance(open_threads, str):
+                        eff_threads = open_threads
+                    else:
+                        eff_threads = "[]"
+                    eff_upto = summary_upto_ts
+
+                    conn.execute(
+                        """
+                        INSERT INTO session_digests (
+                            session_id, role, chatbot_id, channel_id, title,
+                            started_at, last_active_at, turn_count, last_user_msgs,
+                            context_policy, summary, open_threads, summary_upto_ts,
+                            embedding, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            session_id,
+                            safe_role,
+                            eff_chatbot,
+                            eff_channel,
+                            eff_title,
+                            eff_started,
+                            eff_active,
+                            eff_turns,
+                            eff_user_msgs,
+                            eff_policy,
+                            eff_summary,
+                            eff_threads,
+                            eff_upto,
+                            embedding,
+                            now,
+                        ),
+                    )
+                else:
+                    eff_role = safe_role if role else str(existing["role"])
+                    eff_chatbot = chatbot_id if chatbot_id is not None else existing["chatbot_id"]
+                    eff_channel = channel_id if channel_id is not None else existing["channel_id"]
+                    eff_title = title if title is not None else str(existing["title"] or "")
+                    eff_started = float(started_at if started_at is not None else existing["started_at"])
+                    eff_active = (
+                        max(float(existing["last_active_at"]), float(last_active_at))
+                        if last_active_at is not None
+                        else float(existing["last_active_at"])
+                    )
+                    eff_turns = int(turn_count if turn_count is not None else existing["turn_count"])
+                    if isinstance(last_user_msgs, list):
+                        eff_user_msgs = json.dumps(last_user_msgs, ensure_ascii=False)
+                    elif isinstance(last_user_msgs, str):
+                        eff_user_msgs = last_user_msgs
+                    else:
+                        eff_user_msgs = str(existing["last_user_msgs"] or "[]")
+                    eff_policy = context_policy if context_policy is not None else str(existing["context_policy"])
+                    eff_summary = summary if summary is not None else str(existing["summary"] or "")
+                    if isinstance(open_threads, list):
+                        eff_threads = json.dumps(open_threads, ensure_ascii=False)
+                    elif isinstance(open_threads, str):
+                        eff_threads = open_threads
+                    else:
+                        eff_threads = str(existing["open_threads"] or "[]")
+                    eff_upto = summary_upto_ts if summary_upto_ts is not None else existing["summary_upto_ts"]
+
+                    if embedding is not None:
+                        conn.execute(
+                            """
+                            UPDATE session_digests SET
+                                role = ?, chatbot_id = ?, channel_id = ?, title = ?,
+                                started_at = ?, last_active_at = ?, turn_count = ?,
+                                last_user_msgs = ?, context_policy = ?, summary = ?,
+                                open_threads = ?, summary_upto_ts = ?, embedding = ?, updated_at = ?
+                            WHERE session_id = ?
+                            """,
+                            (
+                                eff_role,
+                                eff_chatbot,
+                                eff_channel,
+                                eff_title,
+                                eff_started,
+                                eff_active,
+                                eff_turns,
+                                eff_user_msgs,
+                                eff_policy,
+                                eff_summary,
+                                eff_threads,
+                                eff_upto,
+                                embedding,
+                                now,
+                                session_id,
+                            ),
+                        )
+                    else:
+                        conn.execute(
+                            """
+                            UPDATE session_digests SET
+                                role = ?, chatbot_id = ?, channel_id = ?, title = ?,
+                                started_at = ?, last_active_at = ?, turn_count = ?,
+                                last_user_msgs = ?, context_policy = ?, summary = ?,
+                                open_threads = ?, summary_upto_ts = ?, updated_at = ?
+                            WHERE session_id = ?
+                            """,
+                            (
+                                eff_role,
+                                eff_chatbot,
+                                eff_channel,
+                                eff_title,
+                                eff_started,
+                                eff_active,
+                                eff_turns,
+                                eff_user_msgs,
+                                eff_policy,
+                                eff_summary,
+                                eff_threads,
+                                eff_upto,
+                                now,
+                                session_id,
+                            ),
+                        )
+                    safe_role = eff_role
+
+                self._refresh_digest_fts_in_tx(
+                    conn,
+                    session_id=session_id,
+                    role=safe_role,
+                    title=eff_title,
+                    summary=eff_summary,
+                    last_user_msgs_json=eff_user_msgs,
+                )
+
+    def get_session_digest(self, session_id: str) -> dict[str, Any] | None:
+        """Retrieve scalar columns of a single `session_digests` row (never selecting `embedding`)."""
+        if not self.digests_available:
+            return None
+        with self.connection_provider.connection() as conn:
+            row = conn.execute(
+                f"SELECT {self._DIGEST_SCALAR_COLS} FROM session_digests WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def get_recent_session_digests(
         self,
         role: str,
-        since_timestamp: float,
         exclude_session_id: str | None = None,
-        limit: int | None = None,
-    ) -> list[Message]:
-        """Retrieve high-value conversational messages for a role since a timestamp.
-
-        Args:
-            role: The persona role to query.
-            since_timestamp: Fetch messages created after this unix timestamp.
-            exclude_session_id: Optional session ID to exclude from the query.
-            limit: Optional maximum number of messages to return.
-
-        Returns:
-            List of matching Message objects.
-        """
+        since_ts: float = 0.0,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Retrieve recent non-cronjob `session_digests` rows for `role` (never selecting `embedding`)."""
+        if not self.digests_available or limit <= 0:
+            return []
         with self.connection_provider.connection() as conn:
-            query = """
-                SELECT m.* FROM messages m
-                JOIN channel_sessions cs ON m.session_id = cs.session_id
-                LEFT JOIN channel_roles cr_direct
-                  ON cs.chatbot_id = cr_direct.chatbot_id
-                 AND cs.channel_id = cr_direct.channel_id
-                LEFT JOIN (
-                    SELECT session_id,
-                           json_extract(metadata, '$.parent_channel_id') as parent_channel_id
-                    FROM messages
-                    WHERE role = 'user' AND metadata LIKE '%parent_channel_id%'
-                    GROUP BY session_id
-                ) parent_info
-                  ON m.session_id = parent_info.session_id
-                 AND cs.chatbot_id = 'discord'
-                LEFT JOIN channel_roles cr_parent
-                  ON cs.chatbot_id = cr_parent.chatbot_id
-                 AND parent_info.parent_channel_id = cr_parent.channel_id
-                WHERE COALESCE(cr_direct.role, cr_parent.role, 'default') = ?
-                  AND m.timestamp > ?
-                  AND m.role IN ('user', 'assistant')
-                  AND m.type = 'text'
-            """
-            params: list[Any] = [role, since_timestamp]
+            clauses = ["role = ?", "last_active_at >= ?", "COALESCE(LOWER(chatbot_id), '') <> 'cronjob'"]
+            params: list[Any] = [role or "default", float(since_ts)]
             if exclude_session_id:
-                query += " AND m.session_id != ?"
+                clauses.append("session_id <> ?")
                 params.append(exclude_session_id)
+            params.append(int(limit))
+            rows = conn.execute(
+                f"""
+                SELECT {self._DIGEST_SCALAR_COLS}
+                FROM session_digests
+                WHERE {" AND ".join(clauses)}
+                ORDER BY last_active_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+            return [dict(r) for r in rows]
 
-            query += " ORDER BY m.timestamp ASC"
-            if limit is not None:
-                query += " LIMIT ?"
-                params.append(limit)
+    def get_role_digest_embeddings(
+        self,
+        role: str,
+        exclude_session_id: str | None = None,
+        limit: int = 200,
+    ) -> list[sqlite3.Row]:
+        """Fetch bounded non-isolated episode digest embeddings for ambient Tier 3 episode hits."""
+        if not self.digests_available or limit <= 0:
+            return []
+        with self.connection_provider.connection() as conn:
+            clauses = [
+                "role = ?",
+                "context_policy <> 'isolated'",
+                "embedding IS NOT NULL",
+                "COALESCE(LOWER(chatbot_id), '') <> 'cronjob'",
+            ]
+            params: list[Any] = [role or "default"]
+            if exclude_session_id:
+                clauses.append("session_id <> ?")
+                params.append(exclude_session_id)
+            params.append(int(limit))
+            return conn.execute(
+                f"""
+                SELECT session_id, title, summary, last_active_at, context_policy, embedding AS chunk_embedding
+                FROM session_digests
+                WHERE {" AND ".join(clauses)}
+                ORDER BY last_active_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
 
-            cursor = conn.cursor()
-            cursor.execute(query, tuple(params))
-            rows = cursor.fetchall()
-            return [self._row_to_message(row) for row in rows]
-
-    def get_role_session_ids(self, role: str) -> list[str]:
-        """Retrieve all session IDs associated with a specific persona role.
+    def fts_insert_messages(self, entries: Sequence[dict[str, Any]]) -> int:
+        """Idempotently insert conversational message rows into `messages_fts`.
 
         Args:
-            role: The persona role to query.
+            entries: Sequence of dicts containing `message_id`, `session_id`, `persona_role`,
+                `context_policy`, `speaker_role`, `ts`, `raw_excerpt`, and `text`.
 
         Returns:
-            List of session ID strings.
+            Number of newly inserted FTS rows.
         """
-        with self.connection_provider.connection() as conn:
-            query = """
-                SELECT id FROM sessions WHERE role_name = ?
-                UNION
-                SELECT DISTINCT m.session_id
-                FROM messages m
-                LEFT JOIN channel_roles cr ON m.chatbot_id = cr.chatbot_id AND m.channel_id = cr.channel_id
-                WHERE COALESCE(cr.role, 'default') = ?
-                UNION
-                SELECT DISTINCT cs.session_id
-                FROM channel_sessions cs
-                LEFT JOIN channel_roles cr_direct
-                  ON cs.chatbot_id = cr_direct.chatbot_id
-                 AND cs.channel_id = cr_direct.channel_id
-                LEFT JOIN (
-                    SELECT session_id,
-                           json_extract(metadata, '$.parent_channel_id') as parent_channel_id
-                    FROM messages
-                    WHERE role = 'user' AND metadata LIKE '%parent_channel_id%'
-                    GROUP BY session_id
-                ) parent_info
-                  ON cs.session_id = parent_info.session_id
-                 AND cs.chatbot_id = 'discord'
-                LEFT JOIN channel_roles cr_parent
-                  ON cs.chatbot_id = cr_parent.chatbot_id
-                 AND parent_info.parent_channel_id = cr_parent.channel_id
-                WHERE COALESCE(cr_direct.role, cr_parent.role, 'default') = ?
-            """
-            cursor = conn.cursor()
-            cursor.execute(query, (role, role, role))
-            rows = cursor.fetchall()
-            return [row[0] for row in rows if row[0]]
+        if not self.fts_available or not entries:
+            return 0
+        valid = [e for e in entries if e.get("message_id") and e.get("session_id") and e.get("text")]
+        if not valid:
+            return 0
 
-    # Cross Session Context CRUD
-    def get_cross_session_context(self, role: str) -> CrossSessionContext | None:
-        """Retrieve the cross-session context for a specific role.
+        by_session: dict[str, list[dict[str, Any]]] = {}
+        for item in valid:
+            by_session.setdefault(str(item["session_id"]), []).append(item)
 
-        Args:
-            role: The persona role identifier.
-
-        Returns:
-            The CrossSessionContext object if found, None otherwise.
-        """
-        with self.connection_provider.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT * FROM cross_session_contexts WHERE role = ?",
-                (role,),
-            )
-            row = cursor.fetchone()
-            if row:
-                return CrossSessionContext(
-                    role=row["role"],
-                    content=row["content"],
-                    updated_at=row["updated_at"],
-                    status=row["status"],
-                )
-            return None
-
-    def upsert_cross_session_context(self, role: str, content: str) -> None:
-        """Insert or replace a cross-session context record.
-
-        Args:
-            role: Persona role identifier.
-            content: The text content of the consolidated summary context.
-        """
+        inserted = 0
         with self.connection_provider.connection() as conn:
             with conn:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO cross_session_contexts
-                    (role, content, updated_at, status)
-                    VALUES (?, ?, ?, 'idle')
-                    """,
-                    (role, content, time.time()),
-                )
+                for sid, items in by_session.items():
+                    safe_sid = sid.replace('"', '""')
+                    existing_ids = {
+                        str(r[0])
+                        for r in conn.execute(
+                            "SELECT message_id FROM messages_fts WHERE messages_fts MATCH ?",
+                            (f'session_id:"{safe_sid}"',),
+                        ).fetchall()
+                    }
+                    to_insert = [
+                        (
+                            str(it["message_id"]),
+                            sid,
+                            str(it.get("persona_role") or "default"),
+                            str(it.get("context_policy") or "full"),
+                            str(it.get("speaker_role") or "user"),
+                            float(it.get("ts") or 0.0),
+                            str(it.get("raw_excerpt") or ""),
+                            str(it["text"]),
+                        )
+                        for it in items
+                        if str(it["message_id"]) not in existing_ids
+                    ]
+                    if to_insert:
+                        conn.executemany(
+                            """
+                            INSERT INTO messages_fts (
+                                message_id, session_id, persona_role, context_policy,
+                                speaker_role, ts, raw_excerpt, text
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            to_insert,
+                        )
+                        inserted += len(to_insert)
+        return inserted
 
-    def claim_cross_session_context_for_update(self, role: str) -> bool:
-        """Atomically claim lock to update cross-session context for a role.
-
-        If a lock is already held ('updating') but older than 5 minutes (300s),
-        forcibly resets the lock to 'idle' and re-claims it to prevent deadlocks.
-
-        Args:
-            role: The target persona role identifier.
-
-        Returns:
-            True if lock was claimed successfully, False otherwise.
-        """
+    def fts_delete_session(self, session_id: str) -> None:
+        """Remove all FTS5 index entries belonging to `session_id`."""
+        if not self.fts_available:
+            return
+        safe_sid = session_id.replace('"', '""')
         with self.connection_provider.connection() as conn:
             with conn:
-                now = time.time()
-                # 1. Ensure a row for this role exists in the table (INSERT OR IGNORE)
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO cross_session_contexts
-                    (role, content, updated_at, status)
-                    VALUES (?, '', 0.0, 'idle')
-                    """,
-                    (role,),
-                )
-                # 2. Self-heal stale locks older than 300 seconds (5 minutes)
-                conn.execute(
-                    """
-                    UPDATE cross_session_contexts
-                    SET status = 'idle'
-                    WHERE role = ? AND status = 'updating' AND (? - updated_at) > 300
-                    """,
-                    (role, now),
-                )
-                # 3. Try to atomically lock the record (CAS)
-                cursor = conn.execute(
-                    """
-                    UPDATE cross_session_contexts
-                    SET status = 'updating', updated_at = ?
-                    WHERE role = ? AND status = 'idle'
-                    """,
-                    (now, role),
-                )
-                return cursor.rowcount == 1
+                conn.execute("DELETE FROM messages_fts WHERE messages_fts MATCH ?", (f'session_id:"{safe_sid}"',))
+                conn.execute("DELETE FROM session_digests_fts WHERE session_id = ?", (session_id,))
 
-    def release_cross_session_context_lock(self, role: str, content: str, updated_at: float | None = None) -> None:
-        """Release lock on cross-session context, updating the summary content.
+    def fts_search_messages(
+        self,
+        role: str,
+        query: str,
+        limit: int = 40,
+        *,
+        include_isolated: bool = False,
+        exclude_session_id: str | None = None,
+        since_ts: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search `messages_fts` scoped inside `MATCH` by `persona_role` and `context_policy` (`C2`, `R2-2`)."""
+        if not self.fts_available or limit <= 0:
+            return []
+        fts_q = fts_tokenize(query, for_query=True)
+        if not fts_q:
+            return []
 
-        Args:
-            role: Persona role identifier.
-            content: The newly consolidated summary content.
-            updated_at: Optional timestamp to set as the new checkpoint. Defaults to current time.
+        safe_role = (role or "default").replace('"', '""')
+        match_expr = f'(persona_role:"{safe_role}" AND text:({fts_q}))'
+        if not include_isolated:
+            match_expr = f'({match_expr}) NOT context_policy:"isolated"'
+        if exclude_session_id:
+            safe_excl = exclude_session_id.replace('"', '""')
+            match_expr = f'({match_expr}) NOT session_id:"{safe_excl}"'
+
+        sql = """
+            SELECT
+                message_id, session_id, persona_role, context_policy,
+                speaker_role, ts, raw_excerpt, bm25(messages_fts) AS rank
+            FROM messages_fts
+            WHERE messages_fts MATCH ?
+        """
+        params: list[Any] = [match_expr]
+        if since_ts is not None:
+            sql += " AND CAST(ts AS REAL) >= ?"
+            params.append(float(since_ts))
+        sql += " ORDER BY rank ASC LIMIT ?"
+        params.append(int(limit))
+
+        with self.connection_provider.connection() as conn:
+            try:
+                rows = conn.execute(sql, tuple(params)).fetchall()
+                return [dict(r) for r in rows]
+            except sqlite3.OperationalError as e:
+                logger.warning(f"fts_search_messages query failed ({match_expr!r}): {e}")
+                return []
+
+    def fts_search_digests(
+        self,
+        role: str,
+        query: str,
+        limit: int = 5,
+        *,
+        include_isolated: bool = False,
+        exclude_session_id: str | None = None,
+        since_ts: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search `session_digests_fts` joined with scalar `session_digests` metadata (Stage 1)."""
+        if not self.fts_available or not self.digests_available or limit <= 0:
+            return []
+        fts_q = fts_tokenize(query, for_query=True)
+        if not fts_q:
+            return []
+
+        safe_role = (role or "default").replace('"', '""')
+        match_expr = f'role:"{safe_role}" AND text:({fts_q})'
+        clauses = [
+            "session_digests_fts MATCH ?",
+            "sd.role = ?",
+            "COALESCE(LOWER(sd.chatbot_id), '') <> 'cronjob'",
+        ]
+        params: list[Any] = [match_expr, role or "default"]
+        if not include_isolated:
+            clauses.append("sd.context_policy <> 'isolated'")
+        if exclude_session_id:
+            clauses.append("sd.session_id <> ?")
+            params.append(exclude_session_id)
+        if since_ts is not None:
+            clauses.append("sd.last_active_at >= ?")
+            params.append(float(since_ts))
+        params.append(int(limit))
+
+        sql = f"""
+            SELECT
+                sd.session_id, sd.role, sd.chatbot_id, sd.channel_id, sd.title,
+                sd.started_at, sd.last_active_at, sd.turn_count, sd.last_user_msgs,
+                sd.context_policy, sd.summary, sd.open_threads, sd.summary_upto_ts, sd.updated_at,
+                bm25(session_digests_fts) AS rank
+            FROM session_digests_fts
+            JOIN session_digests sd ON sd.session_id = session_digests_fts.session_id
+            WHERE {" AND ".join(clauses)}
+            ORDER BY rank ASC, sd.last_active_at DESC
+            LIMIT ?
         """
         with self.connection_provider.connection() as conn:
-            with conn:
-                ts = updated_at if updated_at is not None else time.time()
-                conn.execute(
-                    """
-                    UPDATE cross_session_contexts
-                    SET content = ?, updated_at = ?, status = 'idle'
-                    WHERE role = ?
-                    """,
-                    (content, ts, role),
-                )
+            try:
+                rows = conn.execute(sql, tuple(params)).fetchall()
+                return [dict(r) for r in rows]
+            except sqlite3.OperationalError as e:
+                logger.warning(f"fts_search_digests query failed ({match_expr!r}): {e}")
+                return []
 
-    def recover_orphaned_context_locks(self) -> int:
-        """Reset any lingering updating locks from past server crashes.
+    def get_messages_text_by_ids(self, message_ids: Sequence[str]) -> dict[str, str]:
+        """Hydrate `id -> content` for `<= 10` displayed snippet IDs via PK lookup (never `embedding`; `R2-3`)."""
+        ids = [str(mid) for mid in message_ids if mid][:10]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self.connection_provider.connection() as conn:
+            rows = conn.execute(
+                f"SELECT id, content FROM messages WHERE id IN ({placeholders})",
+                tuple(ids),
+            ).fetchall()
+            return {str(r["id"]): str(r["content"] or "") for r in rows}
 
-        Returns:
-            The number of locks recovered.
-        """
+    def get_session_view_messages(
+        self,
+        session_id: str,
+        around_message_id: str | None = None,
+        window: int = 6,
+        max_messages: int = 20,
+    ) -> list[Message]:
+        """Fetch bounded conversational messages around `around_message_id` (explicit columns, never `embedding`)."""
+        cap = max(1, min(20, int(max_messages)))
+        win = max(1, int(window))
+        with self.connection_provider.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {self._MSG_EXPLICIT_COLS}
+                FROM messages
+                WHERE session_id = ?
+                  AND type NOT IN (?, ?)
+                ORDER BY timestamp ASC, id ASC
+                """,
+                (session_id, MessageType.THOUGHT, MessageType.SESSION_RENAME),
+            ).fetchall()
+            all_msgs = sort_session_messages([self._row_to_message(r) for r in rows], "grouped")
+            if not all_msgs:
+                return []
+            if around_message_id:
+                center_idx = next((i for i, m in enumerate(all_msgs) if m.id == around_message_id), None)
+                if center_idx is not None:
+                    lo = max(0, center_idx - win)
+                    hi = min(len(all_msgs), center_idx + win + 1)
+                    sliced = all_msgs[lo:hi]
+                    if len(sliced) > cap:
+                        half = cap // 2
+                        new_lo = max(0, center_idx - half)
+                        sliced = all_msgs[new_lo : new_lo + cap]
+                    return sliced
+            take = min(cap, win * 2 + 1)
+            return all_msgs[-take:]
+
+    def get_extraction_cursor(self, session_id: str) -> dict[str, Any] | None:
+        """Retrieve the `memory_extraction_cursors` row for `session_id`."""
+        with self.connection_provider.connection() as conn:
+            try:
+                row = conn.execute(
+                    "SELECT * FROM memory_extraction_cursors WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                return dict(row) if row is not None else None
+            except sqlite3.OperationalError:
+                return None
+
+    def upsert_extraction_cursor(
+        self,
+        session_id: str,
+        role: str,
+        *,
+        last_extracted_msg_ts: float | None = None,
+        last_extracted_msg_id: str | None = None,
+        pending_user_turns: int | None = None,
+        pending_chars: int | None = None,
+        last_run_at: float | None = None,
+        last_reason: str | None = None,
+        tokens_spent: int | None = None,
+        failures: int | None = None,
+    ) -> dict[str, Any]:
+        """Insert or update `memory_extraction_cursors` for `session_id` and return the updated row."""
         with self.connection_provider.connection() as conn:
             with conn:
-                cursor = conn.execute("UPDATE cross_session_contexts SET status = 'idle' WHERE status = 'updating'")
-                return cursor.rowcount
+                prev = conn.execute(
+                    "SELECT * FROM memory_extraction_cursors WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                eff_role = role or (str(prev["role"]) if prev else "default")
+                eff_ts = (
+                    float(last_extracted_msg_ts)
+                    if last_extracted_msg_ts is not None
+                    else (float(prev["last_extracted_msg_ts"]) if prev else 0.0)
+                )
+                eff_id = (
+                    str(last_extracted_msg_id)
+                    if last_extracted_msg_id is not None
+                    else (str(prev["last_extracted_msg_id"]) if prev else "")
+                )
+                eff_turns = (
+                    max(0, int(pending_user_turns))
+                    if pending_user_turns is not None
+                    else (int(prev["pending_user_turns"]) if prev else 0)
+                )
+                eff_chars = (
+                    max(0, int(pending_chars))
+                    if pending_chars is not None
+                    else (int(prev["pending_chars"]) if prev else 0)
+                )
+                eff_run_at = (
+                    float(last_run_at)
+                    if last_run_at is not None
+                    else (prev["last_run_at"] if prev else None)
+                )
+                eff_reason = (
+                    str(last_reason)
+                    if last_reason is not None
+                    else (prev["last_reason"] if prev else None)
+                )
+                eff_tokens = (
+                    max(0, int(tokens_spent))
+                    if tokens_spent is not None
+                    else (int(prev["tokens_spent"]) if prev else 0)
+                )
+                eff_failures = (
+                    max(0, int(failures))
+                    if failures is not None
+                    else (int(prev["failures"]) if prev else 0)
+                )
+                conn.execute(
+                    """
+                    INSERT INTO memory_extraction_cursors (
+                        session_id, role, last_extracted_msg_ts, last_extracted_msg_id,
+                        pending_user_turns, pending_chars, last_run_at, last_reason,
+                        tokens_spent, failures
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        role = excluded.role,
+                        last_extracted_msg_ts = excluded.last_extracted_msg_ts,
+                        last_extracted_msg_id = excluded.last_extracted_msg_id,
+                        pending_user_turns = excluded.pending_user_turns,
+                        pending_chars = excluded.pending_chars,
+                        last_run_at = excluded.last_run_at,
+                        last_reason = excluded.last_reason,
+                        tokens_spent = excluded.tokens_spent,
+                        failures = excluded.failures
+                    """,
+                    (
+                        session_id,
+                        eff_role,
+                        eff_ts,
+                        eff_id,
+                        eff_turns,
+                        eff_chars,
+                        eff_run_at,
+                        eff_reason,
+                        eff_tokens,
+                        eff_failures,
+                    ),
+                )
+                updated = conn.execute(
+                    "SELECT * FROM memory_extraction_cursors WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                return dict(updated) if updated else {}
+
+    def list_extraction_cursors(
+        self,
+        role: str | None = None,
+        min_pending_turns: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List `memory_extraction_cursors` rows optionally filtered by `role` and `pending_user_turns`."""
+        with self.connection_provider.connection() as conn:
+            try:
+                clauses = ["pending_user_turns >= ?"]
+                params: list[Any] = [int(min_pending_turns)]
+                if role is not None:
+                    clauses.append("role = ?")
+                    params.append(role)
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM memory_extraction_cursors
+                    WHERE {" AND ".join(clauses)}
+                    ORDER BY pending_user_turns DESC, session_id ASC
+                    """,
+                    tuple(params),
+                ).fetchall()
+                return [dict(r) for r in rows]
+            except sqlite3.OperationalError:
+                return []
+
+    def get_unextracted_messages(
+        self,
+        session_id: str,
+        after_ts: float = 0.0,
+        after_id: str = "",
+        safe_upper: float | tuple[float, str] | None = None,
+        limit: int = 200,
+    ) -> list[Message]:
+        """Select completed, unextracted messages strictly before any in-flight USER turn (`C4`, `R2-1`).
+
+        Bounds `(after_ts, after_id) < (timestamp, id) <= safe_upper`, where `safe_upper` is strictly
+        before the earliest USER anchor with `status IN ('pending_agent', 'processing')`
+        (`MessageStatus.PENDING_AGENT`, `MessageStatus.PROCESSING` — never `'pending'`).
+        Selects explicit scalar columns only (never `embedding`), ordered by `(timestamp ASC, id ASC)`.
+        """
+        if limit <= 0:
+            return []
+        with self.connection_provider.connection() as conn:
+            inflight_anchor = conn.execute(
+                """
+                SELECT timestamp, id
+                FROM messages
+                WHERE session_id = ?
+                  AND role = ?
+                  AND status IN (?, ?)
+                ORDER BY timestamp ASC, id ASC
+                LIMIT 1
+                """,
+                (
+                    session_id,
+                    MessageRole.USER,
+                    MessageStatus.PENDING_AGENT,
+                    MessageStatus.PROCESSING,
+                ),
+            ).fetchone()
+
+            clauses = [
+                "session_id = ?",
+                "type != ?",
+                "COALESCE(LOWER(chatbot_id), '') <> 'cronjob'",
+                "NOT (role = 'user' AND LOWER(sender) IN ('cronjob', 'system'))",
+                "json_extract(metadata, '$.prompt_blocked') IS NULL",
+                "(timestamp > ? OR (timestamp = ? AND id > ?))",
+            ]
+            params: list[Any] = [
+                session_id,
+                MessageType.SESSION_RENAME,
+                float(after_ts),
+                float(after_ts),
+                str(after_id or ""),
+            ]
+
+            if inflight_anchor is not None:
+                inf_ts = float(inflight_anchor["timestamp"])
+                inf_id = str(inflight_anchor["id"])
+                clauses.append("(timestamp < ? OR (timestamp = ? AND id < ?))")
+                params.extend([inf_ts, inf_ts, inf_id])
+
+            if isinstance(safe_upper, tuple) and len(safe_upper) == 2:
+                up_ts, up_id = float(safe_upper[0]), str(safe_upper[1])
+                clauses.append("(timestamp < ? OR (timestamp = ? AND id <= ?))")
+                params.extend([up_ts, up_ts, up_id])
+            elif isinstance(safe_upper, (int, float)):
+                clauses.append("timestamp <= ?")
+                params.append(float(safe_upper))
+
+            params.append(max(1, min(200, int(limit))))
+            rows = conn.execute(
+                f"""
+                SELECT {self._MSG_EXPLICIT_COLS}
+                FROM messages
+                WHERE {" AND ".join(clauses)}
+                ORDER BY timestamp ASC, id ASC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+            return [self._row_to_message(r) for r in rows]
+
+    def log_extraction(
+        self,
+        *,
+        role: str,
+        session_id: str | None,
+        reason: str,
+        started_at: float,
+        finished_at: float,
+        status: str,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        ops_applied: int = 0,
+        error: str | None = None,
+    ) -> None:
+        """Append an observability entry to `memory_extraction_log`."""
+        with self.connection_provider.connection() as conn:
+            try:
+                with conn:
+                    conn.execute(
+                        """
+                        INSERT INTO memory_extraction_log (
+                            role, session_id, reason, started_at, finished_at,
+                            status, input_tokens, output_tokens, ops_applied, error
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            role,
+                            session_id,
+                            reason,
+                            float(started_at),
+                            float(finished_at),
+                            status,
+                            int(input_tokens),
+                            int(output_tokens),
+                            int(ops_applied),
+                            error,
+                        ),
+                    )
+            except sqlite3.OperationalError as e:
+                logger.warning(f"Failed writing memory_extraction_log: {e}")
+
+    def get_daily_extraction_tokens(self, role: str, since_ts: float | None = None) -> int:
+        """Return total extraction tokens (`input_tokens + output_tokens`) spent by `role` since local midnight."""
+        if since_ts is None:
+            now = datetime.datetime.now()
+            since_ts = datetime.datetime(now.year, now.month, now.day).timestamp()
+        with self.connection_provider.connection() as conn:
+            try:
+                row = conn.execute(
+                    """
+                    SELECT COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)
+                    FROM memory_extraction_log
+                    WHERE role = ? AND started_at >= ?
+                    """,
+                    (role, float(since_ts)),
+                ).fetchone()
+                return int(row[0] or 0) if row else 0
+            except sqlite3.OperationalError:
+                return 0
+
+    def get_recent_extraction_logs(
+        self,
+        role: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return most recent `memory_extraction_log` rows."""
+        with self.connection_provider.connection() as conn:
+            try:
+                if role:
+                    rows = conn.execute(
+                        "SELECT * FROM memory_extraction_log WHERE role = ? ORDER BY id DESC LIMIT ?",
+                        (role, int(limit)),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM memory_extraction_log ORDER BY id DESC LIMIT ?",
+                        (int(limit),),
+                    ).fetchall()
+                return [dict(r) for r in rows]
+            except sqlite3.OperationalError:
+                return []
+
+    def get_fts_backfill_state(self, name: str = "messages_fts") -> dict[str, Any] | None:
+        """Retrieve `fts_backfill_state` checkpoint row."""
+        with self.connection_provider.connection() as conn:
+            try:
+                row = conn.execute("SELECT * FROM fts_backfill_state WHERE name = ?", (name,)).fetchone()
+                return dict(row) if row is not None else None
+            except sqlite3.OperationalError:
+                return None
+
+    def upsert_fts_backfill_state(
+        self,
+        name: str,
+        last_ts: float,
+        last_id: str,
+        done: bool,
+    ) -> None:
+        """Persist `fts_backfill_state` checkpoint."""
+        with self.connection_provider.connection() as conn:
+            try:
+                with conn:
+                    conn.execute(
+                        """
+                        INSERT INTO fts_backfill_state (name, last_ts, last_id, done)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(name) DO UPDATE SET
+                            last_ts = excluded.last_ts,
+                            last_id = excluded.last_id,
+                            done = excluded.done
+                        """,
+                        (name, float(last_ts), str(last_id), 1 if done else 0),
+                    )
+            except sqlite3.OperationalError as e:
+                logger.warning(f"Failed updating fts_backfill_state: {e}")
 
     def _row_to_summary_node(self, row: sqlite3.Row) -> SummaryNode:
         """Convert a sqlite Row to a SummaryNode Pydantic model."""
@@ -2047,9 +2921,17 @@ class AsyncDatabaseManager:
         """
         return await asyncio.to_thread(self.sync_db.get_session_history_by_ranges, session_id, ranges, order)
 
-    async def get_memory_files_by_role(self, role: str) -> list[dict[str, Any]]:
-        """Retrieve all indexed memory file metadata rows for a role."""
-        return await asyncio.to_thread(self.sync_db.get_memory_files_by_role, role)
+    async def get_memory_files_by_role(
+        self,
+        role: str,
+        *,
+        visibility: str | None = None,
+        exclude_pinned: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Retrieve indexed memory file metadata rows for a role."""
+        return await asyncio.to_thread(
+            lambda: self.sync_db.get_memory_files_by_role(role, visibility=visibility, exclude_pinned=exclude_pinned)
+        )
 
     async def upsert_memory_file(
         self,
@@ -2060,17 +2942,23 @@ class AsyncDatabaseManager:
         mtime: float,
         updated_at: float,
         chunks: list[tuple[int, str, bytes]],
+        *,
+        visibility: str = "DEFAULT",
+        size_bytes: int = 0,
     ) -> int:
         """Insert or update a memory file entry and replace its chunk embeddings atomically."""
         return await asyncio.to_thread(
-            self.sync_db.upsert_memory_file,
-            role,
-            rel_path,
-            description,
-            content_hash,
-            mtime,
-            updated_at,
-            chunks,
+            lambda: self.sync_db.upsert_memory_file(
+                role,
+                rel_path,
+                description,
+                content_hash,
+                mtime,
+                updated_at,
+                chunks,
+                visibility=visibility,
+                size_bytes=size_bytes,
+            )
         )
 
     async def delete_memory_files_by_ids(self, file_ids: list[int]) -> None:
@@ -2081,9 +2969,11 @@ class AsyncDatabaseManager:
         """Delete all indexed memory files and chunks (for a specific role or all roles)."""
         await asyncio.to_thread(self.sync_db.clear_role_memory_index, role)
 
-    async def get_memory_chunks_for_role(self, role: str) -> list[sqlite3.Row]:
-        """Fetch all memory chunks joined with their parent file metadata for a role."""
-        return await asyncio.to_thread(self.sync_db.get_memory_chunks_for_role, role)
+    async def get_memory_chunks_for_role(self, role: str, *, include_pinned: bool = True) -> list[sqlite3.Row]:
+        """Fetch memory chunks joined with their parent file metadata for a role."""
+        return await asyncio.to_thread(
+            lambda: self.sync_db.get_memory_chunks_for_role(role, include_pinned=include_pinned)
+        )
 
     async def save_ui_prompt(self, session_id: str, message_id: str, spec: dict[str, Any]) -> None:
         """Insert or update the spec of an interactive UI prompt."""
@@ -2175,113 +3065,82 @@ class AsyncDatabaseManager:
         """
         return await asyncio.to_thread(self.sync_db.get_cronjob_sent_stats_today, chatbot_id, channel_id)
 
-    async def get_role_messages_since(
+    async def upsert_session_digest(self, session_id: str, role: str, **kwargs: Any) -> None:
+        """Insert or update a session digest asynchronously."""
+        await asyncio.to_thread(lambda: self.sync_db.upsert_session_digest(session_id, role, **kwargs))
+
+    async def get_session_digest(self, session_id: str) -> dict[str, Any] | None:
+        """Retrieve a session digest asynchronously."""
+        return await asyncio.to_thread(self.sync_db.get_session_digest, session_id)
+
+    async def get_recent_session_digests(
         self,
         role: str,
-        since_timestamp: float,
         exclude_session_id: str | None = None,
-        limit: int | None = None,
-    ) -> list[Message]:
-        """Retrieve messages for a role since a specific timestamp.
-
-        Args:
-            role: The role name.
-            since_timestamp: The start timestamp.
-            exclude_session_id: Optional session ID to exclude.
-            limit: Optional maximum number of messages to return.
-
-        Returns:
-            A list of messages.
-        """
+        since_ts: float = 0.0,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Retrieve recent session digests for `role` asynchronously."""
         return await asyncio.to_thread(
-            self.sync_db.get_role_messages_since, role, since_timestamp, exclude_session_id, limit
+            self.sync_db.get_recent_session_digests, role, exclude_session_id, since_ts, limit
         )
 
-    async def get_cross_session_context(self, role: str) -> CrossSessionContext | None:
-        """Retrieve cross-session context for a role.
+    async def fts_insert_messages(self, entries: Sequence[dict[str, Any]]) -> int:
+        """Insert message FTS entries asynchronously."""
+        return await asyncio.to_thread(self.sync_db.fts_insert_messages, entries)
 
-        Args:
-            role: The role name.
+    async def fts_delete_session(self, session_id: str) -> None:
+        """Delete FTS entries for `session_id` asynchronously."""
+        await asyncio.to_thread(self.sync_db.fts_delete_session, session_id)
 
-        Returns:
-            The cross-session context if found, else None.
-        """
-        return await asyncio.to_thread(self.sync_db.get_cross_session_context, role)
+    async def fts_search_messages(self, role: str, query: str, limit: int = 40, **kwargs: Any) -> list[dict[str, Any]]:
+        """Search `messages_fts` asynchronously."""
+        return await asyncio.to_thread(lambda: self.sync_db.fts_search_messages(role, query, limit, **kwargs))
 
-    async def upsert_cross_session_context(self, role: str, content: str) -> None:
-        """Upsert cross-session context for a role.
+    async def fts_search_digests(self, role: str, query: str, limit: int = 5, **kwargs: Any) -> list[dict[str, Any]]:
+        """Search `session_digests_fts` asynchronously."""
+        return await asyncio.to_thread(lambda: self.sync_db.fts_search_digests(role, query, limit, **kwargs))
 
-        Args:
-            role: The role name.
-            content: The context content.
-        """
-        await asyncio.to_thread(self.sync_db.upsert_cross_session_context, role, content)
+    async def get_messages_text_by_ids(self, message_ids: Sequence[str]) -> dict[str, str]:
+        """Hydrate message text for `<= 10` IDs asynchronously."""
+        return await asyncio.to_thread(self.sync_db.get_messages_text_by_ids, message_ids)
 
-    async def claim_cross_session_context_for_update(self, role: str) -> bool:
-        """Claim cross-session context for update by acquiring a lock.
-
-        Args:
-            role: The role name.
-
-        Returns:
-            True if the lock was acquired, False otherwise.
-        """
-        return await asyncio.to_thread(self.sync_db.claim_cross_session_context_for_update, role)
-
-    async def release_cross_session_context_lock(
-        self, role: str, content: str, updated_at: float | None = None
-    ) -> None:
-        """Release the cross-session context lock and update the content.
-
-        Args:
-            role: The role name.
-            content: The new content.
-            updated_at: Optional timestamp to set for the update.
-        """
-        await asyncio.to_thread(self.sync_db.release_cross_session_context_lock, role, content, updated_at)
-
-    async def recover_orphaned_context_locks(self) -> int:
-        """Recover orphaned cross-session context locks.
-
-        Returns:
-            The number of recovered locks.
-        """
-        return await asyncio.to_thread(self.sync_db.recover_orphaned_context_locks)
-
-    async def get_cross_session_memory_updates(
+    async def get_session_view_messages(
         self,
-        role: str,
-        exclude_session_id: str,
-    ) -> tuple[CrossSessionContext | None, list[Message]]:
-        """Get cross-session memory updates for a role, excluding a specific session.
-
-        Args:
-            role: The role name.
-            exclude_session_id: The session ID to exclude from updates.
-
-        Returns:
-            A tuple of (stored_context, new_messages).
-        """
-        stored_ctx = await self.get_cross_session_context(role)
-        last_updated = stored_ctx.updated_at if stored_ctx else 0.0
-
-        new_messages = await self.get_role_messages_since(
-            role=role,
-            since_timestamp=last_updated,
-            exclude_session_id=exclude_session_id,
+        session_id: str,
+        around_message_id: str | None = None,
+        window: int = 6,
+        max_messages: int = 20,
+    ) -> list[Message]:
+        """Retrieve bounded messages around `around_message_id` asynchronously."""
+        return await asyncio.to_thread(
+            self.sync_db.get_session_view_messages, session_id, around_message_id, window, max_messages
         )
-        return stored_ctx, new_messages
 
-    async def get_role_session_ids(self, role: str) -> list[str]:
-        """Retrieve all session IDs associated with a specific persona role (async).
+    async def get_extraction_cursor(self, session_id: str) -> dict[str, Any] | None:
+        """Retrieve extraction cursor asynchronously."""
+        return await asyncio.to_thread(self.sync_db.get_extraction_cursor, session_id)
 
-        Args:
-            role: The persona role to query.
+    async def upsert_extraction_cursor(self, session_id: str, role: str, **kwargs: Any) -> dict[str, Any]:
+        """Upsert extraction cursor asynchronously."""
+        return await asyncio.to_thread(lambda: self.sync_db.upsert_extraction_cursor(session_id, role, **kwargs))
 
-        Returns:
-            List of session ID strings.
-        """
-        return await asyncio.to_thread(self.sync_db.get_role_session_ids, role)
+    async def get_unextracted_messages(
+        self,
+        session_id: str,
+        after_ts: float = 0.0,
+        after_id: str = "",
+        safe_upper: float | tuple[float, str] | None = None,
+        limit: int = 200,
+    ) -> list[Message]:
+        """Retrieve safe unextracted messages asynchronously."""
+        return await asyncio.to_thread(
+            self.sync_db.get_unextracted_messages, session_id, after_ts, after_id, safe_upper, limit
+        )
+
+    async def log_extraction(self, **kwargs: Any) -> None:
+        """Append an extraction log entry asynchronously."""
+        await asyncio.to_thread(lambda: self.sync_db.log_extraction(**kwargs))
 
     async def insert_summary_node(self, node: SummaryNode) -> None:
         """Insert a new summary node into the database (async)."""

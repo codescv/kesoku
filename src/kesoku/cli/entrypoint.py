@@ -16,6 +16,7 @@ from rich.console import Console
 from kesoku.agent.agent import Agent
 from kesoku.cli.chat import run_cli_chat_async
 from kesoku.cli.history import history_app
+from kesoku.cli.memory import memory_app
 from kesoku.cli.service import service_app
 from kesoku.config import get_config, init_config, init_roles, init_skills, load_config
 from kesoku.cron import CronManager
@@ -37,6 +38,7 @@ app.add_typer(wechat_app, name="wechat")
 
 
 app.add_typer(history_app, name="history")
+app.add_typer(memory_app, name="memory")
 
 
 @wechat_app.command("pair")

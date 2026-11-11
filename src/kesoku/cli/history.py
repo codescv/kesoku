@@ -126,6 +126,8 @@ def history_search(
         query,
         limit=limit,
         min_score=threshold,
+        include_pinned=True,
+        allow_sync=True,
     )
 
     if not matches:

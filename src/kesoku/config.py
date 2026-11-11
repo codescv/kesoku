@@ -66,6 +66,32 @@ class WorkspaceConfig(BaseModel):
     )
 
 
+class BackfillContextMarker(BaseModel):
+    """Rule carrying forward a context memory policy across historical turns during backfill."""
+
+    pattern: str = Field(..., description="Regex matched against historical tool call arguments or content")
+    policy: Literal["full", "real_facts_only", "isolated"] = Field(
+        ..., description="Context policy activated when pattern matches"
+    )
+    until: str = Field(default="", description="Optional regex ending the carried-forward policy")
+
+    @model_validator(mode="after")
+    def _validate_marker(self) -> "BackfillContextMarker":
+        """Ensure pattern and optional until regex are valid."""
+        if not self.pattern or not self.pattern.strip():
+            raise ValueError("memory_backfill_context_markers.pattern cannot be empty")
+        try:
+            re.compile(self.pattern)
+        except re.error as e:
+            raise ValueError(f"Invalid backfill marker pattern regex '{self.pattern}': {e}") from e
+        if self.until:
+            try:
+                re.compile(self.until)
+            except re.error as e:
+                raise ValueError(f"Invalid backfill marker until regex '{self.until}': {e}") from e
+        return self
+
+
 class AgentConfig(BaseModel):
     """Agent-level configuration settings."""
 
@@ -235,6 +261,160 @@ class AgentConfig(BaseModel):
             "physical IANA timezone and location; empty disables user-local clock attributes on <current_message>"
         ),
     )
+    memory_pinned_enabled: bool = Field(
+        default=True,
+        description="Whether to inject PINNED memory files into <memory_pinned> each turn",
+    )
+    memory_pinned_max_chars: int = Field(
+        default=2500,
+        description="Maximum character budget for the injected <memory_pinned> block",
+    )
+    memory_pinned_files: list[str] = Field(
+        default_factory=lambda: ["user/profile.md"],
+        description="Allow-listed relative paths under $MEMORY_DIR permitted to declare visibility: PINNED",
+    )
+    recent_sessions_enabled: bool = Field(
+        default=True,
+        description="Whether to inject <recent_sessions> rolling digests on bootstrap or interleaved turns",
+    )
+    recent_sessions_limit: int = Field(
+        default=5,
+        description="Maximum number of recent sibling sessions included in <recent_sessions>",
+    )
+    recent_sessions_window_days: int = Field(
+        default=7,
+        description="Lookback window in days for sibling sessions in <recent_sessions>",
+    )
+    recent_sessions_max_chars: int = Field(
+        default=1200,
+        description="Maximum character budget for the <recent_sessions> block",
+    )
+    memory_isolated_contexts: list[str] = Field(
+        default_factory=list,
+        description="Glob patterns matched against <context> block names classified as 'isolated'",
+    )
+    memory_filtered_contexts: list[str] = Field(
+        default_factory=list,
+        description="Glob patterns matched against <context> block names classified as 'real_facts_only'",
+    )
+    memory_backfill_context_markers: list[BackfillContextMarker] = Field(
+        default_factory=list,
+        description="Historical tool-call regex markers carrying context policy forward during memory backfill",
+    )
+    memory_extraction_enabled: bool = Field(
+        default=True,
+        description="Whether background cross-session episode memory extraction is enabled",
+    )
+    memory_extraction_model: str = Field(
+        default="",
+        description="Optional model identifier override for background memory extraction (empty uses context model)",
+    )
+    memory_extraction_thinking_level: Literal["minimal", "low", "medium", "high"] = Field(
+        default="minimal",
+        description="Reasoning level for background memory extraction ('minimal' on Gemini maps to 'low' on Claude)",
+    )
+    memory_extraction_prompts: list[str] = Field(
+        default_factory=list,
+        description="Optional workspace prompt files appended to the base memory extractor rubric",
+    )
+    memory_extraction_signal_regex: str = Field(
+        default=(
+            r"记住|别忘了|以后都|永远不要|"
+            r"我(是|叫|住在|搬到|对.*过敏|.*不耐受|不吃|忌口)|"
+            r"下周|下个月|出差|航班|酒店"
+        ),
+        description="Configurable regex triggering immediate debounced T1 memory extraction (empty disables signal T1)",
+    )
+    memory_extraction_min_turns: int = Field(
+        default=4,
+        description="Pending human turns threshold triggering batched T1 memory extraction",
+    )
+    memory_extraction_min_chars: int = Field(
+        default=2000,
+        description="Pending character count threshold triggering batched T1 memory extraction",
+    )
+    memory_extraction_debounce_seconds: int = Field(
+        default=60,
+        description="Per-session debounce interval in seconds for signal-triggered T1 extraction",
+    )
+    memory_extraction_idle_seconds: int = Field(
+        default=1800,
+        description="Session inactivity threshold in seconds before T4 idle sweep extracts pending turns",
+    )
+    memory_extraction_daily_token_budget: int = Field(
+        default=400000,
+        description="Daily token budget per role for background memory extraction (T2 close bypasses when exhausted)",
+    )
+    memory_extraction_candidate_files: int = Field(
+        default=4,
+        description="Maximum number of candidate existing memory file bodies shown to the extractor",
+    )
+    memory_file_max_bytes: int = Field(
+        default=12288,
+        description="Byte threshold per memory file above which ConsolidateFile splitting/archiving is enqueued",
+    )
+    memory_consolidation_cron: str = Field(
+        default="0 4 * * *",
+        description="5-field cron schedule for nightly T5 role memory consolidation (empty disables)",
+    )
+    memory_rejected_tags: list[str] = Field(
+        default_factory=list,
+        description="Tags causing an extracted memory op to be dropped by MemoryWriter",
+    )
+    session_search_enabled: bool = Field(
+        default=True,
+        description="Whether session_search and session_view tools are enabled",
+    )
+    session_search_max_results: int = Field(
+        default=5,
+        description="Default maximum number of session groups returned by session_search",
+    )
+
+    @model_validator(mode="after")
+    def _validate_memory_settings(self) -> "AgentConfig":
+        """Validate cross-session memory caps, glob lists, cron expression, and signal regex."""
+        non_negative_fields = (
+            "memory_pinned_max_chars",
+            "recent_sessions_limit",
+            "recent_sessions_window_days",
+            "recent_sessions_max_chars",
+            "memory_extraction_min_turns",
+            "memory_extraction_min_chars",
+            "memory_extraction_debounce_seconds",
+            "memory_extraction_idle_seconds",
+            "memory_extraction_daily_token_budget",
+            "memory_extraction_candidate_files",
+            "memory_file_max_bytes",
+            "session_search_max_results",
+        )
+        for field_name in non_negative_fields:
+            val = getattr(self, field_name)
+            if val < 0:
+                raise ValueError(f"{field_name} ({val}) must be >= 0")
+
+        string_list_fields = (
+            "memory_pinned_files",
+            "memory_isolated_contexts",
+            "memory_filtered_contexts",
+            "memory_extraction_prompts",
+            "memory_rejected_tags",
+        )
+        for list_name in string_list_fields:
+            for item in getattr(self, list_name):
+                if not isinstance(item, str) or not item.strip():
+                    raise ValueError(f"All entries in {list_name} must be non-empty strings")
+
+        if self.memory_extraction_signal_regex:
+            try:
+                re.compile(self.memory_extraction_signal_regex)
+            except re.error as e:
+                raise ValueError(f"Invalid memory_extraction_signal_regex: {e}") from e
+
+        if self.memory_consolidation_cron and len(self.memory_consolidation_cron.split()) != 5:
+            raise ValueError(
+                f"Invalid memory_consolidation_cron '{self.memory_consolidation_cron}': expected 5 cron fields"
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_recent_user_message_budget(self) -> "AgentConfig":

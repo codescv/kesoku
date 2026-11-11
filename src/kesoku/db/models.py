@@ -70,15 +70,6 @@ class AgentMemory(BaseModel):
     embedding: bytes | None = Field(default=None, description="Optional raw binary embedding representation")
 
 
-class CrossSessionContext(BaseModel):
-    """Represents a cross-session context/memory summary for a specific persona role."""
-
-    role: str = Field(..., description="The unique role/persona identifier")
-    content: str = Field(..., description="The summarized memory/context content string")
-    updated_at: float = Field(default_factory=time.time, description="Unix timestamp of last consolidation")
-    status: str = Field(default="idle", description="Lock status: 'idle' or 'updating'")
-
-
 class SummaryNode(BaseModel):
     """Represents a compressed context summary node inside the hierarchical compression forest."""
 

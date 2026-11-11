@@ -163,6 +163,7 @@ def test_search_role_memories_hybrid_and_role_isolation(tmp_path, monkeypatch) -
         "---\ndescription: Writer controller secret\n---\n- Secret controller\n",
         encoding="utf-8",
     )
+    sync_role_memories(db, "coder", str(coder_mem))
     sync_role_memories(db, "writer", str(writer_mem))
 
     matches = search_role_memories(

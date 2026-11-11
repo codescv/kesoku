@@ -5,6 +5,8 @@ from kesoku.agent.tools.media import analyze_media
 from kesoku.agent.tools.memory import (
     list_skills,
     memory_search,
+    session_search,
+    session_view,
     skill_manager,
     use_skill,
 )
@@ -39,6 +41,8 @@ __all__ = [
     "list_skills",
     "use_skill",
     "memory_search",
+    "session_search",
+    "session_view",
     "skill_manager",
     "update_file",
     "read_file",

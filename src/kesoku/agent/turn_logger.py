@@ -58,6 +58,7 @@ class TurnLogger:
         tools: list[Callable[..., Any]],
         response: LLMResponse,
         system_prompt: str | None = None,
+        extra_metrics: dict[str, Any] | None = None,
     ) -> None:
         """Log the raw LLM turn inputs and outputs to a YAML file in the session staging directory.
 
@@ -67,6 +68,7 @@ class TurnLogger:
             tools: List of tools passed to the LLM.
             response: LLMResponse object returned by the LLM.
             system_prompt: Optional global system prompt.
+            extra_metrics: Optional dictionary of additional turn metrics (such as memory injection stats).
         """
         os.makedirs(self.session_staging_dir, exist_ok=True)
         idx = self._get_next_llm_turn_idx()
@@ -154,6 +156,7 @@ class TurnLogger:
                     "candidates_tokens": response.candidates_tokens,
                     "cached_tokens": response.cached_tokens,
                     "total_tokens": response.total_tokens,
+                    **(extra_metrics or {}),
                 },
             },
         }

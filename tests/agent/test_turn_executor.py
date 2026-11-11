@@ -1788,11 +1788,13 @@ async def test_history_compressor_in_place_update(temp_db: str) -> None:
 @pytest.mark.asyncio
 async def test_turn_executor_auto_context_search_injection(temp_db: str, tmp_path: Any, monkeypatch: Any) -> None:
     """Verify that auto context search retrieves and injects progressive disclosure <memory> blocks."""
+    from kesoku.agent.memory_store import sync_role_memories
     from kesoku.agent.turn_executor import TurnExecutor
     from kesoku.constants import MessageRole
     from kesoku.db import DatabaseManager
 
-    DatabaseManager(temp_db).init_tables()
+    db = DatabaseManager(temp_db)
+    db.init_tables()
 
     monkeypatch.setattr("kesoku.utils.embedding.get_embedding", lambda text: [1.0] + [0.0] * 383)
     monkeypatch.setattr(
@@ -1807,6 +1809,7 @@ async def test_turn_executor_auto_context_search_injection(temp_db: str, tmp_pat
         "---\ndescription: 可达鸭头越痛念力越强！\n---\n- 念力攻击说明\n",
         encoding="utf-8",
     )
+    sync_role_memories(db, "role_a", str(mem_dir))
 
     cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db, roles_dir=str(roles_dir)))
     cfg.agent.auto_context_search = True

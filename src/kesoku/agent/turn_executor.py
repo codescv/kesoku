@@ -15,7 +15,14 @@ from typing import TYPE_CHECKING, Any
 import tzlocal
 
 from kesoku.agent.compressor import SCAFFOLD_HEADER, HistoryCompressor, estimate_tokens_calibrated
-from kesoku.agent.context_dir import ContextEntry, build_context_prefix
+from kesoku.agent.context_dir import (
+    ContextEntry,
+    apply_total_budget,
+    collect_context_entries,
+    insert_extra_entries,
+    render_context_blocks,
+)
+from kesoku.agent.context_policy import resolve_context_policy
 from kesoku.agent.history import (
     build_history,
     prepare_history_for_llm,
@@ -23,17 +30,32 @@ from kesoku.agent.history import (
 )
 from kesoku.agent.hooks import run_post_tool_use_hooks, run_stop_hooks
 from kesoku.agent.llm import BaseLLM, LLMResponse
-from kesoku.agent.memory_store import format_ambient_memory_block, render_context_query, search_role_memories
+from kesoku.agent.memory_store import (
+    default_pinned_cache,
+    format_ambient_memory_block,
+    render_context_query,
+    search_role_episodes,
+    search_role_memories,
+)
 from kesoku.agent.repo_rules import RepoRulesManager
+from kesoku.agent.session_digest import (
+    DigestUpdater,
+    extract_bootstrap_extra_context,
+    fetch_recent_digests,
+    format_recent_sessions_block,
+    is_excluded_from_memory,
+    should_render,
+)
 from kesoku.agent.state_snapshot import render_repo_rules, render_running_jobs, render_staging_artifacts
 from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.tools.file import expand_path_variables
 from kesoku.agent.turn_logger import TurnLogger
 from kesoku.config import DiscordChannelOverride, KesokuConfig, resolve_gemini_cache_ttl
 from kesoku.context import KesokuContext
+from kesoku.db.manager import DatabaseManager
 from kesoku.utils.async_fs import async_exists, async_read_text_file, async_write_text_file
 from kesoku.utils.path import PathResolver
-from kesoku.utils.text import truncate_middle
+from kesoku.utils.text import strip_injected_blocks, truncate_middle
 from kesoku.utils.time_utils import humanize_gap, load_user_clock, user_local_stamp
 from kesoku.utils.ui_markup import collapse_ui_blocks, extract_ui_options, parse_multi_selection
 
@@ -45,8 +67,8 @@ from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
-MAX_TOTAL_CROSS_SESSION_CONTEXT_LENGTH = 3000
 MAX_CHATBOT_ERROR_MESSAGE_LENGTH = 500
+_REFERENTIAL_QUERY_RE = re.compile(r"刚才|之前|上次|那个|另一个|继续|下一")
 # Number of silent re-generations attempted when the model returns no content at all
 # (e.g. Vertex safety filtering yields finish_reason=SAFETY with zero parts) before
 # falling back to nudging the model with an explicit system message.
@@ -446,6 +468,17 @@ class TurnExecutor:
         # Per-turn frozen state snapshot (running_jobs / staging_artifacts context blocks). It must be byte-identical
         # across all LLM calls of a turn so the implicit prefix cache keeps hitting; reset on pivot.
         self._snapshot_cache: list[ContextEntry] | None = None
+        # Per-turn frozen cross-session memory blocks: (pinned_block, recent_sessions_block, ambient_block).
+        # Reused across R1..RN (never reset on mid-turn memory writes); reset only on pivot (H1-dev).
+        self._memory_snapshot: tuple[str, str, str] | None = None
+        self._memory_pre_turn_ms: float = 0.0
+        self._pinned_chars: int = 0
+        self._recent_sessions_chars: int = 0
+        self._recent_sessions_rendered: bool = False
+        self._turn_context_policy: str = "full"
+        self._turn_clicked_option: bool = False
+        self._last_final_assistant_msg: Message | None = None
+        self._turn_start_digest_task: asyncio.Task[None] | None = None
         self._has_summaries: bool | None = None
         self._compaction_pending: bool = False
         self._last_turn_prompt_blocked: bool = False
@@ -505,6 +538,10 @@ class TurnExecutor:
             "stream": self._turn_stream,
             "cache_mode": self._turn_cache_mode,
             "used_explicit_cache": self._turn_used_explicit_cache,
+            "memory_pre_turn_ms": self._memory_pre_turn_ms,
+            "pinned_chars": self._pinned_chars,
+            "recent_sessions_chars": self._recent_sessions_chars,
+            "recent_sessions_rendered": self._recent_sessions_rendered,
             "rounds": [dict(r) for r in self._turn_rounds],
         }
         if llm is not None:
@@ -676,9 +713,24 @@ class TurnExecutor:
         last_system_prompt: str | None = None
         last_tools_list: list[Any] = []
         last_llm: BaseLLM | None = None
+        self._last_final_assistant_msg = None
+
+        def _schedule_turn_start_digest(msg: Message) -> None:
+            sync_db = getattr(self.context.db, "_sync", getattr(self.context.db, "sync_db", None))
+            if not isinstance(sync_db, DatabaseManager) or is_excluded_from_memory(msg):
+                return
+
+            async def _touch() -> None:
+                sess_obj = await self.context.db.get_session(self.session_id)
+                role_str = await self._resolve_active_role(msg)
+                await DigestUpdater.touch_at_turn_start(self.context.db, sess_obj, role_str, msg)
+
+            self._turn_start_digest_task = asyncio.create_task(_touch())
+
         try:
             self.tool_runner.tool_context.user_turn = await self._get_session_turns_count()
             self.tool_runner.tool_context.supports_deferred_media = self._resolve_supports_deferred_media(chatbot_id)
+            _schedule_turn_start_digest(current_msg)
             while worker.running:
                 # Check-in before atomic action (Thought Interruption)
                 prev_msg_id = current_msg.id
@@ -696,6 +748,12 @@ class TurnExecutor:
                         chatbot_id
                     )
                     self._snapshot_cache = None
+                    self._memory_snapshot = None
+                    self._memory_pre_turn_ms = 0.0
+                    self._pinned_chars = 0
+                    self._recent_sessions_chars = 0
+                    self._recent_sessions_rendered = False
+                    _schedule_turn_start_digest(current_msg)
                     self._turn_tools_used.clear()
                     self._turn_writes = False
                     self._stop_reminder_fired = False
@@ -956,6 +1014,12 @@ class TurnExecutor:
                             tools=tools_list,
                             response=res,
                             system_prompt=generate_system_prompt,
+                            extra_metrics={
+                                "memory_pre_turn_ms": self._memory_pre_turn_ms,
+                                "pinned_chars": self._pinned_chars,
+                                "recent_sessions_chars": self._recent_sessions_chars,
+                                "recent_sessions_rendered": self._recent_sessions_rendered,
+                            },
                         )
                     except Exception as le:
                         logger.error(f"Failed to log LLM turn: {le}", exc_info=True)
@@ -1020,14 +1084,55 @@ class TurnExecutor:
                         completed_final_response = True
                         break
 
-            # Post-turn phase: run auto-compaction and explicit context cache lifecycle AFTER reply delivery
-            # so neither summarization nor cache creation/refresh/TTL renewal ever adds to TTFT.
+            # Post-turn phase: finalize session digest, FTS5 index, and extraction triggers FIRST
+            # (before `queue_empty()` so queued follow-up messages never starve memory cursor/FTS updates),
+            # then run auto-compaction and explicit context cache lifecycle AFTER reply delivery.
             if (
                 completed_final_response
                 and not self._last_turn_prompt_blocked
                 and last_raw_history is not None
                 and last_llm is not None
             ):
+                if self._turn_start_digest_task is not None and not self._turn_start_digest_task.done():
+                    try:
+                        await self._turn_start_digest_task
+                    except Exception:
+                        pass
+
+                sync_db_post = getattr(self.context.db, "_sync", getattr(self.context.db, "sync_db", None))
+                if isinstance(sync_db_post, DatabaseManager) and not is_excluded_from_memory(current_msg):
+                    try:
+                        post_role = await self._resolve_active_role(current_msg)
+                        turn_msgs_for_fts: list[Message] = [current_msg]
+                        if self._last_final_assistant_msg is not None:
+                            turn_msgs_for_fts.append(self._last_final_assistant_msg)
+                        await DigestUpdater.finalize_after_turn(
+                            self.context.db,
+                            self.session_id,
+                            post_role,
+                            self._turn_context_policy,
+                            turn_msgs_for_fts,
+                            current_user_msg=current_msg,
+                        )
+                        consolidator = getattr(self.context, "memory_consolidator", None)
+                        if consolidator is not None:
+                            await consolidator.notify_turn(
+                                session_id=self.session_id,
+                                role=post_role,
+                                user_msg=current_msg,
+                                assistant_text=(
+                                    self._last_final_assistant_msg.content
+                                    if self._last_final_assistant_msg is not None
+                                    else ""
+                                ),
+                                clicked_option=self._turn_clicked_option,
+                            )
+                    except Exception as mem_post_err:
+                        logger.warning(
+                            f"Post-turn memory digest/consolidator hook failed for session {self.session_id}: "
+                            f"{mem_post_err}"
+                        )
+
                 if not worker.queue_empty():
                     logger.info(
                         f"Skipping post-turn compaction and cache management for session {self.session_id} "
@@ -1411,6 +1516,7 @@ class TurnExecutor:
         # 2.2. Read per-turn context blocks every turn: pinned notes ($STAGING_DIR/notes.md) first, then
         # every $STAGING_DIR/context/*.md in filename order, each rendered as <context name="...">.
         context_blocks_prefix = ""
+        raw_context_entries: list[ContextEntry] = []
         target_staging_dir = session_staging_dir
         if not target_staging_dir and self.context and self.context.config:
             sessions_dir = self.context.config.workspace.sessions_dir
@@ -1420,47 +1526,141 @@ class TurnExecutor:
 
         if target_staging_dir:
             try:
-                context_blocks_prefix = await build_context_prefix(
-                    target_staging_dir,
-                    self.context.config.agent.context_dir_max_chars,
-                    extra_entries=await self._get_state_snapshot_entries(target_staging_dir),
+                raw_context_entries = await collect_context_entries(target_staging_dir, include_policy_only=True)
+                renderable_entries = [e for e in raw_context_entries if e.content]
+                combined_entries = insert_extra_entries(
+                    renderable_entries,
+                    await self._get_state_snapshot_entries(target_staging_dir),
+                )
+                context_blocks_prefix = render_context_blocks(
+                    apply_total_budget(combined_entries, self.context.config.agent.context_dir_max_chars)
                 )
             except Exception as e:
                 logger.warning(f"Failed to build context blocks for session '{self.session_id}': {e}")
+
+        cfg = self.context.config
+        self._turn_context_policy = resolve_context_policy(
+            [e.name for e in raw_context_entries],
+            {e.name: e.memory_policy for e in raw_context_entries},
+            cfg,
+        )
 
         # 3. Prepend Consolidated Passive Synchronization, Preferences, and Context Compression Guidelines
         # (if Bootstrap)
         full_prefix = ""
         if is_bootstrap:
-            disabled_tools = set(self.context.config.agent.disabled_tools)
+            disabled_tools = set(cfg.agent.disabled_tools)
             hints = []
             if "memory_search" not in disabled_tools:
                 hints.append(
                     "- Use `memory_search(query)` to search long-term Markdown memories in `$MEMORY_DIR` for this role."
                 )
+            if cfg.agent.session_search_enabled and "session_search" not in disabled_tools:
+                hints.append(
+                    "- Use `session_search(query)` / `session_view(session_id)` to look up details from sibling "
+                    "sessions of this role."
+                )
             lines = ['<background_context type="sync_guidelines">', *hints, "</background_context>"] if hints else []
             full_prefix = "\n".join(lines) + "\n" if lines else ""
 
-        # 4. Prepend Ambient Progressive-Disclosure Memory Index (if enabled)
-        augmented_context_prefix = ""
-        cfg = self.context.config
-        if cfg.agent.auto_context_search and active_role:
-            raw_query = latest_user_msg.content or ""
-            # Skip when the user merely clicked/picked an option of the previous question.
-            clicked_option = is_clicked_option(raw_query, last_assistant_text)
-            if clicked_option:
-                logger.info("Skipping ambient memory search: user message is a clicked option of the last question")
-            elif len(raw_query.strip()) >= 2:
+        # 4. Build or reuse per-turn frozen memory snapshot (PINNED + <recent_sessions> + <memory>)
+        raw_query = latest_user_msg.content or ""
+        clicked_option = is_clicked_option(raw_query, last_assistant_text)
+        self._turn_clicked_option = clicked_option
+
+        if self._memory_snapshot is None:
+            mem_t0 = time.perf_counter()
+            pinned_block = ""
+            recent_sessions_block = ""
+            augmented_context_prefix = ""
+            sync_db = getattr(self.context.db, "_sync", getattr(self.context.db, "sync_db", None))
+            has_real_db = isinstance(sync_db, DatabaseManager)
+
+            if cfg.agent.memory_pinned_enabled and active_role:
                 try:
-                    context_query = render_context_query(history, latest_user_msg, max_turns=2, max_chars=2000)
-                    augmented_context_prefix = await self._retrieve_auto_search_context(
-                        role=active_role,
-                        query_text=context_query or raw_query.strip(),
-                        semantic_min=cfg.agent.auto_context_search_semantic_min,
-                        limit=cfg.agent.auto_context_search_limit,
+                    memories_dir = self._resolve_memories_dir(active_role)
+                    consolidator = getattr(self.context, "memory_consolidator", None)
+
+                    def _on_over_budget(rel_p: str) -> None:
+                        if consolidator is not None:
+                            from kesoku.agent.memory_consolidator import ConsolidateFile
+
+                            consolidator.enqueue(ConsolidateFile(role=active_role, rel_path=rel_p))
+
+                    pinned_block = await asyncio.to_thread(
+                        lambda: default_pinned_cache.get_block(
+                            active_role,
+                            memories_dir=memories_dir,
+                            max_chars=cfg.agent.memory_pinned_max_chars,
+                            pinned_files=cfg.agent.memory_pinned_files,
+                            db=sync_db if has_real_db else None,
+                            on_over_budget=_on_over_budget,
+                        )
                     )
-                except Exception as se:
-                    logger.warning(f"Failed to retrieve ambient memory context: {se}")
+                except Exception as pe:
+                    logger.warning(f"Failed to load <memory_pinned> for role '{active_role}': {pe}")
+
+            digest_rows: list[dict[str, Any]] = []
+            if (
+                cfg.agent.recent_sessions_enabled
+                and active_role
+                and has_real_db
+                and not is_excluded_from_memory(latest_user_msg)
+            ):
+                try:
+                    digest_rows = await asyncio.to_thread(
+                        fetch_recent_digests,
+                        sync_db,
+                        active_role,
+                        self.session_id,
+                        cfg.agent.recent_sessions_window_days,
+                        cfg.agent.recent_sessions_limit,
+                        float(latest_user_msg.timestamp),
+                    )
+                    prev_human_ts = _find_prev_human_user_timestamp(history, latest_user_idx)
+                    if should_render(is_bootstrap, prev_human_ts, digest_rows):
+                        recent_sessions_block = format_recent_sessions_block(
+                            active_role,
+                            digest_rows,
+                            max_chars=cfg.agent.recent_sessions_max_chars,
+                        )
+                except Exception as de:
+                    logger.warning(f"Failed to build <recent_sessions> for role '{active_role}': {de}")
+
+            if cfg.agent.auto_context_search and active_role:
+                if clicked_option:
+                    logger.info("Skipping ambient memory search: user message is a clicked option of the last question")
+                elif len(raw_query.strip()) >= 2:
+                    try:
+                        extra_ctx = ""
+                        if is_bootstrap and digest_rows:
+                            cleaned_u = strip_injected_blocks(raw_query)
+                            if len(cleaned_u) < 20 or _REFERENTIAL_QUERY_RE.search(cleaned_u):
+                                extra_ctx = extract_bootstrap_extra_context(digest_rows, max_sessions=2, max_chars=600)
+                        context_query = render_context_query(
+                            history,
+                            latest_user_msg,
+                            max_turns=2,
+                            max_chars=2000,
+                            extra_context=extra_ctx,
+                        )
+                        augmented_context_prefix = await self._retrieve_auto_search_context(
+                            role=active_role,
+                            query_text=context_query or raw_query.strip(),
+                            current_session_id=self.session_id,
+                            semantic_min=cfg.agent.auto_context_search_semantic_min,
+                            limit=cfg.agent.auto_context_search_limit,
+                        )
+                    except Exception as se:
+                        logger.warning(f"Failed to retrieve ambient memory context: {se}")
+
+            self._memory_pre_turn_ms = round((time.perf_counter() - mem_t0) * 1000.0, 2)
+            self._pinned_chars = len(pinned_block)
+            self._recent_sessions_chars = len(recent_sessions_block)
+            self._recent_sessions_rendered = bool(recent_sessions_block)
+            self._memory_snapshot = (pinned_block, recent_sessions_block, augmented_context_prefix)
+        else:
+            pinned_block, recent_sessions_block, augmented_context_prefix = self._memory_snapshot
 
         msg_idx = history.index(latest_user_msg)
         copied_msg = latest_user_msg.model_copy()
@@ -1497,6 +1697,8 @@ class TurnExecutor:
 
         copied_msg.content = (
             f"{instructions_prefix}"
+            f"{pinned_block}"
+            f"{recent_sessions_block}"
             f"{context_blocks_prefix}"
             f"{full_prefix}"
             f"{augmented_context_prefix}"
@@ -1552,28 +1754,43 @@ class TurnExecutor:
         limit: int = 5,
         window_size: int = 1,
     ) -> str:
-        """Search relevant Markdown memories for the active role and render a `<memory>` block."""
-        _ = (current_session_id, threshold, window_size)
+        """Search relevant Markdown memories and episode digests (pre-turn `allow_sync=False`)."""
+        _ = (threshold, window_size)
         sync_db = getattr(self.context.db, "_sync", getattr(self.context.db, "sync_db", self.context.db))
         memories_dir = self._resolve_memories_dir(role)
 
-        matches = await asyncio.to_thread(
-            search_role_memories,
-            sync_db,
-            role,
-            query_text,
-            limit=limit,
-            min_score=semantic_min,
-            memories_dir=memories_dir,
-        )
-        if not matches:
+        def _search_both() -> tuple[list[Any], list[Any]]:
+            mem_hits = search_role_memories(
+                sync_db,
+                role,
+                query_text,
+                limit=limit,
+                min_score=semantic_min,
+                memories_dir=memories_dir,
+                include_pinned=False,
+                allow_sync=False,
+            )
+            ep_hits: list[Any] = []
+            if isinstance(sync_db, DatabaseManager):
+                ep_hits = search_role_episodes(
+                    sync_db,
+                    role,
+                    query_text,
+                    exclude_session_id=current_session_id or self.session_id,
+                    limit=2,
+                    min_score=max(0.50, semantic_min),
+                )
+            return mem_hits, ep_hits
+
+        matches, episode_hits = await asyncio.to_thread(_search_both)
+        if not matches and not episode_hits:
             return ""
 
         logger.info(
-            f"Ambient-injected {len(matches)} memory file descriptions for role '{role}' "
+            f"Ambient-injected {len(matches)} memory file(s) and {len(episode_hits)} episode(s) for role '{role}' "
             f"(query: '{query_text[:40]}...')"
         )
-        return format_ambient_memory_block(matches)
+        return format_ambient_memory_block(matches, episode_hits=episode_hits)
 
     def _ensure_repo_rules_manager(
         self,
@@ -2468,6 +2685,7 @@ class TurnExecutor:
             parent_id=current_msg.id,
             metadata=final_meta,
         )
+        self._last_final_assistant_msg = final_msg
         await self.gateway.post(final_msg)
         await self.context.db.update_message_status(current_msg.id, MessageStatus.PROCESSED)
         return False, empty_attempts  # should_continue=False, counter unmodified

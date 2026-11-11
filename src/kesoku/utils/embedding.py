@@ -2,6 +2,7 @@
 
 import array
 import logging
+import threading
 
 import numpy as np
 from fastembed import TextEmbedding
@@ -9,16 +10,26 @@ from fastembed import TextEmbedding
 logger = logging.getLogger(__name__)
 
 _model_instance: TextEmbedding | None = None
+_model_lock = threading.Lock()
 
 
 def get_embedding_model() -> TextEmbedding:
-    """Lazy load and return the TextEmbedding model instance."""
+    """Lazy load and return the TextEmbedding model instance under a thread lock."""
     global _model_instance
     if _model_instance is None:
-        logger.info("Initializing fastembed TextEmbedding model...")
-        _model_instance = TextEmbedding(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-        logger.info("fastembed TextEmbedding model initialized.")
+        with _model_lock:
+            if _model_instance is None:
+                logger.info("Initializing fastembed TextEmbedding model...")
+                _model_instance = TextEmbedding(
+                    model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+                )
+                logger.info("fastembed TextEmbedding model initialized.")
     return _model_instance
+
+
+def prewarm() -> None:
+    """Eagerly initialize the singleton TextEmbedding model on the calling thread."""
+    get_embedding_model()
 
 
 def get_embedding(text: str) -> list[float]:

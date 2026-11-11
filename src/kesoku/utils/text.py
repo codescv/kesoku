@@ -859,3 +859,130 @@ def parse_search_keywords(query: str) -> list[str]:
 
     return result
 
+
+_INJECTED_XML_BLOCKS_RE = re.compile(
+    r"<(?:instructions|memory_pinned\b[^>]*|recent_sessions\b[^>]*|context\b[^>]*|facts|memory|"
+    r"background_context\b[^>]*|relevant_historical_context)>.*?"
+    r"</(?:instructions|memory_pinned|recent_sessions|context|facts|memory|"
+    r"background_context|relevant_historical_context)>\s*",
+    re.DOTALL,
+)
+_CURRENT_MSG_TAG_RE = re.compile(r"</?current_message\b[^>]*>\s*")
+_UI_FENCED_BLOCK_RE = re.compile(r"^[ \t]*```ui[ \t]*\r?\n.*?^[ \t]*```[ \t]*$", re.MULTILINE | re.DOTALL)
+_LEGACY_QUESTION_BLOCK_RE = re.compile(r"\[question:\s*[^\]]+\]")
+
+_FURIGANA_RE = re.compile(
+    r"([\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3005-\u3007]+)"
+    r"\s*[（(][\u3040-\u309f\u30a0-\u30ffー・\s]+[）)]"
+)
+
+_CJK_CHAR_RANGES = r"\u3005-\u3007\u3040-\u309f\u30a0-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+_FTS_SCAN_RE = re.compile(f"([{_CJK_CHAR_RANGES}]+)|([a-zA-Z0-9_]+)")
+_FTS_RESERVED_KEYWORDS = frozenset({"and", "or", "not", "near"})
+
+
+def strip_injected_blocks(text: str) -> str:
+    """Strip system-injected XML wrappers and interactive UI blocks from message text.
+
+    Args:
+        text: Raw message text potentially containing XML context wrappers or UI blocks.
+
+    Returns:
+        Cleaned conversational text.
+    """
+    if not text:
+        return ""
+    cleaned = _INJECTED_XML_BLOCKS_RE.sub("", text)
+    cleaned = _CURRENT_MSG_TAG_RE.sub("", cleaned)
+    cleaned = _UI_FENCED_BLOCK_RE.sub("", cleaned)
+    cleaned = _LEGACY_QUESTION_BLOCK_RE.sub("", cleaned)
+    return cleaned.strip()
+
+
+def strip_furigana(text: str) -> str:
+    """Strip kana readings in parentheses immediately following Kanji (`漢字(かな)` -> `漢字`).
+
+    Args:
+        text: Input string possibly containing Japanese furigana annotations.
+
+    Returns:
+        Text with furigana parentheticals removed.
+    """
+    if not text:
+        return ""
+    return _FURIGANA_RE.sub(r"\1", text)
+
+
+def _tokenize_segment_for_index(segment: str) -> list[str]:
+    """Emit index tokens for a single cleaned text segment."""
+    tokens: list[str] = []
+    for match in _FTS_SCAN_RE.finditer(segment):
+        cjk_run, ascii_word = match.groups()
+        if ascii_word is not None:
+            tokens.append(ascii_word.lower())
+        elif cjk_run is not None:
+            n = len(cjk_run)
+            if n == 1:
+                tokens.append(cjk_run)
+            else:
+                for i in range(n - 1):
+                    tokens.append(cjk_run[i : i + 2])
+                tokens.append(cjk_run[-1])
+    return tokens
+
+
+def fts_tokenize(text: str, *, for_query: bool = False) -> str:
+    """Tokenize CJK and ASCII text for SQLite FTS5 (`unicode61`) indexing or querying.
+
+    Index mode (`for_query=False`):
+      - Strips injected XML blocks and UI blocks.
+      - Appends a furigana-stripped copy (`漢字(かな)` -> `漢字`) when furigana is present so both
+        kana readings and contiguous Kanji bigrams are indexed.
+      - For CJK runs of length `n >= 2`, emits all overlapping bigrams plus the trailing unigram
+        `c_{n-1}` (so single-character prefix queries `c*` match final characters as well).
+      - Isolated single CJK characters emit the unigram; ASCII words are lower-cased.
+
+    Query mode (`for_query=True`):
+      - Strips injected blocks and furigana, discarding punctuation/quotes safely.
+      - CJK runs `>= 2` become adjacent-bigram FTS5 phrases (`"东京 京出 出差"`).
+      - Isolated single CJK characters become FTS5 prefix queries (`猫*`).
+      - ASCII words are lower-cased (quoting FTS5 reserved keywords like `not`/`and`/`or`/`near`).
+
+    Args:
+        text: Raw document or search query string.
+        for_query: True to format as a safe FTS5 MATCH expression; False to format for indexing.
+
+    Returns:
+        Space-delimited token string (or FTS5 query expression).
+    """
+    cleaned = strip_injected_blocks(text)
+    if not cleaned:
+        return ""
+
+    if not for_query:
+        tokens = _tokenize_segment_for_index(cleaned)
+        furi_stripped = strip_furigana(cleaned)
+        if furi_stripped != cleaned:
+            tokens.extend(_tokenize_segment_for_index(furi_stripped))
+        return " ".join(tokens)
+
+    query_source = strip_furigana(cleaned)
+    parts: list[str] = []
+    for match in _FTS_SCAN_RE.finditer(query_source):
+        cjk_run, ascii_word = match.groups()
+        if ascii_word is not None:
+            lower_word = ascii_word.lower()
+            if lower_word in _FTS_RESERVED_KEYWORDS:
+                parts.append(f'"{lower_word}"')
+            else:
+                parts.append(lower_word)
+        elif cjk_run is not None:
+            n = len(cjk_run)
+            if n == 1:
+                parts.append(f"{cjk_run}*")
+            else:
+                bigrams = " ".join(cjk_run[i : i + 2] for i in range(n - 1))
+                parts.append(f'"{bigrams}"')
+    return " ".join(parts)
+
+

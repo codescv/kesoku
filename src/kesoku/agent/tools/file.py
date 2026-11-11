@@ -329,6 +329,187 @@ def _suggestion_text(resolved_missing: str) -> str:
 # ---------------------------------------------------------------------------------------------------------------
 
 
+def _resolve_memory_target(
+    resolved_path: str,
+    context: ToolContext | None,
+) -> tuple[str, str, str, object | None, object] | None:
+    """If `resolved_path` lies inside a role's `$MEMORY_DIR`, return `(role, memories_dir, rel_path, sync_db, cfg)`."""
+    gw = getattr(context, "gateway", None) if context is not None else None
+    gw_ctx = getattr(gw, "context", None) if gw is not None else None
+    cfg = gw_ctx.config if gw_ctx is not None else get_config()
+    db_obj = getattr(gw, "db", None) if gw is not None else None
+    sync_db = getattr(db_obj, "_sync", getattr(db_obj, "sync_db", db_obj)) if db_obj is not None else None
+
+    abs_resolved = os.path.abspath(resolved_path)
+
+    # 1. Check active role's resolved memories directory
+    active_role = _resolve_role_sync(context)
+    try:
+        active_mem_dir = os.path.abspath(PathResolver.get_role_memories_dir(active_role))
+        if os.path.commonpath([active_mem_dir, abs_resolved]) == active_mem_dir and abs_resolved != active_mem_dir:
+            rel_p = os.path.relpath(abs_resolved, active_mem_dir).replace(os.sep, "/")
+            return active_role, active_mem_dir, rel_p, sync_db, cfg
+    except Exception:
+        pass
+
+    # 2. Check workspace roles_dir/<role>/memories/...
+    try:
+        roles_dir = cfg.workspace.roles_dir
+        if not os.path.isabs(roles_dir) and cfg.agent_working_dir:
+            roles_dir = os.path.join(cfg.agent_working_dir, roles_dir)
+        abs_roles = os.path.abspath(roles_dir)
+        if os.path.commonpath([abs_roles, abs_resolved]) == abs_roles and abs_resolved != abs_roles:
+            rel_from_roles = os.path.relpath(abs_resolved, abs_roles).split(os.sep)
+            if len(rel_from_roles) >= 3 and rel_from_roles[1] == "memories":
+                role_name = rel_from_roles[0]
+                mem_dir = os.path.join(abs_roles, role_name, "memories")
+                rel_p = "/".join(rel_from_roles[2:])
+                return role_name, mem_dir, rel_p, sync_db, cfg
+    except Exception:
+        pass
+
+    return None
+
+
+def _post_memory_write_sync(
+    *,
+    role: str,
+    memories_dir: str,
+    rel_path: str,
+    written_bytes: int,
+    sync_db: object | None,
+    cfg: object,
+    context: ToolContext | None,
+) -> None:
+    """Sync SQLite memory embeddings, bump index version, and enqueue ConsolidateFile if over cap."""
+    from kesoku.agent.memory_store import bump_memory_index_version, default_pinned_cache, sync_role_memories
+    from kesoku.db.manager import DatabaseManager
+
+    try:
+        if isinstance(sync_db, DatabaseManager):
+            sync_role_memories(sync_db, role, memories_dir)
+        else:
+            bump_memory_index_version(role)
+        default_pinned_cache.invalidate(role)
+
+        max_bytes = int(getattr(getattr(cfg, "agent", None), "memory_file_max_bytes", 12288) or 12288)
+        if max_bytes > 0 and written_bytes > max_bytes and context is not None:
+            gw_ctx = getattr(getattr(context, "gateway", None), "context", None) or getattr(
+                context, "kesoku_context", None
+            )
+            consolidator = getattr(gw_ctx, "memory_consolidator", None) if gw_ctx is not None else None
+            if consolidator is not None:
+                from kesoku.agent.memory_consolidator import ConsolidateFile
+
+                consolidator.enqueue(ConsolidateFile(role=role, rel_path=rel_path))
+    except Exception:
+        pass
+
+
+def _update_memory_file_locked(
+    file_name: str,
+    resolved_path: str,
+    old_content: str | None,
+    new_content: str,
+    mem_target: tuple[str, str, str, object | None, object],
+    context: ToolContext | None,
+) -> str:
+    """Execute `update_file` under `with_memory_lock()`, enforcing PINNED allow-list and atomic replace (`H5`)."""
+    from kesoku.agent.memory_writer import atomic_write_text, validate_pinned_write, with_memory_lock
+
+    role, memories_dir, rel_path, sync_db, cfg = mem_target
+    pinned_files = list(getattr(getattr(cfg, "agent", None), "memory_pinned_files", ["user/profile.md"]))
+
+    written_bytes = 0
+    with with_memory_lock(memories_dir):
+        if old_content is None or old_content == "":
+            if os.path.isdir(resolved_path):
+                return f"Error: '{file_name}' is a directory."
+            if os.path.exists(resolved_path):
+                try:
+                    with open(resolved_path, encoding="utf-8", errors="replace") as f:
+                        n_lines: int | str = _count_lines(f.read())
+                except OSError:
+                    n_lines = "?"
+                return (
+                    f"Error: File '{file_name}' already exists ({n_lines} lines). To edit it, pass the exact lines to "
+                    "replace as old_content (use read_file to view them). To replace the whole file, pass its full "
+                    "current content as old_content."
+                )
+            if new_content == "":
+                return "Error: new_content is empty."
+            pin_err = validate_pinned_write(rel_path, new_content, pinned_files)
+            if pin_err:
+                return pin_err
+            try:
+                written_bytes = atomic_write_text(resolved_path, new_content)
+            except OSError as e:
+                return f"Error creating file '{file_name}': {e}"
+            out_msg = f"Success: Created file '{file_name}' ({_count_lines(new_content)} lines)."
+        else:
+            if not os.path.exists(resolved_path):
+                return (
+                    f"Error: File '{file_name}' does not exist.{_suggestion_text(resolved_path)} "
+                    "If you meant to create it, omit old_content."
+                )
+            try:
+                with open(resolved_path, encoding="utf-8") as f:
+                    content = f.read()
+            except (OSError, UnicodeDecodeError) as e:
+                return f"Error reading file '{file_name}': {e}"
+
+            needle = old_content
+            note = ""
+            offsets = _find_all(content, needle)
+            stripped = _strip_line_number_prefixes(old_content) if not offsets else None
+            if not offsets and stripped:
+                stripped_offsets = _find_all(content, stripped)
+                if stripped_offsets:
+                    needle, offsets = stripped, stripped_offsets
+                    note = " (note: stripped read_file line-number prefixes from old_content)"
+
+            if not offsets:
+                return _not_found_message(file_name, content, old_content, stripped)
+            if len(offsets) > 2:
+                return _too_many_matches_message(file_name, content, needle, offsets)
+
+            new_file_content = content.replace(needle, new_content)
+            pin_err = validate_pinned_write(rel_path, new_file_content, pinned_files)
+            if pin_err:
+                return pin_err
+            try:
+                written_bytes = atomic_write_text(resolved_path, new_file_content)
+            except OSError as e:
+                return f"Error writing to file '{file_name}': {e}"
+
+            delta = len(new_content) - len(needle)
+            spans = [_block_span(new_file_content, idx + i * delta, len(new_content)) for i, idx in enumerate(offsets)]
+            total = _count_lines(new_file_content)
+            if len(spans) == 1:
+                label = "line" if spans[0][0] == spans[0][1] else "lines"
+                out_msg = (
+                    f"Success: Updated file '{file_name}' (1 replacement at {label} {_fmt_span(spans[0])}; "
+                    f"file now has {total} lines).{note}"
+                )
+            else:
+                where = f"{_fmt_span(spans[0])} and {_fmt_span(spans[1])}"
+                out_msg = (
+                    f"Success: Updated file '{file_name}' (2 replacements; file now has {total} lines).{note} "
+                    f"⚠️ replaced 2 occurrences at lines {where}; if you meant one, include more context."
+                )
+
+    _post_memory_write_sync(
+        role=role,
+        memories_dir=memories_dir,
+        rel_path=rel_path,
+        written_bytes=written_bytes,
+        sync_db=sync_db,
+        cfg=cfg,
+        context=context,
+    )
+    return out_msg
+
+
 def _create_file(file_name: str, resolved_path: str, new_content: str) -> str:
     """Create-mode branch of `update_file` (old_content omitted)."""
     if os.path.isdir(resolved_path):
@@ -384,6 +565,10 @@ def update_file(
         )
 
     resolved_path = PathResolver.resolve(expand_path_variables(file_name, context))
+
+    mem_target = _resolve_memory_target(resolved_path, context)
+    if mem_target is not None:
+        return _update_memory_file_locked(file_name, resolved_path, old_content, new_content, mem_target, context)
 
     if old_content is None or old_content == "":
         return _create_file(file_name, resolved_path, new_content)

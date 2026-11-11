@@ -704,6 +704,14 @@ class Chatbot(ABC):
             if not isinstance(role_name, str) or not role_name:
                 role_name = bot_default or "default"
 
+            # 2c. Trigger T2 close extraction for the outgoing session before creating the new session
+            consolidator = getattr(getattr(self.gateway, "context", None), "memory_consolidator", None)
+            if consolidator is not None and hasattr(consolidator, "notify_close"):
+                try:
+                    await consolidator.notify_close(session.id, role=role_name, reason="new_session")
+                except Exception as e:
+                    logger.warning(f"Failed to notify memory consolidator on clear_session_by_channel: {e}")
+
             is_dm = await self.is_dm_channel(channel_id)
             display_role = role_name.capitalize() if role_name != "default" else "Default"
 
@@ -2567,15 +2575,28 @@ class Chatbot(ABC):
                 f"✨ **Available Personas:** {', '.join(f'`{r}`' for r in sorted(available_roles))}"
             )
 
+        old_session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
+        old_role: str | None = None
+        if old_session:
+            bot_default = resolve_gateway_default_role(self.gateway, self.chatbot_id)
+            old_role = await self.gateway.db.get_channel_role_with_inheritance(
+                self.chatbot_id, channel_id, old_session.id, default=bot_default
+            )
+
         # 1. Update in database
         await self.gateway.db.set_channel_role(self.chatbot_id, channel_id, role_name)
 
         # 2. Rebuild the active session system prompt if a session exists
-        old_session = await self.gateway.db.get_session_by_channel(self.chatbot_id, channel_id)
         if old_session:
             agent = self.gateway.agent
             if agent:
                 await agent.stop_session_worker(old_session.id, immediate=True)
+            consolidator = getattr(getattr(self.gateway, "context", None), "memory_consolidator", None)
+            if consolidator is not None and hasattr(consolidator, "notify_close"):
+                try:
+                    await consolidator.notify_close(old_session.id, role=old_role, reason="role_switch")
+                except Exception as e:
+                    logger.warning(f"Failed to notify memory consolidator on role switch: {e}")
             try:
                 await self.gateway.context.active_jobs.stop_all_for_session(old_session.id)
             except Exception as e:

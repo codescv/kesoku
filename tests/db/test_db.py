@@ -210,47 +210,94 @@ def test_message_crud(db_manager):
 
 
 
-def test_cross_session_context_and_locking(db_manager):
-    """Tests cross-session memory updates and lock mechanics with deadlock self-healing."""
-    db_manager.upsert_cross_session_context(role="default", content="Initial default context summary")
+def test_v2_v3_migrations_drop_legacy_table_and_create_new_schema(tmp_path):
+    """Tests idempotent v2/v3 migrations including dropping legacy cross-session table."""
+    import sqlite3
 
-    # Get context
-    ctx = db_manager.get_cross_session_context("default")
-    assert ctx is not None
-    assert ctx.content == "Initial default context summary"
-    assert ctx.status == "idle"
+    db_file = str(tmp_path / "legacy_upgrade.db")
+    with sqlite3.connect(db_file) as conn:
+        conn.execute(
+            "CREATE TABLE legacy_dummy (id INTEGER PRIMARY KEY)"
+        )
+        conn.execute(
+            "CREATE TABLE cross_session_contexts ("
+            "role TEXT PRIMARY KEY, content TEXT NOT NULL, updated_at REAL NOT NULL, status TEXT"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO cross_session_contexts (role, content, updated_at, status) "
+            "VALUES ('default', 'old summary', 1.0, 'idle')"
+        )
+        conn.commit()
 
-    # Atomically claim update lock
-    locked = db_manager.claim_cross_session_context_for_update("default")
-    assert locked is True
+    mgr = DatabaseManager(db_file)
+    mgr.init_tables()
+    # Second call is idempotent
+    mgr.init_tables()
 
-    # Second lock attempt should fail
-    locked_again = db_manager.claim_cross_session_context_for_update("default")
-    assert locked_again is False
+    assert mgr.digests_available is True
+    assert mgr.fts_available is True
 
-    # Release lock and update content
-    db_manager.release_cross_session_context_lock(role="default", content="Updated context summary")
-    updated_ctx = db_manager.get_cross_session_context("default")
-    assert updated_ctx.content == "Updated context summary"
-    assert updated_ctx.status == "idle"
+    with mgr.connection_provider.connection() as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 3
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
+            ).fetchall()
+        }
+        assert "session_digests" in tables
+        assert "memory_extraction_cursors" in tables
+        assert "memory_extraction_log" in tables
+        assert "messages_fts" in tables
+        assert "session_digests_fts" in tables
+        assert "fts_backfill_state" in tables
+        mgr_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(memory_files)").fetchall()
+        }
+        assert "visibility" in mgr_cols
+        assert "size_bytes" in mgr_cols
+        # Dropped legacy table must no longer exist
+        legacy_exists = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'cross_session_%'"
+        ).fetchone()[0]
+        assert legacy_exists == 0
 
 
-def test_cross_session_context_stale_lock_self_healing(db_manager):
-    """Tests that stale locks older than 5 minutes are self-healed and re-claimable."""
-    # Manually inject a stale lock directly into SQLite table
-    with db_manager.connection_provider.connection() as conn:
-        with conn:
-            conn.execute(
-                """
-                INSERT INTO cross_session_contexts (role, content, updated_at, status)
-                VALUES ('coder_role', 'Coder content', ?, 'updating')
-                """,
-                (time.time() - 301,),  # 301 seconds ago (more than 5 minutes)
-            )
+def test_update_session_title_syncs_digest_and_fts(db_manager):
+    """Tests that renaming a session updates both session_digests and session_digests_fts."""
+    now = time.time()
+    sess = Session(
+        id="sess_rename_1",
+        title="New Session",
+        created_at=now,
+        updated_at=now,
+        role_name="coder",
+    )
+    db_manager.create_session(sess)
+    db_manager.upsert_session_digest(
+        session_id="sess_rename_1",
+        role="coder",
+        chatbot_id="cli",
+        channel_id="chan_1",
+        started_at=now,
+        last_active_at=now,
+        turn_count=1,
+        title="New Session",
+        last_user_msgs=["聊到：Rust 编译器优化"],
+        context_policy="full",
+        updated_at=now,
+    )
 
-    # Claim lock should heal the stale lock and return True
-    locked = db_manager.claim_cross_session_context_for_update("coder_role")
-    assert locked is True
+    db_manager.update_session_title("sess_rename_1", "Rust Borrow Checker 调试")
+    digest = db_manager.get_session_digest("sess_rename_1")
+    assert digest is not None
+    assert digest["title"] == "Rust Borrow Checker 调试"
+
+    fts_hits = db_manager.fts_search_digests(role="coder", query="Borrow")
+    assert len(fts_hits) == 1
+    assert fts_hits[0]["session_id"] == "sess_rename_1"
 
 
 def test_cronjob_thread_aware_stats_and_timestamp(db_manager):

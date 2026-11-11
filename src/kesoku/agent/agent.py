@@ -10,6 +10,7 @@ import os
 from typing import Any
 
 from kesoku.agent.llm import BaseLLM
+from kesoku.agent.memory_consolidator import MemoryConsolidator
 from kesoku.agent.namer import SessionNamer
 from kesoku.agent.tool_runner import ToolRunner
 from kesoku.agent.tools import ToolContext
@@ -230,8 +231,9 @@ class SessionWorker:
                 worker=self,
                 session_staging_dir=session_staging_dir,
             )
-            # Trigger auto session naming asynchronously
-            asyncio.create_task(self._auto_rename_session())
+            # Trigger auto session naming asynchronously while worker is still running
+            if self._running:
+                asyncio.create_task(self._auto_rename_session())
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -278,6 +280,12 @@ class Agent:
         self.workers: dict[str, SessionWorker] = {}
         self._running = False
         self._master_task: asyncio.Task[None] | None = None
+        existing_consolidator = getattr(self.context, "memory_consolidator", None)
+        self.consolidator: MemoryConsolidator = (
+            existing_consolidator
+            if isinstance(existing_consolidator, MemoryConsolidator)
+            else MemoryConsolidator(self.context)
+        )
         self.gateway.register_agent(self)
 
     async def start(self) -> None:
@@ -285,6 +293,7 @@ class Agent:
         self._running = True
         self._master_task = asyncio.current_task()
         logger.info("Kesoku Agent master dispatcher loop started.")
+        await self.consolidator.start()
 
         # Recover orphaned processing messages at startup
         recovered_count = await self.gateway.db.recover_orphaned_processing_messages(threshold_seconds=0.0)
@@ -325,7 +334,7 @@ class Agent:
             logger.info("Agent master dispatcher loop cancelled.")
         finally:
             self._running = False
-            await self.stop_all_workers()
+            await self.stop_all_workers(shutdown_consolidator=True)
 
     async def stop_session_worker(self, session_id: str, immediate: bool = False) -> None:
         """Stop the active session worker for the given session ID.
@@ -344,12 +353,30 @@ class Agent:
             await worker.stop(immediate=immediate)
             self.workers.pop(session_id, None)
 
-    async def stop_all_workers(self) -> None:
-        """Stop all active session workers."""
+        try:
+            await self.consolidator.notify_close(session_id, reason="worker_stop")
+        except Exception as e:
+            logger.warning(f"Failed to trigger T2 memory close in stop_session_worker: {e}")
+
+    async def stop_all_workers(self, *, shutdown_consolidator: bool = False) -> None:
+        """Stop all active session workers and optionally drain `MemoryConsolidator`."""
+        worker_ids = list(self.workers.keys())
         workers = list(self.workers.values())
         if workers:
             await asyncio.gather(*(worker.stop() for worker in workers), return_exceptions=True)
         self.workers.clear()
+
+        for sid in worker_ids:
+            try:
+                await self.consolidator.notify_close(sid, reason="shutdown")
+            except Exception as e:
+                logger.warning(f"Failed to trigger T2 memory close during stop_all_workers for '{sid}': {e}")
+
+        if shutdown_consolidator:
+            try:
+                await self.consolidator.stop(wait_seconds=20.0)
+            except Exception as e:
+                logger.warning(f"Failed stopping MemoryConsolidator cleanly: {e}")
 
     def stop(self) -> None:
         """Signal the agent dispatcher to stop and cancel worker tasks."""
