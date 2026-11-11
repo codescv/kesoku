@@ -161,8 +161,13 @@ def memory_status_cmd(
         pending_sess = sum(1 for c in cursors if int(c.get("pending_user_turns") or 0) > 0)
         pending_turns = sum(int(c.get("pending_user_turns") or 0) for c in cursors)
         failed_sess = sum(1 for c in cursors if int(c.get("failures") or 0) > 0)
-        tokens_today = db.get_daily_extraction_tokens(r_name)
+        tokens_today = db.get_daily_extraction_tokens(r_name, exclude_backfill=True)
+        all_tokens_today = db.get_daily_extraction_tokens(r_name, exclude_backfill=False)
+        backfill_today = max(0, all_tokens_today - tokens_today)
         budget = cfg.agent.memory_extraction_daily_token_budget
+        tokens_str = f"{tokens_today:,} / {budget:,}"
+        if backfill_today > 0:
+            tokens_str += f" (+{backfill_today:,} backfill)"
 
         table.add_row(
             r_name,
@@ -173,7 +178,7 @@ def memory_status_cmd(
             f"{role_fts:,}",
             f"{pending_sess}/{pending_turns}",
             str(failed_sess) if failed_sess == 0 else f"[red]{failed_sess}[/red]",
-            f"{tokens_today:,} / {budget:,}",
+            tokens_str,
             str(get_memory_index_version(r_name)),
         )
 

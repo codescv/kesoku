@@ -2423,21 +2423,28 @@ class DatabaseManager:
             except sqlite3.OperationalError as e:
                 logger.warning(f"Failed writing memory_extraction_log: {e}")
 
-    def get_daily_extraction_tokens(self, role: str, since_ts: float | None = None) -> int:
+    def get_daily_extraction_tokens(
+        self,
+        role: str,
+        since_ts: float | None = None,
+        *,
+        exclude_backfill: bool = True,
+    ) -> int:
         """Return total extraction tokens (`input_tokens + output_tokens`) spent by `role` since local midnight."""
         if since_ts is None:
             now = datetime.datetime.now()
             since_ts = datetime.datetime(now.year, now.month, now.day).timestamp()
         with self.connection_provider.connection() as conn:
             try:
-                row = conn.execute(
-                    """
+                sql = """
                     SELECT COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)
                     FROM memory_extraction_log
                     WHERE role = ? AND started_at >= ?
-                    """,
-                    (role, float(since_ts)),
-                ).fetchone()
+                """
+                params: list[Any] = [role, float(since_ts)]
+                if exclude_backfill:
+                    sql += " AND COALESCE(reason, '') != 'backfill'"
+                row = conn.execute(sql, params).fetchone()
                 return int(row[0] or 0) if row else 0
             except sqlite3.OperationalError:
                 return 0

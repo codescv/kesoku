@@ -331,9 +331,24 @@ async def test_triggers_debounce_budget_backoff_and_consolidate_file_splitter(tm
     out_backoff = await consolidator.run_episode_extract(EpisodeExtract(role="coder", session_id="s_trig"))
     assert out_backoff.status == "backoff"
 
-    # Reset failures and run once (spends 150 tokens > 100 daily budget)
+    # Reset failures and verify CLI `backfill` token logs do NOT starve live daily runtime budget
     should_fail = False
     db.upsert_extraction_cursor("s_trig", "coder", failures=0, last_run_at=0.0)
+    now_wall = time.time()
+    db.log_extraction(
+        role="coder",
+        session_id="s_hist",
+        reason="backfill",
+        started_at=now_wall,
+        finished_at=now_wall + 1.0,
+        input_tokens=500_000,
+        output_tokens=10_000,
+        status="ok",
+    )
+    assert db.get_daily_extraction_tokens("coder") == 0
+    assert db.get_daily_extraction_tokens("coder", exclude_backfill=False) == 510_000
+
+    # Run once live (spends 150 live tokens > 100 daily budget)
     out_ok = await consolidator.run_episode_extract(EpisodeExtract(role="coder", session_id="s_trig"))
     assert out_ok.status == "ok"
 
