@@ -834,3 +834,49 @@ async def test_multi_window_backfill_carries_prior_markers_ignores_late_disk_and
     assert final_cur is not None and final_cur["last_extracted_msg_id"] == "mx_a_115"
     final_trpg_cur = db.get_extraction_cursor(sid_trpg)
     assert final_trpg_cur is not None and final_trpg_cur["last_extracted_msg_id"] == "tr_a_110"
+
+
+@pytest.mark.asyncio
+async def test_minimal_thinking_unsupported_falls_back_to_low(tmp_path, monkeypatch) -> None:
+    """Verify Gemini 400 `THINKING_LEVEL_MINIMAL` auto-falls back to `thinking_level='low'` and caches it."""
+    monkeypatch.setattr("kesoku.utils.embedding.get_embedding", lambda text: [0.1] * 384)
+    monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", lambda texts: [[0.1] * 384 for _ in texts])
+
+    db_path = str(tmp_path / "fallback.db")
+    db = DatabaseManager(db_path)
+    db.init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=db_path, roles_dir=str(tmp_path / "roles")))
+    cfg.agent_working_dir = str(tmp_path)
+
+    seen_levels: list[str] = []
+
+    class StrictFlashLLM(BaseLLM):
+        async def generate(self, **kwargs: Any) -> LLMResponse:
+            lvl = getattr(self, "_last_extraction_thinking_level", "minimal")
+            seen_levels.append(lvl)
+            if lvl == "minimal":
+                raise RuntimeError("400 INVALID_ARGUMENT: Thinking level is unsupported: THINKING_LEVEL_MINIMAL")
+            return LLMResponse(
+                content='{"episode_summary": "ok", "open_threads": [], "ops": []}',
+                prompt_tokens=20,
+                completion_tokens=10,
+                total_tokens=30,
+            )
+
+    ctx = KesokuContext(config=cfg, llm=StrictFlashLLM(), db=db)
+    consolidator = MemoryConsolidator(ctx, prewarm_embeddings=False, enable_timers=False)
+
+    now = 1_760_000_000.0
+    db.create_session(Session(id="s_fb1", title="FB1", created_at=now, updated_at=now, role_name="coder"))
+    _save_turn(db, sid="s_fb1", turn_idx=1, user_text="测试回退机制", asst_text="好的", ts=now + 1)
+    out1 = await consolidator.run_episode_extract(EpisodeExtract(role="coder", session_id="s_fb1"))
+    assert out1.status == "ok"
+    assert seen_levels == ["minimal", "low"]
+
+    # Subsequent extraction goes directly to `low` without another 400 round-trip
+    _save_turn(db, sid="s_fb1", turn_idx=2, user_text="第二轮测试", asst_text="好的", ts=now + 5)
+    out2 = await consolidator.run_episode_extract(EpisodeExtract(role="coder", session_id="s_fb1"))
+    assert out2.status == "ok"
+    assert seen_levels == ["minimal", "low", "low"]
+    await consolidator.stop(wait_seconds=1.0)
+

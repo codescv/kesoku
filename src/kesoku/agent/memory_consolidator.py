@@ -1089,11 +1089,12 @@ class MemoryConsolidator:
             except Exception as e:
                 logger.warning(f"Memory nightly cron tick error: {e}")
 
-    def _resolve_extractor_llm(self) -> BaseLLM:
+    def _resolve_extractor_llm(self, *, force_low: bool = False) -> BaseLLM:
         """Resolve the low-cost extraction LLM (`thinking_level='minimal'` on Gemini, `'low'` on Claude)."""
         cfg = self.context.config
         provider = cfg.agent.context_llm or cfg.agent.llm
-        thinking = resolve_extraction_thinking_level(provider, cfg.agent.memory_extraction_thinking_level)
+        desired = "low" if force_low else cfg.agent.memory_extraction_thinking_level
+        thinking = resolve_extraction_thinking_level(provider, desired)
         model_override = (cfg.agent.memory_extraction_model or "").strip() or None
         if getattr(self.context, "_llm", None) is not None and model_override is None:
             # Respect injected mock LLM in unit tests while recording resolved thinking level for verification.
@@ -1313,8 +1314,24 @@ class MemoryConsolidator:
                     compaction_hints=compaction_summaries,
                 )
             )
-            llm = self._resolve_extractor_llm()
-            res = await llm.generate(prompt=prompt)
+            llm = self._resolve_extractor_llm(
+                force_low=bool(getattr(self, "_minimal_thinking_unsupported", False))
+            )
+            try:
+                res = await llm.generate(prompt=prompt)
+            except Exception as gen_err:
+                err_s = str(gen_err)
+                if not getattr(self, "_minimal_thinking_unsupported", False) and (
+                    "THINKING_LEVEL_MINIMAL" in err_s or "Thinking level is unsupported" in err_s
+                ):
+                    logger.info(
+                        "Extractor model does not support thinking_level='minimal'; falling back to 'low'."
+                    )
+                    self._minimal_thinking_unsupported = True
+                    llm = self._resolve_extractor_llm(force_low=True)
+                    res = await llm.generate(prompt=prompt)
+                else:
+                    raise
             in_tok = int(res.prompt_tokens or 0)
             out_tok = int(res.candidates_tokens or 0)
             if in_tok == 0 and out_tok == 0 and res.total_tokens:
