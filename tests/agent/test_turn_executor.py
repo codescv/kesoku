@@ -2903,3 +2903,242 @@ async def test_user_clock_header_gating_elapsed_and_cache_prefix_immutability(tm
     assert [m.model_dump() for m in prepared_before] == [m.model_dump() for m in prepared_after]
 
 
+@pytest.mark.asyncio
+async def test_turn_executor_skips_post_turn_explicit_cache_overhead_for_unsupported_model_while_preserving_flash(
+    tmp_path: Any,
+) -> None:
+    """Verify `_manage_post_turn_explicit_cache` skips history prep once a model is marked unsupported."""
+    from types import SimpleNamespace
+
+    from kesoku.agent.llm import (
+        _EXPLICIT_CACHE_UNSUPPORTED_LOCK,
+        _EXPLICIT_CACHE_UNSUPPORTED_MODELS,
+        GeminiLLM,
+    )
+    from kesoku.agent.turn_executor import build_history, discard_session_cache_state, prepare_history_for_llm
+    from kesoku.config import ChatbotsConfig, DiscordConfig
+
+    with _EXPLICIT_CACHE_UNSUPPORTED_LOCK:
+        saved_models = set(_EXPLICIT_CACHE_UNSUPPORTED_MODELS)
+        _EXPLICIT_CACHE_UNSUPPORTED_MODELS.clear()
+
+    db_path = str(tmp_path / "h2_cache.db")
+    staging_dir = str(tmp_path / "sessions" / "sess_h2")
+    Path(staging_dir).mkdir(parents=True, exist_ok=True)
+    DatabaseManager(db_path).init_tables()
+
+    cfg = KesokuConfig(
+        agent_working_dir=str(tmp_path),
+        workspace=WorkspaceConfig(db_path=db_path, sessions_dir=str(tmp_path / "sessions")),
+        gemini=GeminiConfig(
+            model_name="gemini-4-hydrogen",
+            context_model_name="gemini-3.8-flash",
+            thinking_level="low",
+            stream=True,
+            context_caching=True,
+            context_caching_mode="explicit",
+            context_caching_threshold=20,
+        ),
+        chatbots=ChatbotsConfig(
+            discord=[
+                DiscordConfig(
+                    enabled=True,
+                    chatbot_id="discord",
+                    bot_token="tok",
+                    channels=[
+                        DiscordChannelOverride(
+                            channels=["flash"],
+                            llm="gemini",
+                            model_name="gemini-3.8-flash",
+                            thinking_level="low",
+                            stream=True,
+                        ),
+                        DiscordChannelOverride(
+                            channels=["general"],
+                            llm="gemini",
+                            thinking_level="low",
+                            stream=True,
+                        ),
+                    ],
+                )
+            ]
+        ),
+    )
+
+    mock_client = MagicMock()
+    cache_create_models: list[str] = []
+
+    def _fake_create_cache(*, model: str, config: Any) -> Any:
+        _ = config
+        cache_create_models.append(model)
+        if model == "gemini-4-hydrogen":
+            raise RuntimeError(
+                "400 INVALID_ARGUMENT: Model 'gemini-4-hydrogen' does not support explicit context caching."
+            )
+        return SimpleNamespace(name=f"cache_for_{model}_{len(cache_create_models)}")
+
+    mock_client.caches.create.side_effect = _fake_create_cache
+
+    try:
+        with patch("google.genai.Client", return_value=mock_client):
+            ctx = KesokuContext(config=cfg)
+            gw = Gateway(context=ctx)
+            await gw.create_session("sess_h2", title="Hydrogen + Flash", chatbot_id="discord", channel_id="general")
+
+            h2_llm = ctx.get_llm()
+            flash_llm = ctx.get_llm(provider="gemini", model_name="gemini-3.8-flash", thinking_level="low")
+            assert isinstance(h2_llm, GeminiLLM)
+            assert isinstance(flash_llm, GeminiLLM)
+            assert h2_llm.model_name == "gemini-4-hydrogen"
+            assert flash_llm.model_name == "gemini-3.8-flash"
+
+            # Stub `generate` on both real `GeminiLLM` instances so no network calls occur during `process_turn`.
+            seen_generates: list[tuple[str, str | None]] = []
+
+            async def _stub_h2_gen(**kw: Any) -> LLMResponse:
+                seen_generates.append(("gemini-4-hydrogen", kw.get("cached_content")))
+                return LLMResponse(content="Hydrogen reply " * 10, prompt_tokens=200, total_tokens=220)
+
+            async def _stub_flash_gen(**kw: Any) -> LLMResponse:
+                seen_generates.append(("gemini-3.8-flash", kw.get("cached_content")))
+                return LLMResponse(content="Flash reply " * 10, prompt_tokens=200, total_tokens=220)
+
+            h2_llm.generate = _stub_h2_gen  # type: ignore[method-assign]
+            flash_llm.generate = _stub_flash_gen  # type: ignore[method-assign]
+
+            # Ensure `#general` override (`ctx.get_llm(provider="gemini", thinking_level="low")`) also shares stub.
+            general_llm = ctx.get_llm(provider="gemini", thinking_level="low")
+            general_llm.generate = _stub_h2_gen  # type: ignore[method-assign]
+
+            tool_runner = MagicMock()
+            tool_runner.tool_registry.get_tools_list.return_value = []
+            tool_runner.tool_context = MagicMock(transitioned_to_session=None)
+
+            worker = MagicMock()
+            worker.active_cache_name = None
+            worker.explicit_caches = {}
+
+            async def _noop_pivot(m: Message) -> Message:
+                return m
+
+            worker.drain_queue_and_pivot.side_effect = _noop_pivot
+            worker.queue_empty.return_value = True
+
+            # Turn 1 on `#general` (`gemini-4-hydrogen`): hits 400 once, marks unsupported, logs INFO (no WARNING).
+            u1 = Message(
+                id="h2_u1",
+                session_id="sess_h2",
+                chatbot_id="discord",
+                channel_id="general",
+                sender="u",
+                role=MessageRole.USER,
+                content="Turn 1 on general " * 10,
+                status=MessageStatus.PENDING_AGENT,
+                metadata={"channel_name": "general"},
+            )
+            await gw.post(u1)
+            ex1 = TurnExecutor("sess_h2", gw, tool_runner, context=ctx)
+            type(worker).running = PropertyMock(side_effect=[True, False])
+            with patch("kesoku.agent.compressor.HistoryCompressor.auto_compact_session", return_value=False):
+                await ex1.process_turn(current_msg=u1, worker=worker, session_staging_dir=staging_dir)
+
+            assert cache_create_models == ["gemini-4-hydrogen"]
+            assert "gemini-4-hydrogen" in _EXPLICIT_CACHE_UNSUPPORTED_MODELS
+            assert general_llm.supports_explicit_cache() is False
+            assert flash_llm.supports_explicit_cache() is True
+            assert worker.explicit_caches == {}
+
+            # Direct check on `_manage_post_turn_explicit_cache`: skips BEFORE `build_history` / `prepare_history`.
+            with (
+                patch("kesoku.agent.turn_executor.build_history", wraps=build_history) as spy_build,
+                patch(
+                    "kesoku.agent.turn_executor.prepare_history_for_llm", wraps=prepare_history_for_llm
+                ) as spy_prepare,
+            ):
+                await ex1._manage_post_turn_explicit_cache(
+                    worker=worker,
+                    llm=general_llm,
+                    cfg=cfg,
+                    current_msg=u1,
+                    system_prompt="sys",
+                    tools_list=[],
+                    session_staging_dir=staging_dir,
+                    compacted_post=False,
+                    used_explicit_cache_last_round=False,
+                    last_context_tokens=200,
+                    last_cached_tokens=0,
+                    last_generate_est_tokens=200,
+                )
+            spy_build.assert_not_called()
+            spy_prepare.assert_not_called()
+            assert cache_create_models == ["gemini-4-hydrogen"]
+
+            # Turn 2 on `#flash` (`gemini-3.8-flash`): creates explicit cache post-turn!
+            u2 = Message(
+                id="h2_u2",
+                session_id="sess_h2",
+                chatbot_id="discord",
+                channel_id="flash",
+                sender="u",
+                role=MessageRole.USER,
+                content="Turn 2 on flash " * 10,
+                status=MessageStatus.PENDING_AGENT,
+                metadata={"channel_name": "flash"},
+            )
+            await gw.post(u2)
+            ex2 = TurnExecutor("sess_h2", gw, tool_runner, context=ctx)
+            type(worker).running = PropertyMock(side_effect=[True, False])
+            with patch("kesoku.agent.compressor.HistoryCompressor.auto_compact_session", return_value=False):
+                await ex2.process_turn(current_msg=u2, worker=worker, session_staging_dir=staging_dir)
+
+            assert cache_create_models == ["gemini-4-hydrogen", "gemini-3.8-flash"]
+            assert "GeminiLLM:gemini-3.8-flash" in worker.explicit_caches
+
+            # Turn 3 on `#flash` reuses the cache; Turn 4 back on `#general` leaves `#flash`'s cache intact!
+            u3 = Message(
+                id="h2_u3",
+                session_id="sess_h2",
+                chatbot_id="discord",
+                channel_id="flash",
+                sender="u",
+                role=MessageRole.USER,
+                content="Turn 3 follow-up on flash",
+                status=MessageStatus.PENDING_AGENT,
+                metadata={"channel_name": "flash"},
+            )
+            await gw.post(u3)
+            ex3 = TurnExecutor("sess_h2", gw, tool_runner, context=ctx)
+            type(worker).running = PropertyMock(side_effect=[True, False])
+            with patch("kesoku.agent.compressor.HistoryCompressor.auto_compact_session", return_value=False):
+                await ex3.process_turn(current_msg=u3, worker=worker, session_staging_dir=staging_dir)
+
+            assert seen_generates[-1] == ("gemini-3.8-flash", "cache_for_gemini-3.8-flash_2")
+
+            u4 = Message(
+                id="h2_u4",
+                session_id="sess_h2",
+                chatbot_id="discord",
+                channel_id="general",
+                sender="u",
+                role=MessageRole.USER,
+                content="Turn 4 back on general",
+                status=MessageStatus.PENDING_AGENT,
+                metadata={"channel_name": "general"},
+            )
+            await gw.post(u4)
+            ex4 = TurnExecutor("sess_h2", gw, tool_runner, context=ctx)
+            type(worker).running = PropertyMock(side_effect=[True, False])
+            with patch("kesoku.agent.compressor.HistoryCompressor.auto_compact_session", return_value=False):
+                await ex4.process_turn(current_msg=u4, worker=worker, session_staging_dir=staging_dir)
+
+            assert seen_generates[-1] == ("gemini-4-hydrogen", None)
+            assert cache_create_models == ["gemini-4-hydrogen", "gemini-3.8-flash"]
+            assert "GeminiLLM:gemini-3.8-flash" in worker.explicit_caches
+            discard_session_cache_state("sess_h2")
+    finally:
+        with _EXPLICIT_CACHE_UNSUPPORTED_LOCK:
+            _EXPLICIT_CACHE_UNSUPPORTED_MODELS.clear()
+            _EXPLICIT_CACHE_UNSUPPORTED_MODELS.update(saved_models)
+
+
+

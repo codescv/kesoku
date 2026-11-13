@@ -13,6 +13,7 @@ import re
 import threading
 import time
 import typing
+import warnings
 from abc import ABC
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterator, Sequence
@@ -35,9 +36,39 @@ _NON_ASCII_RE = re.compile(r'[^\x00-\x7F]')
 
 logger = setup_logger(__name__)
 
-GEMINI_THINKING_LEVELS: frozenset[str] = frozenset({"minimal", "low", "medium", "high"})
+GEMINI_THINKING_LEVELS: frozenset[str] = frozenset({"minimal", "low", "medium", "high", "xhigh"})
 CLAUDE_THINKING_LEVELS: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
 StreamCallback = Callable[[str, str], Awaitable[None]]
+
+_EXPLICIT_CACHE_UNSUPPORTED_MODELS: set[str] = set()
+_EXPLICIT_CACHE_UNSUPPORTED_LOCK = threading.Lock()
+
+
+def is_explicit_cache_unsupported_model(model_name: str) -> bool:
+    """Return True when `model_name` has been recorded as not supporting explicit context caching."""
+    with _EXPLICIT_CACHE_UNSUPPORTED_LOCK:
+        return model_name in _EXPLICIT_CACHE_UNSUPPORTED_MODELS
+
+
+def _mark_explicit_cache_unsupported_model(model_name: str) -> bool:
+    """Record `model_name` as not supporting explicit context caching; return True if newly added."""
+    with _EXPLICIT_CACHE_UNSUPPORTED_LOCK:
+        if model_name in _EXPLICIT_CACHE_UNSUPPORTED_MODELS:
+            return False
+        _EXPLICIT_CACHE_UNSUPPORTED_MODELS.add(model_name)
+        return True
+
+
+def _is_explicit_cache_unsupported_error(err: BaseException | str) -> bool:
+    """Return True when an exception message indicates the model does not support explicit context caching."""
+    err_lower = str(err).lower()
+    return "does not support explicit context caching" in err_lower or "explicit context caching" in err_lower
+
+
+def _resolve_gemini_thinking_level(level: str) -> Any:
+    """Resolve a Gemini `thinking_level` string to `types.ThinkingLevel` (or uppercase wire enum string)."""
+    upper = level.upper()
+    return getattr(types.ThinkingLevel, upper, upper)
 
 
 def _patch_requests_response_utf8_lines(response: requests.Response) -> requests.Response:
@@ -797,6 +828,10 @@ class BaseLLM(ABC):
         """Translate the provider-native response into a standardized LLMResponse."""
         raise NotImplementedError()
 
+    def supports_explicit_cache(self) -> bool:
+        """Return True if this LLM instance supports provider-managed explicit context caching."""
+        return False
+
     async def create_cache(
         self,
         contents: list[Message],
@@ -985,10 +1020,13 @@ class GeminiLLM(BaseLLM):
                 config.tools = tools  # type: ignore
                 config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
         if self.config.thinking_level is not None:
-            config.thinking_config = types.ThinkingConfig(
-                thinking_level=self.config.thinking_level,
-                include_thoughts=True,
-            )
+            resolved_level = _resolve_gemini_thinking_level(self.config.thinking_level)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=r".*is not a valid ThinkingLevel.*", category=UserWarning)
+                config.thinking_config = types.ThinkingConfig(
+                    thinking_level=resolved_level,
+                    include_thoughts=True,
+                )
         if self.config.safety_threshold is not None:
             threshold = self.config.safety_threshold.upper()
             categories = list(CONFIGURABLE_HARM_CATEGORIES)
@@ -1113,6 +1151,14 @@ class GeminiLLM(BaseLLM):
             prompt_feedback=last_prompt_feedback,
         )
 
+    def supports_explicit_cache(self) -> bool:
+        """Return True when explicit Gemini context caching is enabled and supported by `self.model_name`."""
+        return bool(
+            self.config.context_caching
+            and self.config.context_caching_mode != "implicit"
+            and not is_explicit_cache_unsupported_model(self.model_name)
+        )
+
     async def create_cache(
         self,
         contents: list[Message],
@@ -1133,6 +1179,9 @@ class GeminiLLM(BaseLLM):
         Returns:
             The resource name string of the created cache, or None if failed.
         """
+        if is_explicit_cache_unsupported_model(self.model_name):
+            return None
+
         effective_ttl = int(
             ttl_seconds if ttl_seconds is not None else resolve_gemini_cache_ttl(self.config)
         )
@@ -1159,6 +1208,13 @@ class GeminiLLM(BaseLLM):
             logger.info(f"Created Gemini context cache: {cache.name} (ttl={effective_ttl}s)")
             return cache.name
         except Exception as e:
+            if _is_explicit_cache_unsupported_error(e):
+                if _mark_explicit_cache_unsupported_model(self.model_name):
+                    logger.info(
+                        f"Model '{self.model_name}' does not support explicit context caching; "
+                        "falling back to implicit caching."
+                    )
+                return None
             err_lower = str(e).lower()
             if ("invalid_argument" in err_lower or "400" in err_lower) and any(
                 kw in err_lower for kw in ("min", "minimum", "too small", "4096", "token")

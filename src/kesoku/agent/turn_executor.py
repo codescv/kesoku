@@ -29,7 +29,7 @@ from kesoku.agent.history import (
     strip_question_options,
 )
 from kesoku.agent.hooks import run_post_tool_use_hooks, run_stop_hooks
-from kesoku.agent.llm import BaseLLM, LLMResponse
+from kesoku.agent.llm import BaseLLM, LLMResponse, is_explicit_cache_unsupported_model
 from kesoku.agent.memory_store import (
     default_pinned_cache,
     format_ambient_memory_block,
@@ -230,6 +230,32 @@ def _cache_model_key(llm: BaseLLM) -> str:
         or "default"
     )
     return f"{llm.__class__.__name__}:{model_id}"
+
+
+def _llm_supports_explicit_cache(llm: Any) -> bool:
+    """Return True when `llm` supports explicit context caching, preserving mock `GeminiLLM(BaseLLM)` compatibility."""
+    if llm is None:
+        return False
+    if "supports_explicit_cache" in getattr(llm, "__dict__", {}):
+        fn = getattr(llm, "supports_explicit_cache", None)
+        return bool(fn()) if callable(fn) else bool(fn)
+    cls_fn = getattr(type(llm), "supports_explicit_cache", None)
+    if cls_fn is not None and cls_fn is not BaseLLM.supports_explicit_cache:
+        fn = getattr(llm, "supports_explicit_cache", lambda: False)
+        return bool(fn()) if callable(fn) else False
+    if llm.__class__.__name__ == "GeminiLLM":
+        llm_cfg = getattr(llm, "config", None)
+        if llm_cfg is not None:
+            if not getattr(llm_cfg, "context_caching", True):
+                return False
+            if getattr(llm_cfg, "context_caching_mode", "explicit") == "implicit":
+                return False
+        model_name = getattr(llm, "model_name", None) or getattr(llm_cfg, "model_name", None)
+        if isinstance(model_name, str) and is_explicit_cache_unsupported_model(model_name):
+            return False
+        return True
+    fn = getattr(llm, "supports_explicit_cache", lambda: False)
+    return bool(fn()) if callable(fn) else False
 
 
 def _is_cache_invalid_error(exc: BaseException) -> bool:
@@ -498,6 +524,8 @@ class TurnExecutor:
         if cls_name == "GeminiLLM":
             if not cfg.gemini.context_caching:
                 return "disabled"
+            if cfg.gemini.context_caching_mode == "implicit" or not _llm_supports_explicit_cache(llm):
+                return "implicit"
             return str(cfg.gemini.context_caching_mode or "explicit")
         llm_cfg = getattr(llm, "config", None)
         if llm_cfg is not None and getattr(llm_cfg, "context_caching", False):
@@ -1269,7 +1297,7 @@ class TurnExecutor:
             if (
                 not cfg.gemini.context_caching
                 or cfg.gemini.context_caching_mode == "implicit"
-                or llm.__class__.__name__ != "GeminiLLM"
+                or not _llm_supports_explicit_cache(llm)
             ):
                 return
 

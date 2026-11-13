@@ -105,7 +105,7 @@ project_id = "your-gcp-project"
 # GCP Location/Region (Required only if auth_mode = "vertex").
 location = "us-central1"
 
-# Thinking allocation level: "minimal", "low", "medium", "high", or comment out for model default.
+# Thinking allocation level: "minimal", "low", "medium", "high", "xhigh", or comment out for model default.
 thinking_level = "high"
 
 # Whether to enable explicit context caching for long sessions to reduce latency/cost.

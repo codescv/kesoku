@@ -2,6 +2,7 @@
 
 import io
 import json
+import warnings
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -11,6 +12,8 @@ import requests
 from google.genai import _api_client, types
 
 from kesoku.agent.llm import (
+    _EXPLICIT_CACHE_UNSUPPORTED_LOCK,
+    _EXPLICIT_CACHE_UNSUPPORTED_MODELS,
     ClaudeLLM,
     GeminiLLM,
     MockLLM,
@@ -18,6 +21,7 @@ from kesoku.agent.llm import (
     function_to_anthropic_tool,
     get_llm,
     history_to_turns,
+    is_explicit_cache_unsupported_model,
 )
 from kesoku.config import ClaudeConfig, GeminiConfig, KesokuConfig, WorkspaceConfig
 from kesoku.constants import MessageRole, MessageType
@@ -1157,11 +1161,17 @@ def test_get_llm_thinking_level_override_and_validation() -> None:
         assert cfg.gemini.thinking_level == "high"
         mock_warn.assert_not_called()
 
-        g_invalid = get_llm(provider="gemini", config=cfg, thinking_level="xhigh")
+        g_xhigh = get_llm(provider="gemini", config=cfg, thinking_level="xhigh")
+        assert isinstance(g_xhigh, GeminiLLM)
+        assert g_xhigh.config.thinking_level == "xhigh"
+        assert cfg.gemini.thinking_level == "high"
+        mock_warn.assert_not_called()
+
+        g_invalid = get_llm(provider="gemini", config=cfg, thinking_level="max")
         assert isinstance(g_invalid, GeminiLLM)
         assert g_invalid.config.thinking_level == "high"
         mock_warn.assert_called_once()
-        assert "Ignoring unsupported thinking_level 'xhigh' for Gemini" in mock_warn.call_args[0][0]
+        assert "Ignoring unsupported thinking_level 'max' for Gemini" in mock_warn.call_args[0][0]
 
     with (
         patch("kesoku.agent.llm.AnthropicVertex", return_value=MagicMock()),
@@ -1526,6 +1536,130 @@ def test_patch_requests_response_utf8_lines_idempotent_and_bytes_passthrough() -
     _patch_requests_response_utf8_lines(resp_bytes)
     raw_lines = list(resp_bytes.iter_lines(decode_unicode=False))
     assert raw_lines == ["去印度旅游，充满魅力".encode(), "第二行".encode()]
+
+
+def test_gemini_thinking_level_xhigh_config_and_wire_mapping() -> None:
+    """Verify `thinking_level='xhigh'` validates on `GeminiConfig` and maps cleanly to uppercase `'XHIGH'`."""
+    cfg = GeminiConfig(model_name="gemini-4-hydrogen", thinking_level="xhigh", auth_mode="api_key", api_key="test-key")
+    assert cfg.thinking_level == "xhigh"
+
+    with patch("google.genai.Client", return_value=MagicMock()):
+        llm = GeminiLLM(config=cfg)
+        turns, sys_prompt = history_to_turns(None, "Solve this", "System prompt")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            native = llm._build_native_input(turns=turns, system_prompt=sys_prompt, tools=None)
+
+    assert [w for w in caught if issubclass(w.category, UserWarning)] == []
+    gen_cfg = native["config"]
+    assert gen_cfg.thinking_config is not None
+    assert gen_cfg.thinking_config.include_thoughts is True
+    lvl_val = getattr(gen_cfg.thinking_config.thinking_level, "value", gen_cfg.thinking_config.thinking_level)
+    assert lvl_val == "XHIGH"
+    dumped = gen_cfg.thinking_config.model_dump(mode="json", exclude_none=True)
+    assert dumped["thinking_level"] == "XHIGH"
+
+
+@pytest.mark.asyncio
+async def test_gemini_explicit_cache_unsupported_model_detection_and_isolation() -> None:
+    """Verify 400 explicit-cache capability errors mark only that model unsupported, log INFO once, and skip RPCs."""
+    with _EXPLICIT_CACHE_UNSUPPORTED_LOCK:
+        saved = set(_EXPLICIT_CACHE_UNSUPPORTED_MODELS)
+        _EXPLICIT_CACHE_UNSUPPORTED_MODELS.clear()
+
+    try:
+        assert MockLLM().supports_explicit_cache() is False
+        with patch("kesoku.agent.llm.AnthropicVertex", return_value=MagicMock()):
+            assert ClaudeLLM(ClaudeConfig()).supports_explicit_cache() is False
+
+        mock_client = MagicMock()
+
+        def _create_side_effect(*, model: str, config: Any) -> Any:
+            _ = config
+            if model == "gemini-4-hydrogen":
+                raise RuntimeError(
+                    "400 INVALID_ARGUMENT. {'error': {'code': 400, "
+                    "'message': \"Model 'gemini-4-hydrogen' does not support explicit context caching.\", "
+                    "'status': 'INVALID_ARGUMENT'}}"
+                )
+            return SimpleNamespace(name=f"projects/p/locations/global/cachedContents/cache_{model}")
+
+        mock_client.caches.create.side_effect = _create_side_effect
+
+        with patch("google.genai.Client", return_value=mock_client):
+            h2_llm = GeminiLLM(
+                GeminiConfig(
+                    model_name="gemini-4-hydrogen",
+                    context_caching=True,
+                    context_caching_mode="explicit",
+                )
+            )
+            flash_llm = GeminiLLM(
+                GeminiConfig(
+                    model_name="gemini-3.8-flash",
+                    context_caching=True,
+                    context_caching_mode="explicit",
+                )
+            )
+            disabled_llm = GeminiLLM(GeminiConfig(model_name="gemini-3.8-flash", context_caching=False))
+            implicit_llm = GeminiLLM(
+                GeminiConfig(model_name="gemini-3.8-flash", context_caching=True, context_caching_mode="implicit")
+            )
+
+            assert disabled_llm.supports_explicit_cache() is False
+            assert implicit_llm.supports_explicit_cache() is False
+            assert h2_llm.supports_explicit_cache() is True
+            assert flash_llm.supports_explicit_cache() is True
+
+            msg = Message(
+                session_id="s1",
+                chatbot_id="c1",
+                channel_id="ch1",
+                sender="u1",
+                role=MessageRole.USER,
+                content="Hello hydrogen",
+            )
+
+            with (
+                patch("kesoku.agent.llm.logger.info") as mock_info,
+                patch("kesoku.agent.llm.logger.warning") as mock_warn,
+            ):
+                res1 = await h2_llm.create_cache([msg], system_prompt="sys")
+
+            assert res1 is None
+            assert is_explicit_cache_unsupported_model("gemini-4-hydrogen") is True
+            assert "gemini-4-hydrogen" in _EXPLICIT_CACHE_UNSUPPORTED_MODELS
+            assert h2_llm.supports_explicit_cache() is False
+            mock_warn.assert_not_called()
+            info_msgs = [call.args[0] for call in mock_info.call_args_list]
+            assert (
+                "Model 'gemini-4-hydrogen' does not support explicit context caching; falling back to implicit caching."
+                in info_msgs
+            )
+            assert mock_client.caches.create.call_count == 1
+
+            # Second call on `gemini-4-hydrogen` returns None immediately with zero RPCs and zero duplicate logs.
+            with (
+                patch("kesoku.agent.llm.logger.info") as mock_info_2,
+                patch("kesoku.agent.llm.logger.warning") as mock_warn_2,
+            ):
+                res2 = await h2_llm.create_cache([msg], system_prompt="sys")
+
+            assert res2 is None
+            assert mock_client.caches.create.call_count == 1
+            mock_info_2.assert_not_called()
+            mock_warn_2.assert_not_called()
+
+            # `gemini-3.8-flash` remains explicit-cache capable and creates its cache cleanly.
+            assert flash_llm.supports_explicit_cache() is True
+            flash_cache = await flash_llm.create_cache([msg], system_prompt="sys")
+            assert flash_cache == "projects/p/locations/global/cachedContents/cache_gemini-3.8-flash"
+            assert mock_client.caches.create.call_count == 2
+    finally:
+        with _EXPLICIT_CACHE_UNSUPPORTED_LOCK:
+            _EXPLICIT_CACHE_UNSUPPORTED_MODELS.clear()
+            _EXPLICIT_CACHE_UNSUPPORTED_MODELS.update(saved)
+
 
 
 
