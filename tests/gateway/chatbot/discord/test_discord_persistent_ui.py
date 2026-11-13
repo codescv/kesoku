@@ -220,8 +220,11 @@ async def test_button_click_posts_option_and_disables(registered: tuple[object, 
     assert posted.metadata["discord_message_id"] == "777"
     interaction.channel.send.assert_awaited_once_with("<@42> selected: **b [x]**")
     view = interaction.edit_original_response.call_args.kwargs["view"]
-    assert all(c.item.disabled for c in view.children)
+    # Only the clicked button is disabled (and highlighted); the other option stays clickable.
+    assert [c.item.disabled for c in view.children] == [False, True]
+    assert [c.item.style for c in view.children] == [discord.ButtonStyle.primary, discord.ButtonStyle.success]
     assert db.rows[("s", "m")]["answered"] == "b [x]"
+    assert db.rows[("s", "m")]["chosen"] == [1] and db.rows[("s", "m")]["closed"] is False
 
 
 @pytest.mark.asyncio
@@ -308,3 +311,70 @@ async def test_setup_hook_registers_dynamic_items(tmp_path: Any) -> None:
     interaction = MagicMock()
     interaction.client = bot.bot
     assert pui.chatbot_for(interaction) is bot
+
+
+@pytest.mark.asyncio
+async def test_button_card_allows_other_options_after_a_click(registered: tuple[object, _MemoryDB, MagicMock]) -> None:
+    """D then A posts both; D again is rejected; the card closes once every regular option is picked."""
+    client, db, chatbot = registered
+    opts = ["A 收编凪纱", "B 搜刮", "C 推进主线", "D 朗读日记", "🎲 再帮我想 4 个不同的选项"]
+    await db.save_ui_prompt("s", "m", pui.build_question_spec("Q", opts, False, 1))
+    await pui.QuestionButton("s", "m", 3).callback(_interaction(client))
+    assert chatbot.gateway.post.call_args.args[0].content == "D 朗读日记"
+    interaction = _interaction(client)
+    await pui.QuestionButton("s", "m", 0).callback(interaction)
+    assert chatbot.gateway.post.call_args.args[0].content == "A 收编凪纱"
+    assert chatbot.gateway.post.await_count == 2
+    view = interaction.edit_original_response.call_args.kwargs["view"]
+    assert [c.item.disabled for c in view.children] == [True, False, False, True, False]
+    embed = interaction.edit_original_response.call_args.kwargs["embed"]
+    assert embed.footer.text == "✓ D 朗读日记；A 收编凪纱"
+    assert embed.color == discord.Color.blurple()
+    spec = db.rows[("s", "m")]
+    assert spec["chosen"] == [3, 0] and spec["closed"] is False
+    # Re-clicking D: ephemeral notice, nothing posted.
+    interaction = _interaction(client)
+    await pui.QuestionButton("s", "m", 3).callback(interaction)
+    interaction.followup.send.assert_awaited_once_with("✓ Already answered: D 朗读日记", ephemeral=True)
+    assert chatbot.gateway.post.await_count == 2
+    # Picking the remaining regular options closes the card (reroll button disabled too, embed grey).
+    await pui.QuestionButton("s", "m", 1).callback(_interaction(client))
+    interaction = _interaction(client)
+    await pui.QuestionButton("s", "m", 2).callback(interaction)
+    view = interaction.edit_original_response.call_args.kwargs["view"]
+    assert all(c.item.disabled for c in view.children)
+    assert interaction.edit_original_response.call_args.kwargs["embed"].color == pui.EMBED_COLOR_ANSWERED
+    assert db.rows[("s", "m")]["closed"] is True
+    interaction = _interaction(client)
+    await pui.QuestionButton("s", "m", 4).callback(interaction)
+    interaction.followup.send.assert_awaited_once()
+    assert chatbot.gateway.post.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_reroll_button_closes_card(registered: tuple[object, _MemoryDB, MagicMock]) -> None:
+    """Clicking `🎲 再帮我想…` posts it and disables every button (a fresh batch replaces this card)."""
+    client, db, chatbot = registered
+    opts = ["a", "b", "🎲 再帮我想 2 个不同的选项"]
+    await db.save_ui_prompt("s", "m", pui.build_question_spec("Q", opts, False, 1))
+    await pui.QuestionButton("s", "m", 0).callback(_interaction(client))
+    interaction = _interaction(client)
+    await pui.QuestionButton("s", "m", 2).callback(interaction)
+    assert chatbot.gateway.post.call_args.args[0].content == opts[2]
+    view = interaction.edit_original_response.call_args.kwargs["view"]
+    assert all(c.item.disabled for c in view.children)
+    assert [c.item.style for c in view.children][2] == discord.ButtonStyle.success
+    assert db.rows[("s", "m")]["closed"] is True
+    # A 🎲 in a regular option (e.g. a world name) is not a reroll marker.
+    assert not pui.is_reroll_option("🎲 无限流·诸天轮回空间（主神空间中转站）")
+    assert pui.is_reroll_option("换一组候选") and pui.is_reroll_option("🎲 再帮我想 4 个不同的委托")
+
+
+def test_legacy_answered_spec_without_closed_stays_locked() -> None:
+    """Rows stored before `closed` existed keep the old behaviour: answered once = locked."""
+    spec = pui.build_question_spec("Q", ["a", "b"], multi=False, max_choices=1)
+    spec.update(answered="b", chosen=[1])
+    assert pui.is_closed(spec)
+    assert all(c.item.disabled for c in pui.build_question_view("s", "m", spec).children)
+    spec["closed"] = False
+    assert [c.item.disabled for c in pui.build_question_view("s", "m", spec).children] == [False, True]

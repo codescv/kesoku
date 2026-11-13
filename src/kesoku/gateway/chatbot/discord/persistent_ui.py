@@ -36,6 +36,10 @@ MAX_SELECT_LABEL_LEN = 100
 MAX_EMBED_TITLE_LEN = 256
 SHORT_LABEL_THRESHOLD = 15
 EMBED_COLOR_ANSWERED = discord.Color.dark_grey()
+# Button cards join the texts of every clicked option in the stored `answered` / embed footer.
+ANSWERED_JOINER = "；"
+# A "reroll" option (ask for a fresh batch); clicking it closes the whole card like a dropdown submit.
+REROLL_MARKERS = ("再帮我想", "换一批", "换一组")
 
 QUESTION_BUTTON_PREFIX = "kui"
 QUESTION_SELECT_PREFIX = "kuis"
@@ -97,6 +101,22 @@ def uses_short_labels(spec: dict[str, Any]) -> bool:
     return not uses_select(spec) and any(len(o) > SHORT_LABEL_THRESHOLD for o in spec.get("options", []))
 
 
+def is_reroll_option(text: str) -> bool:
+    """Whether an option asks for a fresh batch (`再帮我想` / `换一批` / `换一组`); a bare 🎲 is not enough."""
+    return any(marker in text for marker in REROLL_MARKERS)
+
+
+def is_closed(spec: dict[str, Any]) -> bool:
+    """Whether no further click is accepted on the card.
+
+    A card stores `closed` explicitly since v0.2.2; older rows without the key fall back to the legacy
+    rule "answered once = closed".
+    """
+    if "closed" in spec:
+        return bool(spec.get("closed"))
+    return bool(spec.get("answered"))
+
+
 def _truncate(text: str, limit: int) -> str:
     """Truncate text to a Discord length limit with an ellipsis."""
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -107,7 +127,8 @@ def build_question_embed(spec: dict[str, Any]) -> discord.Embed:
     answered = spec.get("answered")
     embed = discord.Embed(
         title=_truncate(f"❓ {spec.get('prompt', '')}", MAX_EMBED_TITLE_LEN),
-        color=EMBED_COLOR_ANSWERED if answered else discord.Color.blurple(),
+        # Grey only once the card is closed; a partially answered button card stays blurple (still clickable).
+        color=EMBED_COLOR_ANSWERED if is_closed(spec) else discord.Color.blurple(),
     )
     options = spec.get("options", [])
     if uses_short_labels(spec) or (uses_select(spec) and any(len(o) > MAX_SELECT_LABEL_LEN for o in options)):
@@ -225,7 +246,10 @@ class QuestionSelect(
 def build_question_view(
     session_id: str, message_id: str, spec: dict[str, Any], chosen: list[int] | None = None
 ) -> discord.ui.View:
-    """Build the persistent view of a question; with `spec["answered"]` set, every component is disabled.
+    """Build the persistent view of a question.
+
+    A closed card (`is_closed`) disables every component. An open button card disables (and highlights)
+    only the already-clicked options so the remaining ones can still be picked later.
 
     Args:
         session_id: Session ID encoded in custom_ids.
@@ -237,7 +261,7 @@ def build_question_view(
         A `discord.ui.View` with timeout=None.
     """
     view = discord.ui.View(timeout=None)
-    disabled = bool(spec.get("answered"))
+    disabled = is_closed(spec)
     options: list[str] = list(spec.get("options", []))
     chosen_list = list(chosen if chosen is not None else spec.get("chosen", []))
     if uses_select(spec):
@@ -256,8 +280,9 @@ def build_question_view(
     short = uses_short_labels(spec)
     for idx, opt in enumerate(options):
         label = chr(ord("A") + idx) if short else opt
+        picked = idx in chosen_list
         view.add_item(
-            QuestionButton(session_id, message_id, idx, label=label, disabled=disabled, chosen=idx in chosen_list)
+            QuestionButton(session_id, message_id, idx, label=label, disabled=disabled or picked, chosen=picked)
         )
     return view
 
@@ -291,9 +316,13 @@ async def _notify(interaction: discord.Interaction, acked: bool, text: str) -> N
 async def handle_question_answer(
     interaction: discord.Interaction, session_id: str, message_id: str, indices: list[int]
 ) -> None:
-    """Resolve the chosen option(s) from the stored spec, disable the components and post the user message.
+    """Resolve the chosen option(s) from the stored spec, update the components and post the user message.
 
-    Single-select posts the option text; multiselect posts one `选择：A；B` message.
+    * Button cards: each click posts that option's text and only that button is disabled; the other options
+      stay clickable (`spec["chosen"]` accumulates). Clicking an already-picked button is rejected. The card
+      closes once a reroll option (`再帮我想` / `换一批`) is clicked or every regular option has been picked.
+    * Dropdowns (multiselect, or >10 options): one submit closes the card; multiselect posts one
+      `选择：A；B` message.
     """
     try:
         acked = True
@@ -310,7 +339,7 @@ async def handle_question_answer(
         if chatbot is None or spec is None:
             await _notify(interaction, acked, "⚠️ This question is no longer available.")
             return
-        if spec.get("answered"):
+        if is_closed(spec):
             await _notify(interaction, acked, f"✓ Already answered: {spec['answered']}")
             return
         options: list[str] = list(spec.get("options", []))
@@ -318,16 +347,30 @@ async def handle_question_answer(
         if not valid:
             await _notify(interaction, acked, "⚠️ Invalid selection.")
             return
+        previously = [i for i in spec.get("chosen", []) if isinstance(i, int) and 0 <= i < len(options)]
         if spec.get("multi"):
             valid = sorted(valid)[: int(spec.get("max", len(options)))]
             content = format_multi_selection([options[i] for i in valid])
-        else:
+            chosen, answered, closed = valid, content, True
+        elif uses_select(spec):
             valid = valid[:1]
             content = options[valid[0]]
+            chosen, answered, closed = valid, content, True
+        else:
+            idx = valid[0]
+            if idx in previously:
+                await _notify(interaction, acked, f"✓ Already answered: {options[idx]}")
+                return
+            content = options[idx]
+            chosen = [*previously, idx]
+            answered = ANSWERED_JOINER.join(options[i] for i in chosen)
+            regular = [i for i, opt in enumerate(options) if not is_reroll_option(opt)]
+            closed = is_reroll_option(content) or all(i in chosen for i in regular)
 
-        # Persist the answer first so concurrent clicks see it, then disable the components.
-        spec["answered"] = content
-        spec["chosen"] = valid
+        # Persist the answer first so concurrent clicks see it, then update the components.
+        spec["answered"] = answered
+        spec["chosen"] = chosen
+        spec["closed"] = closed
         await db.save_ui_prompt(session_id, message_id, spec)
         await _edit_interaction_message(
             interaction,

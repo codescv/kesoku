@@ -1210,9 +1210,9 @@ async def test_k6_expired_interaction_10062_persists_edits_and_posts_choice() ->
     assert posted_msg.content == "Option Beta"
     assert posted_msg.role == MessageRole.USER
 
-    # Clicking again when expired (10062) notifies via channel.send instead of followup.send
+    # Re-clicking the same option when expired (10062) notifies via channel.send instead of followup.send
     interaction.channel.send.reset_mock()
-    await pui.handle_question_answer(interaction, "s_ui", "m_ui", [0])
+    await pui.handle_question_answer(interaction, "s_ui", "m_ui", [1])
     interaction.followup.send.assert_not_awaited()
     interaction.channel.send.assert_awaited_once()
     assert "Already answered: Option Beta" in interaction.channel.send.call_args[0][0]

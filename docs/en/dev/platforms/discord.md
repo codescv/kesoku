@@ -64,7 +64,7 @@ When the parsed content contains a question segment (a ```` ```ui ```` `type: se
 
 *   Renders the text block.
 *   Appends a `QuestionView` containing buttons representing `"2"` and `"3"`.
-*   Once a button is clicked, it disables all options to prevent duplicate responses, posts a confirmation message, and submits the choice directly to the Gateway Broker as a new `ROLE_USER` prompt.
+*   Once a button is clicked, only that button is disabled (the other options stay clickable, so several good options can be taken one after another); a confirmation message is posted and the choice is submitted directly to the Gateway Broker as a new `ROLE_USER` prompt.
 
 ### 3. `DetailsView` (Collapsible Sections)
 A `<details><summary>TITLE</summary>BODY</details>` segment is sent as a message `▸ **TITLE**` with a `展开` button. Clicking it edits the message in place to show `▾ **TITLE**` and BODY (truncated to Discord's 2000-character limit) and relabels the button `收起`; clicking again collapses it.
@@ -73,8 +73,8 @@ A `<details><summary>TITLE</summary>BODY</details>` segment is sent as a message
 Questions and `<details>` toggles are rendered with `discord.ui.DynamicItem`s, so clicks keep working after `kesoku service restart`:
 
 *   **custom_id templates**: `kui:<session_id>:<message_id>:<idx>` (option button), `kuis:<session_id>:<message_id>` (select menu) and `kud:<session_id>:<message_id>-d<n>` (details toggle). `<message_id>` is the kesoku id of the rendered assistant message.
-*   **Storage**: the spec (`prompt`, `options`, `multi`, `max`, later `answered`/`chosen`; or `title`/`body` for details) is saved in the `ui_prompts(session_id, message_id, spec_json, created_at)` table when the message is sent and loaded on click. Rows are deleted with their session.
+*   **Storage**: the spec (`prompt`, `options`, `multi`, `max`, later `answered`/`chosen`/`closed`; or `title`/`body` for details) is saved in the `ui_prompts(session_id, message_id, spec_json, created_at)` table when the message is sent and loaded on click. Rows are deleted with their session.
 *   **Registration**: `DiscordChatbot._setup_hook` calls `Client.add_dynamic_items(QuestionButton, QuestionSelect, DetailsToggle)`; the client → adapter mapping (`register_chatbot`) gives callbacks access to the gateway.
 *   **Layout**: single-select with ≤5 options → buttons on row 0 (letters A/B/… plus a list in the embed when an option is longer than 15 chars); more than 5 options → single-select dropdown; multiselect → `Select(min_values=1, max_values=max)` on row 1. `_row` is set explicitly because `discord.ui.Select(row=...)` does not set it.
-*   **Answering**: a click posts the option text (multiselect: one message `选择：A；B；C`) into the same session exactly like `QuestionView` (confirmation message + simulated user message + typing indicator), stores the answer, and edits the message so every component is disabled (chosen option highlighted). Later clicks get an ephemeral notice.
+*   **Answering**: a click posts the option text (multiselect: one message `选择：A；B；C`) into the same session exactly like `QuestionView` (confirmation message + simulated user message + typing indicator), stores the answer, and edits the message. Button cards disable (and highlight) only the clicked option so the remaining options can still be picked later; `answered` accumulates the picked texts and the card is closed (every component disabled, embed greyed) once a reroll option (`🎲 再帮我想…` / `换一批`) is clicked or every regular option has been picked. Dropdowns (multiselect, or >10 options) close on the first submit. Re-clicking a picked option or a closed card gets an ephemeral notice and posts nothing.
 *   If a custom_id would exceed Discord's 100-character limit, the adapter falls back to the in-memory `QuestionView` / `DetailsView`.
