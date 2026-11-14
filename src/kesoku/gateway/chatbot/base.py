@@ -52,10 +52,12 @@ from kesoku.utils.table import parse_markdown_tables, render_table_to_image
 from kesoku.utils.text import format_text, render_spoilers, split_text_into_chunks
 from kesoku.utils.ui_markup import (
     DETAILS_RE,
+    INLINE_BILINGUAL_RE,
     RICH_BLOCK_RE,
     UI_BLOCK_RE,
     find_first_ui_block,
     flatten_rich_blocks,
+    parse_inline_bilingual_match,
     parse_rich_block,
     render_details_as_text,
     render_question_as_text,
@@ -136,6 +138,16 @@ def parse_message_content(content: str, rich_blocks: bool = False) -> list[dict[
     for m in DETAILS_RE.finditer(content):
         details = {"type": "details", "title": m.group("title").strip(), "body": m.group("body").strip()}
         candidates.append((m.start(), m.end(), details))
+        rich_masks.append((m.start(), m.end()))
+
+    if rich_blocks and ">" in content:
+        for m in INLINE_BILINGUAL_RE.finditer(content):
+            if any(ms <= m.start() < me for ms, me in rich_masks):
+                continue
+            inline_seg = parse_inline_bilingual_match(m)
+            if inline_seg is not None:
+                candidates.append((m.start(), m.end(), inline_seg))
+                rich_masks.append((m.start(), m.end()))
 
     for m in _LEGACY_TAG_RE.finditer(content):
         candidates.append((m.start(), m.end(), _legacy_tag_segment(m)))

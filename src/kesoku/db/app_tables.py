@@ -279,7 +279,10 @@ class AppTablesMixin:
             clauses.append("timestamp < ?")
             params.append(float(before_ts))
         if visible_only:
-            clauses.append("role IN ('user', 'assistant') AND type = 'text' AND sender <> 'Notification'")
+            clauses.append(
+                "role IN ('user', 'assistant') AND type = 'text' AND sender <> 'Notification' "
+                "AND trim(content) <> 'Processed request successfully.'"
+            )
         params.append(max(1, min(int(limit), 500)))
         sql = "SELECT * FROM messages WHERE " + " AND ".join(clauses) + " ORDER BY timestamp DESC, id DESC LIMIT ?"
         with self.connection_provider.connection() as conn:
