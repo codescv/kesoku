@@ -25,6 +25,7 @@ from kesoku.agent.memory_writer import (
 from kesoku.agent.turn_executor import validate_llm_override
 from kesoku.constants import MessageRole
 from kesoku.gateway.chatbot.app.host import Reply, RequestContext, realpath_within
+from kesoku.gateway.chatbot.app.media import probe_audio_duration_ms
 from kesoku.gateway.chatbot.app.protocol import (
     AVATAR_REF_RE,
     LIMITS,
@@ -175,11 +176,32 @@ class RequestHandlers:
             }
         )
 
+    async def _session_persona(self, session_id: str) -> tuple[str | None, str | None]:
+        """Return `(role_id, display_name)` of the session persona (display name None when unknown)."""
+        try:
+            session = await self.app.gateway.db.get_session(session_id)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Session lookup failed for {session_id}: {e}")
+            session = None
+        role_id = (session.role_name if session else None) or self.app.app_config.default_role
+        if not role_id:
+            return None, None
+        try:
+            summary = await asyncio.to_thread(self.app.persona.registry.get, role_id)
+        except Exception as e:  # noqa: BLE001 - a broken role.json must never break history
+            logger.debug(f"Persona lookup failed for role {role_id}: {e}")
+            summary = None
+        name = (summary or {}).get("display_name")
+        return role_id, name if isinstance(name, str) and name.strip() else None
+
     async def build_snapshot(self, session_id: str) -> dict[str, Any]:
         """Return the `session.snapshot` payload for `session_id`."""
         summary = await self.summary_for(session_id)
         msgs = await asyncio.to_thread(self.db.get_messages_page, session_id, None, 50, True)
-        records = [message_to_record(m, self.app.chatbot_id) for m in msgs]
+        role_id, role_name = await self._session_persona(session_id)
+        records = [
+            message_to_record(m, self.app.chatbot_id, role_id=role_id, role_display_name=role_name) for m in msgs
+        ]
         files, staging_rev = await self.app.state_watcher.snapshot(session_id)
         prefs = await asyncio.to_thread(self.db.get_app_session_prefs, session_id)
         payload: dict[str, Any] = {
@@ -381,9 +403,13 @@ class RequestHandlers:
             raise ProtocolError("BAD_REQUEST", "before_ts must be a number")
         limit = bounded_int(payload, "limit", 50, 1, LIMITS["HISTORY_PAGE_MAX"])
         msgs = await asyncio.to_thread(self.db.get_messages_page, session_id, before, limit, True)
+        role_id, role_name = await self._session_persona(session_id)
         return {
             "session_id": session_id,
-            "messages": [message_to_record(m, self.app.chatbot_id) for m in msgs],
+            "messages": [
+                message_to_record(m, self.app.chatbot_id, role_id=role_id, role_display_name=role_name)
+                for m in msgs
+            ],
             "has_more": len(msgs) >= limit,
         }
 
@@ -727,6 +753,10 @@ class RequestHandlers:
             out["placeholder_id"] = placeholder_id
         if session_id:
             out["session_id"] = session_id
+        if kind == "voice" or path.lower().endswith(".wav"):
+            duration_ms = await asyncio.to_thread(probe_audio_duration_ms, path)
+            if duration_ms is not None:
+                out["duration_ms"] = duration_ms
         return Reply("media.ready", out, session_id=session_id)
 
     # ------------------------------------------------------------------ lexical

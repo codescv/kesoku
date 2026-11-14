@@ -8,9 +8,11 @@ Only short-lived signed URLs ever leave the engine; nothing is published.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import mimetypes
 import os
 import time
+import wave
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
@@ -65,7 +67,7 @@ class MediaManager:
     def __init__(
         self,
         requester_getter: Callable[[], RelayRequester | None],
-        http_put: Callable[[str, bytes, str], Awaitable[None]] | None = None,
+        http_put: Callable[..., Awaitable[None]] | None = None,
         http_get: Callable[[str, int], Awaitable[bytes]] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -73,12 +75,14 @@ class MediaManager:
 
         Args:
             requester_getter: Returns the live relay requester (`EngineLink`) or None when offline.
-            http_put: Optional override `(url, data, mime)` for signed PUT uploads (tests).
+            http_put: Optional override `(url, data, mime[, extra_headers])` for signed PUT uploads (tests).
+                Callables accepting a 4th positional argument receive the relay ticket's required headers.
             http_get: Optional override `(url, max_bytes) -> bytes` for signed GET downloads (tests).
             clock: Injectable time source.
         """
         self._requester_getter = requester_getter
         self._http_put = http_put or self._default_put
+        self._http_put_takes_headers = _accepts_extra_headers(self._http_put)
         self._http_get = http_get or self._default_get
         self._clock = clock
         self._upload_cache: dict[tuple[str, int, int, str], dict[str, Any]] = {}
@@ -90,10 +94,11 @@ class MediaManager:
         return req
 
     @staticmethod
-    async def _default_put(url: str, data: bytes, mime: str) -> None:
+    async def _default_put(url: str, data: bytes, mime: str, extra_headers: dict[str, str] | None = None) -> None:
+        req_headers = build_put_headers(mime, extra_headers)
         timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.put(url, data=data, headers={"Content-Type": mime}) as resp:
+            async with session.put(url, data=data, headers=req_headers) as resp:
                 if resp.status >= 300:
                     raise ConnectionError(f"signed PUT failed with HTTP {resp.status}")
 
@@ -197,7 +202,12 @@ class MediaManager:
             max_bytes = int(body.get("max_bytes") or len(data))
             if not isinstance(put_url, str) or len(data) > max_bytes:
                 raise ProtocolError("BAD_REQUEST", "relay refused the upload ticket")
-            await self._http_put(put_url, data, eff_mime)
+            raw_headers = body.get("headers")
+            ticket_headers = raw_headers if isinstance(raw_headers, dict) else None
+            if self._http_put_takes_headers:
+                await self._http_put(put_url, data, eff_mime, ticket_headers)
+            else:
+                await self._http_put(put_url, data, eff_mime)
             result = {
                 "object": body.get("object"),
                 "url": body.get("get_url"),
@@ -241,6 +251,47 @@ class MediaManager:
         signed = await self.sign(object_name)
         data = await self.download(str(signed["url"]), max_bytes)
         return data, signed
+
+
+def probe_audio_duration_ms(file_path: str) -> int | None:
+    """Return the duration of a PCM WAV file in milliseconds (header only), or None when not parseable."""
+    try:
+        with wave.open(file_path, "rb") as w:
+            frames, rate = w.getnframes(), w.getframerate()
+    except Exception:  # noqa: BLE001 - non-WAV / truncated / unreadable files simply have no duration
+        return None
+    return int(frames * 1000 / rate) if rate else None
+
+
+def build_put_headers(mime: str, extra_headers: dict[str, Any] | None = None) -> dict[str, str]:
+    """Build signed-PUT request headers: the relay ticket's headers plus `Content-Type`.
+
+    Signed V4 URLs may bind extension headers (e.g. `x-goog-content-length-range`); omitting them makes the
+    object store reject the upload, so every string header from the ticket is forwarded verbatim.
+    """
+    req_headers: dict[str, str] = {}
+    if isinstance(extra_headers, dict):
+        req_headers.update(
+            {str(k): str(v) for k, v in extra_headers.items() if isinstance(k, str) and isinstance(v, str)}
+        )
+    for key in [k for k in req_headers if k.lower() == "content-type"]:
+        req_headers.pop(key)
+    req_headers["Content-Type"] = mime
+    return req_headers
+
+
+def _accepts_extra_headers(fn: Callable[..., Any]) -> bool:
+    """Return True when `fn` can take a 4th positional `extra_headers` argument."""
+    try:
+        params = list(inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    if any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+        return True
+    positional = [
+        p for p in params if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    return len(positional) >= 4
 
 
 def _read_bytes(path: str) -> bytes:

@@ -602,3 +602,153 @@ async def test_start_stop_lifecycle(make_service):
     svc, host = make_service()
     await svc.start()
     await svc.stop()
+
+
+# ---------------------------------------------------------------- avatar.generate without an upload
+
+
+def _jpeg_bytes(size=(80, 80), color=(10, 200, 10)):
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, "JPEG")
+    return buf.getvalue()
+
+
+def _write(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data)
+
+
+def _write_json(path, value):
+    _write(path, json.dumps(value, ensure_ascii=False).encode("utf-8"))
+
+
+def _source_png(host, job_id):
+    with Image.open(os.path.join(host.sessions_dir, "avatar_jobs", job_id, "source.png")) as im:
+        return im.size, im.convert("RGB").getpixel((0, 0))
+
+
+async def _generate_without_upload(svc, target_type, target_id, **extra):
+    reply = await svc.handle_avatar_generate(
+        _ctx("avatar.generate"),
+        {"target_type": target_type, "target_id": target_id, "style_preset": "anime_clean", **extra},
+    )
+    await svc.wait_idle()
+    return reply
+
+
+async def _make_hana(svc, host):
+    await svc.handle_persona_upsert(_ctx(), {"display_name": "Hana Example", "role_id": "hana"})
+    original = os.path.join(host.awd, "roles", "hana", "images", "hana.jpg")
+    _write(original, _jpeg_bytes((120, 90), (250, 0, 0)))
+    _write_json(
+        os.path.join(svc.characters_dir, "hana", "characters.json"),
+        [{"name": "Hana Example", "aliases": ["hana"], "image": "roles/hana/images/hana.jpg"}],
+    )
+    return original
+
+
+async def test_avatar_generate_uses_registry_image_without_source_object(make_service):
+    svc, host = make_service()
+    await _make_hana(svc, host)
+    listed = await svc.handle_persona_list(_ctx(), {})
+    assert {r["role_id"]: r["has_source_image"] for r in listed["roles"]} == {"hana": True, "default": False}
+    detail = await svc.handle_persona_get(_ctx(), {"role_id": "hana"})
+    assert detail["has_source_image"] is True
+
+    for omitted in ({}, {"source_object": None}, {"source_object": ""}):
+        reply = await _generate_without_upload(svc, "role", "hana", **omitted)
+        assert reply.type == "avatar.job"
+        size, pixel = _source_png(host, reply.payload["job_id"])
+        assert size == (120, 90) and pixel[0] > 200 and pixel[1] < 40
+    assert len([p for _, t, p in host.unicasts if t == "media.ready"]) == 12
+
+
+async def test_prev_image_beats_registered_ref_face(make_service):
+    svc, host = make_service()
+    await _make_hana(svc, host)
+    reply = await _generate_without_upload(svc, "role", "hana")
+    host.broadcasts.clear()
+    res = await svc.handle_avatar_apply(
+        _ctx(), {"job_id": reply.payload["job_id"], "index": 0, "target_type": "role", "target_id": "hana",
+                 "register_reference": True}
+    )
+    assert res["ok"] is True
+    event, payload = host.broadcasts[-1]
+    assert event == "persona.updated" and payload["roles"][0]["has_source_image"] is True
+    cdir = os.path.join(svc.characters_dir, "hana")
+    with open(os.path.join(cdir, "characters.json"), encoding="utf-8") as f:
+        assert json.load(f)[0]["image"] == "characters/hana/images/ref_face.webp"
+    with open(os.path.join(cdir, ".kesoku_prev_image"), encoding="utf-8") as f:
+        assert json.load(f)["image"] == "roles/hana/images/hana.jpg"
+
+    again = await _generate_without_upload(svc, "role", "hana")
+    size, pixel = _source_png(host, again.payload["job_id"])
+    assert size == (120, 90) and pixel[0] > 200  # the original photo, not the AI output (512×512)
+
+    # Without the original photo the registered face reference is the last resort.
+    os.unlink(os.path.join(host.awd, "roles", "hana", "images", "hana.jpg"))
+    os.unlink(os.path.join(host.roles_dir, "hana", "avatar.webp"))
+    last = await _generate_without_upload(svc, "role", "hana")
+    size, _ = _source_png(host, last.payload["job_id"])
+    assert size == (512, 512)
+
+
+async def test_avatar_generate_falls_back_to_role_and_user_avatars(make_service):
+    svc, host = make_service()
+    await svc.handle_persona_upsert(_ctx(), {"display_name": "Bob", "role_id": "bob"})
+    _write(os.path.join(host.roles_dir, "bob", "avatar.webp"), _png_bytes((70, 70), (0, 0, 250)))
+    assert (await svc.handle_persona_get(_ctx(), {"role_id": "bob"}))["has_source_image"] is True
+    reply = await _generate_without_upload(svc, "role", "bob")
+    size, pixel = _source_png(host, reply.payload["job_id"])
+    assert size == (70, 70) and pixel[2] > 200
+
+    # roles/<id>/images/<id>.jpg outranks the current avatar.
+    _write(os.path.join(host.roles_dir, "bob", "images", "bob.jpg"), _jpeg_bytes((90, 60)))
+    reply = await _generate_without_upload(svc, "role", "bob")
+    assert _source_png(host, reply.payload["job_id"])[0] == (90, 60)
+
+    profile = await svc.handle_user_profile_get(_ctx(), {})
+    assert profile["has_source_image"] is False
+    _write(os.path.join(host.awd, "user", "avatar.webp"), _png_bytes((66, 44), (5, 5, 5)))
+    res = await svc.handle_user_profile_put(_ctx(), {"nickname": "Sam"})
+    assert res["profile"]["has_source_image"] is True
+    assert host.broadcasts[-1] == ("user_profile.updated", res["profile"])
+    reply = await _generate_without_upload(svc, "user", "me")
+    assert _source_png(host, reply.payload["job_id"])[0] == (66, 44)
+
+
+async def test_avatar_generate_without_any_source_is_invalid(make_service):
+    svc, host = make_service()
+    await svc.handle_persona_upsert(_ctx(), {"display_name": "Empty", "role_id": "empty"})
+    await _expect_error("AVATAR_SOURCE_INVALID", _generate_without_upload(svc, "role", "empty"))
+    await _expect_error("AVATAR_SOURCE_INVALID", _generate_without_upload(svc, "user", "me"))
+    # Undecodable / oversized files are skipped rather than used.
+    _write(os.path.join(host.roles_dir, "empty", "avatar.webp"), b"RIFF0000WEBPjunk")
+    await _expect_error("AVATAR_SOURCE_INVALID", _generate_without_upload(svc, "role", "empty"))
+    _write(os.path.join(host.roles_dir, "empty", "images", "empty.png"), b"")
+    await _expect_error("AVATAR_SOURCE_INVALID", _generate_without_upload(svc, "role", "empty"))
+    assert host.sync_db.count_recent_avatar_jobs(DEVICE, 0) == 0
+
+
+async def test_avatar_source_paths_outside_awd_are_rejected(make_service, tmp_path):
+    svc, host = make_service()
+    await svc.handle_persona_upsert(_ctx(), {"display_name": "Eve", "role_id": "eve"})
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(_png_bytes((33, 33)))
+    cdir = os.path.join(svc.characters_dir, "eve")
+    _write_json(os.path.join(cdir, ".kesoku_prev_image"), {"name": "Eve", "image": "../outside.png"})
+    _write_json(os.path.join(cdir, "characters.json"), [{"name": "Eve", "image": str(outside)}])
+    os.makedirs(os.path.join(host.roles_dir, "eve", "images"), exist_ok=True)
+    os.symlink(outside, os.path.join(host.roles_dir, "eve", "images", "eve.png"))
+    assert svc.has_existing_avatar_source("role", "eve") is False
+    await _expect_error("AVATAR_SOURCE_INVALID", _generate_without_upload(svc, "role", "eve"))
+    with pytest.raises(ProtocolError):
+        svc._load_existing_avatar_source_sync("role", "../eve")
+    assert svc.has_existing_avatar_source("role", "../eve") is False
+
+    # A non-empty source_object is still validated as an upload (no silent fallback).
+    _write(os.path.join(host.roles_dir, "eve", "avatar.webp"), _png_bytes((40, 40)))
+    await _expect_error("AVATAR_SOURCE_INVALID", _generate_without_upload(svc, "role", "eve", source_object="x"))
+    reply = await _generate_without_upload(svc, "role", "eve")
+    assert _source_png(host, reply.payload["job_id"])[0] == (40, 40)

@@ -26,7 +26,7 @@ from kesoku.gateway.attachment_manager import AttachmentManager
 from kesoku.gateway.chatbot.app.commands import CROSS_CHANNEL_IGNORE_GLOBS, RequestHandlers
 from kesoku.gateway.chatbot.app.host import Reply, RequestContext
 from kesoku.gateway.chatbot.app.link import EngineLink
-from kesoku.gateway.chatbot.app.media import MediaManager
+from kesoku.gateway.chatbot.app.media import MediaManager, probe_audio_duration_ms
 from kesoku.gateway.chatbot.app.memory_policy import MemoryPolicyService
 from kesoku.gateway.chatbot.app.outbox import Outbox
 from kesoku.gateway.chatbot.app.pairing import PairingService
@@ -847,23 +847,37 @@ class AppChatbot(Chatbot):
         wire, jobs = to_wire_segments(segments, message_id=message.id, live=True)
         turn_id = str(message.parent_id or message.id)
         session = await self.gateway.db.get_session(message.session_id)
+        role_id = (session.role_name if session else None) or self.app_config.default_role
+        sender: dict[str, Any] = {"kind": "assistant", "name": message.sender, "role_id": role_id}
+        if message.sender != "Notification":
+            display_name = await self._role_display_name(role_id)
+            if display_name:
+                sender["display_name"] = display_name
         payload = {
             "message_id": message.id,
             "turn_id": turn_id,
             "segments": wire,
             "raw_markdown": message.content or "",
             "ts": float(message.timestamp),
-            "sender": {
-                "kind": "assistant",
-                "name": message.sender,
-                "role_id": (session.role_name if session else None) or self.app_config.default_role,
-            },
+            "sender": sender,
         }
         await self.emit_session_event(message.session_id, "message.final", payload)
         if message.sender != "Notification":
             self._mark_finalized(message.session_id, turn_id)
         for job in jobs:
             await self._deliver_media_job(message, job)
+
+    async def _role_display_name(self, role_id: str | None) -> str | None:
+        """Return the persona display name for `role_id` (None when unknown or unreadable)."""
+        if not role_id:
+            return None
+        try:
+            summary = await asyncio.to_thread(self.persona.registry.get, role_id)
+        except Exception as e:  # noqa: BLE001 - a broken role.json must never block delivery
+            logger.debug(f"Persona lookup failed for role {role_id}: {e}")
+            return None
+        name = (summary or {}).get("display_name")
+        return name if isinstance(name, str) and name.strip() else None
 
     async def _deliver_media_job(self, message: Message, job: MediaJob) -> None:
         token = _CURRENT_MEDIA.set(job)
@@ -905,6 +919,10 @@ class AppChatbot(Chatbot):
         }
         if ref:
             payload["ref"] = ref
+        if kind == "voice":
+            duration_ms = await asyncio.to_thread(probe_audio_duration_ms, file_path)
+            if duration_ms is not None:
+                payload["duration_ms"] = duration_ms
         await self.emit_session_event(message.session_id, "media.ready", payload)
 
     async def send_file_segment(self, channel_id: str, file_path: str, message: Message) -> None:

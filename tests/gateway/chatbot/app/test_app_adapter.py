@@ -790,3 +790,73 @@ async def test_memory_proposal_event_carries_turn_id(env) -> None:
     await bot.proposals.on_staged(proposal)
     ev = [e for e in link.of_type("memory.proposal") if e["session_id"] == sid][-1]["payload"]
     assert ev["message_id"] == "user-msg-1" and ev["turn_id"] == "user-msg-1"
+
+
+def _write_test_wav(path, seconds: float = 0.75, rate: int = 8000) -> None:
+    import wave
+
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b"\x00\x00" * int(rate * seconds))
+
+
+async def test_final_message_and_history_carry_persona_display_name(env) -> None:
+    bot, link, gw = env["bot"], env["link"], env["gw"]
+    registry = bot.persona.registry
+    meta = registry.load_meta("helper") or {}
+    meta["display_name"] = "Hana Example"
+    registry.write_meta("helper", meta)
+    sid = await create_session(env)
+    final = Message(session_id=sid, chatbot_id="app", channel_id=f"app:{sid}", sender="Kesoku",
+                    role=MessageRole.ASSISTANT, content="こんにちは", status=MessageStatus.PENDING)
+    await gw.db.save_message(final)
+    await bot.render_outgoing_message(final)
+    fin = [e for e in link.of_type("message.final") if e["session_id"] == sid][-1]
+    assert fin["payload"]["sender"] == {
+        "kind": "assistant", "name": "Kesoku", "role_id": "helper", "display_name": "Hana Example",
+    }
+
+    hist = (await rpc(env, "history.page", {"session_id": sid}))["payload"]["messages"]
+    assistant = [m for m in hist if m["role"] == "assistant"][-1]
+    assert assistant["sender"]["role_id"] == "helper" and assistant["sender"]["display_name"] == "Hana Example"
+    snap = (await rpc(env, "session.open", {"session_id": sid}))["payload"]
+    last = [m for m in snap["last_messages"] if m["role"] == "assistant"][-1]
+    assert last["sender"]["display_name"] == "Hana Example" and last["sender"]["name"] == "Kesoku"
+
+
+async def test_notification_final_has_no_persona_display_name(env) -> None:
+    bot, link, gw = env["bot"], env["link"], env["gw"]
+    sid = await create_session(env)
+    note = Message(session_id=sid, chatbot_id="app", channel_id=f"app:{sid}", sender="Notification",
+                   role=MessageRole.ASSISTANT, content="reminder", status=MessageStatus.PENDING)
+    await gw.db.save_message(note)
+    await bot.render_outgoing_message(note)
+    fin = [e for e in link.of_type("message.final") if e["session_id"] == sid][-1]
+    assert "display_name" not in fin["payload"]["sender"]
+
+
+async def test_voice_media_ready_and_hydrate_carry_duration(env) -> None:
+    bot, link = env["bot"], env["link"]
+    sid = await create_session(env)
+    staging = env["tmp"] / "sessions" / sid
+    staging.mkdir(parents=True, exist_ok=True)
+    wav = staging / "line.wav"
+    _write_test_wav(wav, 0.75)
+    msg = Message(session_id=sid, chatbot_id="app", channel_id=f"app:{sid}", sender="Kesoku",
+                  role=MessageRole.ASSISTANT, content=f"[voice: {wav}]")
+    await bot._upload_and_announce(msg, str(wav), "voice", "ph_voice", None)
+    ready = [e for e in link.of_type("media.ready") if e["payload"].get("placeholder_id") == "ph_voice"][-1]
+    assert ready["payload"]["kind"] == "voice" and ready["payload"]["duration_ms"] == 750
+
+    (staging / "note.txt").write_text("plain", encoding="utf-8")
+    await bot._upload_and_announce(msg, str(staging / "note.txt"), "file", "ph_file", None)
+    plain = [e for e in link.of_type("media.ready") if e["payload"].get("placeholder_id") == "ph_file"][-1]
+    assert "duration_ms" not in plain["payload"]
+
+    hyd = await rpc(env, "media.hydrate", {"session_id": sid, "message_id": msg.id, "ref": "line.wav"})
+    assert hyd["type"] == "media.ready" and hyd["payload"]["duration_ms"] == 750
+    (staging / "broken.wav").write_bytes(b"RIFF....WAVE")
+    broken = await rpc(env, "media.hydrate", {"session_id": sid, "ref": "broken.wav"})
+    assert broken["type"] == "media.ready" and "duration_ms" not in broken["payload"]

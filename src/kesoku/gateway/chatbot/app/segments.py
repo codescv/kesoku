@@ -126,8 +126,18 @@ def user_display_text(msg: Message) -> str:
     return content
 
 
-def message_to_record(msg: Message, app_chatbot_id: str) -> dict[str, Any]:
-    """Convert a stored user / assistant text message to a `MessageRecord` (media as refs only)."""
+def message_to_record(
+    msg: Message,
+    app_chatbot_id: str,
+    *,
+    role_id: str | None = None,
+    role_display_name: str | None = None,
+) -> dict[str, Any]:
+    """Convert a stored user / assistant text message to a `MessageRecord` (media as refs only).
+
+    `role_id` / `role_display_name` (the session persona) are attached to assistant senders, except
+    notifications, so clients can show the persona name instead of the bot name.
+    """
     meta = msg.metadata or {}
     if msg.role == MessageRole.USER:
         attachments = []
@@ -172,6 +182,11 @@ def message_to_record(msg: Message, app_chatbot_id: str) -> dict[str, Any]:
         "sender": {"kind": "assistant", "name": msg.sender, "chatbot_id": msg.chatbot_id},
         "chatbot_id": msg.chatbot_id,
     }
+    if msg.role == MessageRole.ASSISTANT and msg.sender != "Notification":
+        if role_id:
+            record["sender"]["role_id"] = role_id
+        if role_display_name:
+            record["sender"]["display_name"] = role_display_name
     if msg.parent_id:
         record["turn_id"] = msg.parent_id
     if isinstance(meta.get("app_seq"), int):

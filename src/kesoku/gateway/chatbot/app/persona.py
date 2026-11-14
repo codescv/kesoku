@@ -9,6 +9,9 @@
   (`characters_dir` defaults to `$AWD/characters`; `image` paths are relative to its parent)
 * avatar jobs: `<sessions_dir>/avatar_jobs/<job_id>/{source.png, cand_<i>.png, cand_<i>.webp}`
 
+`avatar.generate` may omit `source_object` when the target already has an image on disk (original reference
+photo, registry image or current avatar); see `PersonaService._avatar_source_candidates` for the lookup order.
+
 Avatar candidates are produced by an external generator (argv template `AppConfig.avatar_generator_command`,
 else `<skills_dir>/ai-image/scripts/generate_image.py --async`) and tracked through the shared
 `<target>.pending.json` / `<target>.error.json` deferred media sidecar protocol.
@@ -92,6 +95,8 @@ VOICE_PREVIEW_MAX_BYTES = 8 * 1024 * 1024
 VOICE_PREVIEW_DEFAULT_TEXT = "你好，很高兴认识你。"
 CLEANUP_INTERVAL_SEC = 3600.0
 MAX_ROLES = 200
+ROLE_SOURCE_IMAGE_EXTS = ("jpg", "jpeg", "png", "webp")
+REF_FACE_FILE = "ref_face.webp"
 
 JOB_ID_RE = re.compile(r"^avj_[0-9A-Z]{26}$")
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -495,7 +500,7 @@ class PersonaService:
     # ------------------------------------------------------------------ persona.*
     async def handle_persona_list(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
         """`persona.list` → `{roles:[PersonaSummary]}`."""
-        roles = await asyncio.to_thread(self.registry.list_roles)
+        roles = await asyncio.to_thread(lambda: [self._role_view(r) for r in self.registry.list_roles()])
         return {"roles": roles}
 
     async def handle_persona_get(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
@@ -505,7 +510,7 @@ class PersonaService:
         def _load() -> dict[str, Any]:
             d = self._require_existing_role(role_id)
             meta = self.registry.load_meta(role_id) or {}
-            detail = self.registry.summary_from_meta(role_id, meta)
+            detail = self._role_view(self.registry.summary_from_meta(role_id, meta))
             detail["intro_md"] = self._read_capped(os.path.join(d, INTRO_MD))
             detail["preferences_md"] = self._read_capped(os.path.join(d, PREFERENCES_MD))
             readonly = [f for f in meta.get("readonly_files") or [] if f in (INTRO_MD, PREFERENCES_MD)]
@@ -611,7 +616,7 @@ class PersonaService:
                 )
             except OSError as e:
                 logger.warning("Could not seed user profile block into new role %s: %s", role_id, e)
-        return self.registry.get(role_id) or {}
+        return self._role_view(self.registry.get(role_id) or {})
 
     async def handle_persona_delete(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
         """`persona.delete{role_id}` → move to `.trash/`, reassign references, broadcast `persona.updated`."""
@@ -737,7 +742,7 @@ class PersonaService:
     # ------------------------------------------------------------------ user_profile.*
     async def handle_user_profile_get(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
         """`user_profile.get` → `UserProfile`."""
-        return await asyncio.to_thread(self.profiles.public_view)
+        return await asyncio.to_thread(lambda: self._profile_view(self.profiles.public_view()))
 
     async def handle_user_profile_put(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
         """`user_profile.put{nickname, bio, cameo_opt_in, avatar_object?}` → save + sync + broadcast."""
@@ -794,7 +799,7 @@ class PersonaService:
             profile["nickname"],
             profile["bio"],
         )
-        return self.profiles.public_view(profile)
+        return self._profile_view(self.profiles.public_view(profile))
 
     # ------------------------------------------------------------------ characters.json registry
     def _character_dir(self, dir_name: str, *, create: bool) -> str | None:
@@ -886,9 +891,144 @@ class PersonaService:
             os.unlink(prev_path)
         return True
 
+    # ------------------------------------------------------------------ existing avatar sources
+    def _role_view(self, summary: dict[str, Any]) -> dict[str, Any]:
+        """Attach `has_source_image` to a role summary (worker thread)."""
+        role_id = summary.get("role_id")
+        if isinstance(role_id, str) and role_id:
+            summary["has_source_image"] = self.has_existing_avatar_source("role", role_id)
+        return summary
+
+    def _profile_view(self, view: dict[str, Any]) -> dict[str, Any]:
+        """Attach `has_source_image` to a `UserProfile` view (worker thread)."""
+        view["has_source_image"] = self.has_existing_avatar_source("user", "user")
+        return view
+
+    def _jailed_source_file(self, path: str | None) -> str | None:
+        """Return the real path of a regular, non-empty, size-capped file strictly inside the AWD."""
+        if not isinstance(path, str) or not path or "\x00" in path:
+            return None
+        if not _within(self.host.awd, path):
+            return None
+        real = os.path.realpath(path)
+        try:
+            if not os.path.isfile(real):
+                return None
+            size = os.path.getsize(real)
+        except OSError:
+            return None
+        if not 0 < size <= LIMITS["AVATAR_SOURCE_MAX_BYTES"]:
+            return None
+        return real
+
+    def _registry_image_path(self, rel: Any) -> str | None:
+        """Resolve a characters.json `image` value against the parent of `characters_dir` (unjailed)."""
+        if not isinstance(rel, str) or not rel.strip() or "\x00" in rel:
+            return None
+        rel = rel.strip()
+        if os.path.isabs(rel):
+            return rel
+        char_parent = os.path.dirname(os.path.realpath(self.characters_dir))
+        return os.path.join(char_parent, rel)
+
+    def _avatar_source_candidates(self, target_type: str, target_id: str) -> list[str]:
+        """Return candidate source image paths for `avatar.generate` without an upload, best first.
+
+        Role: pre-registration original (`.kesoku_prev_image`), registry image (non-reference), the role's
+        `images/<id>.<ext>`, the role avatar, then any face reference. User: pre-registration original, the
+        user avatar, then the registry image / face reference. Candidates are not yet jailed or validated.
+        """
+        names: list[str]
+        if target_type == "role":
+            if not is_valid_role_id(target_id):
+                return []
+            dir_name = target_id
+            meta = self.registry.load_meta(target_id) or {}
+            names = [str(meta.get("display_name") or ""), target_id]
+        elif target_type == "user":
+            profile = self.profiles.load()
+            dir_name = str(profile.get("character_dir") or "user")
+            names = [str(profile.get("nickname") or "")]
+        else:
+            return []
+        prev_images: list[str] = []
+        primary: list[str] = []
+        references: list[str] = []
+        cdir = self._character_dir(dir_name, create=False)
+        if cdir:
+            prev = read_json_dict(os.path.join(cdir, ".kesoku_prev_image")) or {}
+            prev_path = self._registry_image_path(prev.get("image"))
+            if prev_path:
+                prev_images.append(prev_path)
+            try:
+                entries = self._load_registry(os.path.join(cdir, "characters.json"))
+            except ProtocolError:
+                entries = []
+            matched = self._find_entry(entries, names)
+            ordered = ([matched] if matched is not None else []) + [e for e in entries if e is not matched]
+            for entry in ordered:
+                path = self._registry_image_path(entry.get("image"))
+                if not path:
+                    continue
+                (references if os.path.basename(path) == REF_FACE_FILE else primary).append(path)
+            references.append(os.path.join(cdir, "images", REF_FACE_FILE))
+        out = list(prev_images)
+        if target_type == "role":
+            role_dir = os.path.join(self.host.roles_dir, target_id)
+            out += primary
+            out += [os.path.join(role_dir, "images", f"{target_id}.{ext}") for ext in ROLE_SOURCE_IMAGE_EXTS]
+            out.append(os.path.join(role_dir, AVATAR_FILE))
+            out += references
+        else:
+            out.append(self.profiles.avatar_path())
+            out += primary
+            out += references
+        return list(dict.fromkeys(out))
+
+    def has_existing_avatar_source(self, target_type: str, target_id: str) -> bool:
+        """Return True when an on-disk image can seed `avatar.generate` without an upload (cheap magic check)."""
+        for candidate in self._avatar_source_candidates(target_type, target_id):
+            real = self._jailed_source_file(candidate)
+            if not real:
+                continue
+            try:
+                with open(real, "rb") as f:
+                    head = f.read(16)
+            except OSError:
+                continue
+            if sniff_image_kind(head) is not None:
+                return True
+        return False
+
+    def _load_existing_avatar_source_sync(self, target_type: str, target_id: str) -> bytes:
+        """Return the bytes of the best decodable on-disk source image (worker thread).
+
+        Raises:
+            ProtocolError: `AVATAR_SOURCE_INVALID` when no jailed, size-capped, decodable image exists.
+        """
+        for candidate in self._avatar_source_candidates(target_type, target_id):
+            real = self._jailed_source_file(candidate)
+            if not real:
+                continue
+            try:
+                data = _read_bytes(real)
+            except OSError:
+                continue
+            if not data or len(data) > LIMITS["AVATAR_SOURCE_MAX_BYTES"]:
+                continue
+            try:
+                decode_image_safely(data)
+            except ValueError:
+                continue
+            return data
+        raise ProtocolError("AVATAR_SOURCE_INVALID", "no existing avatar image; please upload a photo first")
+
     # ------------------------------------------------------------------ avatar.generate
     async def handle_avatar_generate(self, ctx: RequestContext, payload: dict[str, Any]) -> Reply:
-        """`avatar.generate` → immediate `avatar.job`; candidates follow as `media.ready` / `media.failed`."""
+        """`avatar.generate` → immediate `avatar.job`; candidates follow as `media.ready` / `media.failed`.
+
+        `source_object` is optional: when omitted (or empty) the target's existing on-disk image is used.
+        """
         target_type = payload.get("target_type")
         if target_type not in ("user", "role"):
             raise ProtocolError("BAD_REQUEST", "'target_type' must be 'user' or 'role'")
@@ -914,7 +1054,11 @@ class PersonaService:
             recent = await asyncio.to_thread(self.host.sync_db.count_recent_avatar_jobs, ctx.device_id, since)
             if recent >= AVATAR_RATE_LIMIT:
                 raise ProtocolError("RATE_LIMITED", "too many avatar jobs; try again in a few minutes")
-            data = await self._fetch_avatar_source(ctx, payload.get("source_object"))
+            source_object = payload.get("source_object")
+            if source_object is None or source_object == "":
+                data = await asyncio.to_thread(self._load_existing_avatar_source_sync, target_type, target_id)
+            else:
+                data = await self._fetch_avatar_source(ctx, source_object)
             im = await self._decode_source(data)
             job_id = new_id("avj")
             job_dir = self._job_dir(job_id)
@@ -1148,7 +1292,7 @@ class PersonaService:
         if register:
             names = [str(meta.get("display_name") or ""), role_id]
             self._register_reference(role_id, data, names)
-        return self.registry.get(role_id) or {}
+        return self._role_view(self.registry.get(role_id) or {})
 
     def _apply_user_avatar_sync(self, data: bytes, register: bool) -> dict[str, Any]:
         """Write the user avatar (+ optional face reference / cameo opt-in) (worker thread)."""
@@ -1162,4 +1306,4 @@ class PersonaService:
         if register:
             names = [profile["nickname"]] if profile.get("nickname") else []
             self._register_reference(profile.get("character_dir") or "user", data, names)
-        return self.profiles.public_view(profile)
+        return self._profile_view(self.profiles.public_view(profile))
