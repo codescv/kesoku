@@ -919,3 +919,30 @@ async def test_mistakes_synthesis_character_hydrate_prefs_sync_and_lexical_token
     assert tok["reading"] == "いこう"
     assert tok["lemma"] == "行く"
     assert tok["gloss_zh"] == "走吧、去吧"
+
+
+async def test_workspace_list_and_read_jailed(env) -> None:
+    tmp = env["tmp"]
+    (tmp / "README.md").write_text("# Agent Workspace\nHello world\n", encoding="utf-8")
+    (tmp / ".env").write_text("SECRET=123", encoding="utf-8")
+    (tmp / "roles" / "helper" / "avatar.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    root_list = (await rpc(env, "workspace.list", {}))["payload"]
+    assert root_list["rel_path"] == ""
+    names = [e["name"] for e in root_list["entries"]]
+    assert "roles" in names and "README.md" in names
+    assert ".env" not in names and "kesoku.db" not in names
+
+    sub_list = (await rpc(env, "workspace.list", {"rel_path": "roles/helper"}))["payload"]
+    assert sub_list["rel_path"] == "roles/helper"
+    assert any(e["name"] == "intro.md" for e in sub_list["entries"])
+
+    read_md = (await rpc(env, "workspace.read", {"rel_path": "README.md"}))["payload"]
+    assert read_md["kind"] == "text" and "# Agent Workspace" in read_md["content"]
+
+    read_img = (await rpc(env, "workspace.read", {"rel_path": "roles/helper/avatar.png"}))["payload"]
+    assert read_img["kind"] == "media" and read_img["url"].startswith("https://store.invalid/")
+
+    for forbidden in ("../outside.txt", ".env", "kesoku.db", "/etc/passwd"):
+        err = await rpc(env, "workspace.read", {"rel_path": forbidden})
+        assert err["type"] == "error" and err["payload"]["code"] == "BAD_REQUEST"

@@ -97,10 +97,19 @@ CLEANUP_INTERVAL_SEC = 3600.0
 MAX_ROLES = 200
 ROLE_SOURCE_IMAGE_EXTS = ("jpg", "jpeg", "png", "webp")
 REF_FACE_FILE = "ref_face.webp"
+SOURCE_AVATAR_FILE = "source_avatar.webp"
 
 JOB_ID_RE = re.compile(r"^avj_[0-9A-Z]{26}$")
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _TEMPLATE_FIELD_RE = re.compile(r"\{(source|output|style|prompt|voice|text)\}")
+_TRANSFORM_HINT_RE = re.compile(
+    r"形态|变形|变身|变成|化为|化身|拟兽|兽化|动物|小笨鸟|笨鸟|肥鸟|小鸟|鸟|猫咪?|小?狗|狐狸|兔子|仓鼠|企鹅|小?龙|史莱姆|"
+    r"玩偶|毛绒|公仔|吉祥物|高达|机甲|机器人|怪物|怪兽|精灵|宝可梦|宠物|Q版|q版|"
+    r"\b(chibi|mascot|creature|animal|bird|cat|kitten|dog|puppy|fox|bunny|rabbit|hamster|penguin|dragon|slime|"
+    r"plush|plushie|doll|mecha|robot|monster|pokemon|form|transform|transformed|morph)\b",
+    re.IGNORECASE,
+)
+_BENNIAO_HINT_RE = re.compile(r"小笨鸟|笨鸟|肥鸟")
 
 STYLE_TEXT: dict[str, str] = {
     "anime_clean": "clean Japanese anime character illustration, crisp line art, soft cel shading",
@@ -131,14 +140,34 @@ def sanitize_prompt_hint(raw: str | None) -> str:
 
 
 def build_avatar_prompt(style_label: str, variant: str, hint: str) -> str:
-    """Build the identity-preserving restyle prompt for one candidate."""
-    prompt = (
+    """Build the identity-preserving restyle or creature-transformation prompt for one candidate."""
+    if hint and _TRANSFORM_HINT_RE.search(hint):
+        benniao_desc = ""
+        if _BENNIAO_HINT_RE.search(hint):
+            benniao_desc = (
+                " ('小笨鸟' is the character's canonical chibi bird mascot form: a cute chubby round white chibi "
+                "bird with brown fringe bangs and brown side hair-locks framing a round white bird face, a small "
+                "yellow beak, expressive eyes, rosy pink blush cheeks, brown feathered wings, and a small red "
+                "ribbon bow on the chest)"
+            )
+        return (
+            f"Transform the character from Image 1 completely into the following non-human / mascot / stylized "
+            f"form: {hint}{benniao_desc}; art style: {style_label}; carry over signature hair/bangs motif, hair "
+            f"color, and requested accessories from Image 1 into the transformed creature design; CRITICAL: the "
+            f"subject itself MUST BE the transformed creature/mascot filling the center of the square avatar — "
+            f"DO NOT draw a human person, DO NOT draw a human face or human head, and DO NOT place a bird/animal "
+            f"on top of a human head; {variant}; centered square avatar composition, clean simple background"
+        )
+    if hint:
+        return (
+            f"Restyle the person in Image 1 as a {style_label} square portrait avatar, applying this primary "
+            f"customization: {hint}; preserve facial identity and hair color from Image 1 unless modified by "
+            f"'{hint}'; {variant}; square head-and-shoulders composition, simple background"
+        )
+    return (
         f"Restyle the person in Image 1 as a {style_label} portrait avatar; keep the same face shape, hairstyle, "
         f"hair color and signature accessories; {variant}; square head-and-shoulders composition, simple background"
     )
-    if hint:
-        prompt += f"; extra details: {hint}"
-    return prompt
 
 
 def fill_argv_template(template: list[str], values: dict[str, str]) -> list[str]:
@@ -481,8 +510,19 @@ class PersonaService:
             return ""
 
     def resolve_avatar_ref(self, ref: str) -> str | None:
-        """Resolve a `media.hydrate` avatar ref (`roles/<id>/avatar.webp` / `user/avatar.webp`) to a file."""
+        """Resolve a `media.hydrate` avatar ref (`roles/<id>/(avatar|source).webp` / `user/(avatar|source).webp`)."""
         if not isinstance(ref, str) or not AVATAR_REF_RE.fullmatch(ref):
+            return None
+        if ref.endswith("/source.webp"):
+            if ref.startswith("user/"):
+                cands = self._avatar_source_candidates("user", "user")
+            else:
+                role_id = ref[len("roles/") : -len("/source.webp")]
+                cands = self._avatar_source_candidates("role", role_id)
+            for cand in cands:
+                real = self._jailed_source_file(cand)
+                if real:
+                    return real
             return None
         if ref.startswith("user/"):
             path = safe_resolve(self.profiles.user_dir, AVATAR_FILE)
@@ -604,6 +644,7 @@ class PersonaService:
             meta["voice_preset"] = voice
         if avatar is not None:
             atomic_write_bytes(os.path.join(d, AVATAR_FILE), avatar)
+            atomic_write_bytes(os.path.join(d, SOURCE_AVATAR_FILE), avatar)
             meta["avatar_rev"] = int(meta.get("avatar_rev") or 0) + 1
             meta["avatar_ai"] = False
         meta["updated_at"] = time.time()
@@ -783,6 +824,7 @@ class PersonaService:
             profile["cameo_opt_in"] = cameo
         if avatar is not None:
             atomic_write_bytes(self.profiles.avatar_path(), avatar)
+            atomic_write_bytes(os.path.join(self.profiles.user_dir, SOURCE_AVATAR_FILE), avatar)
             profile["avatar_rev"] = int(profile.get("avatar_rev") or 0) + 1
             profile["avatar_ai"] = False
         self.profiles.save(profile)
@@ -977,11 +1019,13 @@ class PersonaService:
             role_dir = os.path.join(self.host.roles_dir, target_id)
             out += primary
             out += [os.path.join(role_dir, "images", f"{target_id}.{ext}") for ext in ROLE_SOURCE_IMAGE_EXTS]
+            out.append(os.path.join(role_dir, SOURCE_AVATAR_FILE))
             out.append(os.path.join(role_dir, AVATAR_FILE))
             out += references
         else:
-            out.append(self.profiles.avatar_path())
             out += primary
+            out.append(os.path.join(self.profiles.user_dir, SOURCE_AVATAR_FILE))
+            out.append(self.profiles.avatar_path())
             out += references
         return list(dict.fromkeys(out))
 

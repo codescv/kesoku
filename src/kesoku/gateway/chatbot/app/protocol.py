@@ -77,7 +77,7 @@ SESSION_MEDIA_OBJECT_RE = re.compile(r"^media/[0-9a-f]{8}/[0-9a-f-]{36}\.[a-z0-9
 AVATAR_MEDIA_OBJECT_RE = re.compile(r"^media/avatar/[0-9a-f-]{36}(-cand[0-3])?\.(jpg|png|webp|heic)$")
 AVATAR_SOURCE_OBJECT_RE = re.compile(r"^media/avatar/[0-9a-f-]{36}\.(jpg|png|webp|heic)$")
 ASSET_MEDIA_OBJECT_RE = re.compile(r"^media/asset/[0-9a-f-]{36}\.[a-z0-9]{1,5}$")
-AVATAR_REF_RE = re.compile(r"^(roles/[a-z0-9_]{2,32}|user)/avatar\.webp$")
+AVATAR_REF_RE = re.compile(r"^(roles/[a-z0-9_]{2,32}|user)/(avatar|source)\.webp$")
 ROLE_ID_RE = re.compile(r"^[a-z0-9_]{2,32}$")
 MODE_ID_RE = re.compile(r"^[a-z0-9_]{1,40}$")
 

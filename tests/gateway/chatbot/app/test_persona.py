@@ -752,3 +752,42 @@ async def test_avatar_source_paths_outside_awd_are_rejected(make_service, tmp_pa
     await _expect_error("AVATAR_SOURCE_INVALID", _generate_without_upload(svc, "role", "eve", source_object="x"))
     reply = await _generate_without_upload(svc, "role", "eve")
     assert _source_png(host, reply.payload["job_id"])[0] == (40, 40)
+
+
+def test_build_avatar_prompt_transformation_and_benniao():
+    from kesoku.gateway.chatbot.app.persona import build_avatar_prompt
+
+    p_benniao = build_avatar_prompt("clean Japanese anime", "front-facing", "变成齐刘海小笨鸟形态，黑框眼镜")
+    assert "Transform the character from Image 1 completely" in p_benniao
+    assert "DO NOT draw a human person" in p_benniao
+    assert "chubby round white chibi bird" in p_benniao
+    assert "黑框眼镜" in p_benniao
+
+    p_cat = build_avatar_prompt("watercolor", "three-quarter view", "猫咪形态")
+    assert "Transform the character from Image 1 completely" in p_cat
+    assert "DO NOT place a bird/animal on top of a human head" in p_cat
+
+    p_human = build_avatar_prompt("watercolor", "front-facing", "戴红围巾")
+    assert "Restyle the person in Image 1" in p_human
+    assert "applying this primary customization: 戴红围巾" in p_human
+
+
+async def test_source_avatar_preserved_across_ai_avatar_apply(make_service):
+    svc, host = make_service()
+    # Upload a direct photo (120x80 red) via persona.upsert
+    obj = host.media.put(_png_bytes((120, 80), (240, 10, 10)))
+    await svc.handle_persona_upsert(_ctx(), {"display_name": "Mio", "role_id": "mio", "avatar_object": obj})
+    assert svc.resolve_avatar_ref("roles/mio/source.webp").endswith("source_avatar.webp")
+
+    # Generate and apply an AI avatar (which overwrites avatar.webp with 300x200 -> 512x512 blue)
+    reply = await _generate_without_upload(svc, "role", "mio")
+    job_id = reply.payload["job_id"]
+    await svc.handle_avatar_apply(
+        _ctx(), {"job_id": job_id, "index": 0, "target_type": "role", "target_id": "mio", "register_reference": False}
+    )
+
+    # Next avatar.generate without upload still uses source_avatar.webp (red), not the AI avatar (blue)
+    reply2 = await _generate_without_upload(svc, "role", "mio")
+    _, pixel = _source_png(host, reply2.payload["job_id"])
+    assert pixel[0] > 200 and pixel[2] < 50
+    assert svc.resolve_avatar_ref("roles/mio/source.webp").endswith("source_avatar.webp")

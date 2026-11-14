@@ -13,6 +13,7 @@ import os
 import re
 import time
 import uuid
+from collections import OrderedDict
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -53,6 +54,28 @@ MEMORY_LIST_MAX_FILES = 500
 TITLE_MAX_CHARS = 120
 LEXICAL_TEXT_MAX_CHARS = 2000
 LEXICAL_TOKEN_MAX_CHARS = 64
+LEXICAL_CACHE_MAX = 512
+WORKSPACE_LIST_MAX = 500
+WORKSPACE_TEXT_MAX_BYTES = 256 * 1024
+WORKSPACE_HIDDEN_DIRS = frozenset(
+    {".git", "__pycache__", ".venv", "node_modules", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
+)
+WORKSPACE_BLOCKED_EXTS = (".db", ".db-wal", ".db-shm", ".sqlite", ".sqlite3", ".pem", ".key", ".p12", ".pfx")
+WORKSPACE_MEDIA_EXTS = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".gif",
+    ".svg",
+    ".wav",
+    ".mp3",
+    ".ogg",
+    ".m4a",
+    ".flac",
+    ".mp4",
+    ".webm",
+)
 _FRONTMATTER_BLOCK_RE = re.compile(r"\A---\r?\n(?P<body>.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
 _VISIBILITY_LINE_RE = re.compile(r"^visibility\s*:.*$", re.MULTILINE)
 CROSS_CHANNEL_IGNORE_GLOBS = ["game-*"]
@@ -96,6 +119,7 @@ class RequestHandlers:
     def __init__(self, app: AppChatbot) -> None:
         """Bind handlers to the adapter."""
         self.app = app
+        self._lexical_cache: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
 
     # ------------------------------------------------------------------ helpers
     @property
@@ -253,8 +277,16 @@ class RequestHandlers:
                 session_id=session_id,
             )
             return
+        now = time.time()
         for env in result["events"]:
-            await self.app.send_raw({**env, "device_id": ctx.device_id})
+            out_env = {**env, "device_id": ctx.device_id}
+            if out_env.get("type") == "media.ready" and isinstance(out_env.get("payload"), dict):
+                exp = out_env["payload"].get("expires_at")
+                if isinstance(exp, (int, float)) and exp - 30 <= now:
+                    out_payload = dict(out_env["payload"])
+                    out_payload.pop("url", None)
+                    out_env["payload"] = out_payload
+            await self.app.send_raw(out_env)
         done: dict[str, Any] = {
             "session_id": session_id,
             "replayed_through_seq": result["replayed_through_seq"],
@@ -876,6 +908,16 @@ class RequestHandlers:
         text = require_str(payload, "text", max_len=LEXICAL_TEXT_MAX_CHARS)
         token = require_str(payload, "token", max_len=LEXICAL_TOKEN_MAX_CHARS)
         await self._get_session(session_id)
+        cache_key = (text.strip(), token.strip())
+        cached = self._lexical_cache.get(cache_key)
+        if cached is not None:
+            self._lexical_cache.move_to_end(cache_key)
+            return {
+                "session_id": session_id,
+                "surface": token,
+                "token": cached["token"],
+                "explanation_markdown": cached["explanation_markdown"],
+            }
         prompt = (
             "Explain the Japanese word or phrase inside <token> as it is used in the sentence inside <sentence>.\n"
             "Return ONLY a YAML mapping in Simplified Chinese with these keys:\n"
@@ -901,12 +943,154 @@ class RequestHandlers:
             raise ProtocolError("INTERNAL", "explanation unavailable") from e
         raw_content = (res.content or "").strip()
         lex_token = _parse_lexical_token(token, raw_content)
+        self._lexical_cache[cache_key] = {
+            "token": lex_token,
+            "explanation_markdown": raw_content,
+        }
+        while len(self._lexical_cache) > LEXICAL_CACHE_MAX:
+            self._lexical_cache.popitem(last=False)
         return {
             "session_id": session_id,
             "surface": token,
             "token": lex_token,
             "explanation_markdown": raw_content,
         }
+
+    # ------------------------------------------------------------------ workspace browser
+    @staticmethod
+    def _is_workspace_blocked(name: str) -> bool:
+        """Return True if a path component is blocked in the workspace browser."""
+        low = name.lower()
+        if not name or name in (".", "..") or low in WORKSPACE_HIDDEN_DIRS:
+            return True
+        if low == ".env" or low.startswith(".env."):
+            return True
+        if low.endswith(WORKSPACE_BLOCKED_EXTS):
+            return True
+        return False
+
+    def _resolve_workspace_path(self, rel_path_raw: Any, *, allow_root: bool) -> tuple[str, str]:
+        """Resolve and jail a relative path inside `$AWD`."""
+        if rel_path_raw is None:
+            rel_path_raw = ""
+        if not isinstance(rel_path_raw, str) or "\x00" in rel_path_raw or len(rel_path_raw) > 512:
+            raise ProtocolError("BAD_REQUEST", "invalid rel_path")
+        raw_stripped = rel_path_raw.strip()
+        if raw_stripped.startswith(("/", "\\")):
+            raise ProtocolError("BAD_REQUEST", "rel_path must be a relative path")
+        cleaned = raw_stripped.replace("\\", "/").strip("/")
+        if not cleaned:
+            if not allow_root:
+                raise ProtocolError("BAD_REQUEST", "rel_path is required")
+            return "", os.path.realpath(self.app.awd)
+        parts = [p for p in cleaned.split("/") if p]
+        if any(self._is_workspace_blocked(p) for p in parts):
+            raise ProtocolError("BAD_REQUEST", "access to this path is restricted")
+        candidate = os.path.join(self.app.awd, *parts)
+        if not realpath_within(self.app.awd, candidate):
+            raise ProtocolError("BAD_REQUEST", "path escapes workspace")
+        return "/".join(parts), os.path.realpath(candidate)
+
+    async def handle_workspace_list(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
+        """`workspace.list{rel_path?, show_hidden?}` -> `{rel_path, entries}` jailed inside `$AWD`."""
+        rel_path_raw = optional_str(payload, "rel_path", max_len=512) or ""
+        show_hidden = bool(payload.get("show_hidden", False))
+        rel_path, real_dir = self._resolve_workspace_path(rel_path_raw, allow_root=True)
+
+        def _list_dir() -> list[dict[str, Any]]:
+            if not os.path.isdir(real_dir):
+                raise ProtocolError("NOT_FOUND", "directory not found")
+            try:
+                names = os.listdir(real_dir)
+            except OSError as e:
+                raise ProtocolError("NOT_FOUND", "cannot list directory") from e
+            entries: list[dict[str, Any]] = []
+            for name in names:
+                if self._is_workspace_blocked(name):
+                    continue
+                if not show_hidden and name.startswith("."):
+                    continue
+                full = os.path.join(real_dir, name)
+                if not realpath_within(self.app.awd, full):
+                    continue
+                try:
+                    st = os.stat(full)
+                    is_dir = os.path.isdir(full)
+                except OSError:
+                    continue
+                kind = "dir" if is_dir else "file"
+                entry_rel = f"{rel_path}/{name}".lstrip("/") if rel_path else name
+                entries.append(
+                    {
+                        "name": name,
+                        "rel_path": entry_rel,
+                        "kind": kind,
+                        "bytes": 0 if is_dir else int(st.st_size),
+                        "mtime": float(st.st_mtime),
+                    }
+                )
+            entries.sort(key=lambda e: (0 if e["kind"] == "dir" else 1, str(e["name"]).lower()))
+            return entries[:WORKSPACE_LIST_MAX]
+
+        return {"rel_path": rel_path, "entries": await asyncio.to_thread(_list_dir)}
+
+    async def handle_workspace_read(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
+        """`workspace.read{rel_path}` -> text content or uploaded media URL jailed inside `$AWD`."""
+        rel_path_raw = require_str(payload, "rel_path", max_len=512)
+        rel_path, real_file = self._resolve_workspace_path(rel_path_raw, allow_root=False)
+        if not await asyncio.to_thread(os.path.isfile, real_file):
+            raise ProtocolError("NOT_FOUND", "file not found")
+        try:
+            st = await asyncio.to_thread(os.stat, real_file)
+        except OSError as e:
+            raise ProtocolError("NOT_FOUND", "file not found") from e
+        size = int(st.st_size)
+        mtime = float(st.st_mtime)
+        name = os.path.basename(real_file)
+        ext = os.path.splitext(name)[1].lower()
+        if ext in WORKSPACE_MEDIA_EXTS:
+            if size > LIMITS["MESSAGE_MEDIA_MAX_BYTES"]:
+                raise ProtocolError("BAD_REQUEST", "media file too large")
+            uploaded = await self.app.media.upload_file(real_file, purpose="asset")
+            return {
+                "rel_path": rel_path,
+                "name": name,
+                "kind": "media",
+                "mime": str(uploaded.get("mime") or "application/octet-stream"),
+                "bytes": size,
+                "mtime": mtime,
+                "object": uploaded.get("object"),
+                "url": uploaded.get("url"),
+                "expires_at": uploaded.get("expires_at"),
+            }
+
+        def _read_file() -> dict[str, Any]:
+            with open(real_file, "rb") as f:
+                head = f.read(WORKSPACE_TEXT_MAX_BYTES + 1)
+            if b"\x00" in head[:4096]:
+                return {
+                    "rel_path": rel_path,
+                    "name": name,
+                    "kind": "binary",
+                    "mime": "application/octet-stream",
+                    "bytes": size,
+                    "mtime": mtime,
+                }
+            truncated = len(head) > WORKSPACE_TEXT_MAX_BYTES
+            text = head[:WORKSPACE_TEXT_MAX_BYTES].decode("utf-8", errors="replace")
+            mime = "text/markdown" if ext == ".md" else ("application/json" if ext == ".json" else "text/plain")
+            return {
+                "rel_path": rel_path,
+                "name": name,
+                "kind": "text",
+                "mime": mime,
+                "bytes": size,
+                "mtime": mtime,
+                "content": text,
+                "truncated": truncated,
+            }
+
+        return await asyncio.to_thread(_read_file)
 
     # ------------------------------------------------------------------ misc
     async def handle_ping(self, ctx: RequestContext, payload: dict[str, Any]) -> Reply:

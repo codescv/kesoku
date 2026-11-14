@@ -387,6 +387,8 @@ class AppChatbot(Chatbot):
             "avatar.apply": p.handle_avatar_apply,
             "media.hydrate": r.handle_media_hydrate,
             "lexical.explain": r.handle_lexical_explain,
+            "workspace.list": r.handle_workspace_list,
+            "workspace.read": r.handle_workspace_read,
             "device.list": r.handle_device_list,
             "device.revoke": r.handle_device_revoke,
             "ping": r.handle_ping,
