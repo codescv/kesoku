@@ -109,3 +109,40 @@ def test_render_fallbacks() -> None:
     assert render_details_as_text("T", "") == "**T**"
     assert render_question_as_text("Q?", ["a", "b"]) == "Q?\n1. a\n2. b"
     assert render_question_as_text("Q?", ["a", "b"], multi=True, max_choices=2) == "Q?\n(select up to 2)\n1. a\n2. b"
+
+
+def test_inline_bilingual_with_spoiler_and_voice() -> None:
+    from kesoku.gateway.chatbot.base import parse_message_content
+
+    raw = (
+        "舞台灯光亮起。\n\n"
+        "> 今夜(こんや)はどの物語(ものがたり)にしようか、小張(シャオジャン)？\n"
+        "<spoiler>今晚要听哪一个故事呀，小张？</spoiler>\n"
+        "[voice: /tmp/theater_open.wav]\n\n"
+        "选一个方向吧。"
+    )
+    segs = parse_message_content(raw, rich_blocks=True)
+    bilinguals = [s for s in segs if s["type"] == "bilingual"]
+    voices = [s for s in segs if s["type"] == "voice"]
+    assert len(bilinguals) == 1
+    assert len(voices) == 0  # folded into bilingual segment
+    b = bilinguals[0]
+    assert b["ja_plain"] == "今夜はどの物語にしようか、小張？"
+    assert b["zh"] == "今晚要听哪一个故事呀，小张？"
+    assert b["voice"] == {"ref": "/tmp/theater_open.wav"}
+
+
+def test_inline_bilingual_fullwidth_ruby_and_plain_zh() -> None:
+    from kesoku.gateway.chatbot.base import parse_message_content
+
+    raw = (
+        "> 「……ふふ、そんなに熱心（ねっしん）に見（み）つめられたら、ちょっと照（て）れちゃうじゃない。」\n"
+        "“……呵呵，被你这么热切地盯着看，我也会有点害羞的呀。”"
+    )
+    segs = parse_message_content(raw, rich_blocks=True)
+    assert len(segs) == 1
+    b = segs[0]
+    assert b["type"] == "bilingual"
+    assert "熱心" in b["ja_plain"]
+    assert any(p.get("rt") == "ねっしん" for p in b["ruby_parts"])
+    assert b["zh"] == "“……呵呵，被你这么热切地盯着看，我也会有点害羞的呀。”"

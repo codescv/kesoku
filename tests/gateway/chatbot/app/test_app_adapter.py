@@ -860,3 +860,62 @@ async def test_voice_media_ready_and_hydrate_carry_duration(env) -> None:
     (staging / "broken.wav").write_bytes(b"RIFF....WAVE")
     broken = await rpc(env, "media.hydrate", {"session_id": sid, "ref": "broken.wav"})
     assert broken["type"] == "media.ready" and "duration_ms" not in broken["payload"]
+
+
+async def test_mistakes_synthesis_character_hydrate_prefs_sync_and_lexical_token(env) -> None:
+    from kesoku.gateway.chatbot.app.commands import _parse_lexical_token
+
+    sid = await create_session(env)
+    staging = env["tmp"] / "sessions" / sid
+    (staging / "game").mkdir(parents=True, exist_ok=True)
+    (staging / "game" / "lesson.json").write_text(json.dumps({"book": "初级", "lesson": 10}), encoding="utf-8")
+    (staging / "game" / "pokemon.json").write_text(json.dumps({"game_version": "sv"}), encoding="utf-8")
+
+    # 1. Global mistakes.json synthesis via StateWatcher
+    g_dir = env["tmp"] / "games" / "jp_classroom" / "data"
+    g_dir.mkdir(parents=True, exist_ok=True)
+    (g_dir / "mistakes.json").write_text(
+        json.dumps(
+            {
+                "next_id": 2,
+                "active": [
+                    {"id": 1, "created": "2026-01-01", "point": "助词に", "next_due": "2026-01-01"},
+                ],
+                "archived": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    snap = (await rpc(env, "session.open", {"session_id": sid}))["payload"]
+    m_state = snap["state_files"].get("game/mistakes.json")
+    assert isinstance(m_state, dict) and m_state["due_count"] == 1
+    assert m_state["due"][0]["point"] == "助词に"
+
+    # 2. mode.prefs.set syncs to context/05-app-prefs.md and game/pokemon.json
+    env["bot"].app_config.modes[0].prefs_schema = {"game_version": ["sv", "za"], "pinned_context": "string"}
+    await rpc(env, "mode.prefs.set", {"session_id": sid, "prefs": {"game_version": "za", "pinned_context": "快龙"}})
+    assert "za" in (staging / "context" / "05-app-prefs.md").read_text(encoding="utf-8")
+    pkmn_updated = json.loads((staging / "game" / "pokemon.json").read_text(encoding="utf-8"))
+    assert pkmn_updated["game_version"] == "za" and pkmn_updated["pinned_context"] == "快龙"
+
+    # 3. Character registry media.hydrate by character name
+    char_dir = env["tmp"] / "characters" / "cast"
+    char_dir.mkdir(parents=True, exist_ok=True)
+    (char_dir / "heroine.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (char_dir / "characters.json").write_text(
+        json.dumps([{"name": "Heroine Alpha", "trigger": "主角A", "image": "heroine.png"}]),
+        encoding="utf-8",
+    )
+    ch_hyd = await rpc(env, "media.hydrate", {"session_id": sid, "ref": "Heroine Alpha"})
+    assert ch_hyd["type"] == "media.ready" and ch_hyd["payload"]["kind"] == "file"
+
+    # 4. _parse_lexical_token structured YAML parsing
+    tok = _parse_lexical_token(
+        "行こう",
+        "```yaml\nreading: いこう\npos: 五段动词\ngloss_zh: 走吧、去吧\nlemma: 行く\nconj: 意向形\n```",
+    )
+    assert tok["surface"] == "行こう"
+    assert tok["reading"] == "いこう"
+    assert tok["lemma"] == "行く"
+    assert tok["gloss_zh"] == "走吧、去吧"

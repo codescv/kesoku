@@ -258,13 +258,28 @@ RICH_BLOCK_RE = re.compile(
     r"^[ \t]*```(?P<kind>bilingual|card)[ \t]*\r?\n(?P<body>.*?)^[ \t]*```[ \t]*\r?$",
     re.MULTILINE | re.DOTALL,
 )
+# Unfenced 2-line / 3-line bilingual quote emitted by role intro / companion prompts:
+#   > <Japanese line containing kana>
+#   <spoiler>Chinese translation</spoiler>   (or ||Chinese|| or plain translation line)
+#   [voice: /optional/path.wav]
+INLINE_BILINGUAL_RE = re.compile(
+    r"^[ \t]*>[ \t]*(?P<ja>[^\r\n]*[\u3040-\u309f\u30a0-\u30ff][^\r\n]*?)[ \t]*\r?\n"
+    r"(?:"
+    r"(?:[ \t]*\r?\n)?[ \t]*(?:>[ \t]*)?<spoiler>[ \t]*(?P<zh_sp>[^\r\n]+?)[ \t]*</spoiler>[ \t]*"
+    r"|(?:[ \t]*\r?\n)?[ \t]*(?:>[ \t]*)?\|\|[ \t]*(?P<zh_bar>[^\r\n|]+?)[ \t]*\|\|[ \t]*"
+    r"|[ \t]*(?P<zh_plain>(?![>#*`\-\[\s<|])[^\r\n\u3040-\u309f\u30a0-\u30ff]*[^\r\n\s\u3040-\u309f\u30a0-\u30ff])[ \t]*"
+    r")"
+    r"(?:\r?\n(?:[ \t]*\r?\n)?[ \t]*\[voice:\s*(?P<voice>[^\]]+?)\s*\][ \t]*)?",
+    re.MULTILINE | re.IGNORECASE,
+)
 CARD_KIND_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _MEDIA_TAG_RE = re.compile(r"^\s*\[(?P<kind>file|voice):\s*(?P<path>[^\]]+?)\s*\]\s*$")
 # Inline ruby notations: `漢字(かな)` / `漢字（かな）` (base = preceding kanji run) and `{base|reading}`.
 _KANJI_CLASS = r"\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3005\u3006\u30f6\u30f5"
 _INLINE_RUBY_RE = re.compile(
     r"\{(?P<b1>[^{}|\n]+)\|(?P<r1>[^{}|\n]+)\}"
-    rf"|(?P<b2>[{_KANJI_CLASS}]+)[(（](?P<r2>[\u3040-\u309f\u30a0-\u30ffー・\s]+)[)）]"
+    rf"|(?P<b3>[{_KANJI_CLASS}]+(?P<oku>[\u3041-\u3096]{{1,3}}))[(（](?P<r3>[\u3040-\u309f\u30a0-\u30ffー・\s]+?(?P=oku))[)）]"
+    rf"|(?P<b2>[{_KANJI_CLASS}]+(?:[\u3041-\u3096]{{1,2}}[{_KANJI_CLASS}]+)*)[(（](?P<r2>[\u3040-\u309f\u30a0-\u30ffー・\s]+)[)）]"
 )
 CARD_FALLBACK_MAX_LINES = 12
 CARD_FALLBACK_VALUE_MAX_CHARS = 200
@@ -284,8 +299,8 @@ def _parts_from_inline(text: str) -> list[dict[str, str]]:
     for m in _INLINE_RUBY_RE.finditer(text):
         if m.start() > last:
             parts.append({"base": text[last : m.start()]})
-        base = m.group("b1") if m.group("b1") is not None else m.group("b2")
-        rt = m.group("r1") if m.group("r1") is not None else m.group("r2")
+        base = m.group("b1") or m.group("b3") or m.group("b2")
+        rt = m.group("r1") or m.group("r3") or m.group("r2")
         parts.append({"base": base, "rt": rt.strip()})
         last = m.end()
     if last < len(text):
@@ -562,6 +577,48 @@ def parse_rich_block(kind: str, body: str) -> dict[str, Any] | None:
     if kind == "card":
         return parse_card_block_body(body)
     return None
+
+
+_INLINE_SPEAKER_RE = re.compile(
+    r"^(?P<q>[「『])?(?P<spk>[^「『:：。！？!?、，\r\n]{1,24}?)\s*[:：]\s*(?P<rest>.+)$"
+)
+_ZH_SPEAKER_RE = re.compile(
+    r"^(?P<spk>[^「『:：。！？!?、，（）()\r\n]{1,12}?)\s*[:：]\s*(?P<rest>.+)$"
+)
+
+
+def parse_inline_bilingual_match(match: re.Match[str]) -> dict[str, Any] | None:
+    """Build a `bilingual` segment from an `INLINE_BILINGUAL_RE` match."""
+    ja = (match.group("ja") or "").strip()
+    zh = (match.group("zh_sp") or match.group("zh_bar") or match.group("zh_plain") or "").strip()
+    voice = (match.group("voice") or "").strip()
+    if not ja or not zh:
+        return None
+    speaker: str | None = None
+    jm = _INLINE_SPEAKER_RE.match(ja)
+    if jm:
+        rest = jm.group("rest").strip()
+        if jm.group("q") and rest.endswith("」") and not rest.startswith(("「", "『")):
+            rest = rest[:-1].strip()
+        zm = _ZH_SPEAKER_RE.match(zh)
+        if zm:
+            speaker = zm.group("spk").strip()
+            zh = zm.group("rest").strip()
+            ja = rest
+        else:
+            spk_plain = _INLINE_RUBY_RE.sub(
+                lambda m: m.group("b1") or m.group("b3") or m.group("b2") or "",
+                jm.group("spk"),
+            ).strip()
+            if 1 <= len(spk_plain) <= 12:
+                speaker = spk_plain
+                ja = rest
+    payload: dict[str, Any] = {"ja": ja, "zh": zh}
+    if speaker:
+        payload["speaker"] = speaker
+    if voice:
+        payload["voice"] = voice
+    return parse_bilingual_block_body(yaml.safe_dump(payload, allow_unicode=True))
 
 
 def render_rich_block_as_text(segment: dict[str, Any]) -> str:
