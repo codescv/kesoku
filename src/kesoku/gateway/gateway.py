@@ -21,6 +21,9 @@ logger = setup_logger(__name__)
 
 StreamHandler = Callable[[str, str, str, str | None], Awaitable[None]]
 
+DEFAULT_STREAM_MIN_INTERVAL_SEC = 1.5
+"""Default throttle between streamed preview updates when a chatbot does not register its own."""
+
 
 class Listener:
     """Internal container for an active subscriber to the Gateway broker."""
@@ -50,6 +53,7 @@ class Gateway:
         self.db_path = self.workspace_config.db_path
         self._listeners: set[Listener] = set()
         self._stream_handlers: dict[str, StreamHandler] = {}
+        self._stream_min_intervals: dict[str, float] = {}
         self._deferred_media_chatbots: set[str] = set()
         self._chatbots: dict[str, Any] = {}
         self.context.sync_db.verify_db()
@@ -90,6 +94,27 @@ class Gateway:
             handler: Async callback `(channel_id, session_id, turn_id, text_or_none) -> None`.
         """
         self._stream_handlers[chatbot_id] = handler
+
+    def register_stream_min_interval(self, chatbot_id: str, seconds: float) -> None:
+        """Register the minimum interval between streamed preview updates for `chatbot_id`.
+
+        Args:
+            chatbot_id: Unique chatbot identifier.
+            seconds: Minimum seconds between preview publishes (clamped to >= 0).
+        """
+        self._stream_min_intervals[chatbot_id] = max(0.0, float(seconds))
+
+    def get_stream_min_interval(self, chatbot_id: str) -> float:
+        """Return the streamed preview throttle interval for `chatbot_id` (default 1.5s)."""
+        return self._stream_min_intervals.get(chatbot_id, DEFAULT_STREAM_MIN_INTERVAL_SEC)
+
+    def register_memory_policy_override_provider(self, provider: Callable[[str], str | None] | None) -> None:
+        """Register an authoritative per-session memory policy override provider on the runtime context.
+
+        Args:
+            provider: Callable `(session_id) -> policy | None`, or None to unregister.
+        """
+        self.context.memory_policy_override_provider = provider
 
     def has_stream_handler(self, chatbot_id: str) -> bool:
         """Return True if a live stream preview handler is registered for `chatbot_id`."""
@@ -135,6 +160,26 @@ class Gateway:
             cron_manager: The active CronManager instance.
         """
         self.cron_manager = cron_manager
+
+    async def list_sessions_by_chatbots(
+        self,
+        chatbot_ids: list[str],
+        role: str | None = None,
+        cursor: tuple[float, str] | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List sessions bound to any of `chatbot_ids` (newest first, keyset pagination).
+
+        Args:
+            chatbot_ids: Chatbot identifiers whose channel bindings qualify a session.
+            role: Optional persona role filter.
+            cursor: Optional `(updated_at, session_id)` keyset cursor.
+            limit: Maximum number of sessions to return.
+
+        Returns:
+            Session summary dicts including all channel bindings (`chatbot_ids`).
+        """
+        return await self.db.list_sessions_by_chatbots(chatbot_ids, role, cursor, limit)
 
     async def create_session(
         self,

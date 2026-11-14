@@ -1,7 +1,13 @@
 """Generic, configuration-driven context memory policy resolution for Kesoku.
 
-Classifies active `<context>` blocks and historical backfill turns into one of three policies:
-`full`, `real_facts_only`, or `isolated` (most restrictive wins: `isolated > real_facts_only > full`).
+Classifies active `<context>` blocks and historical backfill turns into one of four policies:
+`full`, `real_facts_only`, `confirm_only`, or `isolated`
+(most restrictive wins: `isolated > confirm_only > real_facts_only > full`).
+
+On top of the static resolution, an optional registered *override provider* may return an explicit,
+authoritative per-session policy (see `resolve_memory_policy`). When it answers, its value replaces the
+static result instead of being merged by rank, so a user-configured setting can relax a stricter static
+default as well as tighten it.
 """
 
 from __future__ import annotations
@@ -9,7 +15,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 
 from kesoku.agent.context_dir import ContextEntry
@@ -17,13 +23,17 @@ from kesoku.config import AgentConfig, KesokuConfig, get_config
 from kesoku.constants import MessageRole, MessageType
 from kesoku.db.models import Message
 
-ContextPolicy = Literal["full", "real_facts_only", "isolated"]
+ContextPolicy = Literal["full", "real_facts_only", "confirm_only", "isolated"]
 
 POLICY_RANK: dict[str, int] = {
     "full": 0,
     "real_facts_only": 1,
-    "isolated": 2,
+    "confirm_only": 2,
+    "isolated": 3,
 }
+
+MemoryPolicyOverrideProvider = Callable[[str], "str | None"]
+"""Callable `(session_id) -> policy | None` returning an authoritative per-session policy override."""
 
 
 def normalize_policy(value: Any) -> ContextPolicy | None:
@@ -35,13 +45,15 @@ def normalize_policy(value: Any) -> ContextPolicy | None:
         return "full"
     if cleaned == "real_facts_only":
         return "real_facts_only"
+    if cleaned == "confirm_only":
+        return "confirm_only"
     if cleaned == "isolated":
         return "isolated"
     return None
 
 
 def most_restrictive_policy(*policies: str | None, default: ContextPolicy = "full") -> ContextPolicy:
-    """Return the most restrictive policy among `policies` (`isolated > real_facts_only > full`)."""
+    """Return the most restrictive policy (`isolated > confirm_only > real_facts_only > full`)."""
     best: ContextPolicy = default
     best_rank = POLICY_RANK[best]
     for raw in policies:
@@ -94,9 +106,11 @@ def resolve_context_policy(
 
     Resolution order per block:
       1. Explicit `memory_policy` in validated YAML frontmatter of the context file.
-      2. `[agent] memory_isolated_contexts` / `memory_filtered_contexts` glob patterns on block name.
+      2. `[agent] memory_isolated_contexts` / `memory_confirm_contexts` / `memory_filtered_contexts` glob
+         patterns on block name (checked in that order).
       3. `'full'`.
-    Across all active blocks, the most restrictive policy (`isolated > real_facts_only > full`) wins.
+    Across all active blocks, the most restrictive policy
+    (`isolated > confirm_only > real_facts_only > full`) wins.
 
     Args:
         block_names: Names of active `<context name="...">` blocks in the turn.
@@ -105,10 +119,11 @@ def resolve_context_policy(
         cfg: `AgentConfig` or `KesokuConfig` (defaults to `get_config().agent`).
 
     Returns:
-        Resolved `ContextPolicy` (`'full'`, `'real_facts_only'`, or `'isolated'`).
+        Resolved `ContextPolicy` (`'full'`, `'real_facts_only'`, `'confirm_only'`, or `'isolated'`).
     """
     agent_cfg = _extract_agent_config(cfg)
     isolated_globs = agent_cfg.memory_isolated_contexts
+    confirm_globs = getattr(agent_cfg, "memory_confirm_contexts", []) or []
     filtered_globs = agent_cfg.memory_filtered_contexts
 
     fm_by_name: dict[str, ContextPolicy] = {}
@@ -135,6 +150,8 @@ def resolve_context_policy(
             continue
         if _matches_any_glob(name, isolated_globs):
             resolved.append("isolated")
+        elif _matches_any_glob(name, confirm_globs):
+            resolved.append("confirm_only")
         elif _matches_any_glob(name, filtered_globs):
             resolved.append("real_facts_only")
         else:
@@ -145,6 +162,36 @@ def resolve_context_policy(
             resolved.append(pol)
 
     return most_restrictive_policy(*resolved, default="full")
+
+
+def resolve_memory_policy(
+    session_id: str,
+    static_policy: str | None,
+    provider: MemoryPolicyOverrideProvider | None = None,
+) -> ContextPolicy:
+    """Resolve the effective memory policy for a session turn, honoring an authoritative override.
+
+    The registered `provider` is consulted first. When it returns a recognized policy, that value is used
+    as-is: it is NOT merged with `static_policy` by `POLICY_RANK`, so an explicit user setting may relax
+    a stricter static default (e.g. frontmatter `isolated` + override `full` => `full`) or tighten it.
+    When the provider is absent, raises, or returns None / an unknown value, the static policy is used.
+
+    Args:
+        session_id: Session whose current turn is being classified.
+        static_policy: Policy resolved from context blocks / configuration (`resolve_context_policy`).
+        provider: Optional callable `(session_id) -> policy | None`.
+
+    Returns:
+        The effective `ContextPolicy`.
+    """
+    if provider is not None:
+        try:
+            override = normalize_policy(provider(session_id))
+        except Exception:
+            override = None
+        if override is not None:
+            return override
+    return normalize_policy(static_policy) or "full"
 
 
 def _tool_call_text(msg: Message) -> str:

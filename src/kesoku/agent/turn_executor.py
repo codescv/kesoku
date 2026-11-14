@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime
+import fnmatch
 import inspect
 import json
 import os
@@ -22,7 +23,7 @@ from kesoku.agent.context_dir import (
     insert_extra_entries,
     render_context_blocks,
 )
-from kesoku.agent.context_policy import resolve_context_policy
+from kesoku.agent.context_policy import resolve_context_policy, resolve_memory_policy
 from kesoku.agent.history import (
     build_history,
     prepare_history_for_llm,
@@ -75,6 +76,83 @@ _REFERENTIAL_QUERY_RE = re.compile(r"刚才|之前|上次|那个|另一个|继�
 EMPTY_RESPONSE_RETRIES = 2
 # Max characters kept per Agent line inside auto-retrieved historical dialogue snippets.
 MAX_RAG_AGENT_LINE_CHARS = 400
+# Context block name used to inject opaque per-message client preferences (`metadata.mode_prefs`).
+MODE_PREFS_CONTEXT_NAME = "app-prefs"
+MODE_PREFS_MAX_BYTES = 2048
+_LLM_OVERRIDE_KEYS = ("llm", "model_name", "thinking_level", "stream")
+_LLM_OVERRIDE_PROVIDERS = ("gemini", "claude")
+_LLM_OVERRIDE_THINKING_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def filter_ignored_context_entries(entries: list[ContextEntry], globs: Any) -> list[ContextEntry]:
+    """Drop context entries whose block name matches any glob in `globs` (generic; no names hard-coded).
+
+    Args:
+        entries: Context entries to render.
+        globs: Glob patterns from `Message.metadata.ignore_context_globs` (non-list values are ignored).
+
+    Returns:
+        Entries whose names match none of the patterns.
+    """
+    if not isinstance(globs, list):
+        return entries
+    patterns = [g.strip() for g in globs if isinstance(g, str) and g.strip()]
+    if not patterns:
+        return entries
+    return [e for e in entries if not any(fnmatch.fnmatchcase(e.name, p) for p in patterns)]
+
+
+def render_mode_prefs_block(mode_prefs: Any) -> str:
+    """Render `metadata.mode_prefs` as an opaque `<context name="app-prefs">` JSON block (empty if invalid)."""
+    if not isinstance(mode_prefs, dict) or not mode_prefs:
+        return ""
+    try:
+        payload = json.dumps(mode_prefs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return ""
+    if len(payload.encode("utf-8")) > MODE_PREFS_MAX_BYTES:
+        logger.warning("Ignoring oversized metadata.mode_prefs block")
+        return ""
+    payload = payload.replace("</context", "<\\/context")
+    return f'<context name="{MODE_PREFS_CONTEXT_NAME}">\n{payload}\n</context>\n'
+
+
+def validate_llm_override(raw: Any, allowed_models: list[str] | None) -> dict[str, Any] | None:
+    """Validate a generic `metadata.llm_override` against whitelisted keys and `allowed_models`.
+
+    Args:
+        raw: Candidate override mapping `{llm?, model_name?, thinking_level?, stream?}`.
+        allowed_models: Model names accepted for this channel; a `model_name` outside it rejects the override.
+
+    Returns:
+        A sanitized override dict, or None when invalid / empty.
+    """
+    if not isinstance(raw, dict):
+        return None
+    if any(k not in _LLM_OVERRIDE_KEYS for k in raw):
+        return None
+    out: dict[str, Any] = {}
+    llm = raw.get("llm")
+    if llm is not None:
+        if not isinstance(llm, str) or llm.lower() not in _LLM_OVERRIDE_PROVIDERS:
+            return None
+        out["llm"] = llm.lower()
+    model_name = raw.get("model_name")
+    if model_name is not None:
+        if not isinstance(model_name, str) or model_name not in (allowed_models or []):
+            return None
+        out["model_name"] = model_name
+    thinking = raw.get("thinking_level")
+    if thinking is not None:
+        if not isinstance(thinking, str) or thinking not in _LLM_OVERRIDE_THINKING_LEVELS:
+            return None
+        out["thinking_level"] = thinking
+    stream = raw.get("stream")
+    if stream is not None:
+        if not isinstance(stream, bool):
+            return None
+        out["stream"] = stream
+    return out or None
 
 # Same block syntax the gateway parses: `[question: <stem> || opt1 | opt2]` (legacy: `<stem> | opt1 | opt2`).
 _QUESTION_BLOCK_CAPTURE_RE = re.compile(r"\[question:\s*([^\]]+)\]")
@@ -502,6 +580,9 @@ class TurnExecutor:
         self._recent_sessions_chars: int = 0
         self._recent_sessions_rendered: bool = False
         self._turn_context_policy: str = "full"
+        # Authoritative override resolved once per turn (keyed by the turn's user message id).
+        self._turn_policy_override_msg_id: str | None = None
+        self._turn_policy_override: str | None = None
         self._turn_clicked_option: bool = False
         self._last_final_assistant_msg: Message | None = None
         self._turn_start_digest_task: asyncio.Task[None] | None = None
@@ -639,8 +720,42 @@ class TurnExecutor:
                 return override
         return None
 
+    def _resolve_message_llm_override(self, current_msg: Message) -> dict[str, Any] | None:
+        """Return the validated generic `metadata.llm_override` of `current_msg`, if any.
+
+        Model names are checked against the `allowed_models` list of the originating channel's app config;
+        channels without such a list never accept per-message model overrides.
+        """
+        raw_meta = getattr(current_msg, "metadata", None)
+        metadata = raw_meta if isinstance(raw_meta, dict) else {}
+        raw = metadata.get("llm_override")
+        if raw is None:
+            return None
+        get_app_cfg = getattr(self.context.config, "get_app_config", None)
+        app_cfg = get_app_cfg(current_msg.chatbot_id) if callable(get_app_cfg) else None
+        allowed = list(getattr(app_cfg, "allowed_models", []) or []) if app_cfg is not None else []
+        validated = validate_llm_override(raw, allowed)
+        if validated is None:
+            logger.warning(f"Ignoring invalid metadata.llm_override on message {current_msg.id}: {raw!r}")
+        return validated
+
+    def _resolve_stream_min_interval(self, chatbot_id: str) -> float:
+        """Return the per-chatbot streamed preview throttle interval (default 1.5s)."""
+        get_fn = getattr(self.gateway, "get_stream_min_interval", None)
+        if callable(get_fn):
+            try:
+                value = get_fn(chatbot_id)
+                if isinstance(value, (int, float)) and value >= 0:
+                    return float(value)
+            except Exception:
+                pass
+        return 1.5
+
     def _resolve_llm(self, current_msg: Message) -> BaseLLM:
         """Resolve the appropriate LLM instance for the current message, applying overrides.
+
+        Precedence: validated per-message `metadata.llm_override`, then Discord channel overrides, then the
+        configured default LLM.
 
         Args:
             current_msg: The active user message initiating the turn.
@@ -648,6 +763,21 @@ class TurnExecutor:
         Returns:
             A BaseLLM instance to use for this turn.
         """
+        msg_override = self._resolve_message_llm_override(current_msg)
+        if msg_override is not None and any(k in msg_override for k in ("llm", "model_name", "thinking_level")):
+            kwargs_m: dict[str, Any] = {}
+            if "llm" in msg_override:
+                kwargs_m["provider"] = msg_override["llm"]
+            if "model_name" in msg_override:
+                kwargs_m["model_name"] = msg_override["model_name"]
+            if "thinking_level" in msg_override:
+                kwargs_m["thinking_level"] = msg_override["thinking_level"]
+            try:
+                logger.info(f"Applying per-message LLM override {msg_override} for message {current_msg.id}")
+                return self.context.get_llm(**kwargs_m)
+            except Exception as e:
+                logger.error(f"Failed to get per-message override LLM {msg_override}: {e}")
+
         override = self._resolve_channel_override(current_msg)
         if override is not None and (
             override.llm is not None or override.model_name is not None or override.thinking_level is not None
@@ -688,6 +818,9 @@ class TurnExecutor:
             if has_handler_fn(current_msg.chatbot_id) is False:
                 return False
 
+        msg_override = self._resolve_message_llm_override(current_msg)
+        if msg_override is not None and "stream" in msg_override:
+            return bool(msg_override["stream"])
         override = self._resolve_channel_override(current_msg)
         if override is not None and override.stream is not None:
             return override.stream
@@ -944,6 +1077,7 @@ class TurnExecutor:
                         channel_id=channel_id,
                         session_id=self.session_id,
                         turn_id=current_msg.id,
+                        min_interval=self._resolve_stream_min_interval(chatbot_id),
                     )
                     if stream
                     else None
@@ -986,6 +1120,7 @@ class TurnExecutor:
                                 channel_id=channel_id,
                                 session_id=self.session_id,
                                 turn_id=current_msg.id,
+                                min_interval=self._resolve_stream_min_interval(chatbot_id),
                             )
                             active_publisher = publisher
                         async with _get_session_cache_lock(self.session_id):
@@ -1556,6 +1691,11 @@ class TurnExecutor:
             try:
                 raw_context_entries = await collect_context_entries(target_staging_dir, include_policy_only=True)
                 renderable_entries = [e for e in raw_context_entries if e.content]
+                # Generic per-message filter (e.g. a cross-channel plain-chat fallback skipping some blocks).
+                # Policy resolution below still sees ALL blocks.
+                renderable_entries = filter_ignored_context_entries(
+                    renderable_entries, (current_msg.metadata or {}).get("ignore_context_globs")
+                )
                 combined_entries = insert_extra_entries(
                     renderable_entries,
                     await self._get_state_snapshot_entries(target_staging_dir),
@@ -1566,12 +1706,15 @@ class TurnExecutor:
             except Exception as e:
                 logger.warning(f"Failed to build context blocks for session '{self.session_id}': {e}")
 
+        context_blocks_prefix += render_mode_prefs_block((current_msg.metadata or {}).get("mode_prefs"))
+
         cfg = self.context.config
-        self._turn_context_policy = resolve_context_policy(
+        static_policy = resolve_context_policy(
             [e.name for e in raw_context_entries],
             {e.name: e.memory_policy for e in raw_context_entries},
             cfg,
         )
+        self._turn_context_policy = await self._apply_memory_policy_override(current_msg, static_policy)
 
         # 3. Prepend Consolidated Passive Synchronization, Preferences, and Context Compression Guidelines
         # (if Bootstrap)
@@ -1743,6 +1886,25 @@ class TurnExecutor:
         )
 
         return latest_user_msg
+
+    async def _apply_memory_policy_override(self, current_msg: Message, static_policy: str) -> str:
+        """Apply the registered authoritative memory policy override (resolved once per turn).
+
+        The provider answer replaces the static policy outright (no rank merge), so a user-configured
+        per-mode policy wins over static frontmatter / glob defaults in both directions.
+        """
+        provider = getattr(self.context, "memory_policy_override_provider", None)
+        if provider is None or not callable(provider):
+            return static_policy
+        if self._turn_policy_override_msg_id != current_msg.id:
+            try:
+                self._turn_policy_override = await asyncio.to_thread(provider, self.session_id)
+            except Exception as e:
+                logger.warning(f"Memory policy override provider failed for session {self.session_id}: {e}")
+                self._turn_policy_override = None
+            self._turn_policy_override_msg_id = current_msg.id
+        cached = self._turn_policy_override
+        return resolve_memory_policy(self.session_id, static_policy, (lambda _sid: cached) if cached else None)
 
     async def _resolve_active_role(self, current_msg: Message) -> str:
         """Resolve the persona role for this turn.

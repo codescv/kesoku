@@ -4,6 +4,7 @@ This avoids global mutable state and supports dependency injection.
 """
 
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from kesoku.agent.llm import BaseLLM, get_llm
@@ -40,6 +41,14 @@ class KesokuContext:
         self._llm_cache: dict[tuple[str, str | None, str | None, bool], BaseLLM] = {}
         self._llm_cache_cfg: KesokuConfig | None = None
         self.active_jobs = ActiveJobsRegistry()
+        # Optional authoritative memory policy override: `(session_id) -> policy | None` (see
+        # `kesoku.agent.context_policy.resolve_memory_policy`). Registered by channel adapters.
+        self.memory_policy_override_provider: Callable[[str], str | None] | None = None
+        # Optional resolver of the session's current experience mode label `(session_id) -> mode | None`,
+        # recorded as `source_mode` on staged memory proposals.
+        self.memory_mode_provider: Callable[[str], str | None] | None = None
+        # Async callbacks notified with each newly staged memory proposal dict.
+        self.memory_proposal_listeners: list[Callable[[dict[str, Any]], Awaitable[None]]] = []
 
     @property
     def config(self) -> KesokuConfig:

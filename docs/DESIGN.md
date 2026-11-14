@@ -88,6 +88,35 @@ For detailed user and developer guides, see [`docs/en/dev/architecture.md`](en/d
    - Single-select button cards (`not uses_select(spec)`) disable and highlight (`ButtonStyle.success`) only the clicked option `idx`, keeping unpicked buttons clickable (`spec["chosen"]` accumulates indices in click order, `spec["answered"]` joins picked labels with `；`, and the embed stays blurple until closed).
    - Re-clicking an already-picked `idx` returns an ephemeral `✓ Already answered` notice without reposting; clicking a reroll option (`再帮我想` / `换一批` / `换一组`) or picking all regular options sets `spec["closed"] = True` (dropdowns close on first submit; legacy rows without `closed` fall back to `bool(answered)`).
 
+### 2.5 App Channel, Per-Mode Memory Policy & `confirm_only` Proposals (v0.3.0)
+
+1. **`AppChatbot` (`src/kesoku/gateway/chatbot/app/`)**: a fourth gateway subscriber (`chatbot_id = "app"`, one channel
+   `app:<session_id>` per session). `EngineLink` (`link.py`) keeps a single outbound WebSocket to a relay
+   (`Authorization: Bearer <token from env>`, `engine.hello{boot_id, conn_seq}`, 25 s ping, seamless `relay.rotate`).
+   Every client request is a V1 envelope (`protocol.py`) answered by exactly one reply (`<type>.result` unless
+   overridden, or `error{code}`), dispatched in `adapter.py` / `commands.py` / `persona.py` / `proposals.py` /
+   `memory_policy.py`.
+2. **Sequenced outbox (`outbox.py`, `app_outbox`)**: only the adapter allocates per-session `seq` for persisted session
+   events (`message.user`, `message.final`, `turn.event`, `media.*`, `state.sync`, `session.updated`,
+   `memory.proposal*`); `sync.replay` re-sends them with their original ids, then `sync.done` (or `sync.reset` when the
+   cursor predates retention). Streaming previews (`stream.delta` / `stream.clear`, code-point offsets, per-round
+   buffers) are never sequenced. `stream_min_interval_sec` is registered per chatbot (`Gateway.get_stream_min_interval`).
+3. **Rich fenced blocks (`utils/ui_markup.py`)**: ```` ```bilingual ```` and ```` ```card ```` (free-form `kind`) parse into
+   structured segments only when `parse_message_content(..., rich_blocks=True)`; every other platform receives a clean
+   text fallback (media tags inside are still delivered).
+4. **Generic per-message metadata (`turn_executor.py`)**: `llm_override` (validated against the channel's
+   `allowed_models`), `mode_prefs` (injected as `<context name="app-prefs">`), `ignore_context_globs` (render-time
+   filter; memory policy still sees every block).
+5. **Four-state memory policy (`context_policy.py`)**: `full < real_facts_only < confirm_only < isolated`
+   (+ `[agent] memory_confirm_contexts`). `resolve_memory_policy` first asks the registered
+   `KesokuContext.memory_policy_override_provider`; a non-empty answer is authoritative (no rank merge). The app
+   adapter answers with `app_mode_memory_prefs[current mode]`, the mode being read generically from
+   `$STAGING_DIR/game/games.json`.
+6. **`confirm_only` proposals (`memory_proposals.py`)**: the consolidator splits a window into an automatic pass and a
+   confirmation pass; confirmation-pass ops are filtered against `memory_proposal_blocklist` and staged in
+   `memory_proposals` without touching `$MEMORY_DIR`. Only `ProposalStore.confirm` calls `MemoryWriter.apply_ops`;
+   `dismiss` blocklists the fact fingerprints; pending proposals expire after 7 days.
+
 ---
 
 ## 3. Evaluation Benchmark (`benchmarks/kesoku_bench/`)

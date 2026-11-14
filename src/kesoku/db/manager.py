@@ -13,6 +13,7 @@ import numpy as np
 
 from kesoku.agent.history_sorter import sort_session_messages
 from kesoku.constants import MessageRole, MessageStatus, MessageType
+from kesoku.db.app_tables import AppTablesMixin
 from kesoku.db.connection import ConnectionProvider
 from kesoku.db.models import Message, Session, SummaryNode
 from kesoku.utils.text import fts_tokenize
@@ -69,7 +70,7 @@ def _batch_semantic_scores(
     return scores
 
 
-class DatabaseManager:
+class DatabaseManager(AppTablesMixin):
     """Encapsulates all SQLite database schema and CRUD operations for Kesoku."""
 
     def __init__(self, db_path: str) -> None:
@@ -253,6 +254,7 @@ class DatabaseManager:
             raise RuntimeError(f"Database schema migration error: {e}") from e
 
         self._apply_memory_v2_v3_migrations(conn)
+        self._apply_app_v4_migration(conn)
 
     def _apply_memory_v2_v3_migrations(self, conn: sqlite3.Connection) -> None:
         """Apply idempotent v2 (digests/cursors/visibility) and v3 (FTS5) migrations safely."""
@@ -872,6 +874,10 @@ class DatabaseManager:
                 conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
                 # Delete interactive UI prompt specs of this session
                 conn.execute("DELETE FROM ui_prompts WHERE session_id = ?", (session_id,))
+                try:
+                    conn.execute("DELETE FROM app_outbox WHERE session_id = ?", (session_id,))
+                except sqlite3.OperationalError as e:
+                    logger.debug(f"Skipping app_outbox cleanup for session '{session_id}': {e}")
                 # Delete the session itself
                 conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
 
@@ -2674,6 +2680,22 @@ class AsyncDatabaseManager:
         """
         await asyncio.to_thread(self.sync_db.update_session_title, session_id, title)
 
+
+    async def list_sessions_by_chatbots(
+        self,
+        chatbot_ids: Sequence[str],
+        role: str | None = None,
+        cursor: tuple[float, str] | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List sessions bound to any of `chatbot_ids` (newest first, keyset pagination)."""
+        return await asyncio.to_thread(self.sync_db.list_sessions_by_chatbots, chatbot_ids, role, cursor, limit)
+
+    async def get_messages_page(
+        self, session_id: str, before_ts: float | None = None, limit: int = 50, visible_only: bool = True
+    ) -> list[Message]:
+        """Return a chronological page of messages strictly older than `before_ts`."""
+        return await asyncio.to_thread(self.sync_db.get_messages_page, session_id, before_ts, limit, visible_only)
 
     async def list_sessions(self) -> list[Session]:
         """List all sessions.

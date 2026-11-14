@@ -206,6 +206,33 @@ base_url = "https://ilinkai.weixin.qq.com"
 # sys_prompt_file = "memory/wechat_prompt.md"
 
 
+# App channel (optional): the engine host keeps ONE outbound WebSocket to a relay that serves app clients.
+# Pair devices with `kesoku app pair`; list / revoke with `kesoku app devices` / `kesoku app revoke <id>`.
+# [[chatbots.app]]
+# enabled = true
+# chatbot_id = "app"
+# default_role = "default"
+# relay_url = "wss://<relay-host>/engine"
+# engine_token_env = "KESOKU_RELAY_ENGINE_TOKEN"   # the token itself is read from this env var, never from this file
+# stream_min_interval_sec = 0.05
+# allowed_models = ["<model-a>", "<model-b>"]      # models selectable per message / session from the app
+#
+# [[chatbots.app.modes]]
+# id = "chat"
+# title = "Chat"
+#
+# [[chatbots.app.modes]]
+# id = "<mode_id>"                     # must equal the active instance id written to game/games.json
+# title = "<Mode title>"
+# launch_prompt = "<user message that starts the mode>"
+# prefs_schema = { key = ["a", "b"] }  # optional whitelist for mode.prefs.set
+#
+# Factory per-mode memory policy (full / confirm_only / isolated). Defaults: chat = full, other modes = confirm_only.
+# Users change them from the app; stored values are authoritative over static context frontmatter.
+# [chatbots.app.memory_policy_defaults]
+# chat = "full"
+
+
 [shell]
 # Whether to enable the shell command execution tool.
 enabled = true

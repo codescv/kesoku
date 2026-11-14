@@ -29,6 +29,7 @@ from kesoku.agent.context_policy import (
 )
 from kesoku.agent.history import segment_logical_turns
 from kesoku.agent.llm import CLAUDE_THINKING_LEVELS, GEMINI_THINKING_LEVELS, BaseLLM
+from kesoku.agent.memory_proposals import ProposalStore
 from kesoku.agent.memory_store import (
     bump_memory_index_version,
     default_pinned_cache,
@@ -139,7 +140,7 @@ def format_turn_for_extraction(turn: Sequence[Message], policy: ContextPolicy) -
         return "[omitted — isolated context]"
 
     lines: list[str] = []
-    if policy == "real_facts_only":
+    if policy in ("real_facts_only", "confirm_only"):
         lines.append("[scenario frame — keep only real-world facts]")
 
     for msg in turn:
@@ -221,6 +222,7 @@ class ExtractionOutcome:
     files_over_cap: list[str] | None = None
     last_msg_ts: float = 0.0
     last_msg_id: str = ""
+    proposal_id: str = ""
 
 
 class EpisodeExtractor:
@@ -1280,9 +1282,41 @@ class MemoryConsolidator:
                 last_msg_id=last_msg.id,
             )
 
-        rendered_turns = [
-            format_turn_for_extraction(t, pol) for t, pol in zip(turns, turn_policies, strict=True)
-        ]
+        # Split the window into an automatic pass (full / real_facts_only turns -> MemoryWriter) and a
+        # confirmation pass (confirm_only turns -> staged proposals, never written to $MEMORY_DIR). When no
+        # confirm_only turn is present this is exactly the single legacy pass.
+        has_confirm = any(p == "confirm_only" for p in turn_policies)
+        has_auto = any(p in ("full", "real_facts_only") for p in turn_policies)
+        passes: list[tuple[str, list[str]]] = []
+        if has_auto:
+            passes.append(
+                (
+                    "auto",
+                    [
+                        format_turn_for_extraction(t, "isolated" if pol == "confirm_only" else pol)
+                        for t, pol in zip(turns, turn_policies, strict=True)
+                    ],
+                )
+            )
+        if has_confirm:
+            passes.append(
+                (
+                    "confirm",
+                    [
+                        format_turn_for_extraction(t, pol if pol == "confirm_only" else "isolated")
+                        for t, pol in zip(turns, turn_policies, strict=True)
+                    ],
+                )
+            )
+        confirm_msg_id: str | None = None
+        if has_confirm:
+            for t, pol in zip(turns, turn_policies, strict=True):
+                if pol != "confirm_only":
+                    continue
+                for m in t:
+                    if m.role == MessageRole.USER:
+                        confirm_msg_id = m.id
+
         window_query_parts: list[str] = []
         for t, pol in zip(turns, turn_policies, strict=True):
             if pol == "isolated":
@@ -1304,56 +1338,55 @@ class MemoryConsolidator:
 
         extractor = EpisodeExtractor(cfg)
         try:
-            prompt, snapshots, mem_dir = await self._run_on_worker(
-                lambda: extractor.prepare_prompt_sync(
-                    db=self.sync_db,
-                    role=safe_role,
-                    session_id=session_id,
-                    rendered_turns=rendered_turns,
-                    window_query_text=window_query,
-                    compaction_hints=compaction_summaries,
-                )
-            )
-            llm = self._resolve_extractor_llm(
-                force_low=bool(getattr(self, "_minimal_thinking_unsupported", False))
-            )
-            try:
-                res = await llm.generate(prompt=prompt)
-            except Exception as gen_err:
-                err_s = str(gen_err)
-                if not getattr(self, "_minimal_thinking_unsupported", False) and (
-                    "THINKING_LEVEL_MINIMAL" in err_s or "Thinking level is unsupported" in err_s
-                ):
-                    logger.info(
-                        "Extractor model does not support thinking_level='minimal'; falling back to 'low'."
+            auto_ops: list[Mapping[str, Any]] = []
+            confirm_ops: list[Mapping[str, Any]] = []
+            ep_summary = ""
+            open_threads: list[str] = []
+            in_tok = 0
+            out_tok = 0
+            snapshots: dict[str, str] = {}
+            mem_dir = ""
+            for pass_kind, rendered_turns in passes:
+                prompt, pass_snapshots, mem_dir = await self._run_on_worker(
+                    lambda rt=rendered_turns: extractor.prepare_prompt_sync(
+                        db=self.sync_db,
+                        role=safe_role,
+                        session_id=session_id,
+                        rendered_turns=rt,
+                        window_query_text=window_query,
+                        compaction_hints=compaction_summaries,
                     )
-                    self._minimal_thinking_unsupported = True
-                    llm = self._resolve_extractor_llm(force_low=True)
-                    res = await llm.generate(prompt=prompt)
+                )
+                parsed, p_in, p_out = await self._generate_extraction(prompt)
+                in_tok += p_in
+                out_tok += p_out
+                raw_ops = [op for op in (parsed.get("ops") or []) if isinstance(op, Mapping)]
+                p_summary = " ".join(str(parsed.get("episode_summary") or "").split()).strip()[
+                    :MAX_EPISODE_SUMMARY_CHARS
+                ]
+                raw_threads = parsed.get("open_threads") or []
+                p_threads = (
+                    [str(x).strip()[:80] for x in raw_threads if str(x).strip()][:3]
+                    if isinstance(raw_threads, list)
+                    else []
+                )
+                if pass_kind == "auto":
+                    auto_ops = raw_ops
+                    snapshots = pass_snapshots
+                    ep_summary, open_threads = p_summary, p_threads
                 else:
-                    raise
-            in_tok = int(res.prompt_tokens or 0)
-            out_tok = int(res.candidates_tokens or 0)
-            if in_tok == 0 and out_tok == 0 and res.total_tokens:
-                in_tok = int(res.total_tokens)
-
-            parsed = parse_extractor_json(res.content)
-            raw_ops = [op for op in (parsed.get("ops") or []) if isinstance(op, Mapping)]
-            ep_summary = " ".join(str(parsed.get("episode_summary") or "").split()).strip()[:MAX_EPISODE_SUMMARY_CHARS]
-            raw_threads = parsed.get("open_threads") or []
-            open_threads = (
-                [str(x).strip()[:80] for x in raw_threads if str(x).strip()][:3]
-                if isinstance(raw_threads, list)
-                else []
-            )
+                    confirm_ops = raw_ops
+                    if not has_auto:
+                        ep_summary, open_threads = p_summary, p_threads
             event_date = datetime.datetime.fromtimestamp(last_msg.timestamp).astimezone().strftime("%Y-%m-%d")
+            all_ops = [dict(o) for o in (*auto_ops, *confirm_ops)]
 
             if dry_run:
                 return ExtractionOutcome(
                     status="dry_run",
                     episode_summary=ep_summary,
                     open_threads=open_threads,
-                    ops=[dict(o) for o in raw_ops],
+                    ops=all_ops,
                     input_tokens=in_tok,
                     output_tokens=out_tok,
                     messages_processed=len(msgs),
@@ -1361,18 +1394,43 @@ class MemoryConsolidator:
                     last_msg_id=last_msg.id,
                 )
 
-            def _apply_and_persist() -> MemoryWriteResult:
-                wr = MemoryWriter.apply_ops(
-                    raw_ops,
-                    role=safe_role,
-                    memories_dir=mem_dir,
-                    db=self.sync_db,
-                    session_id=session_id,
-                    event_date=event_date,
-                    pinned_files=cfg.agent.memory_pinned_files,
-                    rejected_tags=cfg.agent.memory_rejected_tags,
-                    max_file_bytes=cfg.agent.memory_file_max_bytes,
-                    snapshots=snapshots,
+            source_mode: str | None = None
+            mode_provider = getattr(self.context, "memory_mode_provider", None)
+            if confirm_ops and callable(mode_provider):
+                try:
+                    source_mode = await self._run_on_worker(mode_provider, session_id)
+                except Exception as mode_err:
+                    logger.warning(f"memory_mode_provider failed for session '{session_id}': {mode_err}")
+            proposal_store = self._get_proposal_store()
+
+            def _apply_and_persist() -> tuple[MemoryWriteResult, dict[str, Any] | None]:
+                wr = (
+                    MemoryWriter.apply_ops(
+                        auto_ops,
+                        role=safe_role,
+                        memories_dir=mem_dir,
+                        db=self.sync_db,
+                        session_id=session_id,
+                        event_date=event_date,
+                        pinned_files=cfg.agent.memory_pinned_files,
+                        rejected_tags=cfg.agent.memory_rejected_tags,
+                        max_file_bytes=cfg.agent.memory_file_max_bytes,
+                        snapshots=snapshots,
+                    )
+                    if auto_ops
+                    else MemoryWriteResult()
+                )
+                # confirm_only: stage candidates only; ProposalStore.confirm is the sole write path.
+                staged = (
+                    proposal_store.stage_sync(
+                        session_id=session_id,
+                        role=safe_role,
+                        ops=confirm_ops,
+                        message_id=confirm_msg_id,
+                        source_mode=source_mode,
+                    )
+                    if confirm_ops
+                    else None
                 )
                 if ep_summary or open_threads:
                     sess = self.sync_db.get_session(session_id)
@@ -1396,10 +1454,12 @@ class MemoryConsolidator:
                         summary_upto_ts=float(last_msg.timestamp),
                         embedding=emb_bytes,
                     )
-                return wr
+                return wr, staged
 
-            write_res = await self._run_on_worker(_apply_and_persist)
+            write_res, staged_proposal = await self._run_on_worker(_apply_and_persist)
             self._compaction_hints.pop(session_id, None)
+            if staged_proposal is not None:
+                await proposal_store.notify(staged_proposal)
 
             await self._advance_cursor_after_success(
                 session_id=session_id,
@@ -1428,7 +1488,7 @@ class MemoryConsolidator:
                 status="ok",
                 episode_summary=ep_summary,
                 open_threads=open_threads,
-                ops=[dict(o) for o in raw_ops],
+                ops=all_ops,
                 ops_applied=write_res.ops_applied,
                 input_tokens=in_tok,
                 output_tokens=out_tok,
@@ -1436,6 +1496,7 @@ class MemoryConsolidator:
                 files_over_cap=list(write_res.files_over_cap),
                 last_msg_ts=float(last_msg.timestamp),
                 last_msg_id=last_msg.id,
+                proposal_id=staged_proposal["proposal_id"] if staged_proposal else "",
             )
         except Exception as e:
             err_msg = str(e)[:500]
@@ -1463,6 +1524,39 @@ class MemoryConsolidator:
 
                 await self._run_on_worker(_record_failure)
             return ExtractionOutcome(status="error")
+
+    def _get_proposal_store(self) -> ProposalStore:
+        """Return the (lazily created) proposal store bound to the context's proposal listeners."""
+        store = getattr(self, "_proposal_store", None)
+        if store is None:
+            listeners = getattr(self.context, "memory_proposal_listeners", None)
+            if not isinstance(listeners, list):
+                listeners = []
+            store = ProposalStore(self.sync_db, self.context.config, listeners=listeners)
+            self._proposal_store = store
+        return store
+
+    async def _generate_extraction(self, prompt: str) -> tuple[dict[str, Any], int, int]:
+        """Run one extractor LLM call (with the minimal-thinking fallback) and parse its JSON output."""
+        llm = self._resolve_extractor_llm(force_low=bool(getattr(self, "_minimal_thinking_unsupported", False)))
+        try:
+            res = await llm.generate(prompt=prompt)
+        except Exception as gen_err:
+            err_s = str(gen_err)
+            if not getattr(self, "_minimal_thinking_unsupported", False) and (
+                "THINKING_LEVEL_MINIMAL" in err_s or "Thinking level is unsupported" in err_s
+            ):
+                logger.info("Extractor model does not support thinking_level='minimal'; falling back to 'low'.")
+                self._minimal_thinking_unsupported = True
+                llm = self._resolve_extractor_llm(force_low=True)
+                res = await llm.generate(prompt=prompt)
+            else:
+                raise
+        in_tok = int(res.prompt_tokens or 0)
+        out_tok = int(res.candidates_tokens or 0)
+        if in_tok == 0 and out_tok == 0 and res.total_tokens:
+            in_tok = int(res.total_tokens)
+        return parse_extractor_json(res.content), in_tok, out_tok
 
     async def _advance_cursor_after_success(
         self,

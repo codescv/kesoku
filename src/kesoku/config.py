@@ -70,7 +70,7 @@ class BackfillContextMarker(BaseModel):
     """Rule carrying forward a context memory policy across historical turns during backfill."""
 
     pattern: str = Field(..., description="Regex matched against historical tool call arguments or content")
-    policy: Literal["full", "real_facts_only", "isolated"] = Field(
+    policy: Literal["full", "real_facts_only", "confirm_only", "isolated"] = Field(
         ..., description="Context policy activated when pattern matches"
     )
     until: str = Field(default="", description="Optional regex ending the carried-forward policy")
@@ -297,6 +297,13 @@ class AgentConfig(BaseModel):
         default_factory=list,
         description="Glob patterns matched against <context> block names classified as 'real_facts_only'",
     )
+    memory_confirm_contexts: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Glob patterns matched against <context> block names classified as 'confirm_only' "
+            "(facts are staged as proposals that require explicit user confirmation)"
+        ),
+    )
     memory_backfill_context_markers: list[BackfillContextMarker] = Field(
         default_factory=list,
         description="Historical tool-call regex markers carrying context policy forward during memory backfill",
@@ -396,6 +403,7 @@ class AgentConfig(BaseModel):
             "memory_pinned_files",
             "memory_isolated_contexts",
             "memory_filtered_contexts",
+            "memory_confirm_contexts",
             "memory_extraction_prompts",
             "memory_rejected_tags",
         )
@@ -671,12 +679,134 @@ class WechatConfig(BaseModel):
     )
 
 
+APP_MEMORY_POLICIES: tuple[str, ...] = ("full", "confirm_only", "isolated")
+"""User-selectable per-mode memory policies for the app channel (auto / confirm / ignore)."""
+
+DEFAULT_APP_MEMORY_POLICY_FOR_NON_CHAT = "confirm_only"
+DEFAULT_APP_CHAT_MODE_ID = "chat"
+
+
+class AppLlmOverride(BaseModel):
+    """Generic per-message LLM override (validated against `allowed_models`)."""
+
+    llm: Literal["gemini", "claude"] | None = Field(default=None, description="LLM provider override")
+    model_name: str | None = Field(default=None, description="Model identifier override")
+    thinking_level: Literal["minimal", "low", "medium", "high", "xhigh", "max"] | None = Field(
+        default=None, description="Thinking/reasoning level override"
+    )
+    stream: bool | None = Field(default=None, description="Streaming preview override")
+
+
+class AppModeConfig(BaseModel):
+    """One launchable experience mode exposed to app clients (opaque to the engine core)."""
+
+    id: str = Field(..., description="Mode identifier (matches the active entry id in game/games.json)")
+    title: str = Field(default="", description="Human-readable mode title")
+    launch_prompt: str | None = Field(default=None, description="User message injected by mode.start")
+    stop_prompt: str | None = Field(default=None, description="User message injected by mode.stop")
+    llm_override: AppLlmOverride | None = Field(default=None, description="Default LLM override for the mode")
+    prefs_schema: dict[str, Any] = Field(
+        default_factory=dict, description="Whitelist of keys accepted by mode.prefs.set (values: enum list or type)"
+    )
+
+    @model_validator(mode="after")
+    def _validate_mode(self) -> "AppModeConfig":
+        if not re.fullmatch(r"[a-z0-9_]{1,40}", self.id):
+            raise ValueError(f"Invalid app mode id '{self.id}': expected [a-z0-9_]{{1,40}}")
+        return self
+
+
+class AppConfig(BaseModel):
+    """App channel adapter settings (outbound connection to a relay; see `kesoku app`)."""
+
+    enabled: bool = Field(default=False, description="Whether to launch the app channel adapter in daemon mode")
+    chatbot_id: str = Field(default="app", description="Unique chatbot identifier")
+    default_role: str = Field(default="default", description="Default persona for new app sessions")
+    relay_url: str = Field(default="", description="Relay engine-leg WebSocket URL (wss://.../engine)")
+    engine_token_env: str = Field(
+        default="KESOKU_RELAY_ENGINE_TOKEN", description="Environment variable holding the relay engine token"
+    )
+    stream_min_interval_sec: float = Field(
+        default=0.05, description="Minimum interval between streamed preview updates for this channel"
+    )
+    allowed_models: list[str] = Field(
+        default_factory=list, description="Model names accepted in message llm_override (empty = no overrides)"
+    )
+    avatar_style_presets: list[str] = Field(
+        default_factory=lambda: ["anime_clean", "cyber_flat", "watercolor", "pixel"],
+        description="Enabled avatar restyle presets",
+    )
+    avatar_generator_command: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional argv template for the avatar image generator. Placeholders: {source}, {output}, {style}, "
+            "{prompt}. Empty uses <skills_dir>/ai-image/scripts/generate_image.py when present."
+        ),
+    )
+    voice_preview_command: list[str] = Field(
+        default_factory=list,
+        description="Optional argv template for voice previews. Placeholders: {voice}, {text}, {output}.",
+    )
+    mode_stop_prompt: str = Field(
+        default="结束当前模式。", description="User message injected by mode.stop when the mode has no stop_prompt"
+    )
+    outbox_max_per_session: int = Field(default=5000, description="Per-session outbox retention (events)")
+    outbox_retention_days: int = Field(default=30, description="Outbox retention in days")
+    modes: list[AppModeConfig] = Field(
+        default_factory=lambda: [AppModeConfig(id=DEFAULT_APP_CHAT_MODE_ID, title="Chat")],
+        description="Launchable modes exposed to app clients",
+    )
+    memory_policy_defaults: dict[str, str] = Field(
+        default_factory=dict,
+        description="Factory per-mode memory policy defaults (full / confirm_only / isolated)",
+    )
+
+    @model_validator(mode="after")
+    def _validate_app(self) -> "AppConfig":
+        if self.stream_min_interval_sec < 0:
+            raise ValueError("stream_min_interval_sec must be >= 0")
+        ids = [m.id for m in self.modes]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Duplicate app mode ids in [[chatbots.app.modes]]")
+        if DEFAULT_APP_CHAT_MODE_ID not in ids:
+            self.modes.insert(0, AppModeConfig(id=DEFAULT_APP_CHAT_MODE_ID, title="Chat"))
+        for mode_id, policy in self.memory_policy_defaults.items():
+            if policy not in APP_MEMORY_POLICIES:
+                raise ValueError(f"Invalid memory_policy_defaults['{mode_id}'] = '{policy}'")
+        if self.outbox_max_per_session < 1:
+            raise ValueError("outbox_max_per_session must be >= 1")
+        return self
+
+    @property
+    def mode_ids(self) -> list[str]:
+        """Return configured mode identifiers in launch order."""
+        return [m.id for m in self.modes]
+
+    def get_mode(self, mode_id: str) -> AppModeConfig | None:
+        """Return the mode configuration matching `mode_id`, if configured."""
+        for m in self.modes:
+            if m.id == mode_id:
+                return m
+        return None
+
+    def effective_memory_policy_defaults(self) -> dict[str, str]:
+        """Return factory policy defaults for every configured mode (chat=full, others=confirm_only)."""
+        out: dict[str, str] = {}
+        for mode_id in self.mode_ids:
+            default = "full" if mode_id == DEFAULT_APP_CHAT_MODE_ID else DEFAULT_APP_MEMORY_POLICY_FOR_NON_CHAT
+            out[mode_id] = self.memory_policy_defaults.get(mode_id, default)
+        for mode_id, policy in self.memory_policy_defaults.items():
+            out.setdefault(mode_id, policy)
+        return out
+
+
 class ChatbotsConfig(BaseModel):
     """Container for multiple chatbot adapter lists."""
 
     discord: list[DiscordConfig] = Field(default_factory=list)
     google_chat: list[GoogleChatConfig] = Field(default_factory=list)
     wechat: list[WechatConfig] = Field(default_factory=list)
+    app: list[AppConfig] = Field(default_factory=list)
 
 
 class PostToolUseHook(BaseModel):
@@ -813,11 +943,28 @@ class KesokuConfig(BaseModel):
             return self.wechat
         return None
 
+    @property
+    def active_apps(self) -> list[AppConfig]:
+        """Get all enabled app channel configs."""
+        return [a for a in self.chatbots.app if a.enabled]
+
+    def get_app_config(self, chatbot_id: str | None = None) -> AppConfig | None:
+        """Find AppConfig with matching chatbot_id (first app config when chatbot_id is None)."""
+        for a_cfg in self.chatbots.app:
+            if chatbot_id is None or a_cfg.chatbot_id == chatbot_id:
+                return a_cfg
+        return None
+
     def get_chatbot_default_role(self, chatbot_id: str) -> str:
         """Return the configured default_role for the matching chatbot adapter, or 'default'."""
         if not chatbot_id:
             return "default"
-        for getter in (self.get_discord_config, self.get_google_chat_config, self.get_wechat_config):
+        for getter in (
+            self.get_discord_config,
+            self.get_google_chat_config,
+            self.get_wechat_config,
+            self.get_app_config,
+        ):
             bot_cfg = getter(chatbot_id)
             if bot_cfg is not None:
                 return bot_cfg.default_role or "default"

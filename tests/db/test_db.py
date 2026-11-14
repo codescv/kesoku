@@ -240,7 +240,7 @@ def test_v2_v3_migrations_drop_legacy_table_and_create_new_schema(tmp_path):
 
     with mgr.connection_provider.connection() as conn:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 3
+        assert version == 4
         tables = {
             row[0]
             for row in conn.execute(

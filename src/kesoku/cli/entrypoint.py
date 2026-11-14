@@ -14,6 +14,7 @@ import typer
 from rich.console import Console
 
 from kesoku.agent.agent import Agent
+from kesoku.cli.app_channel import app_app
 from kesoku.cli.chat import run_cli_chat_async
 from kesoku.cli.history import history_app
 from kesoku.cli.memory import memory_app
@@ -39,6 +40,7 @@ app.add_typer(wechat_app, name="wechat")
 
 app.add_typer(history_app, name="history")
 app.add_typer(memory_app, name="memory")
+app.add_typer(app_app, name="app")
 
 
 @wechat_app.command("pair")
@@ -238,8 +240,9 @@ def start_cmd(
     active_discords = cfg.active_discords
     active_gchats = cfg.active_google_chats
     active_wechats = cfg.active_wechats
+    active_apps = cfg.active_apps
 
-    if not active_discords and not active_gchats and not active_wechats:
+    if not active_discords and not active_gchats and not active_wechats and not active_apps:
         console = Console()
         console.print("[bold red]Error: No chatbots are enabled in the configuration.[/bold red]")
         sys.exit(1)
@@ -291,6 +294,17 @@ def start_cmd(
         )
         bot_tasks.append(wechat_bot.start())
         bots.append(wechat_bot)
+
+    for a_cfg in active_apps:
+        from kesoku.gateway.chatbot.app import AppChatbot
+
+        app_bot = AppChatbot(
+            chatbot_id=a_cfg.chatbot_id,
+            gateway=gateway,
+            app_config=a_cfg,
+        )
+        bot_tasks.append(app_bot.start())
+        bots.append(app_bot)
 
     cron_manager = None
     config_dir = cfg.agent_working_dir

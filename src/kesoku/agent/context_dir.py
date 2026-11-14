@@ -31,7 +31,7 @@ TRUNCATED_MARKER = "[truncated]"
 _NUMERIC_PREFIX_RE = re.compile(r"^\d+[-_]")
 # Strict key-value line check for safe YAML frontmatter stripping in `context/*.md` (R2-4).
 _FRONTMATTER_KV_LINE_RE = re.compile(r"^([a-zA-Z0-9_-]+)\s*:(.*)$")
-_VALID_MEMORY_POLICIES = frozenset({"full", "real_facts_only", "isolated"})
+_VALID_MEMORY_POLICIES = frozenset({"full", "real_facts_only", "confirm_only", "isolated"})
 
 
 @dataclass(frozen=True)

@@ -52,8 +52,11 @@ from kesoku.utils.table import parse_markdown_tables, render_table_to_image
 from kesoku.utils.text import format_text, render_spoilers, split_text_into_chunks
 from kesoku.utils.ui_markup import (
     DETAILS_RE,
+    RICH_BLOCK_RE,
     UI_BLOCK_RE,
     find_first_ui_block,
+    flatten_rich_blocks,
+    parse_rich_block,
     render_details_as_text,
     render_question_as_text,
 )
@@ -84,27 +87,44 @@ def _legacy_tag_segment(match: re.Match[str]) -> dict[str, Any]:
     return {"type": "question", "question": question_text, "choices": choices, "multi": False, "max": 1}
 
 
-def parse_message_content(content: str) -> list[dict[str, Any]]:
+def parse_message_content(content: str, rich_blocks: bool = False) -> list[dict[str, Any]]:
     """Parse message content to extract zero or more blocks.
 
     Recognizes:
     * the first fenced ```ui block (YAML `type: select|multiselect`, `prompt`, `options`, optional `max`);
       further ```ui blocks, and invalid ones, stay plain text;
     * `<details><summary>TITLE</summary>BODY</details>` collapsible sections;
-    * `[file: /path]`, `[voice: /path]` and the legacy `[question: <question> || choice1 | ...]`.
+    * `[file: /path]`, `[voice: /path]` and the legacy `[question: <question> || choice1 | ...]`;
+    * fenced ```bilingual and ```card YAML blocks: returned as structured segments when `rich_blocks` is True,
+      otherwise replaced by a clean readable plain-text fallback (so platforms without rich rendering never
+      show raw YAML; media tags inside the fallback are still delivered as attachments).
 
     Args:
         content: Raw message text content to parse.
+        rich_blocks: Whether the caller renders `bilingual` / `card` segments natively.
 
     Returns:
         A list of segment dictionaries:
         {"type": "text", "content": "..."}, {"type": "file", "path": "..."}, {"type": "voice", "path": "..."},
-        {"type": "question", "question": "...", "choices": [...], "multi": bool, "max": int} and
-        {"type": "details", "title": "...", "body": "..."}.
+        {"type": "question", "question": "...", "choices": [...], "multi": bool, "max": int},
+        {"type": "details", "title": "...", "body": "..."} and (rich mode only)
+        {"type": "bilingual", ...} / {"type": "card", "kind": "...", "data": {...}}.
     """
+    if not rich_blocks:
+        content = flatten_rich_blocks(content)
+
     # Collect candidate spans from every syntax, then keep non-overlapping ones by start position, so a tag
     # inside a ```ui block or a <details> body is treated as part of that block.
     candidates: list[tuple[int, int, dict[str, Any]]] = []
+    rich_masks: list[tuple[int, int]] = []
+    if rich_blocks and "```" in content:
+        for m in RICH_BLOCK_RE.finditer(content):
+            rich_segment = parse_rich_block(m.group("kind"), m.group("body"))
+            if rich_segment is None:
+                logger.warning(f"Invalid ```{m.group('kind')} block (bad YAML or missing fields); rendering as text")
+                continue
+            candidates.append((m.start(), m.end(), rich_segment))
+            rich_masks.append((m.start(), m.end()))
 
     ui_match, ui_question = find_first_ui_block(content)
     if ui_match is not None:
@@ -122,6 +142,7 @@ def parse_message_content(content: str) -> list[dict[str, Any]]:
 
     # Any ```ui block (including non-interactive ones) masks tags inside it.
     masks = [(m.start(), m.end()) for m in UI_BLOCK_RE.finditer(content)] if "```ui" in content else []
+    masks.extend(rich_masks)
 
     segments: list[dict[str, Any]] = []
     last_idx = 0
@@ -245,6 +266,7 @@ class Chatbot(ABC):
     """Abstract base class for chatbot adapters connecting to Kesoku Gateway."""
 
     supports_deferred_media: bool = False
+    stream_min_interval_sec: float = 1.5
     _deferred_poll_initial_sec: float = 0.5
     _deferred_poll_max_sec: float = 2.0
     _deferred_dead_grace_sec: float = DEAD_WORKER_GRACE_SEC
@@ -281,6 +303,9 @@ class Chatbot(ABC):
         register_deferred_fn = getattr(self.gateway, "register_deferred_media", None)
         if callable(register_deferred_fn):
             register_deferred_fn(self.chatbot_id, bool(self.supports_deferred_media))
+        register_interval_fn = getattr(self.gateway, "register_stream_min_interval", None)
+        if callable(register_interval_fn):
+            register_interval_fn(self.chatbot_id, float(self.stream_min_interval_sec))
 
     def _register_default_commands(self) -> None:
         """Register platform-agnostic standard commands."""
