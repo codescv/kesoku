@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from kesoku.cli.service import resolve_service_config_path
 from kesoku.config import KesokuConfig, load_config
 from kesoku.db import DatabaseManager
 from kesoku.gateway.chatbot.app.pairing import PAIRING_TTL_SECONDS, create_pairing_offer
@@ -22,14 +23,34 @@ logger = setup_logger(__name__)
 app_app = typer.Typer(help="Manage the app channel: pair devices, list / revoke devices, show status.")
 
 ConfigOpt = Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")]
+ServiceNameOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--name",
+        "-n",
+        help="Service instance suffix (kesoku-<name>.service) or workspace name; defaults to the main kesoku service",
+    ),
+]
+UserScopeOpt = Annotated[
+    bool,
+    typer.Option(
+        "--user/--system",
+        help="Resolve service config from user-level (default) or system-level service",
+    ),
+]
 
 
-def _load(config_path: str) -> tuple[KesokuConfig, DatabaseManager]:
-    cfg = load_config(config_path)
+def _load(
+    config_path: str,
+    name: str | None = None,
+    user: bool = True,
+) -> tuple[KesokuConfig, DatabaseManager, bool]:
+    resolved_path, matched_service = resolve_service_config_path(config_path, name=name, user=user)
+    cfg = load_config(resolved_path)
     db = DatabaseManager(cfg.workspace.db_path)
     db._config = cfg
     db.verify_db()
-    return cfg, db
+    return cfg, db, matched_service
 
 
 def _fmt_ts(ts: float | None) -> str:
@@ -65,31 +86,42 @@ def _print_qr(console: Console, text: str) -> None:
 
 @app_app.command("pair")
 def pair_cmd(
-    name: Annotated[str, typer.Option("--name", "-n", help="Display name of the device being paired")] = "device",
+    name: ServiceNameOpt = None,
+    device_name: Annotated[
+        str, typer.Option("--device-name", "-d", help="Display name of the device being paired")
+    ] = "device",
     config: ConfigOpt = "config.toml",
+    user: UserScopeOpt = True,
     wait: Annotated[bool, typer.Option("--wait/--no-wait", help="Wait until the code is redeemed")] = True,
-    qr: Annotated[bool, typer.Option("--qr", help="Also print a QR code with a pairing deep link")] = False,
+    qr: Annotated[
+        bool, typer.Option("--qr/--no-qr", help="Print a QR code with a pairing deep link (enabled by default)")
+    ] = True,
 ) -> None:
-    """Create a one-time 6-digit pairing code (valid for 2 minutes) for a new app device."""
-    cfg, db = _load(config)
+    """Create a one-time 6-digit pairing code (valid for 2 minutes) and QR code for a new app device."""
+    cfg, db, matched_service = _load(config, name=name, user=user)
+    effective_device_name = device_name
+    if name and not matched_service and device_name == "device":
+        effective_device_name = name
     console = Console()
     if not cfg.active_apps:
         console.print(
             "[yellow]" + escape("Warning: no enabled [[chatbots.app]] entry; the running service will not relay "
                                 "this code.") + "[/yellow]"
         )
-    offer = create_pairing_offer(db, name)
+    offer = create_pairing_offer(db, effective_device_name)
     code = offer["code"]
     console.print(f"\n[bold]Pairing code:[/bold] [bold cyan]{code[:3]} {code[3:]}[/bold cyan]  "
                   f"(valid for {PAIRING_TTL_SECONDS // 60} minutes, single use)")
-    console.print("Enter it in the app. The running Kesoku service forwards only a salted hash to the relay.")
+    console.print("Scan the QR code below in the Kesoku mobile app (or enter the 6-digit code manually).")
     if qr:
         app_cfg = cfg.get_app_config()
         relay_base = ""
         if app_cfg and app_cfg.relay_url:
             host = _safe_host(app_cfg.relay_url)
             relay_base = f"https://{host}" if host else ""
-        _print_qr(console, f"kesoku://pair?code={code}" + (f"&relay={relay_base}" if relay_base else ""))
+        pair_link = f"kesoku://pair?code={code}" + (f"&relay={relay_base}" if relay_base else "")
+        _print_qr(console, pair_link)
+        console.print(f"[dim]Pairing link: {escape(pair_link)}[/dim]")
     if not wait:
         return
     deadline = float(offer["expires_at"])
@@ -112,11 +144,13 @@ def pair_cmd(
 
 @app_app.command("devices")
 def devices_cmd(
+    name: ServiceNameOpt = None,
     config: ConfigOpt = "config.toml",
+    user: UserScopeOpt = True,
     all_devices: Annotated[bool, typer.Option("--all", help="Include revoked devices")] = False,
 ) -> None:
     """List paired app devices."""
-    _, db = _load(config)
+    _, db, _ = _load(config, name=name, user=user)
     rows = db.list_app_devices(include_revoked=all_devices)
     console = Console()
     if not rows:
@@ -141,10 +175,12 @@ def devices_cmd(
 @app_app.command("revoke")
 def revoke_cmd(
     device_id: Annotated[str, typer.Argument(help="Device id to revoke")],
+    name: ServiceNameOpt = None,
     config: ConfigOpt = "config.toml",
+    user: UserScopeOpt = True,
 ) -> None:
     """Revoke a device (the running service pushes the revocation to the relay within seconds)."""
-    _, db = _load(config)
+    _, db, _ = _load(config, name=name, user=user)
     console = Console()
     if db.get_app_device(device_id) is None:
         console.print(f"[bold red]Unknown device '{device_id}'.[/bold red]")
@@ -156,9 +192,13 @@ def revoke_cmd(
 
 
 @app_app.command("status")
-def status_cmd(config: ConfigOpt = "config.toml") -> None:
+def status_cmd(
+    name: ServiceNameOpt = None,
+    config: ConfigOpt = "config.toml",
+    user: UserScopeOpt = True,
+) -> None:
     """Show app channel configuration, devices, memory policies and pending proposals (never secrets)."""
-    cfg, db = _load(config)
+    cfg, db, _ = _load(config, name=name, user=user)
     console = Console()
     apps = cfg.chatbots.app
     if not apps:
