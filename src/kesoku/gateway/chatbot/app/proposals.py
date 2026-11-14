@@ -78,6 +78,9 @@ class ProposalService:
         """Listener for newly staged proposals: emit a sequenced `memory.proposal` event."""
         payload = proposal_for_wire(proposal)
         payload.pop("status", None)
+        # `message_id` is the triggering user message, i.e. the turn id clients key assistant replies by.
+        if payload.get("message_id"):
+            payload["turn_id"] = payload["message_id"]
         await self._emit(proposal["session_id"], "memory.proposal", payload)
 
     async def handle_list(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:

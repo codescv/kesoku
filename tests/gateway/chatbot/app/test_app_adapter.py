@@ -762,3 +762,31 @@ async def test_pairing_offer_redeem_burn_and_hash(env) -> None:
     await bot.pairing.poll_once()
     assert "dev-web" in link.of_type("device.revoked")[-1]["payload"]["device_ids"]
     assert "dev-web" in bot._hello_extra()["revoked_device_ids"]
+
+
+async def test_auto_session_rename_emits_session_updated_not_turn_event(env) -> None:
+    bot, link, gw = env["bot"], env["link"], env["gw"]
+    sid = await create_session(env, role="other_role")
+    rename = Message(session_id=sid, chatbot_id="app", channel_id=f"app:{sid}", sender="Kesoku",
+                     role=MessageRole.SYSTEM, type=MessageType.SESSION_RENAME, content="Weekend plans",
+                     status=MessageStatus.PENDING)
+    await gw.db.save_message(rename)
+    before_turn_events = len(link.of_type("turn.event"))
+    await bot.render_outgoing_message(rename)
+    upd = [e for e in link.of_type("session.updated") if e["session_id"] == sid][-1]
+    assert upd["payload"]["title"] == "Weekend plans" and upd["payload"]["role"] == "other_role"
+    assert upd["payload"]["session_id"] == sid and "seq" in upd
+    assert len(link.of_type("turn.event")) == before_turn_events
+    assert (await gw.db.get_message(rename.id)).status == MessageStatus.DELIVERED
+
+
+async def test_memory_proposal_event_carries_turn_id(env) -> None:
+    bot, link = env["bot"], env["link"]
+    sid = await create_session(env)
+    proposal = await asyncio.to_thread(
+        bot.proposal_store.stage_sync, session_id=sid, role="helper",
+        ops=[{"op": "upsert_bullet", "file": "user/profile.md", "text": "Owns a bicycle"}], message_id="user-msg-1",
+    )
+    await bot.proposals.on_staged(proposal)
+    ev = [e for e in link.of_type("memory.proposal") if e["session_id"] == sid][-1]["payload"]
+    assert ev["message_id"] == "user-msg-1" and ev["turn_id"] == "user-msg-1"

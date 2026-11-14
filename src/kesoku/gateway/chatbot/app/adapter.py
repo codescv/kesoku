@@ -756,6 +756,10 @@ class AppChatbot(Chatbot):
     async def render_outgoing_message(self, message: Message) -> None:
         """Map gateway messages to `turn.event` / `message.final` / `media.*` events."""
         try:
+            if message.type == MessageType.SESSION_RENAME:
+                await self._emit_session_rename(message)
+                await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
+                return
             if self.is_intermediate_message(message):
                 await self._emit_turn_event(message)
                 await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
@@ -775,6 +779,18 @@ class AppChatbot(Chatbot):
     async def on_message_delivered(self, message: Message) -> None:
         """Scan staging state after each delivered final message."""
         await self.state_watcher.scan(message.session_id)
+
+    async def _emit_session_rename(self, message: Message) -> None:
+        """Announce an automatic session title as a sequenced `session.updated` event."""
+        session = await self.gateway.db.get_session(message.session_id)
+        payload: dict[str, Any] = {
+            "session_id": message.session_id,
+            "title": (message.content or "").strip() or (session.title if session else ""),
+            "updated_at": float(message.timestamp),
+        }
+        if session is not None and session.role_name:
+            payload["role"] = session.role_name
+        await self.emit_session_event(message.session_id, "session.updated", payload)
 
     def _turn_id_of(self, message: Message) -> str:
         if message.role == MessageRole.TOOL and message.type != MessageType.TOOL_CALL and message.parent_id:
