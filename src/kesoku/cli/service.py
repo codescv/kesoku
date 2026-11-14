@@ -4,6 +4,8 @@ Provides commands: install, uninstall, start, stop, restart.
 """
 
 import os
+import plistlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -80,6 +82,130 @@ def _get_service_params(user: bool, name: str | None = None) -> tuple[str, list[
             systemctl_reload = ["sudo", "systemctl", "daemon-reload"]
             user_flag = ""
         return target_path, systemctl_reload, user_flag, service_name
+
+
+def _extract_config_from_unit_file(unit_path: str) -> tuple[str | None, str | None]:
+    """Extract `(config_path, working_dir)` from a systemd `.service` or launchd `.plist` file."""
+    if not os.path.isfile(unit_path):
+        return None, None
+    try:
+        if unit_path.endswith(".plist"):
+            with open(unit_path, "rb") as f:
+                data = plistlib.load(f)
+            working_dir = data.get("WorkingDirectory") if isinstance(data, dict) else None
+            args = data.get("ProgramArguments") if isinstance(data, dict) else None
+            cfg_path: str | None = None
+            if isinstance(args, list):
+                for i, tok in enumerate(args):
+                    if tok in ("-c", "--config") and i + 1 < len(args):
+                        cfg_path = str(args[i + 1])
+                        break
+                    if isinstance(tok, str) and tok.startswith("--config="):
+                        cfg_path = tok.split("=", 1)[1]
+                        break
+            if not cfg_path and isinstance(working_dir, str) and working_dir:
+                cfg_path = os.path.join(working_dir, "config.toml")
+            return cfg_path, working_dir if isinstance(working_dir, str) else None
+
+        with open(unit_path, encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        working_dir = None
+        cfg_path = None
+        for raw in lines:
+            line = raw.strip()
+            if line.startswith("WorkingDirectory="):
+                working_dir = line.split("=", 1)[1].strip().strip('"')
+            elif line.startswith("ExecStart="):
+                cmd_str = line.split("=", 1)[1].strip()
+                try:
+                    tokens = shlex.split(cmd_str)
+                except ValueError:
+                    tokens = cmd_str.split()
+                for i, tok in enumerate(tokens):
+                    if tok in ("-c", "--config") and i + 1 < len(tokens):
+                        cfg_path = tokens[i + 1]
+                        break
+                    if tok.startswith("--config="):
+                        cfg_path = tok.split("=", 1)[1]
+                        break
+        if cfg_path and not os.path.isabs(cfg_path) and working_dir:
+            cfg_path = os.path.join(working_dir, cfg_path)
+        if not cfg_path and working_dir:
+            cfg_path = os.path.join(working_dir, "config.toml")
+        return cfg_path, working_dir
+    except Exception:
+        return None, None
+
+
+def resolve_service_config_path(
+    config: str = "config.toml",
+    name: str | None = None,
+    user: bool = True,
+    service_dirs: list[str] | None = None,
+) -> tuple[str, bool]:
+    """Resolve `config.toml` from `-c`, `--name` service instance / workspace, CWD, or default service.
+
+    Returns:
+        `(resolved_config_path, matched_service_by_name)` where `matched_service_by_name` is True
+        when `name` matched an installed service instance or its working directory name.
+    """
+    if config != "config.toml":
+        return config, False
+
+    def _candidate_dirs(is_user: bool) -> list[str]:
+        if service_dirs is not None:
+            return list(service_dirs)
+        if sys.platform == "darwin":
+            return [
+                os.path.expanduser("~/Library/LaunchAgents") if is_user else "/Library/LaunchDaemons"
+            ]
+        return [
+            os.path.expanduser("~/.config/systemd/user") if is_user else "/etc/systemd/system"
+        ]
+
+    def _unit_file_for(is_user: bool, inst_name: str | None) -> str:
+        base_dir = _candidate_dirs(is_user)[0]
+        if sys.platform == "darwin":
+            svc = "com.kesoku.agent" if not inst_name else f"com.kesoku.agent-{inst_name}"
+            return os.path.join(base_dir, f"{svc}.plist")
+        svc = "kesoku" if not inst_name else f"kesoku-{inst_name}"
+        return os.path.join(base_dir, f"{svc}.service")
+
+    if name:
+        clean = name.strip()
+        inst = None if clean in ("", "default", "kesoku") else clean
+        for scope in (user, not user):
+            unit_path = _unit_file_for(scope, inst)
+            cfg_path, _ = _extract_config_from_unit_file(unit_path)
+            if cfg_path and os.path.exists(cfg_path):
+                return cfg_path, True
+        for scope in (user, not user):
+            for d in _candidate_dirs(scope):
+                if not os.path.isdir(d):
+                    continue
+                for fname in sorted(os.listdir(d)):
+                    if not (fname.startswith("kesoku") or fname.startswith("com.kesoku.agent")):
+                        continue
+                    if not (fname.endswith(".service") or fname.endswith(".plist")):
+                        continue
+                    cfg_path, working_dir = _extract_config_from_unit_file(os.path.join(d, fname))
+                    if not cfg_path or not os.path.exists(cfg_path):
+                        continue
+                    wd_base = os.path.basename(os.path.normpath(working_dir or os.path.dirname(cfg_path)))
+                    cfg_dir_base = os.path.basename(os.path.normpath(os.path.dirname(cfg_path)))
+                    if clean in (wd_base, cfg_dir_base):
+                        return cfg_path, True
+
+    if os.path.exists(config):
+        return config, False
+
+    for scope in (user, not user):
+        unit_path = _unit_file_for(scope, None)
+        cfg_path, _ = _extract_config_from_unit_file(unit_path)
+        if cfg_path and os.path.exists(cfg_path):
+            return cfg_path, False
+
+    return config, False
 
 
 @service_app.command("install")

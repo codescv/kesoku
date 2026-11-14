@@ -434,3 +434,74 @@ def test_pair_qr_hides_credentials_in_relay_userinfo(tmp_path: Path, monkeypatch
     result = _invoke("pair", "--no-wait", "--qr", "-c", str(cfg))
     assert result.exit_code == 0, result.output
     assert captured and FAKE_TOKEN not in captured[0]
+
+
+def test_pair_prints_qr_by_default_and_no_qr_disables_it(cfg_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[str] = []
+    monkeypatch.setattr(cli_app, "_print_qr", lambda _console, text: captured.append(text))
+    res_default = _invoke("pair", "--no-wait", "-c", str(cfg_path))
+    assert res_default.exit_code == 0, res_default.output
+    assert len(captured) == 1
+    assert captured[0].startswith("kesoku://pair?code=")
+
+    captured.clear()
+    res_no_qr = _invoke("pair", "--no-wait", "--no-qr", "-c", str(cfg_path))
+    assert res_no_qr.exit_code == 0, res_no_qr.output
+    assert captured == []
+
+
+def test_app_commands_resolve_config_from_service_without_entering_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kesoku.cli import service as cli_service
+
+    ws_main = tmp_path / "band"
+    ws_main.mkdir()
+    cfg_main = _write_config(ws_main, relay_url="wss://main.example.test/engine")
+
+    ws_pub = tmp_path / "band-pub"
+    ws_pub.mkdir()
+    cfg_pub = _write_config(ws_pub, relay_url="wss://pub.example.test/engine")
+
+    svc_dir = tmp_path / "systemd_user"
+    svc_dir.mkdir()
+    (svc_dir / "kesoku.service").write_text(
+        f"[Service]\nWorkingDirectory={ws_main}\nExecStart=/usr/bin/kesoku start -c {cfg_main}\n",
+        encoding="utf-8",
+    )
+    (svc_dir / "kesoku-pub.service").write_text(
+        f"[Service]\nWorkingDirectory={ws_pub}\nExecStart=/usr/bin/kesoku start -c {cfg_pub}\n",
+        encoding="utf-8",
+    )
+
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    monkeypatch.chdir(outside_dir)
+
+    orig_resolve = cli_service.resolve_service_config_path
+    monkeypatch.setattr(
+        cli_app,
+        "resolve_service_config_path",
+        lambda config="config.toml", name=None, user=True: orig_resolve(
+            config, name=name, user=user, service_dirs=[str(svc_dir)]
+        ),
+    )
+
+    # 1. `kesoku app pair --no-wait` outside `band` resolves default `kesoku.service`
+    res1 = _invoke("pair", "--no-wait", "--device-name", "iPhone 17")
+    assert res1.exit_code == 0, res1.output
+    rows_main = _pairing_rows(ws_main / "kesoku.db")
+    assert len(rows_main) == 1
+    assert rows_main[0]["name"] == "iPhone 17"
+
+    # 2. `kesoku app pair --name pub --no-wait` resolves `kesoku-pub.service`
+    res2 = _invoke("pair", "--name", "pub", "--no-wait")
+    assert res2.exit_code == 0, res2.output
+    rows_pub = _pairing_rows(ws_pub / "kesoku.db")
+    assert len(rows_pub) == 1
+    assert rows_pub[0]["name"] == "device"
+
+    # 3. `kesoku app status --name band` matches WorkingDirectory basename `band`
+    res3 = _invoke("status", "--name", "band")
+    assert res3.exit_code == 0, res3.output
+    assert "relay=main.example.test" in res3.output
