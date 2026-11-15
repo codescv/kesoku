@@ -78,6 +78,7 @@ _V4_STATEMENTS: tuple[tuple[str, str], ...] = (
             session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
             llm_override TEXT,
             mode_prefs TEXT,
+            pending_mode TEXT,
             origin_channel TEXT,
             created_by_device TEXT,
             updated_at REAL NOT NULL
@@ -189,6 +190,13 @@ class AppTablesMixin:
             except Exception as e:
                 ok = False
                 logger.error(f"Migration v4 ({label}) failed: {e}")
+        try:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(app_session_prefs)").fetchall()}
+            if "pending_mode" not in cols:
+                with conn:
+                    conn.execute("ALTER TABLE app_session_prefs ADD COLUMN pending_mode TEXT")
+        except Exception as e:
+            logger.warning(f"Failed adding pending_mode column to app_session_prefs: {e}")
         if ok:
             try:
                 current = int(conn.execute("PRAGMA user_version").fetchone()[0])
@@ -570,6 +578,7 @@ class AppTablesMixin:
             "session_id": row["session_id"],
             "llm_override": _loads(row["llm_override"]),
             "mode_prefs": _loads(row["mode_prefs"]),
+            "pending_mode": row["pending_mode"] if "pending_mode" in row.keys() else None,
             "origin_channel": row["origin_channel"],
             "created_by_device": row["created_by_device"],
             "updated_at": float(row["updated_at"]),
@@ -578,10 +587,10 @@ class AppTablesMixin:
     def upsert_app_session_prefs(self, session_id: str, **fields: Any) -> None:
         """Insert or update selected per-session preference fields.
 
-        Accepted keys: `llm_override` (dict | None), `mode_prefs` (dict | None), `origin_channel`,
-        `created_by_device`. Keys not provided are left unchanged.
+        Accepted keys: `llm_override` (dict | None), `mode_prefs` (dict | None), `pending_mode` (str | None),
+        `origin_channel`, `created_by_device`. Keys not provided are left unchanged.
         """
-        allowed = ("llm_override", "mode_prefs", "origin_channel", "created_by_device")
+        allowed = ("llm_override", "mode_prefs", "pending_mode", "origin_channel", "created_by_device")
         unknown = set(fields) - set(allowed)
         if unknown:
             raise ValueError(f"Unknown app_session_prefs fields: {sorted(unknown)}")

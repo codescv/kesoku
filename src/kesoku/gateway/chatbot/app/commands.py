@@ -374,7 +374,10 @@ class RequestHandlers:
             {"session_id": session_id, "title": title, "role": role, "updated_at": time.time()},
         )
         if mode_id is not None and mode_id != "chat":
-            await self.app.start_mode(session_id, mode_id, ctx.device_id, prefs or None)
+            if payload.get("defer_mode", True):
+                await self.app.prepare_mode(session_id, mode_id, prefs or None)
+            else:
+                await self.app.start_mode(session_id, mode_id, ctx.device_id, prefs or None)
         elif prefs:
             await self.apply_mode_prefs(session_id, prefs)
         return Reply("session.snapshot", await self.build_snapshot(session_id), session_id=session_id)
@@ -555,7 +558,7 @@ class RequestHandlers:
 
     # ------------------------------------------------------------------ modes & prefs
     async def handle_mode_start(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
-        """`mode.start{session_id, mode_id, prefs?}`: inject the configured launch prompt as a user message."""
+        """`mode.start{session_id, mode_id, prefs?, defer?}`: inject the configured launch prompt (or defer)."""
         session_id = require_session_id(payload)
         mode_id = require_str(payload, "mode_id", max_len=40)
         if self.app.app_config.get_mode(mode_id) is None:
@@ -564,14 +567,18 @@ class RequestHandlers:
         prefs = payload.get("prefs")
         if prefs is not None and not isinstance(prefs, dict):
             raise ProtocolError("BAD_REQUEST", "prefs must be an object")
-        ack = await self.app.start_mode(session_id, mode_id, ctx.device_id, prefs or None)
+        defer = bool(payload.get("defer", False))
+        ack = await self.app.start_mode(session_id, mode_id, ctx.device_id, prefs or None, defer=defer)
         return {"session_id": session_id, "mode_id": mode_id, **(ack or {})}
 
     async def handle_mode_stop(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
-        """`mode.stop{session_id, instance_id?}`: inject the configured (or default) stop prompt."""
+        """`mode.stop{session_id, instance_id?, defer?}`: inject the configured stop prompt (or defer)."""
         session_id = require_session_id(payload)
         await self._get_session(session_id)
-        ack = await self.app.stop_mode(session_id, ctx.device_id, optional_str(payload, "instance_id", max_len=64))
+        defer = bool(payload.get("defer", False))
+        ack = await self.app.stop_mode(
+            session_id, ctx.device_id, optional_str(payload, "instance_id", max_len=64), defer=defer
+        )
         return {"session_id": session_id, **(ack or {})}
 
     async def handle_mode_prefs_set(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:

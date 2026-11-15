@@ -532,6 +532,23 @@ class AppChatbot(Chatbot):
             saved = await self._download_attachments(session, attachments)
             device = await asyncio.to_thread(self.sync_db.get_app_device, device_id)
             sender_name = (device or {}).get("name") or device_id
+            llm_text = text
+            pending_mode = prefs.get("pending_mode")
+            if isinstance(pending_mode, str) and pending_mode and not cross_channel:
+                await asyncio.to_thread(self.sync_db.upsert_app_session_prefs, session_id, pending_mode=None)
+                if mode_hint is None and pending_mode != "chat":
+                    pmode = self.app_config.get_mode(pending_mode)
+                    if pmode is not None:
+                        mode_hint = pending_mode
+                        launch_prompt = pmode.launch_prompt
+                        if pending_mode == "translator":
+                            launch_prompt = await self._translator_launch_prompt(session_id) or launch_prompt
+                        if launch_prompt:
+                            llm_text = (
+                                f"{launch_prompt}\n\n{text}".strip()
+                                if text.strip() and launch_prompt not in text
+                                else (text.strip() or launch_prompt)
+                            )
             metadata: dict[str, Any] = {
                 **(extra_metadata or {}),
                 "client_msg_id": client_msg_id,
@@ -552,7 +569,7 @@ class AppChatbot(Chatbot):
                 metadata.setdefault("mode_hint", "chat")
                 metadata["ignore_context_globs"] = list(CROSS_CHANNEL_IGNORE_GLOBS)
 
-            content = self._format_inbound_content_parts(text, [a for a, _, _ in saved])
+            content = self._format_inbound_content_parts(llm_text, [a for a, _, _ in saved])
             msg = Message(
                 session_id=session_id,
                 chatbot_id=self.chatbot_id,
@@ -643,32 +660,86 @@ class AppChatbot(Chatbot):
         return saved
 
     # ------------------------------------------------------------------ modes / roles
-    async def start_mode(
-        self, session_id: str, mode_id: str, device_id: str, prefs: dict[str, Any] | None = None
-    ) -> dict[str, Any] | None:
-        """Inject the configured mode launch prompt as a user message (the LLM drives the actual start).
+    async def prepare_mode(
+        self, session_id: str, mode_id: str, prefs: dict[str, Any] | None = None
+    ) -> None:
+        """Record a pending mode (and its prefs / LLM override) on `session_id` without triggering an LLM turn.
 
-        Args:
-            session_id: Target session.
-            mode_id: Configured mode id.
-            device_id: Requesting device.
-            prefs: Optional `mode.start{prefs}` merged (validated) into the stored session `mode_prefs` first.
+        The mode's `launch_prompt` is attached automatically when the user sends their first message in the session.
         """
         mode = self.app_config.get_mode(mode_id)
         if mode is None:
             raise ProtocolError("BAD_REQUEST", "unknown mode")
         if prefs:
             await self.requests.apply_mode_prefs(session_id, prefs)
+        if mode_id == "translator":
+            await self._translator_launch_prompt(session_id)
+        override = mode.llm_override.model_dump(exclude_none=True) if mode.llm_override else None
+        fields: dict[str, Any] = {"pending_mode": mode_id if mode_id != "chat" else None}
+        if override is not None:
+            fields["llm_override"] = override
+        elif mode_id == "chat":
+            stored = await asyncio.to_thread(self.sync_db.get_app_session_prefs, session_id) or {}
+            prev_mode = self.app_config.get_mode(str(stored.get("pending_mode") or ""))
+            prev_override = (
+                prev_mode.llm_override.model_dump(exclude_none=True)
+                if prev_mode and prev_mode.llm_override
+                else None
+            )
+            if prev_override and stored.get("llm_override") == prev_override:
+                fields["llm_override"] = None
+        await asyncio.to_thread(self.sync_db.upsert_app_session_prefs, session_id, **fields)
+
+    async def start_mode(
+        self,
+        session_id: str,
+        mode_id: str,
+        device_id: str,
+        prefs: dict[str, Any] | None = None,
+        *,
+        defer: bool = False,
+    ) -> dict[str, Any] | None:
+        """Inject the configured mode launch prompt as a user message (or defer until the first user message).
+
+        Args:
+            session_id: Target session.
+            mode_id: Configured mode id.
+            device_id: Requesting device.
+            prefs: Optional `mode.start{prefs}` merged (validated) into the stored session `mode_prefs` first.
+            defer: When True, record `pending_mode` without sending a standalone message turn.
+        """
+        mode = self.app_config.get_mode(mode_id)
+        if mode is None:
+            raise ProtocolError("BAD_REQUEST", "unknown mode")
+        if defer:
+            await self.prepare_mode(session_id, mode_id, prefs)
+            await self.emit_session_event(
+                session_id,
+                "session.updated",
+                {"session_id": session_id, "mode_id": mode_id, "updated_at": time.time()},
+            )
+            return {"deferred": True}
+        if prefs:
+            await self.requests.apply_mode_prefs(session_id, prefs)
         current = await asyncio.to_thread(self.policy.current_mode, session_id)
         if not mode.launch_prompt:
             if current != mode_id and current != "chat":
                 return await self.stop_mode(session_id, device_id, None)
+            stored = await asyncio.to_thread(self.sync_db.get_app_session_prefs, session_id) or {}
+            if stored.get("pending_mode"):
+                await asyncio.to_thread(self.sync_db.upsert_app_session_prefs, session_id, pending_mode=None)
             return None
         if current != mode_id:
             await self._notify_mode_exit(session_id, current)
         override = mode.llm_override.model_dump(exclude_none=True) if mode.llm_override else None
+        stored = await asyncio.to_thread(self.sync_db.get_app_session_prefs, session_id) or {}
+        fields: dict[str, Any] = {}
+        if stored.get("pending_mode"):
+            fields["pending_mode"] = None
         if override:
-            await asyncio.to_thread(self.sync_db.upsert_app_session_prefs, session_id, llm_override=override)
+            fields["llm_override"] = override
+        if fields:
+            await asyncio.to_thread(self.sync_db.upsert_app_session_prefs, session_id, **fields)
         launch_prompt = mode.launch_prompt
         if mode_id == "translator":
             launch_prompt = await self._translator_launch_prompt(session_id) or launch_prompt
@@ -716,18 +787,33 @@ class AppChatbot(Chatbot):
         await self.requests._sync_mode_prefs_to_staging(session_id, prefs)
         return f"进入通用极速翻译模式：{pair}{extra}，零寒暄。"
 
-    async def stop_mode(self, session_id: str, device_id: str, instance_id: str | None) -> dict[str, Any] | None:
-        """Inject the stop prompt of the session's current mode (or the configured default)."""
+    async def stop_mode(
+        self, session_id: str, device_id: str, instance_id: str | None, *, defer: bool = False
+    ) -> dict[str, Any] | None:
+        """Inject the stop prompt of the session's current mode (or clear `pending_mode` when deferred)."""
+        if defer:
+            await self.prepare_mode(session_id, "chat", None)
+            await self.emit_session_event(
+                session_id,
+                "session.updated",
+                {"session_id": session_id, "mode_id": "chat", "updated_at": time.time()},
+            )
+            return {"deferred": True, "mode_id": "chat"}
         current = await asyncio.to_thread(self.policy.current_mode, session_id)
         await self._notify_mode_exit(session_id, current)
         mode = self.app_config.get_mode(current)
         text = (mode.stop_prompt if mode and mode.stop_prompt else None) or self.app_config.mode_stop_prompt
         if instance_id:
             text = f"{text} ({instance_id})"
+        prefs = await asyncio.to_thread(self.sync_db.get_app_session_prefs, session_id) or {}
+        fields: dict[str, Any] = {}
+        if prefs.get("pending_mode"):
+            fields["pending_mode"] = None
         if mode is not None and mode.llm_override is not None:
-            prefs = await asyncio.to_thread(self.sync_db.get_app_session_prefs, session_id) or {}
             if prefs.get("llm_override") == mode.llm_override.model_dump(exclude_none=True):
-                await asyncio.to_thread(self.sync_db.upsert_app_session_prefs, session_id, llm_override=None)
+                fields["llm_override"] = None
+        if fields:
+            await asyncio.to_thread(self.sync_db.upsert_app_session_prefs, session_id, **fields)
         return await self.ingest_app_message(
             session_id=session_id,
             device_id=device_id,

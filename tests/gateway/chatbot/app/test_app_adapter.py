@@ -1574,22 +1574,50 @@ async def test_translator_native_only_prompt_avoids_native_as_foreign(translator
 
 # origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
 async def test_session_create_with_translator_mode_and_prefs(translator_env, monkeypatch) -> None:
-    sent: list[str] = []
+    bot, gw = translator_env["bot"], translator_env["gw"]
+    posted: list[Message] = []
+    orig_post = gw.post
 
-    async def fake_ingest(**kw: Any) -> dict[str, Any]:
-        sent.append(kw["text"])
-        return {"ok": True}
+    async def capture(msg: Message) -> Message:
+        posted.append(msg)
+        return await orig_post(msg)
 
-    monkeypatch.setattr(translator_env["bot"], "ingest_app_message", fake_ingest)
+    monkeypatch.setattr(gw, "post", capture)
     prefs = {"native_lang": "zh-CN", "foreign_langs": ["ja", "en", "ko"], "src_lang": "ja", "dst_lang": "zh-CN"}
+    # Default session.create defers the mode launch prompt until the user's first message so no turn is wasted.
     sid = await create_session(translator_env, mode="translator", prefs=prefs)
-    assert translator_env["bot"].sync_db.get_app_session_prefs(sid)["mode_prefs"] == prefs
-    assert sent == ["进入通用极速翻译模式：母语 zh-CN ⇄ 常用外语 ja（常用外语：ja、en、ko），零寒暄。"]
+    stored = bot.sync_db.get_app_session_prefs(sid)
+    assert stored["mode_prefs"] == prefs
+    assert stored["pending_mode"] == "translator"
+    assert bot.policy.current_mode(sid) == "translator"
+    assert posted == []
+
+    # When the user sends their first message, the mode launch prompt is automatically prepended to the LLM content
+    # while display_text preserves only what the user typed.
+    await rpc(translator_env, "message.send", {"session_id": sid, "client_msg_id": "m1", "text": "すみません"})
+    assert len(posted) == 1
+    assert "进入通用极速翻译模式：母语 zh-CN ⇄ 常用外语 ja（常用外语：ja、en、ko），零寒暄。" in posted[0].content
+    assert "すみません" in posted[0].content
+    assert posted[0].metadata["display_text"] == "すみません"
+    assert posted[0].metadata["mode_hint"] == "translator"
+    assert bot.sync_db.get_app_session_prefs(sid)["pending_mode"] is None
+
+    # Switching mode before any message is sent (defer=True) updates pending_mode without posting a message.
+    sid_defer = await create_session(translator_env)
+    d_res = await rpc(
+        translator_env, "mode.start", {"session_id": sid_defer, "mode_id": "translator", "prefs": prefs, "defer": True}
+    )
+    assert d_res["payload"]["deferred"] is True
+    assert bot.policy.current_mode(sid_defer) == "translator"
+    assert len(posted) == 1
+    s_res = await rpc(translator_env, "mode.stop", {"session_id": sid_defer, "defer": True})
+    assert s_res["payload"]["deferred"] is True
+    assert bot.policy.current_mode(sid_defer) == "chat"
 
     # chat-mode session.create just persists prefs.
     sid2 = await create_session(translator_env, prefs={"native_lang": "en"})
-    assert translator_env["bot"].sync_db.get_app_session_prefs(sid2)["mode_prefs"] == {"native_lang": "en"}
-    assert len(sent) == 1
+    assert bot.sync_db.get_app_session_prefs(sid2)["mode_prefs"] == {"native_lang": "en"}
+    assert len(posted) == 1
 
     # Invalid prefs are rejected before any session is created.
     before = len((await rpc(translator_env, "session.list", {"limit": 50}))["payload"]["sessions"])

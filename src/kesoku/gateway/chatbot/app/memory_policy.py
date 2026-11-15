@@ -92,8 +92,15 @@ class MemoryPolicyService:
 
     # ---------------------------------------------------------------- provider (sync; runs on worker threads)
     def current_mode(self, session_id: str) -> str:
-        """Return the session's current mode id."""
-        return read_active_mode(self._staging_dir_for(session_id))
+        """Return the session's current mode id (`game/games.json` active mode or `pending_mode`)."""
+        active = read_active_mode(self._staging_dir_for(session_id), default_mode="")
+        if active:
+            return active
+        prefs = self.db.get_app_session_prefs(session_id) or {}
+        pending = prefs.get("pending_mode")
+        if isinstance(pending, str) and pending in self.app_config.mode_ids:
+            return pending
+        return DEFAULT_APP_CHAT_MODE_ID
 
     def resolve_override(self, session_id: str) -> str | None:
         """Return the user-configured policy for the session's current mode, or None to keep static rules."""
