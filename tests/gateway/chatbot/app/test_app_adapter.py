@@ -25,6 +25,8 @@ from kesoku.gateway.chatbot.app.protocol import (
     parse_envelope,
     reply_type_for,
 )
+from kesoku.gateway.chatbot.app.segments import MediaJob, message_to_record, user_attachments, user_display_text
+from kesoku.gateway.chatbot.base import DeliveryAbortedError
 from kesoku.gateway.gateway import Gateway
 
 
@@ -1178,3 +1180,509 @@ async def test_media_hydrate_pkmn_art_and_staging_refs(env) -> None:
     for ref in ("pkmn/../../../../secret.txt", "pkmn/missing.webp", "games/../secret.txt", "pkmn/\x00.webp"):
         bad = await rpc(env, "media.hydrate", {"session_id": sid, "ref": ref})
         assert bad["type"] == "error" and bad["payload"]["code"] in ("NOT_FOUND", "BAD_REQUEST"), ref
+
+
+_LISTING = (
+    "\n\nAttachments:\n"
+    "[Attachment: voice.m4a (audio/mp4) saved at /ws/s1/uploads/voice.m4a — image/audio attachments are already "
+    "visible to you in this message; do not call analyze_media on them]\n"
+    "[Attachment: menu.jpg (image/jpeg) saved at /ws/s1/uploads/menu.jpg — image/audio attachments are already "
+    "visible to you in this message; do not call analyze_media on them]"
+)
+
+
+def _user(content: str, metadata: dict | None = None) -> Message:
+    return Message(
+        session_id="s1", chatbot_id="app", channel_id="app:s1", sender="dev-1", role=MessageRole.USER,
+        content=content, metadata=metadata or {},
+    )
+
+
+# origin: tests/gateway/chatbot/app/test_v037_user_attachments.py
+def test_record_exposes_structured_attachments_and_clean_text() -> None:
+    meta = {
+        "display_text": "帮我听听",
+        "attachments": [
+            {"path": "/ws/s1/uploads/voice.m4a", "mime_type": "audio/mp4", "filename": "voice.m4a",
+             "object": "media/s1/voice.m4a", "bytes": 1234},
+        ],
+    }
+    rec = message_to_record(_user("帮我听听" + _LISTING, meta), "app")
+    assert rec["text"] == "帮我听听"
+    assert rec["attachments"] == [
+        {"ref": "/ws/s1/uploads/voice.m4a", "mime": "audio/mp4", "filename": "voice.m4a",
+         "object": "media/s1/voice.m4a", "bytes": 1234},
+    ]
+
+
+# origin: tests/gateway/chatbot/app/test_v037_user_attachments.py
+def test_listing_is_stripped_and_parsed_without_metadata() -> None:
+    """Cross-channel / legacy rows without `attachments` metadata: strip the listing and recover the pills."""
+    msg = _user("这是什么？" + _LISTING)
+    assert user_display_text(msg) == "这是什么？"
+    atts = user_attachments(msg)
+    assert [(a["filename"], a["mime"], a["ref"]) for a in atts] == [
+        ("voice.m4a", "audio/mp4", "/ws/s1/uploads/voice.m4a"),
+        ("menu.jpg", "image/jpeg", "/ws/s1/uploads/menu.jpg"),
+    ]
+    rec = message_to_record(msg, "app")
+    assert "saved at" not in rec["text"] and "Attachments:" not in rec["text"]
+    assert len(rec["attachments"]) == 2
+
+
+# origin: tests/gateway/chatbot/app/test_v037_user_attachments.py
+def test_attachment_only_message_has_empty_text() -> None:
+    msg = _user("Attachments:\n[Attachment: rec.webm (audio/webm) saved at /ws/s1/uploads/rec.webm]")
+    rec = message_to_record(msg, "app")
+    assert rec["text"] == ""
+    assert rec["attachments"][0]["mime"] == "audio/webm" and rec["attachments"][0]["object"] == ""
+
+
+# origin: tests/gateway/chatbot/app/test_v037_user_attachments.py
+def test_metadata_mime_fallback_from_extension() -> None:
+    msg = _user("hi", {"attachments": [{"path": "/ws/a/clip.wav"}]})
+    assert user_attachments(msg)[0]["mime"] == "audio/x-wav" or user_attachments(msg)[0]["mime"].startswith("audio/")
+
+
+# origin: tests/gateway/chatbot/app/test_v037_user_attachments.py
+def test_plain_text_mentioning_attachments_is_untouched() -> None:
+    msg = _user("Attachments: none today")
+    assert user_display_text(msg) == "Attachments: none today"
+    assert user_attachments(msg) == []
+
+
+TRANSLATOR_DEFAULT_PROMPT = "进入通用极速翻译模式：日语⇄简中，零寒暄。"
+
+
+@pytest.fixture
+async def translator_env(tmp_path, monkeypatch):
+    """Gateway + AppChatbot (FakeLink) with a translator mode using the v0.3.7 prefs schema."""
+    db_path = str(tmp_path / "kesoku.db")
+    cfg = KesokuConfig(
+        workspace=WorkspaceConfig(
+            db_path=db_path,
+            roles_dir=str(tmp_path / "roles"),
+            sessions_dir=str(tmp_path / "sessions"),
+            skills_dir=str(tmp_path / "skills"),
+        )
+    )
+    cfg.agent_working_dir = str(tmp_path)
+    app_cfg = AppConfig(
+        enabled=True,
+        default_role="helper",
+        allowed_models=["model-a"],
+        modes=[
+            AppModeConfig(id="chat", title="Chat"),
+            AppModeConfig(
+                id="translator",
+                title="通用翻译",
+                launch_prompt=TRANSLATOR_DEFAULT_PROMPT,
+                prefs_schema={
+                    "native_lang": "string",
+                    "foreign_langs": "list",
+                    "src_lang": "string",
+                    "dst_lang": "string",
+                    "formality": ["polite", "casual"],
+                },
+            ),
+        ],
+    )
+    cfg.chatbots.app = [app_cfg]
+    monkeypatch.setattr(kesoku.config, "_global_config", cfg)
+    DatabaseManager(db_path).init_tables()
+    (tmp_path / "roles" / "helper").mkdir(parents=True)
+    (tmp_path / "roles" / "helper" / "intro.md").write_text("# helper\nA test role.\n", encoding="utf-8")
+    ctx = KesokuContext(config=cfg)
+    gw = Gateway(context=ctx)
+    link = FakeLink()
+    bot = AppChatbot("app", gw, app_cfg, link=link)
+    await asyncio.to_thread(bot.policy.seed_defaults_sync)
+    yield {"bot": bot, "link": link, "gw": gw, "cfg": cfg, "ctx": ctx, "tmp": tmp_path}
+
+
+def _msg(sid: str, role: MessageRole, content: str, **kw: Any) -> Message:
+    return Message(session_id=sid, chatbot_id="app", channel_id=f"app:{sid}", content=content, role=role,
+                   type=MessageType.TEXT, **kw)
+
+
+def _finals(link: FakeLink, sid: str) -> list[dict[str, Any]]:
+    return [e for e in link.of_type("message.final") if e["session_id"] == sid]
+
+
+async def _start_translator(translator_env, monkeypatch, sid: str, prefs: dict[str, Any] | None = None) -> str:
+    sent: list[str] = []
+
+    async def fake_ingest(**kw: Any) -> dict[str, Any]:
+        sent.append(kw["text"])
+        return {"ok": True}
+
+    monkeypatch.setattr(translator_env["bot"], "ingest_app_message", fake_ingest)
+    payload: dict[str, Any] = {"session_id": sid, "mode_id": "translator"}
+    if prefs is not None:
+        payload["prefs"] = prefs
+    reply = await rpc(translator_env, "mode.start", payload)
+    assert reply["type"] == "mode.start.result", reply
+    return sent[-1]
+
+
+async def _send(translator_env: dict[str, Any], sid: str, cid: str, text: str = "hi") -> str:
+    ack = await rpc(translator_env, "message.send", {"session_id": sid, "client_msg_id": cid, "text": text})
+    assert ack["type"] == "message.ack", ack
+    return str(ack["payload"]["message_id"])
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_missing_voice_first_attempt_self_heals_without_duplicate_final(translator_env) -> None:
+    bot, link, gw = translator_env["bot"], translator_env["link"], translator_env["gw"]
+    sid = await create_session(translator_env)
+    staging = translator_env["tmp"] / "sessions" / sid
+    staging.mkdir(parents=True, exist_ok=True)
+    posted: list[Message] = []
+    orig_post = gw.post
+
+    async def capture(msg: Message) -> Message:
+        posted.append(msg)
+        return await orig_post(msg)
+
+    gw.post = capture
+    user = _msg(sid, MessageRole.USER, "穿毛衣", sender="dev-1", status=MessageStatus.PROCESSED)
+    await gw.db.save_message(user)
+
+    broken = _msg(sid, MessageRole.ASSISTANT, "哼，才不是为你穿的！\n[voice: sweater_tsun.wav]", sender="Kesoku",
+                  parent_id=user.id, status=MessageStatus.PENDING)
+    await gw.db.save_message(broken)
+    await bot.render_outgoing_message(broken)
+
+    # The broken first attempt is never shown: no message.final, no media.failed, status ERROR.
+    assert _finals(link, sid) == []
+    assert not [e for e in link.of_type("media.failed") if e["session_id"] == sid]
+    assert (await gw.db.get_message(broken.id)).status == MessageStatus.ERROR
+    assert link.of_type("stream.clear")[-1]["payload"]["turn_id"] == user.id
+    healing = [m for m in posted if (m.metadata or {}).get("is_self_healing_retry")]
+    assert len(healing) == 1 and healing[0].role == MessageRole.SYSTEM
+    assert healing[0].metadata["failed_path"] == "sweater_tsun.wav"
+    assert "[voice: sweater_tsun.wav]" in healing[0].content
+    # Not reported as a generic delivery failure (no user-facing error text was sent).
+    assert not [m for m in posted if m.role == MessageRole.ASSISTANT]
+
+    # Healed retry: the voice clip now exists -> exactly one message.final + media.ready.
+    (staging / "sweater_tsun.wav").write_bytes(b"RIFF....WAVEfmt ")
+    healed = _msg(sid, MessageRole.ASSISTANT, "哼，才不是为你穿的！\n[voice: sweater_tsun.wav]", sender="Kesoku",
+                  parent_id=healing[0].id, status=MessageStatus.PENDING)
+    await gw.db.save_message(healed)
+    await bot.render_outgoing_message(healed)
+    finals = _finals(link, sid)
+    assert [f["payload"]["message_id"] for f in finals] == [healed.id]
+    assert [e for e in link.of_type("media.ready") if e["payload"]["message_id"] == healed.id]
+    assert (await gw.db.get_message(healed.id)).status == MessageStatus.DELIVERED
+
+    hist = (await rpc(translator_env, "history.page", {"session_id": sid}))["payload"]["messages"]
+    ids = [m["message_id"] for m in hist]
+    assert broken.id not in ids and healed.id in ids and user.id in ids
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_self_healing_retry_with_still_missing_media_is_delivered_once(translator_env) -> None:
+    bot, link, gw = translator_env["bot"], translator_env["link"], translator_env["gw"]
+    sid = await create_session(translator_env)
+    healing = _msg(sid, MessageRole.SYSTEM, "File transmission failed", sender="System",
+                   status=MessageStatus.PROCESSED, metadata={"is_self_healing_retry": True, "failed_path": "x.wav"})
+    await gw.db.save_message(healing)
+    retry = _msg(sid, MessageRole.ASSISTANT, "again\n[voice: still_missing.wav]", sender="Kesoku",
+                 parent_id=healing.id, status=MessageStatus.PENDING)
+    await gw.db.save_message(retry)
+    await bot.render_outgoing_message(retry)
+    # Retry turns skip the pre-flight (no infinite healing loop): the final is shown once.
+    assert [f["payload"]["message_id"] for f in _finals(link, sid)] == [retry.id]
+    assert (await gw.db.get_message(retry.id)).status == MessageStatus.DELIVERED
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_preflight_accepts_existing_files_and_deferred_sidecars(translator_env) -> None:
+    bot, gw = translator_env["bot"], translator_env["gw"]
+    sid = await create_session(translator_env)
+    staging = translator_env["tmp"] / "sessions" / sid
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "ok.png").write_bytes(b"\x89PNG")
+    (staging / "failed.wav.error.json").write_text(json.dumps({"error": "tts down"}), encoding="utf-8")
+    user = _msg(sid, MessageRole.USER, "hi", sender="dev-1", status=MessageStatus.PROCESSED)
+    await gw.db.save_message(user)
+    msg = _msg(sid, MessageRole.ASSISTANT, "x", sender="Kesoku", parent_id=user.id, status=MessageStatus.PENDING)
+    await gw.db.save_message(msg)
+    await bot._preflight_self_healing(msg, [])
+    await bot._preflight_self_healing(
+        msg,
+        [MediaJob(placeholder_id="ph_1", kind="file", ref="ok.png"),
+         MediaJob(placeholder_id="ph_2", kind="voice", ref="failed.wav")],
+    )
+    with pytest.raises(DeliveryAbortedError):
+        await bot._preflight_self_healing(msg, [MediaJob(placeholder_id="ph_3", kind="file", ref="nope.png")])
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_card_ref_resolvable_only_via_hydration_roots_never_aborts(translator_env) -> None:
+    bot, link, gw = translator_env["bot"], translator_env["link"], translator_env["gw"]
+    sid = await create_session(translator_env)
+    art = translator_env["tmp"] / "games" / "pokemon_assistant" / "data" / "art"
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "0987.webp").write_bytes(b"RIFF....WEBP")
+    posted: list[Message] = []
+    orig_post = gw.post
+
+    async def capture(msg: Message) -> Message:
+        posted.append(msg)
+        return await orig_post(msg)
+
+    gw.post = capture
+    user = _msg(sid, MessageRole.USER, "show", sender="dev-1", status=MessageStatus.PROCESSED)
+    await gw.db.save_message(user)
+    content = "```card\nkind: info_card\ntitle: Flutter Mane\nimage: \"[file: pkmn/0987.webp]\"\n```"
+    final = _msg(sid, MessageRole.ASSISTANT, content, sender="Kesoku", parent_id=user.id,
+                 status=MessageStatus.PENDING)
+    await gw.db.save_message(final)
+    await bot.render_outgoing_message(final)
+
+    finals = _finals(link, sid)
+    assert [f["payload"]["message_id"] for f in finals] == [final.id]
+    pid = finals[0]["payload"]["segments"][0]["media"]["image"]
+    ready = [e for e in link.of_type("media.ready") if e["payload"]["placeholder_id"] == pid]
+    assert ready and ready[0]["payload"]["ref"] == "pkmn/0987.webp"
+    assert not [e for e in link.of_type("media.failed") if e["session_id"] == sid]
+    assert not [m for m in posted if (m.metadata or {}).get("is_self_healing_retry")]
+    assert (await gw.db.get_message(final.id)).status == MessageStatus.DELIVERED
+
+    # An artwork ref that the hydrator cannot find either still triggers the pre-flight self-healing.
+    missing = _msg(sid, MessageRole.ASSISTANT, content.replace("0987", "9999"), sender="Kesoku", parent_id=user.id,
+                   status=MessageStatus.PENDING)
+    await gw.db.save_message(missing)
+    await bot.render_outgoing_message(missing)
+    assert len(_finals(link, sid)) == 1
+    assert (await gw.db.get_message(missing.id)).status == MessageStatus.ERROR
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_history_page_hides_error_assistant_but_keeps_error_user_messages(translator_env) -> None:
+    gw = translator_env["gw"]
+    sid = await create_session(translator_env)
+    u = _msg(sid, MessageRole.USER, "user text", sender="dev-1", status=MessageStatus.ERROR)
+    a_err = _msg(sid, MessageRole.ASSISTANT, "aborted", sender="Kesoku", status=MessageStatus.ERROR)
+    a_ok = _msg(sid, MessageRole.ASSISTANT, "fine", sender="Kesoku", status=MessageStatus.DELIVERED)
+    for m in (u, a_err, a_ok):
+        await gw.db.save_message(m)
+    visible = [m.id for m in translator_env["bot"].sync_db.get_messages_page(sid, visible_only=True)]
+    assert u.id in visible and a_ok.id in visible and a_err.id not in visible
+    everything = [m.id for m in translator_env["bot"].sync_db.get_messages_page(sid, visible_only=False)]
+    assert a_err.id in everything
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_prefs_schema_list_rule(translator_env) -> None:
+    sid = await create_session(translator_env)
+    ok = await rpc(translator_env, "mode.prefs.set", {"session_id": sid,
+                                           "prefs": {"native_lang": "zh-CN", "foreign_langs": ["ja", "en", "ko"]}})
+    assert ok["payload"]["prefs"] == {"native_lang": "zh-CN", "foreign_langs": ["ja", "en", "ko"]}
+    for bad in ("ja,en", ["x" * 41], [f"l{i}" for i in range(17)], ["ja", 3]):
+        err = await rpc(translator_env, "mode.prefs.set", {"session_id": sid, "prefs": {"foreign_langs": bad}})
+        assert err["type"] == "error" and err["payload"]["code"] == "BAD_REQUEST", bad
+    edge = await rpc(translator_env, "mode.prefs.set", {"session_id": sid, "prefs": {"foreign_langs": ["y" * 40] * 16}})
+    assert edge["type"] == "mode.prefs.set.result", edge
+    bad_formality = await rpc(translator_env, "mode.prefs.set", {"session_id": sid, "prefs": {"formality": "rude"}})
+    assert bad_formality["payload"]["code"] == "BAD_REQUEST"
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_prefs_sync_updates_translator_json(translator_env) -> None:
+    sid = await create_session(translator_env)
+    game = translator_env["tmp"] / "sessions" / sid / "game"
+    game.mkdir(parents=True, exist_ok=True)
+    (game / "translator.json").write_text(json.dumps({"src_lang": "ja", "dst_lang": "zh-CN", "turns": 3}),
+                                          encoding="utf-8")
+    prefs = {"native_lang": "en", "foreign_langs": ["ja", "fr"], "src_lang": "fr", "dst_lang": "en",
+             "formality": "casual"}
+    await rpc(translator_env, "mode.prefs.set", {"session_id": sid, "prefs": prefs})
+    data = json.loads((game / "translator.json").read_text(encoding="utf-8"))
+    assert data == {**prefs, "turns": 3}
+    md = (translator_env["tmp"] / "sessions" / sid / "context" / "05-app-prefs.md").read_text(encoding="utf-8")
+    assert "`native_lang`: en" in md
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_prefs_sync_does_not_create_translator_json(translator_env) -> None:
+    sid = await create_session(translator_env)
+    await rpc(translator_env, "mode.prefs.set", {"session_id": sid, "prefs": {"native_lang": "ja"}})
+    assert not (translator_env["tmp"] / "sessions" / sid / "game" / "translator.json").exists()
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_translator_start_uses_default_prompt_without_language_prefs(translator_env, monkeypatch) -> None:
+    sid = await create_session(translator_env)
+    assert await _start_translator(translator_env, monkeypatch, sid) == TRANSLATOR_DEFAULT_PROMPT
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_translator_start_builds_prompt_from_stored_prefs_and_syncs_staging(translator_env, monkeypatch) -> None:
+    sid = await create_session(translator_env)
+    game = translator_env["tmp"] / "sessions" / sid / "game"
+    game.mkdir(parents=True, exist_ok=True)
+    (game / "translator.json").write_text(json.dumps({"src_lang": "ja", "dst_lang": "zh-CN"}), encoding="utf-8")
+    await asyncio.to_thread(
+        translator_env["bot"].sync_db.upsert_app_session_prefs, sid,
+        mode_prefs={"native_lang": "zh-CN", "foreign_langs": ["en", "ja"], "src_lang": "zh-CN", "dst_lang": "ko"},
+    )
+    prompt = await _start_translator(translator_env, monkeypatch, sid)
+    assert prompt == "进入通用极速翻译模式：母语 zh-CN ⇄ 常用外语 ko（常用外语：en、ja），零寒暄。"
+    data = json.loads((game / "translator.json").read_text(encoding="utf-8"))
+    assert data["dst_lang"] == "ko" and data["native_lang"] == "zh-CN" and data["foreign_langs"] == ["en", "ja"]
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_translator_start_payload_prefs_override_and_persist(translator_env, monkeypatch) -> None:
+    sid = await create_session(translator_env)
+    prompt = await _start_translator(translator_env, monkeypatch, sid, {"native_lang": "ja", "foreign_langs": ["en"]})
+    assert prompt == "进入通用极速翻译模式：母语 ja ⇄ 常用外语 en，零寒暄。"
+    stored = translator_env["bot"].sync_db.get_app_session_prefs(sid)["mode_prefs"]
+    assert stored == {"native_lang": "ja", "foreign_langs": ["en"]}
+    md = (translator_env["tmp"] / "sessions" / sid / "context" / "05-app-prefs.md").read_text(encoding="utf-8")
+    assert "`native_lang`: ja" in md
+
+    # Explicit foreign<->foreign pair (neither side is the native language).
+    prompt = await _start_translator(translator_env, monkeypatch, sid, {"src_lang": "en", "dst_lang": "fr"})
+    assert prompt == "进入通用极速翻译模式：母语 ja，当前外语对 en ⇄ fr，零寒暄。"
+
+    for bad_prefs in ({"formality": "rude"}, {"unknown_key": "x"}, {"foreign_langs": "ja"}):
+        bad = await rpc(translator_env, "mode.start", {"session_id": sid, "mode_id": "translator", "prefs": bad_prefs})
+        assert bad["type"] == "error" and bad["payload"]["code"] == "BAD_REQUEST", bad_prefs
+    not_obj = await rpc(translator_env, "mode.start", {"session_id": sid, "mode_id": "translator", "prefs": ["x"]})
+    assert not_obj["payload"]["code"] == "BAD_REQUEST"
+    # Rejected prefs never overwrite the stored ones.
+    assert translator_env["bot"].sync_db.get_app_session_prefs(sid)["mode_prefs"]["native_lang"] == "ja"
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_translator_start_src_dst_only_defaults_native(translator_env, monkeypatch) -> None:
+    sid = await create_session(translator_env)
+    prompt = await _start_translator(translator_env, monkeypatch, sid, {"src_lang": "ja", "dst_lang": "zh-CN"})
+    assert prompt == "进入通用极速翻译模式：母语 zh-CN ⇄ 常用外语 ja，零寒暄。"
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_translator_native_only_prompt_avoids_native_as_foreign(translator_env, monkeypatch) -> None:
+    sid = await create_session(translator_env)
+    prompt = await _start_translator(translator_env, monkeypatch, sid, {"native_lang": "ja"})
+    assert prompt == "进入通用极速翻译模式：母语 ja ⇄ 常用外语 en，零寒暄。"
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_session_create_with_translator_mode_and_prefs(translator_env, monkeypatch) -> None:
+    sent: list[str] = []
+
+    async def fake_ingest(**kw: Any) -> dict[str, Any]:
+        sent.append(kw["text"])
+        return {"ok": True}
+
+    monkeypatch.setattr(translator_env["bot"], "ingest_app_message", fake_ingest)
+    prefs = {"native_lang": "zh-CN", "foreign_langs": ["ja", "en", "ko"], "src_lang": "ja", "dst_lang": "zh-CN"}
+    sid = await create_session(translator_env, mode="translator", prefs=prefs)
+    assert translator_env["bot"].sync_db.get_app_session_prefs(sid)["mode_prefs"] == prefs
+    assert sent == ["进入通用极速翻译模式：母语 zh-CN ⇄ 常用外语 ja（常用外语：ja、en、ko），零寒暄。"]
+
+    # chat-mode session.create just persists prefs.
+    sid2 = await create_session(translator_env, prefs={"native_lang": "en"})
+    assert translator_env["bot"].sync_db.get_app_session_prefs(sid2)["mode_prefs"] == {"native_lang": "en"}
+    assert len(sent) == 1
+
+    # Invalid prefs are rejected before any session is created.
+    before = len((await rpc(translator_env, "session.list", {"limit": 50}))["payload"]["sessions"])
+    bad = await rpc(translator_env, "session.create", {"mode": "translator", "prefs": {"formality": "rude"}})
+    assert bad["type"] == "error" and bad["payload"]["code"] == "BAD_REQUEST"
+    assert len((await rpc(translator_env, "session.list", {"limit": 50}))["payload"]["sessions"]) == before
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_v038_turn_active_immediately_after_ingest_and_cleared_on_final(translator_env) -> None:
+    bot, link, gw = translator_env["bot"], translator_env["link"], translator_env["gw"]
+    sid = await create_session(translator_env)
+    mid = await _send(translator_env, sid, "t1")
+    # Active before any token: snapshot / resume can show the typing indicator, and devices got a stream.clear.
+    assert bot.active_turn_snapshot(sid) == {"turn_id": mid, "round_id": 0, "preview_text": ""}
+    clear = [e for e in link.of_type("stream.clear") if e["session_id"] == sid][-1]
+    assert clear["payload"] == {"turn_id": mid, "round_id": 0}
+    assert "seq" not in clear
+    user_seq = [e for e in link.of_type("message.user") if e["session_id"] == sid][-1]["seq"]
+    assert link.sent.index(clear) > link.sent.index(
+        next(e for e in link.sent if e.get("type") == "message.user" and e.get("seq") == user_seq)
+    )
+    snap = await rpc(translator_env, "session.open", {"session_id": sid})
+    assert snap["type"] == "session.snapshot", snap
+    assert snap["payload"]["active_turn"]["turn_id"] == mid
+    done = await rpc(translator_env, "sync.replay", {"session_id": sid, "after_seq": 0})
+    assert done["type"] == "sync.done" and done["payload"]["active_turn"]["turn_id"] == mid
+
+    reply = _msg(sid, MessageRole.ASSISTANT, "hello", sender="Kesoku", parent_id=mid, status=MessageStatus.PENDING)
+    await gw.db.save_message(reply)
+    await bot.render_outgoing_message(reply)
+    assert bot.active_turn_snapshot(sid) is None
+    done = await rpc(translator_env, "sync.replay", {"session_id": sid, "after_seq": 0})
+    # Explicit null on the last page so devices drop a stale typing indicator.
+    assert "active_turn" in done["payload"] and done["payload"]["active_turn"] is None
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_v038_turn_events_reactivate_and_self_healing_final_clears(translator_env) -> None:
+    bot, link, gw = translator_env["bot"], translator_env["link"], translator_env["gw"]
+    sid = await create_session(translator_env)
+    mid = await _send(translator_env, sid, "t2", "穿毛衣")
+    bot._active_turns.pop(sid)  # e.g. engine restarted mid-turn
+    thought = _msg(sid, MessageRole.ASSISTANT, "thinking…", sender="Kesoku", parent_id=mid,
+                   status=MessageStatus.PENDING)
+    thought.type = MessageType.THOUGHT
+    await bot._emit_turn_event(thought)
+    assert bot.active_turn_snapshot(sid)["turn_id"] == mid
+
+    broken = _msg(sid, MessageRole.ASSISTANT, "哼！\n[voice: sweater.wav]", sender="Kesoku", parent_id=mid,
+                  status=MessageStatus.PENDING)
+    await gw.db.save_message(broken)
+    await bot.render_outgoing_message(broken)
+    assert _finals(link, sid) == []
+    assert bot.active_turn_snapshot(sid) is not None  # still typing while the self-healing retry runs
+    healing_msg = _msg(sid, MessageRole.SYSTEM, "File transmission failed", sender="System",
+                       status=MessageStatus.PROCESSED, metadata={"is_self_healing_retry": True})
+    await gw.db.save_message(healing_msg)
+    healed = _msg(sid, MessageRole.ASSISTANT, "哼！", sender="Kesoku", parent_id=healing_msg.id,
+                  status=MessageStatus.PENDING)
+    await gw.db.save_message(healed)
+    await bot.render_outgoing_message(healed)
+    assert [f["payload"]["turn_id"] for f in _finals(link, sid)] == [healing_msg.id]
+    # The retry finalized under a different turn id, yet the session is no longer marked as typing.
+    assert bot.active_turn_snapshot(sid) is None
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_v038_notification_final_keeps_turn_and_turn_stop_clears(translator_env) -> None:
+    bot, gw = translator_env["bot"], translator_env["gw"]
+    sid = await create_session(translator_env)
+    mid = await _send(translator_env, sid, "t3")
+    note = _msg(sid, MessageRole.ASSISTANT, "📌 note", sender="Notification", parent_id=mid,
+                status=MessageStatus.PENDING)
+    await gw.db.save_message(note)
+    await bot.render_outgoing_message(note)
+    assert bot.active_turn_snapshot(sid) is not None
+    stop = await rpc(translator_env, "turn.stop", {"session_id": sid})
+    assert stop["payload"]["stopped"] is True
+    assert bot.active_turn_snapshot(sid) is None
+
+
+# origin: tests/gateway/chatbot/app/test_app_v037_delivery_translator.py
+async def test_v038_delivery_failure_clears_active_turn(translator_env, monkeypatch) -> None:
+    bot, gw = translator_env["bot"], translator_env["gw"]
+    sid = await create_session(translator_env)
+    mid = await _send(translator_env, sid, "t4")
+
+    async def boom(message: Message) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(bot, "_deliver_final", boom)
+    reply = _msg(sid, MessageRole.ASSISTANT, "x", sender="Kesoku", parent_id=mid, status=MessageStatus.PENDING)
+    await gw.db.save_message(reply)
+    await bot.render_outgoing_message(reply)
+    assert bot.active_turn_snapshot(sid) is None

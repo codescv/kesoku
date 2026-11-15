@@ -119,6 +119,7 @@ For detailed user and developer guides, see [`docs/en/dev/architecture.md`](en/d
 
 ---
 
-## 3. Evaluation Benchmark (`benchmarks/kesoku_bench/`)
+## 3. Evaluation Benchmark & Headless Testing (`src/kesoku/testing/`, `benchmarks/kesoku_bench/`)
 
-`kesoku-bench` is a 16-task reproducible benchmark suite (`A1`–`A4` file/diff editing, `B1`–`B4` output truncation & investigation, `C1`–`C4` multi-turn compaction survival, `D1`–`D4` skills, `/compact`, background jobs, and `AGENTS.md` conventions) with deterministic behavioral graders, `MeteredLLM` cost/token accounting, and stage ablation support (`baseline`, `p0`, `p1`, `p2`).
+- **Headless Session & Playtest Toolkit (`src/kesoku/testing/`)**: Exports persona-free `BenchSession`, `PlaytestSession`, `TurnOutcome`, `extract_tool_events`, `render_config_toml`, `sanitized_env`, and `MeteredLLM`. `PlaytestSession` drives real or mocked multi-turn sessions in-process with isolated `cfg.shell.env` injection, two-phase deferred media sidecar pickup, direct `run_setup_gm(...)` execution (`USER_TURN=0`), and structured per-turn `snapshot()` inspection.
+- **Evaluation Benchmark (`benchmarks/kesoku_bench/`)**: A reproducible benchmark suite (`A1`–`A4` file/diff editing, `B1`–`B4` output truncation & investigation, `C1`–`C4` multi-turn compaction survival, `D1`–`D4` skills, `/compact`, background jobs, and `AGENTS.md` conventions) built on `kesoku.testing` with deterministic behavioral graders, `MeteredLLM` cost/token accounting, and stage ablation support (`baseline`, `p0`, `p1`, `p2`).

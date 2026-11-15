@@ -1,32 +1,69 @@
 """Unit tests for Kesoku LLM module and Anthropic Claude support."""
 
+import asyncio
 import io
 import json
+import os
+import threading
+import time
 import warnings
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 import requests
 from google.genai import _api_client, types
+from PIL import Image
 
+from kesoku.agent.agent import Agent, SessionWorker
+from kesoku.agent.compressor import HistoryCompressor
+from kesoku.agent.history import build_history
 from kesoku.agent.llm import (
     _EXPLICIT_CACHE_UNSUPPORTED_LOCK,
     _EXPLICIT_CACHE_UNSUPPORTED_MODELS,
+    _IMAGE_ATTACHMENT_LRU,
+    _IMAGE_ATTACHMENT_LRU_LOCK,
+    _IMAGE_ATTACHMENT_LRU_MAXSIZE,
+    BaseLLM,
     ClaudeLLM,
     GeminiLLM,
+    LLMResponse,
     MockLLM,
+    ToolCallRequest,
+    _drain_blocking_stream,
+    _load_attachments,
     _patch_requests_response_utf8_lines,
     function_to_anthropic_tool,
     get_llm,
     history_to_turns,
     is_explicit_cache_unsupported_model,
+    prewarm_image_attachments,
 )
-from kesoku.config import ClaudeConfig, GeminiConfig, KesokuConfig, WorkspaceConfig
-from kesoku.constants import MessageRole, MessageType
+from kesoku.agent.tools.registry import ToolContext
+from kesoku.agent.turn_executor import (
+    TurnExecutor,
+    discard_session_cache_state,
+)
+from kesoku.agent.turn_logger import TurnLogger
+from kesoku.config import (
+    ClaudeConfig,
+    DiscordChannelOverride,
+    DiscordConfig,
+    GeminiConfig,
+    KesokuConfig,
+    WorkspaceConfig,
+    resolve_gemini_cache_ttl,
+)
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.context import KesokuContext
-from kesoku.db import DatabaseManager, Message
+from kesoku.db import AsyncDatabaseManager, DatabaseManager, Message
+from kesoku.gateway.chatbot.base import (
+    Chatbot,
+)
+from kesoku.gateway.chatbot.discord.adapter import DiscordChatbot
+from kesoku.gateway.gateway import Gateway
 
 
 def sample_tool_func(query: str, max_results: int = 10, context: Any = None) -> str:
@@ -1661,5 +1698,1222 @@ async def test_gemini_explicit_cache_unsupported_model_detection_and_isolation()
             _EXPLICIT_CACHE_UNSUPPORTED_MODELS.update(saved)
 
 
+class _DummyChatbot(Chatbot):
+    """Minimal concrete Chatbot for testing base Chatbot behavior."""
+
+    def __init__(self, chatbot_id: str, gateway: Gateway) -> None:
+        super().__init__(chatbot_id=chatbot_id, gateway=gateway)
+        self.sent_chunks: list[list[str]] = []
+        self.sent_questions: list[dict[str, Any]] = []
+        self.sent_files: list[str] = []
+
+    async def handle_message(self, message: Message) -> None:
+        await self.render_outgoing_message(message)
+
+    async def send_text_chunks(self, channel_id: str, chunks: list[str], message: Message) -> None:
+        self.sent_chunks.append(list(chunks))
+
+    async def send_file_segment(self, channel_id: str, file_path: str, message: Message) -> None:
+        self.sent_files.append(file_path)
+
+    async def send_question_segment(
+        self,
+        channel_id: str,
+        question: str,
+        choices: list[str],
+        message: Message,
+        multi: bool = False,
+        max_choices: int = 1,
+    ) -> None:
+        self.sent_questions.append(
+            {"question": question, "choices": list(choices), "multi": multi, "max": max_choices}
+        )
 
 
+def _make_png_bytes(width: int = 1600, height: int = 1200, color: tuple[int, int, int] = (40, 120, 200)) -> bytes:
+    img = Image.new("RGB", (width, height), color=color)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+async def _make_gateway(tmp_path: Any, cfg: KesokuConfig | None = None) -> tuple[Gateway, AsyncDatabaseManager]:
+    sessions_dir = str(tmp_path / "sessions")
+    os.makedirs(sessions_dir, exist_ok=True)
+    db_path = str(tmp_path / "kesoku.db")
+    if cfg is None:
+        cfg = KesokuConfig(
+            agent_working_dir=str(tmp_path),
+            workspace=WorkspaceConfig(sessions_dir=sessions_dir, db_path=db_path),
+        )
+    ctx = KesokuContext(config=cfg)
+    ctx.sync_db.init_tables()
+    gw = Gateway(context=ctx)
+    return gw, ctx.db
+
+
+def _make_discord_bot(gateway: Gateway, chatbot_id: str = "discord_v015") -> DiscordChatbot:
+    bot = DiscordChatbot(
+        chatbot_id=chatbot_id,
+        gateway=gateway,
+        bot_token="fake-token",
+        discord_config=DiscordConfig(chatbot_id=chatbot_id, bot_token="fake-token"),
+    )
+    bot._deferred_poll_initial_sec = 0.02
+    bot._deferred_poll_max_sec = 0.04
+    bot._deferred_dead_grace_sec = 0.08
+    return bot
+
+
+# origin: tests/test_round3_fixes.py K1
+@pytest.mark.asyncio
+async def test_k1_gemini_parse_prompt_blocked_non_stream_and_stream() -> None:
+    cfg = GeminiConfig(auth_mode="api_key", api_key="dummy")
+    with patch("google.genai.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+
+        raw_non_stream = types.GenerateContentResponse.model_construct(
+            candidates=[],
+            prompt_feedback=types.GenerateContentResponsePromptFeedback.model_construct(
+                block_reason=types.BlockedReason.PROHIBITED_CONTENT
+            ),
+        )
+        mock_client.models.generate_content.return_value = raw_non_stream
+        llm = GeminiLLM(config=cfg)
+        res = await llm.generate(prompt="hello")
+        assert res.finish_reason == "PROMPT_BLOCKED:PROHIBITED_CONTENT"
+        assert res.content == ""
+
+        # Streaming chunk with candidates=[] and prompt_feedback.block_reason
+        stream_chunk = SimpleNamespace(
+            candidates=[],
+            usage_metadata=None,
+            prompt_feedback=SimpleNamespace(block_reason=types.BlockedReason.PROHIBITED_CONTENT),
+        )
+        mock_client.models.generate_content_stream.return_value = iter([stream_chunk])
+        res_stream = await llm.generate(prompt="hello", stream=True)
+        assert res_stream.finish_reason == "PROMPT_BLOCKED:PROHIBITED_CONTENT"
+
+        # Unblocked empty MagicMock stays None (does not false-trigger on MagicMock attributes)
+        mock_client.models.generate_content.return_value = MagicMock(parts=[], candidates=[])
+        res_plain = await llm.generate(prompt="hello")
+        assert res_plain.finish_reason is None
+
+
+# origin: tests/test_round3_fixes.py K1
+@pytest.mark.asyncio
+async def test_k1_turn_executor_prompt_blocked_single_call_and_history_filtered(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "k1.db")
+    DatabaseManager(db_path).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=db_path, sessions_dir=str(tmp_path / "sessions")))
+    cfg.gemini.stream = True
+    gw = Gateway(context=KesokuContext(config=cfg))
+    gw.register_stream_handler("discord_test", AsyncMock())
+    await gw.create_session("s_k1", title="K1 Session", chatbot_id="discord_test", channel_id="c1")
+
+    # Turn 1: clean prior exchange
+    u1 = Message(
+        session_id="s_k1",
+        chatbot_id="discord_test",
+        channel_id="c1",
+        sender="u",
+        role=MessageRole.USER,
+        content="Normal question",
+        status=MessageStatus.PROCESSED,
+        timestamp=100.0,
+    )
+    a1 = Message(
+        session_id="s_k1",
+        chatbot_id="discord_test",
+        channel_id="c1",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="Normal answer",
+        status=MessageStatus.DELIVERED,
+        parent_id=u1.id,
+        timestamp=101.0,
+    )
+    await gw.post(u1)
+    await gw.post(a1)
+
+    # Turn 2: two merged/queued user rows in the blocked turn
+    u2_first = Message(
+        session_id="s_k1",
+        chatbot_id="discord_test",
+        channel_id="c1",
+        sender="u",
+        role=MessageRole.USER,
+        content="Queued part 1",
+        status=MessageStatus.INTERRUPTED,
+        timestamp=200.0,
+    )
+    u2_active = Message(
+        session_id="s_k1",
+        chatbot_id="discord_test",
+        channel_id="c1",
+        sender="u",
+        role=MessageRole.USER,
+        content="Queued part 2",
+        status=MessageStatus.PENDING_AGENT,
+        timestamp=201.0,
+    )
+    await gw.post(u2_first)
+    await gw.post(u2_active)
+
+    calls = 0
+
+    class BlockedLLM(BaseLLM):
+        config = cfg.gemini
+
+        async def generate(self, **kwargs: Any) -> LLMResponse:
+            nonlocal calls
+            calls += 1
+            on_chunk = kwargs.get("on_stream_chunk")
+            if on_chunk:
+                await on_chunk("partial", "partial")
+            return LLMResponse(content="", finish_reason="PROMPT_BLOCKED:PROHIBITED_CONTENT")
+
+    llm = BlockedLLM()
+    ctx = KesokuContext(config=cfg, llm=llm)
+    gw = Gateway(context=ctx)
+    stream_events: list[tuple[Any, ...]] = []
+    gw.register_stream_handler("discord_test", AsyncMock(side_effect=lambda *args: stream_events.append(args)))
+
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    tool_runner.tool_context = ToolContext(gateway=gw, session_id="s_k1")
+    executor = TurnExecutor("s_k1", gw, tool_runner, MagicMock(spec=TurnLogger), context=ctx)
+
+    worker = MagicMock()
+    type(worker).running = PropertyMock(return_value=True)
+    worker.drain_queue_and_pivot = AsyncMock(side_effect=lambda m: m)
+    worker.queue_empty.return_value = True
+
+    await executor.process_turn(u2_active, worker, str(tmp_path / "staging"))
+
+    # (b) Exactly 1 LLM call, 0 System nudges, 1 Notification warning with /compact & /clear, stream discarded
+    assert calls == 1
+    raw_msgs = await gw.db.get_session_messages("s_k1")
+    assert [m for m in raw_msgs if m.role == MessageRole.SYSTEM] == []
+    notices = [m for m in raw_msgs if m.role == MessageRole.ASSISTANT and m.sender == "Notification"]
+    assert len(notices) == 1
+    assert "/compact" in notices[0].content
+    assert "/clear" in notices[0].content
+    assert notices[0].metadata.get("delivery_notice") is True
+    assert notices[0].metadata.get("prompt_blocked") == "PROHIBITED_CONTENT"
+    assert any(len(ev) >= 4 and ev[3] is None for ev in stream_events)
+
+    # Both merged user rows stamped with prompt_blocked
+    by_id = {m.id: m for m in raw_msgs}
+    assert by_id[u2_first.id].metadata.get("prompt_blocked") == "PROHIBITED_CONTENT"
+    assert by_id[u2_active.id].metadata.get("prompt_blocked") == "PROHIBITED_CONTENT"
+
+    # (c) build_history excludes both the Notification warning and the blocked user rows
+    clean_hist = await build_history(gw, "s_k1", heal_orphans=False)
+    assert [m.id for m in clean_hist] == [u1.id, a1.id]
+
+    # Multi-step subcase: Step 1 executes a tool, Step 2 returns PROMPT_BLOCKED -> intermediate rows also stamped
+
+    await gw.create_session("s_k1_tools", title="K1 Tools", chatbot_id="discord_test", channel_id="c2")
+    step_calls = 0
+
+    class ToolThenBlockedLLM(BaseLLM):
+        config = cfg.gemini
+
+        async def generate(self, **kwargs: Any) -> LLMResponse:
+            nonlocal step_calls
+            step_calls += 1
+            if step_calls == 1:
+                return LLMResponse(
+                    content="",
+                    thought="Checking file",
+                    tool_calls=[ToolCallRequest(name="read_file", arguments={"file_name": "x.txt"}, tool_call_id="t1")],
+                )
+            return LLMResponse(content="", finish_reason="PROMPT_BLOCKED:SAFETY")
+
+    ctx2 = KesokuContext(config=cfg, llm=ToolThenBlockedLLM())
+    gw2 = Gateway(context=ctx2)
+    tr2 = MagicMock()
+    tr2.tool_registry.get_tools_list.return_value = []
+    tr2.tool_context = ToolContext(gateway=gw2, session_id="s_k1_tools")
+
+    async def fake_exec_tool(call: Any, tc_msg: Message, **kwargs: Any) -> Message:
+        return Message(
+            session_id="s_k1_tools",
+            chatbot_id="discord_test",
+            channel_id="c2",
+            sender=call.name,
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content="tool out",
+            status=MessageStatus.RESPONDED,
+            parent_id=tc_msg.id,
+            metadata={"tool_name": call.name, "tool_call_id": call.tool_call_id},
+        )
+
+    tr2.execute_tool = fake_exec_tool
+    exec2 = TurnExecutor("s_k1_tools", gw2, tr2, MagicMock(spec=TurnLogger), context=ctx2)
+    u_multi = Message(
+        session_id="s_k1_tools",
+        chatbot_id="discord_test",
+        channel_id="c2",
+        sender="u",
+        role=MessageRole.USER,
+        content="Trigger tool then block",
+        status=MessageStatus.PENDING_AGENT,
+        timestamp=300.0,
+    )
+    await gw2.post(u_multi)
+    await exec2.process_turn(u_multi, worker, str(tmp_path / "staging"))
+    assert step_calls == 2
+    raw2 = await gw2.db.get_session_messages("s_k1_tools")
+    non_notice2 = [m for m in raw2 if m.sender != "Notification"]
+    assert len(non_notice2) == 4  # USER + THOUGHT + TOOL_CALL + TOOL_RESULT
+    assert all(m.metadata.get("prompt_blocked") == "SAFETY" for m in non_notice2)
+    assert await build_history(gw2, "s_k1_tools", heal_orphans=False) == []
+
+
+# origin: tests/test_round3_fixes.py K1
+@pytest.mark.asyncio
+async def test_k1_manual_compact_guardrail_g2_and_compact_all(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "k1_compact.db")
+    db = DatabaseManager(db_path)
+    db.init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=db_path, sessions_dir=str(tmp_path / "sessions")))
+    cfg.agent.protect_front_turns = 3
+    cfg.agent.protect_tail_turns = 6
+    cfg.agent.watermark_chunk_min_turns = 1
+
+    class SummaryLLM(BaseLLM):
+        async def generate(self, **kwargs: Any) -> LLMResponse:
+            return LLMResponse(content="<summary>Condensed safe summary.</summary>", total_tokens=20)
+
+    ctx = KesokuContext(config=cfg, db=db, llm=SummaryLLM())
+    gw = Gateway(context=ctx)
+    bot = _DummyChatbot("discord_test", gw)
+    sess = await gw.create_session("s_g2", title="G2", chatbot_id="discord_test", channel_id="chan_g2")
+
+    # 2 clean turns + 1 prompt_blocked user turn at the end
+    for idx in range(2):
+        um = Message(
+            session_id=sess.id,
+            chatbot_id="discord_test",
+            channel_id="chan_g2",
+            sender="u",
+            role=MessageRole.USER,
+            content=f"Turn {idx} user text",
+            status=MessageStatus.PROCESSED,
+            timestamp=10.0 * idx + 1,
+        )
+        am = Message(
+            session_id=sess.id,
+            chatbot_id="discord_test",
+            channel_id="chan_g2",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            content=f"Turn {idx} reply text",
+            status=MessageStatus.DELIVERED,
+            parent_id=um.id,
+            timestamp=10.0 * idx + 2,
+        )
+        await gw.post(um)
+        await gw.post(am)
+
+    blocked_u = Message(
+        session_id=sess.id,
+        chatbot_id="discord_test",
+        channel_id="chan_g2",
+        sender="u",
+        role=MessageRole.USER,
+        content="Blocked user turn",
+        status=MessageStatus.PROCESSED,
+        timestamp=50.0,
+        metadata={"prompt_blocked": "PROHIBITED_CONTENT"},
+    )
+    await gw.post(blocked_u)
+
+    with patch("kesoku.agent.llm.get_llm", return_value=SummaryLLM()):
+        reply = await bot.manual_compact_session_by_channel("chan_g2", "")
+
+    assert reply.startswith("🔄 Compacted 2 turn(s) into ")
+    assert "including recent turns" in reply
+    # Guardrail G2: shared cfg.agent was NEVER mutated in place
+    assert cfg.agent.protect_front_turns == 3
+    assert cfg.agent.protect_tail_turns == 6
+
+    # Also verify `/compact all` on an unblocked 2-turn session
+    sess2 = await gw.create_session("s_all", title="All", chatbot_id="discord_test", channel_id="chan_all")
+    for idx in range(2):
+        um = Message(
+            session_id=sess2.id,
+            chatbot_id="discord_test",
+            channel_id="chan_all",
+            sender="u",
+            role=MessageRole.USER,
+            content=f"Clean {idx}",
+            status=MessageStatus.PROCESSED,
+            timestamp=10.0 * idx + 1,
+        )
+        am = Message(
+            session_id=sess2.id,
+            chatbot_id="discord_test",
+            channel_id="chan_all",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            content=f"Reply {idx}",
+            status=MessageStatus.DELIVERED,
+            parent_id=um.id,
+            timestamp=10.0 * idx + 2,
+        )
+        await gw.post(um)
+        await gw.post(am)
+
+    with patch("kesoku.agent.llm.get_llm", return_value=SummaryLLM()):
+        reply_all = await bot.manual_compact_session_by_channel("chan_all", "all")
+    assert reply_all.startswith("🔄 Compacted 2 turn(s) into ")
+    assert "including recent turns" in reply_all
+    assert cfg.agent.protect_front_turns == 3
+    assert cfg.agent.protect_tail_turns == 6
+
+
+# origin: tests/test_round3_fixes.py K1
+@pytest.mark.asyncio
+async def test_k1_second_consecutive_block_schedules_bg_compaction_and_swallows_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = str(tmp_path / "k1_consec.db")
+    db = DatabaseManager(db_path)
+    db.init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=db_path, sessions_dir=str(tmp_path / "sessions")))
+
+    class AlwaysBlockedLLM(BaseLLM):
+        async def generate(self, **kwargs: Any) -> LLMResponse:
+            return LLMResponse(content="", finish_reason="PROMPT_BLOCKED:PROHIBITED_CONTENT")
+
+    ctx = KesokuContext(config=cfg, db=db, llm=AlwaysBlockedLLM())
+    gw = Gateway(context=ctx)
+    await gw.create_session("s_consec", title="Consec", chatbot_id="discord_test", channel_id="c_consec")
+
+    # Seed 1 normal turn so history is non-empty
+    u0 = Message(
+        session_id="s_consec",
+        chatbot_id="discord_test",
+        channel_id="c_consec",
+        sender="u",
+        role=MessageRole.USER,
+        content="Hello",
+        status=MessageStatus.PROCESSED,
+        timestamp=1.0,
+    )
+    a0 = Message(
+        session_id="s_consec",
+        chatbot_id="discord_test",
+        channel_id="c_consec",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="Hi!",
+        status=MessageStatus.DELIVERED,
+        parent_id=u0.id,
+        timestamp=2.0,
+    )
+    await gw.post(u0)
+    await gw.post(a0)
+
+    compact_calls: list[dict[str, Any]] = []
+
+    async def fake_force_compact(
+        self_comp: HistoryCompressor,
+        session_id: str,
+        history: list[Message],
+        llm: BaseLLM,
+        config: KesokuConfig,
+        *,
+        directive: str | None = None,
+        staging_dir: str | None = None,
+        protect_front_turns: int | None = None,
+        protect_tail_turns: int | None = None,
+    ) -> int:
+        compact_calls.append(
+            {
+                "session_id": session_id,
+                "protect_front_turns": protect_front_turns,
+                "protect_tail_turns": protect_tail_turns,
+            }
+        )
+        if len(compact_calls) >= 2:
+            raise RuntimeError("compressor also blocked")
+        return 1
+
+    monkeypatch.setattr(HistoryCompressor, "force_compact_session", fake_force_compact)
+
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    tool_runner.tool_context = ToolContext(gateway=gw, session_id="s_consec")
+    executor = TurnExecutor("s_consec", gw, tool_runner, MagicMock(spec=TurnLogger), context=ctx)
+
+    worker = MagicMock()
+    type(worker).running = PropertyMock(return_value=True)
+    worker.drain_queue_and_pivot = AsyncMock(side_effect=lambda m: m)
+    worker.queue_empty.return_value = True
+
+    # 1st blocked turn -> 0 background compactions
+    b1 = Message(
+        session_id="s_consec",
+        chatbot_id="discord_test",
+        channel_id="c_consec",
+        sender="u",
+        role=MessageRole.USER,
+        content="Block 1",
+        status=MessageStatus.PENDING_AGENT,
+        timestamp=10.0,
+    )
+    await gw.post(b1)
+    await executor.process_turn(b1, worker, str(tmp_path / "staging"))
+    if executor._bg_compaction_tasks:
+        await asyncio.gather(*list(executor._bg_compaction_tasks))
+    assert len(compact_calls) == 0
+
+    # 2nd consecutive blocked turn -> schedules background compaction once
+    b2 = Message(
+        session_id="s_consec",
+        chatbot_id="discord_test",
+        channel_id="c_consec",
+        sender="u",
+        role=MessageRole.USER,
+        content="Block 2",
+        status=MessageStatus.PENDING_AGENT,
+        timestamp=20.0,
+    )
+    await gw.post(b2)
+    await executor.process_turn(b2, worker, str(tmp_path / "staging"))
+    if executor._bg_compaction_tasks:
+        await asyncio.gather(*list(executor._bg_compaction_tasks))
+    assert len(compact_calls) == 1
+    assert compact_calls[0]["protect_tail_turns"] == 0
+    assert compact_calls[0]["protect_front_turns"] == 0
+
+    # 3rd blocked turn where compressor raises -> swallowed cleanly without raising
+    b3 = Message(
+        session_id="s_consec",
+        chatbot_id="discord_test",
+        channel_id="c_consec",
+        sender="u",
+        role=MessageRole.USER,
+        content="Block 3",
+        status=MessageStatus.PENDING_AGENT,
+        timestamp=30.0,
+    )
+    await gw.post(b3)
+    await executor.process_turn(b3, worker, str(tmp_path / "staging"))
+    if executor._bg_compaction_tasks:
+        await asyncio.gather(*list(executor._bg_compaction_tasks))
+    assert len(compact_calls) == 2
+
+
+# origin: tests/test_round3_fixes.py K9
+@pytest.mark.asyncio
+async def test_k9_gemini_request_timeout_http_options_and_non_stream_and_stream_timeouts() -> None:
+    assert GeminiConfig().request_timeout_seconds == 300.0
+
+    cfg = GeminiConfig(auth_mode="vertex", project_id="proj", location="us-central1", request_timeout_seconds=0.08)
+    with patch("google.genai.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        llm = GeminiLLM(config=cfg)
+
+        _, client_kwargs = mock_client_cls.call_args
+        assert isinstance(client_kwargs.get("http_options"), types.HttpOptions)
+        assert client_kwargs["http_options"].timeout == 80
+
+        # Non-streaming wait_for timeout
+        def slow_call(**kwargs: Any) -> Any:
+            time.sleep(0.5)
+            return MagicMock(parts=[], candidates=[])
+
+        mock_client.models.generate_content.side_effect = slow_call
+        with pytest.raises(TimeoutError):
+            await llm._call_llm({"contents": [], "config": types.GenerateContentConfig()})
+
+    # Streaming idle-chunk timeout in _drain_blocking_stream
+    def stalled_stream() -> Any:
+        yield "first_chunk"
+        time.sleep(0.5)
+        yield "never_reached"
+
+    seen: list[Any] = []
+
+    async def on_item(item: Any) -> None:
+        seen.append(item)
+
+    with pytest.raises(TimeoutError):
+        await _drain_blocking_stream(stalled_stream, on_item, idle_timeout=0.08)
+    assert seen == ["first_chunk"]
+
+
+# origin: tests/test_ttft_async_tts_v015.py
+@pytest.mark.asyncio
+async def test_gemini_config_ttl_and_cache_rpcs_off_event_loop() -> None:
+    """Verify `context_cache_ttl_seconds == 1200` and create/delete/update_cache_ttl run via `to_thread`."""
+    cfg = GeminiConfig()
+    assert cfg.context_cache_ttl_seconds == 1200
+    assert resolve_gemini_cache_ttl(cfg) == 1200
+
+    loop_tid = threading.get_ident()
+    seen_threads: dict[str, int] = {}
+
+    mock_client = MagicMock()
+
+    def _fake_create(**kwargs: Any) -> Any:
+        seen_threads["create"] = threading.get_ident()
+        assert kwargs["config"].ttl == "1200s"
+        c = MagicMock()
+        c.name = "projects/p/locations/global/cachedContents/c1"
+        return c
+
+    def _fake_update(**kwargs: Any) -> Any:
+        seen_threads["update"] = threading.get_ident()
+        assert kwargs["name"] == "projects/p/locations/global/cachedContents/c1"
+        assert kwargs["config"].ttl == "1200s"
+        return MagicMock()
+
+    def _fake_delete(**kwargs: Any) -> None:
+        seen_threads["delete"] = threading.get_ident()
+        assert kwargs["name"] == "projects/p/locations/global/cachedContents/c1"
+
+    mock_client.caches.create.side_effect = _fake_create
+    mock_client.caches.update.side_effect = _fake_update
+    mock_client.caches.delete.side_effect = _fake_delete
+
+    with patch("google.genai.Client", return_value=mock_client):
+        llm = GeminiLLM(cfg)
+        m = Message(
+            session_id="s",
+            chatbot_id="c",
+            channel_id="ch",
+            sender="u",
+            role=MessageRole.USER,
+            content="hello",
+        )
+        cname = await llm.create_cache([m], system_prompt="sys")
+        assert cname == "projects/p/locations/global/cachedContents/c1"
+        assert await llm.update_cache_ttl(cname) is True
+        await llm.delete_cache(cname)
+
+        assert seen_threads["create"] != loop_tid
+        assert seen_threads["update"] != loop_tid
+        assert seen_threads["delete"] != loop_tid
+
+        # 404 on update_cache_ttl returns False cleanly
+        mock_client.caches.update.side_effect = RuntimeError("404 NOT_FOUND: CachedContent expired")
+        assert await llm.update_cache_ttl(cname, 1200) is False
+
+        # 400 INVALID_ARGUMENT < min token count returns None quietly without warning spam
+        mock_client.caches.create.side_effect = RuntimeError(
+            "400 INVALID_ARGUMENT: CachedContent total token count 3900 is less than minimum 4096"
+        )
+        assert await llm.create_cache([m], system_prompt="sys") is None
+
+
+# origin: tests/test_ttft_async_tts_v015.py
+@pytest.mark.asyncio
+async def test_gemini_streaming_and_sync_parity_with_cached_content() -> None:
+    """Verify both `_call_llm` and `_call_llm_stream` pass `cached_content` and omit `system_instruction`/`tools`."""
+    mock_client = MagicMock()
+
+    sync_res = MagicMock()
+    sync_res.parts = [MagicMock(text="Sync answer", thought=False, function_call=None)]
+    sync_res.candidates = [MagicMock(finish_reason="STOP", finish_message=None, safety_ratings=None)]
+    sync_res.usage_metadata = MagicMock(
+        prompt_token_count=5000,
+        candidates_token_count=20,
+        total_token_count=5020,
+        cached_content_token_count=4800,
+    )
+    sync_res.prompt_feedback = None
+    mock_client.models.generate_content.return_value = sync_res
+
+    part_thought = MagicMock(text="thinking...", thought=True, function_call=None, thought_signature=None)
+    part_text = MagicMock(text="Stream answer", thought=False, function_call=None, thought_signature=None)
+    chunk1 = MagicMock(
+        candidates=[MagicMock(content=MagicMock(parts=[part_thought]), finish_reason=None, safety_ratings=None)],
+        usage_metadata=None,
+        prompt_feedback=None,
+    )
+    chunk2 = MagicMock(
+        candidates=[MagicMock(content=MagicMock(parts=[part_text]), finish_reason="STOP", safety_ratings=None)],
+        usage_metadata=sync_res.usage_metadata,
+        prompt_feedback=None,
+    )
+    mock_client.models.generate_content_stream.return_value = iter([chunk1, chunk2])
+
+    def dummy_tool(x: str) -> str:
+        """Dummy tool."""
+        return x
+
+    tail_msg = Message(
+        session_id="s",
+        chatbot_id="c",
+        channel_id="ch",
+        sender="u",
+        role=MessageRole.USER,
+        content="Tail uncached prompt",
+    )
+
+    with patch("google.genai.Client", return_value=mock_client):
+        llm = GeminiLLM(GeminiConfig(thinking_level="low"))
+        cache_id = "projects/p/locations/global/cachedContents/999"
+
+        r_sync = await llm.generate(
+            system_prompt="Cached sys",
+            history=[tail_msg],
+            tools=[dummy_tool],
+            cached_content=cache_id,
+            stream=False,
+        )
+        streamed_deltas: list[str] = []
+
+        async def _on_chunk(d: str, _acc: str) -> None:
+            streamed_deltas.append(d)
+
+        r_stream = await llm.generate(
+            system_prompt="Cached sys",
+            history=[tail_msg],
+            tools=[dummy_tool],
+            cached_content=cache_id,
+            stream=True,
+            on_stream_chunk=_on_chunk,
+        )
+
+    assert r_sync.content == "Sync answer"
+    assert r_stream.content == "Stream answer"
+    assert streamed_deltas == ["Stream answer"]
+    assert r_sync.cached_tokens == r_stream.cached_tokens == 4800
+
+    for call_obj in (
+        mock_client.models.generate_content.call_args,
+        mock_client.models.generate_content_stream.call_args,
+    ):
+        gen_cfg = call_obj.kwargs["config"]
+        assert gen_cfg.cached_content == cache_id
+        assert gen_cfg.system_instruction is None
+        assert gen_cfg.tools is None
+        assert gen_cfg.automatic_function_calling.disable is True
+        sent_contents = call_obj.kwargs["contents"]
+        assert len(sent_contents) == 1
+        assert sent_contents[0].parts[0].text == "Tail uncached prompt"
+
+
+# origin: tests/test_ttft_async_tts_v015.py
+@pytest.mark.asyncio
+async def test_post_turn_explicit_cache_lifecycle_4600_floor_rolling_refresh_and_ttl(tmp_path: Any) -> None:
+    """Verify post-turn 4600 floor, rolling refresh (`create -> swap -> delete`), and sliding TTL renewal."""
+    cfg = KesokuConfig(
+        agent_working_dir=str(tmp_path),
+        workspace=WorkspaceConfig(sessions_dir=str(tmp_path / "sessions"), db_path=str(tmp_path / "k.db")),
+        gemini=GeminiConfig(
+            model_name="gemini-3.8-flash",
+            context_caching=True,
+            context_caching_mode="explicit",
+            context_caching_threshold=4096,  # Default -> enforces 4600 safety floor!
+            context_cache_ttl_seconds=1200,
+        ),
+    )
+    gw, _ = await _make_gateway(tmp_path, cfg=cfg)
+    await gw.create_session("s_life", title="Lifecycle", system_prompt="System prompt")
+    staging_dir = str(tmp_path / "sessions" / "s_life")
+    os.makedirs(staging_dir, exist_ok=True)
+
+    events: list[str] = []
+
+    class GeminiLLM(BaseLLM):
+        model_name = "gemini-3.8-flash"
+
+        def __init__(self) -> None:
+            self.config = cfg.gemini
+            self.seq = 0
+            self.generates: list[dict[str, Any]] = []
+            self.ttl_renew_ok = True
+            self.next_prompt_tokens = 5000
+            self.next_cached_tokens = 4800
+            self.worker_ref: Any = None
+
+        def count_tokens(self, *args: Any, **kwargs: Any) -> int:
+            raise AssertionError("Blocking count_tokens() RPC must NEVER be called!")
+
+        async def create_cache(
+            self,
+            contents: list[Message],
+            system_prompt: str | None = None,
+            tools: list[Any] | None = None,
+            display_name: str | None = None,
+            ttl_seconds: int | None = None,
+        ) -> str | None:
+            self.seq += 1
+            cname = f"cache_v{self.seq}"
+            events.append(f"create:{cname}:len={len(contents)}:ttl={ttl_seconds}")
+            return cname
+
+        async def delete_cache(self, cache_name: str) -> None:
+            # Verify atomic swap ALREADY happened on worker BEFORE old cache is deleted!
+            active_now = getattr(self.worker_ref, "active_cache_name", None)
+            events.append(f"delete:{cache_name}:active_during_delete={active_now}")
+
+        async def update_cache_ttl(self, cache_name: str, ttl_seconds: int = 1200) -> bool:
+            events.append(f"ttl:{cache_name}:{ttl_seconds}")
+            return self.ttl_renew_ok
+
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+            cached_content: str | None = None,
+            **kwargs: Any,
+        ) -> LLMResponse:
+            _ = (prompt, system_prompt, tools, kwargs)
+            self.generates.append({"cached_content": cached_content, "hist_len": len(history or [])})
+            return LLMResponse(
+                content="Reply text.",
+                prompt_tokens=self.next_prompt_tokens,
+                cached_tokens=self.next_cached_tokens if cached_content else 0,
+                candidates_tokens=20,
+                total_tokens=self.next_prompt_tokens + 20,
+            )
+
+    llm = GeminiLLM()
+    ctx = KesokuContext(config=cfg, db=gw.context.sync_db, llm=llm)
+    gw.context = ctx
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    tool_runner.tool_context = MagicMock(transitioned_to_session=None)
+
+    worker = SessionWorker("s_life", gw, context=ctx)
+    llm.worker_ref = worker
+
+    async def _run_turn(uid: str, text: str) -> None:
+        umsg = Message(
+            id=uid,
+            session_id="s_life",
+            chatbot_id="cli",
+            channel_id="ch",
+            sender="u",
+            role=MessageRole.USER,
+            content=text,
+            status=MessageStatus.PENDING_AGENT,
+        )
+        await gw.post(umsg)
+        ex = TurnExecutor("s_life", gw, tool_runner, context=ctx)
+        worker._running = True
+        with patch("kesoku.agent.compressor.HistoryCompressor.auto_compact_session", return_value=False):
+            await ex.process_turn(current_msg=umsg, worker=worker, session_staging_dir=staging_dir)
+
+    # 1. Short Turn 1 (~4200 est tokens: above 4096 but BELOW 4600 safety floor!) -> NO cache created!
+    await _run_turn("u1", "a" * 16400)  # ~4100 est tokens
+    assert events == []
+    assert worker.active_cache_name is None
+
+    # 2. Turn 2 pushes prefix >= 4600 est tokens -> R1 uncached, post-turn creates `cache_v1`!
+    await _run_turn("u2", "b" * 4000)
+    assert llm.generates[-1]["cached_content"] is None
+    assert events == ["create:cache_v1:len=4:ttl=1200"]
+    assert worker.active_cache_name == "cache_v1"
+
+    # 3. Turn 3 hits `cache_v1` and has remaining TTL < 600s -> renews TTL via `update_cache_ttl`!
+    entry_v1 = worker.explicit_caches["GeminiLLM:gemini-3.8-flash"]
+    entry_v1.expires_at = time.time() + 300.0  # < 600s remaining
+    events.clear()
+    await _run_turn("u3", "short follow-up")
+    assert llm.generates[-1]["cached_content"] == "cache_v1"
+    assert llm.generates[-1]["hist_len"] == 1  # Only incremental tail `[u3]` sent!
+    assert events == ["ttl:cache_v1:1200"]
+    assert entry_v1.expires_at > time.time() + 1000.0
+
+    # 4. Turn 4: `update_cache_ttl` hits 404 (`False`) -> falls back to creating fresh `cache_v2`!
+    entry_v1.expires_at = time.time() + 200.0
+    llm.ttl_renew_ok = False
+    events.clear()
+    await _run_turn("u4", "another short turn")
+    assert events == ["ttl:cache_v1:1200", "create:cache_v2:len=8:ttl=1200"]
+    assert worker.active_cache_name == "cache_v2"
+
+    # 5. Turn 5: `uncached_suffix >= 8192` -> Rolling refresh: CREATE new `cache_v3` -> SWAP -> DELETE `cache_v2`!
+    llm.next_prompt_tokens = 16000
+    llm.next_cached_tokens = 5000  # 16000 - 5000 = 11000 >= max(8192, 1250)
+    events.clear()
+    await _run_turn("u5", "trigger rolling refresh")
+    assert events == [
+        "create:cache_v3:len=10:ttl=1200",
+        "delete:cache_v2:active_during_delete=cache_v3",
+    ]
+    assert worker.active_cache_name == "cache_v3"
+    discard_session_cache_state("s_life")
+
+
+# origin: tests/test_ttft_async_tts_v015.py
+@pytest.mark.asyncio
+async def test_channel_model_override_isolation_404_stream_fallback_and_session_delete(tmp_path: Any) -> None:
+    """Verify `#lite` model isolation, streaming 404 same-round fallback, and `/clear` + `delete_session` cleanup."""
+    cfg = KesokuConfig(
+        agent_working_dir=str(tmp_path),
+        workspace=WorkspaceConfig(sessions_dir=str(tmp_path / "sessions"), db_path=str(tmp_path / "iso.db")),
+        gemini=GeminiConfig(
+            model_name="gemini-3.8-flash",
+            context_caching=True,
+            context_caching_mode="explicit",
+            context_caching_threshold=50,
+            stream=True,
+        ),
+        discord=DiscordConfig(
+            enabled=True,
+            chatbot_id="discord_iso",
+            bot_token="tok",
+            channels=[
+                DiscordChannelOverride(
+                    channels=["lite"],
+                    llm="gemini",
+                    model_name="gemini-3.5-flash-lite",
+                    thinking_level="low",
+                    stream=True,
+                )
+            ],
+        ),
+    )
+    gw, _ = await _make_gateway(tmp_path, cfg=cfg)
+    stream_events: list[str | None] = []
+
+    async def _stream_handler(_cid: str, _sid: str, _tid: str, text: str | None) -> None:
+        stream_events.append(text)
+
+    gw.register_stream_handler("discord_iso", _stream_handler)
+    await gw.create_session("s_iso", title="Iso", chatbot_id="discord_iso", channel_id="ch_main")
+    staging_dir = str(tmp_path / "sessions" / "s_iso")
+    os.makedirs(staging_dir, exist_ok=True)
+
+    deleted_all: list[tuple[str, str]] = []
+    seen_calls: list[tuple[str, str | None, bool]] = []
+    fail_404_once = False
+
+    class GeminiLLM(BaseLLM):
+        def __init__(self, model_name: str) -> None:
+            self.model_name = model_name
+            self.config = GeminiConfig(model_name=model_name, stream=True, context_caching_threshold=50)
+            self.created = 0
+
+        async def create_cache(self, contents: list[Message], **_kw: Any) -> str | None:
+            _ = contents
+            self.created += 1
+            return f"cache_{self.model_name}_{self.created}"
+
+        async def delete_cache(self, cache_name: str) -> None:
+            deleted_all.append((self.model_name, cache_name))
+
+        async def generate(
+            self,
+            prompt: str | None = None,
+            system_prompt: str | None = None,
+            history: list[Message] | None = None,
+            tools: list[Any] | None = None,
+            cached_content: str | None = None,
+            stream: bool = False,
+            on_stream_chunk: Any = None,
+        ) -> LLMResponse:
+            _ = (prompt, system_prompt, history, tools)
+            nonlocal fail_404_once
+            seen_calls.append((self.model_name, cached_content, stream))
+            if fail_404_once and cached_content is not None:
+                fail_404_once = False
+                if on_stream_chunk is not None:
+                    await on_stream_chunk("partial", "partial")
+                raise RuntimeError("404 NOT_FOUND: Requested entity CachedContent was not found")
+            if on_stream_chunk is not None:
+                await on_stream_chunk("Hello ", "Hello ")
+                await on_stream_chunk("world!", "Hello world!")
+            return LLMResponse(content="Hello world!", prompt_tokens=200, cached_tokens=150 if cached_content else 0)
+
+    llms = {
+        "gemini-3.8-flash": GeminiLLM("gemini-3.8-flash"),
+        "gemini-3.5-flash-lite": GeminiLLM("gemini-3.5-flash-lite"),
+    }
+    ctx = KesokuContext(config=cfg, db=gw.context.sync_db)
+    ctx.get_llm = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda model_name=None, **_kw: llms[model_name or "gemini-3.8-flash"]
+    )
+    gw.context = ctx
+
+    agent = Agent(gw, context=ctx)
+    worker = SessionWorker("s_iso", gw, context=ctx)
+    agent.workers["s_iso"] = worker
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = ["t1"]
+    tool_runner.tool_context = MagicMock(transitioned_to_session=None)
+
+    async def _turn(mid: str, ch_name: str, text: str) -> None:
+        m = Message(
+            id=mid,
+            session_id="s_iso",
+            chatbot_id="discord_iso",
+            channel_id=ch_name,
+            sender="u",
+            role=MessageRole.USER,
+            content=text,
+            status=MessageStatus.PENDING_AGENT,
+            metadata={"channel_name": ch_name},
+        )
+        await gw.post(m)
+        ex = TurnExecutor("s_iso", gw, tool_runner, context=ctx)
+        worker._running = True
+        with patch("kesoku.agent.compressor.HistoryCompressor.auto_compact_session", return_value=False):
+            await ex.process_turn(current_msg=m, worker=worker, session_staging_dir=staging_dir)
+
+    # Turn 1 on main (`gemini-3.8-flash`) -> creates `cache_gemini-3.8-flash_1` post-turn
+    await _turn("m1", "main", "Long enough initial prompt " * 20)
+    assert "GeminiLLM:gemini-3.8-flash" in worker.explicit_caches
+
+    # Turn 2 on `#lite` (`gemini-3.5-flash-lite`) -> MUST NOT reuse `cache_gemini-3.8-flash_1` OR delete it!
+    await _turn("m2", "lite", "Quick question on lite channel " * 10)
+    assert seen_calls[-1] == ("gemini-3.5-flash-lite", None, True)
+    assert deleted_all == []
+    assert "GeminiLLM:gemini-3.8-flash" in worker.explicit_caches
+    assert "GeminiLLM:gemini-3.5-flash-lite" in worker.explicit_caches
+
+    # Turn 3 back on main (`gemini-3.8-flash`) with simulated 404 on stream -> discards preview & retries same round!
+    fail_404_once = True
+    stream_events.clear()
+    await _turn("m3", "main", "Back on main channel")
+    assert seen_calls[-2] == ("gemini-3.8-flash", "cache_gemini-3.8-flash_1", True)
+    assert seen_calls[-1] == ("gemini-3.8-flash", None, True)
+    assert None in stream_events  # Partial preview was discarded cleanly before retry!
+
+    # `Gateway.delete_session` cleans up ALL active caches across all models for `s_iso`!
+    await gw.delete_session("s_iso")
+    deleted_names = {c for _, c in deleted_all}
+    assert "cache_gemini-3.8-flash_2" in deleted_names
+    assert "cache_gemini-3.5-flash-lite_1" in deleted_names
+
+
+# origin: tests/test_ttft_async_tts_v015.py
+@pytest.mark.asyncio
+async def test_attachment_webp_lru_hit_mtime_invalidation_and_discord_parallel_prewarm(tmp_path: Any) -> None:
+    """Verify 0-recompress LRU hit, mtime invalidation, maxsize=64 eviction, and Discord parallel download + prewarm."""
+    with _IMAGE_ATTACHMENT_LRU_LOCK:
+        _IMAGE_ATTACHMENT_LRU.clear()
+
+    img1 = str(tmp_path / "photo_a.png")
+    with open(img1, "wb") as fh:
+        fh.write(_make_png_bytes(1400, 1000))
+
+    with patch("kesoku.agent.llm._resize_and_compress_image", wraps=__import__(
+        "kesoku.agent.llm", fromlist=["_resize_and_compress_image"]
+    )._resize_and_compress_image) as spy_resize:
+        b1 = _load_attachments([{"path": img1, "mime_type": "image/png"}])
+        b2 = _load_attachments([{"path": img1, "mime_type": "image/png"}])
+        assert spy_resize.call_count == 1  # Second round is an instant RAM LRU hit!
+        assert b1[0].data == b2[0].data
+
+        # Changing mtime invalidates the LRU entry
+        future_ns = os.stat(img1).st_mtime_ns + 10_000_000
+        os.utime(img1, ns=(future_ns, future_ns))
+        _load_attachments([{"path": img1, "mime_type": "image/png"}])
+        assert spy_resize.call_count == 2
+
+    # Verify maxsize=64 eviction bound
+    small_png = _make_png_bytes(64, 64)
+    for idx in range(70):
+        p = str(tmp_path / f"evict_{idx}.png")
+        with open(p, "wb") as fh:
+            fh.write(small_png)
+        _load_attachments([{"path": p, "mime_type": "image/png"}])
+    with _IMAGE_ATTACHMENT_LRU_LOCK:
+        assert len(_IMAGE_ATTACHMENT_LRU) == _IMAGE_ATTACHMENT_LRU_MAXSIZE
+
+    # Verify Discord parallel download (semaphore=6) + `asyncio.to_thread(prewarm_image_attachments, ...)`
+    gw, _ = await _make_gateway(tmp_path)
+    session = await gw.create_session("s_att", title="Att", chatbot_id="discord_v015", channel_id="44")
+    bot = _make_discord_bot(gw)
+
+    active_downloads = 0
+    peak_downloads = 0
+    save_starts: list[float] = []
+    save_ends: list[float] = []
+    png_payload = _make_png_bytes(1280, 960, color=(90, 30, 120))
+
+    def _make_mock_att(idx: int, fname: str) -> Any:
+        att = MagicMock()
+        att.id = 1000 + idx
+        att.filename = fname
+        att.content_type = "image/png"
+
+        async def _save(target_path: str) -> None:
+            nonlocal active_downloads, peak_downloads
+            save_starts.append(time.perf_counter())
+            active_downloads += 1
+            peak_downloads = max(peak_downloads, active_downloads)
+            try:
+                await asyncio.sleep(0.08)
+                with open(target_path, "wb") as fh:
+                    fh.write(png_payload)
+            finally:
+                active_downloads -= 1
+                save_ends.append(time.perf_counter())
+
+        att.save = AsyncMock(side_effect=_save)
+        return att
+
+    # 8 attachments including duplicate clipboard `"image.png"` names!
+    raw_msg = MagicMock()
+    raw_msg.attachments = [
+        _make_mock_att(i, "image.png" if i < 3 else f"shot_{i}.png") for i in range(8)
+    ]
+
+    loop_tid = threading.get_ident()
+    prewarm_tids: list[int] = []
+    orig_prewarm = prewarm_image_attachments
+
+    def _spy_prewarm(paths: Any) -> int:
+        prewarm_tids.append(threading.get_ident())
+        return orig_prewarm(paths)
+
+    dto = MagicMock()
+    with patch("kesoku.agent.llm.prewarm_image_attachments", side_effect=_spy_prewarm):
+        saved_atts = await bot.process_attachments_hook(session, dto, raw_msg)
+    download_elapsed = max(save_ends) - min(save_starts)
+
+    assert len(saved_atts) == 8
+    assert len({a.path for a in saved_atts}) == 8  # Zero filename collision overwrite!
+    assert 2 <= peak_downloads <= 6  # Concurrent and bounded by semaphore(6)!
+    assert download_elapsed < 0.45  # 8 * 0.08s = 0.64s serial -> ~0.16s parallel (2 waves of 6+2)!
+    assert prewarm_tids and prewarm_tids[0] != loop_tid  # Ran off the asyncio event loop!
+
+    # Now `history_to_turns` hits warm LRU with ZERO `_resize_and_compress_image` calls on the event loop!
+    u_msg = Message(
+        session_id=session.id,
+        chatbot_id="discord_v015",
+        channel_id="44",
+        sender="u",
+        role=MessageRole.USER,
+        content="Check all 8 images",
+        metadata={"attachments": [a.model_dump() for a in saved_atts]},
+    )
+    with patch("kesoku.agent.llm._resize_and_compress_image") as mock_no_resize:
+        turns, _ = history_to_turns([u_msg])
+        mock_no_resize.assert_not_called()
+    assert len(turns[0].blocks) == 9  # 1 TextBlock + 8 ImageBlocks
+
+
+# origin: tests/test_ttft_async_tts_v015.py
+@pytest.mark.asyncio
+async def test_post_compaction_cache_rebuild_and_clear_session_cleanup(tmp_path: Any) -> None:
+    """Verify post-turn compaction deletes old cache & immediately rebuilds over compacted prefix, and `/clear` cleans up."""  # noqa: E501
+    from kesoku.db import SummaryNode
+
+    cfg = KesokuConfig(
+        agent_working_dir=str(tmp_path),
+        workspace=WorkspaceConfig(sessions_dir=str(tmp_path / "sessions"), db_path=str(tmp_path / "reb.db")),
+        gemini=GeminiConfig(
+            model_name="gemini-3.8-flash",
+            context_caching=True,
+            context_caching_mode="explicit",
+            context_caching_threshold=30,
+        ),
+    )
+    gw, db = await _make_gateway(tmp_path, cfg=cfg)
+    bot = _make_discord_bot(gw, chatbot_id="discord_reb")
+    bot.bot.close = AsyncMock()  # type: ignore[method-assign]
+    session = await gw.create_session("s_reb", title="Rebuild", chatbot_id="discord_reb", channel_id="88")
+    staging_dir = os.path.join(gw.workspace_config.sessions_dir, session.workspace_name)
+    os.makedirs(staging_dir, exist_ok=True)
+
+    ops: list[str] = []
+
+    class GeminiLLM(BaseLLM):
+        model_name = "gemini-3.8-flash"
+
+        def __init__(self) -> None:
+            self.config = cfg.gemini
+            self.n = 0
+
+        async def create_cache(self, contents: list[Message], **_kw: Any) -> str | None:
+            self.n += 1
+            name = f"reb_cache_{self.n}"
+            has_scaffold = any("[Note: This conversation uses custom turn-based" in (m.content or "") for m in contents)
+            ops.append(f"create:{name}:scaffold={has_scaffold}")
+            return name
+
+        async def delete_cache(self, cache_name: str) -> None:
+            ops.append(f"delete:{cache_name}")
+
+        async def generate(self, **_kw: Any) -> LLMResponse:
+            return LLMResponse(content="Long assistant reply " * 10, total_tokens=50)
+
+    llm = GeminiLLM()
+    ctx = KesokuContext(config=cfg, db=gw.context.sync_db, llm=llm)
+    gw.context = ctx
+    agent = Agent(gw, context=ctx)
+    worker = SessionWorker("s_reb", gw, context=ctx)
+    agent.workers["s_reb"] = worker
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    tool_runner.tool_context = MagicMock(transitioned_to_session=None)
+
+    # Turn 1 creates `reb_cache_1` (no scaffold yet)
+    u1 = Message(
+        id="u_r1",
+        session_id="s_reb",
+        chatbot_id="discord_reb",
+        channel_id="88",
+        sender="u",
+        role=MessageRole.USER,
+        content="Initial user turn " * 15,
+        status=MessageStatus.PENDING_AGENT,
+    )
+    await gw.post(u1)
+    ex1 = TurnExecutor("s_reb", gw, tool_runner, context=ctx)
+    worker._running = True
+    with patch("kesoku.agent.compressor.HistoryCompressor.auto_compact_session", return_value=False):
+        await ex1.process_turn(current_msg=u1, worker=worker, session_staging_dir=staging_dir)
+    assert ops == ["create:reb_cache_1:scaffold=False"]
+
+    # Turn 2 triggers post-turn compaction -> deletes `reb_cache_1` and IMMEDIATELY creates `reb_cache_2` over scaffold!
+    async def _compact_t1(session_id: str, history: list[Message], *_a: Any, **_kw: Any) -> bool:
+        node = SummaryNode(
+            id="sum-node-reb",
+            session_id=session_id,
+            level=0,
+            summary="Dense summary of Turn 1 " * 10,
+            start_timestamp=time.time() - 50,
+            end_timestamp=time.time() - 10,
+            token_count=80,
+            source_token_count=200,
+            parent_id=None,
+        )
+        await db.insert_summary_node(node)
+        await db.update_messages_summary_node([m.id for m in history[:2]], "sum-node-reb")
+        return True
+
+    u2 = Message(
+        id="u_r2",
+        session_id="s_reb",
+        chatbot_id="discord_reb",
+        channel_id="88",
+        sender="u",
+        role=MessageRole.USER,
+        content="Second user turn " * 15,
+        status=MessageStatus.PENDING_AGENT,
+    )
+    await gw.post(u2)
+    ex2 = TurnExecutor("s_reb", gw, tool_runner, context=ctx)
+    worker._running = True
+    ops.clear()
+    with patch("kesoku.agent.compressor.HistoryCompressor.auto_compact_session", side_effect=_compact_t1):
+        await ex2.process_turn(current_msg=u2, worker=worker, session_staging_dir=staging_dir)
+
+    assert ops == ["delete:reb_cache_1", "create:reb_cache_2:scaffold=True"]
+    assert worker.active_cache_name == "reb_cache_2"
+
+    # `/clear` (`clear_session_by_channel`) stops worker and deletes `reb_cache_2`!
+    ops.clear()
+    await bot.clear_session_by_channel("88")
+    assert ops == ["delete:reb_cache_2"]
+    discard_session_cache_state("s_reb")

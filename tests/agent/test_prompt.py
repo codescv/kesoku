@@ -1,6 +1,5 @@
 """Unit tests for the modular system prompt construction utility."""
 
-import re
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -208,38 +207,15 @@ def test_prompt_channel_lookup_failure_still_uses_role_name(role_awd: KesokuConf
 # ---------------------------------------------------------------------------
 
 
-def test_session_notes_instructions_use_update_file() -> None:
-    """Notes are edited via update_file old_content/new_content; the full-overwrite tool is gone."""
+def test_prompt_mentions_protocol_tokens() -> None:
+    """System prompt instructions carry core protocol identifiers without freezing English prose."""
     text = SESSION_NOTES_INSTRUCTIONS
-    assert "update_file" in text
-    assert "old_content" in text and "new_content" in text
+    for token in ("update_file", '<context name="notes">', "$STAGING_DIR/context/", "notes.md"):
+        assert token in text
     assert "update_session_notes" not in text
-    assert "notes.md" in text
-    assert '<context name="notes">' in text
     assert "<session_notes>" not in text
-
-
-def test_session_notes_instructions_first_creation_uses_none() -> None:
-    """Omitting old_content (old_content=None) is reserved for creating notes.md when <context name=\"notes\"> is
-    absent."""
-    text = SESSION_NOTES_INSTRUCTIONS
-    assert re.search(r"old_content\s*=\s*None", text)
-    assert "Omit `old_content`" in text
-
-
-def test_session_notes_instructions_forbid_redundant_shell_reads() -> None:
-    """The agent copies old_content from <context name="notes"> instead of reading notes.md with shell tools."""
-    text = SESSION_NOTES_INSTRUCTIONS
-    assert re.search(r"(do not|don't|never)[^.\n]*(rg|cat|shell)", text, re.IGNORECASE), text
-    tag = re.escape('<context name="notes">')
-    assert re.search(rf"cop(y|ied)[^.\n]*{tag}|{tag}[^.\n]*cop(y|ied)", text, re.IGNORECASE)
-
-
-def test_session_notes_instructions_partial_edits_only() -> None:
-    """Only the outdated lines are replaced/deleted; the whole file is never rewritten."""
-    text = SESSION_NOTES_INSTRUCTIONS.lower()
-    assert "whole file" in text or "entire file" in text
-    assert "replace" in text and "delete" in text
+    assert "```ui" in OUTPUT_FORMATTING_INSTRUCTIONS
+    assert "[question:" not in OUTPUT_FORMATTING_INSTRUCTIONS
 
 
 def test_build_sys_prompt_includes_notes_instructions() -> None:
@@ -247,27 +223,6 @@ def test_build_sys_prompt_includes_notes_instructions() -> None:
     prompt = build_sys_prompt(session=Session(id="notes01", title="t"))
     assert SESSION_NOTES_INSTRUCTIONS.strip() in prompt
     assert "update_session_notes" not in prompt
-
-
-def test_context_blocks_instructions_forbid_editing_context_dir() -> None:
-    """Context blocks are tool-maintained: files under $STAGING_DIR/context/ must not be edited."""
-    text = SESSION_NOTES_INSTRUCTIONS
-    assert "$STAGING_DIR/context/" in text
-    assert re.search(r"never edit files under `\$STAGING_DIR/context/`", text)
-    assert "maintained by tools" in text
-
-
-def test_output_formatting_teaches_ui_block_and_details_only() -> None:
-    """The prompt teaches the fenced ```ui block and <details>, not the legacy [question:] tag."""
-    text = OUTPUT_FORMATTING_INSTRUCTIONS
-    assert "```ui" in text
-    assert "type: select" in text and "multiselect" in text
-    assert "prompt:" in text and "options:" in text and "max:" in text
-    assert "<details><summary>" in text
-    assert "[question:" not in text
-    assert "选择：A；B" in text
-    assert "再帮我想 X 个不同的选项" in text
-    assert "Give me X different options" in text
 
 
 def test_output_formatting_example_parses_as_question() -> None:

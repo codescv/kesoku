@@ -5,9 +5,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from kesoku.agent.compressor import HistoryCompressor
 from kesoku.agent.history import build_history, prepare_history_for_llm, strip_question_options
+from kesoku.config import (
+    KesokuConfig,
+    WorkspaceConfig,
+)
 from kesoku.constants import MessageRole, MessageStatus, MessageType
-from kesoku.db import Message
+from kesoku.context import KesokuContext
+from kesoku.db import DatabaseManager, Message
 from kesoku.gateway.gateway import Gateway
 
 
@@ -373,7 +379,7 @@ def test_history_preview_short_outputs_untouched(tmp_path) -> None:
 
 
 def test_estimate_prepared_turn_tokens_uses_same_preview() -> None:
-    from kesoku.agent.compressor import HistoryCompressor, estimate_tokens_calibrated
+    from kesoku.agent.compressor import estimate_tokens_calibrated
     from kesoku.agent.history import history_preview
     from kesoku.agent.llm import MockLLM
 
@@ -519,3 +525,49 @@ def test_prepare_history_skips_rewrite_when_archived_file_exists(tmp_path: Path)
     assert not unused_staging.exists()
     assert [m.content for m in fm_first] == [m.content for m in fm_second]
     assert [m.metadata for m in fm_first] == [m.metadata for m in fm_second]
+
+
+# origin: tests/test_round3_fixes.py K3
+@pytest.mark.asyncio
+async def test_k3_build_history_prefixes_errored_assistant_rows_on_copy(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "k3.db")
+    db = DatabaseManager(db_path)
+    db.init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=db_path))
+    gw = Gateway(context=KesokuContext(config=cfg, db=db))
+    await gw.create_session("s_k3", title="K3")
+
+    m_err = Message(
+        id="a_err",
+        session_id="s_k3",
+        chatbot_id="discord",
+        channel_id="c1",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="Invisible reply",
+        status=MessageStatus.ERROR,
+        timestamp=10.0,
+    )
+    m_ok = Message(
+        id="a_ok",
+        session_id="s_k3",
+        chatbot_id="discord",
+        channel_id="c1",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="Visible reply",
+        status=MessageStatus.DELIVERED,
+        timestamp=20.0,
+    )
+    await gw.post(m_err)
+    await gw.post(m_ok)
+
+    hist = await build_history(gw, "s_k3", heal_orphans=False)
+    by_id = {m.id: m for m in hist}
+    assert by_id["a_err"].content == "[未送达：以下这条回复因发送失败，用户没有看到]\nInvisible reply"
+    assert by_id["a_ok"].content == "Visible reply"
+
+    # DB row itself must remain unmutated
+    persisted = await gw.db.get_message("a_err")
+    assert persisted is not None
+    assert persisted.content == "Invisible reply"

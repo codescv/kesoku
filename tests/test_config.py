@@ -1,19 +1,39 @@
 """Unit tests for Kesoku config module."""
 
 import os
+import tomllib
+from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from kesoku.agent.prompt import build_sys_prompt
+from kesoku.agent.tools.file import _resolve_role_sync
+from kesoku.agent.tools.memory import _resolve_role
+from kesoku.agent.tools.registry import ToolContext
+from kesoku.agent.turn_executor import TurnExecutor
+from kesoku.agent.turn_logger import TurnLogger
 from kesoku.config import (
     AgentConfig,
     ClaudeConfig,
     DiscordChannelOverride,
+    DiscordConfig,
     GeminiConfig,
+    GoogleChatConfig,
     KesokuConfig,
+    WechatConfig,
+    WorkspaceConfig,
     init_config,
     load_config,
 )
+from kesoku.constants import MessageRole
+from kesoku.context import KesokuContext
+from kesoku.db import DatabaseManager, Message, Session
+from kesoku.gateway.chatbot.base import (
+    Chatbot,
+)
+from kesoku.gateway.gateway import Gateway
 
 
 def test_load_config_file_not_found(tmp_path: Any) -> None:
@@ -404,3 +424,213 @@ bot_token = "tok-secondary"
     assert primary.channels[2].thinking_level is None
     assert primary.channels[2].stream is False
 
+
+class _DummyChatbot(Chatbot):
+    """Minimal concrete Chatbot for testing base Chatbot behavior."""
+
+    def __init__(self, chatbot_id: str, gateway: Gateway) -> None:
+        super().__init__(chatbot_id=chatbot_id, gateway=gateway)
+        self.sent_chunks: list[list[str]] = []
+        self.sent_questions: list[dict[str, Any]] = []
+        self.sent_files: list[str] = []
+
+    async def handle_message(self, message: Message) -> None:
+        await self.render_outgoing_message(message)
+
+    async def send_text_chunks(self, channel_id: str, chunks: list[str], message: Message) -> None:
+        self.sent_chunks.append(list(chunks))
+
+    async def send_file_segment(self, channel_id: str, file_path: str, message: Message) -> None:
+        self.sent_files.append(file_path)
+
+    async def send_question_segment(
+        self,
+        channel_id: str,
+        question: str,
+        choices: list[str],
+        message: Message,
+        multi: bool = False,
+        max_choices: int = 1,
+    ) -> None:
+        self.sent_questions.append(
+            {"question": question, "choices": list(choices), "multi": multi, "max": max_choices}
+        )
+
+
+# origin: tests/test_round3_fixes.py K4
+def test_k4_toml_parse_two_discord_bots_with_default_role_and_five_channel_blocks() -> None:
+    raw_toml = """
+[[chatbots.discord]]
+enabled = true
+chatbot_id = "discord_primary"
+bot_token = "tok_1"
+
+[[chatbots.discord.channels]]
+channels = ["claude"]
+llm = "claude"
+
+[[chatbots.discord.channels]]
+channels = ["opus"]
+llm = "claude"
+model_name = "claude-opus-4-6"
+
+[[chatbots.discord.channels]]
+channels = ["argon"]
+llm = "gemini"
+thinking_level = "high"
+
+[[chatbots.discord.channels]]
+channels = ["flash", "general"]
+llm = "gemini"
+thinking_level = "medium"
+
+[[chatbots.discord.channels]]
+channels = ["lite", "quick"]
+llm = "gemini"
+thinking_level = "minimal"
+
+[[chatbots.discord]]
+enabled = true
+chatbot_id = "discord_persona"
+bot_token = "tok_2"
+default_role = "mentor"
+
+[[chatbots.discord.channels]]
+channels = ["claude"]
+llm = "claude"
+
+[[chatbots.discord.channels]]
+channels = ["opus"]
+llm = "claude"
+model_name = "claude-opus-4-6"
+
+[[chatbots.discord.channels]]
+channels = ["argon"]
+llm = "gemini"
+thinking_level = "high"
+
+[[chatbots.discord.channels]]
+channels = ["flash", "general"]
+llm = "gemini"
+thinking_level = "medium"
+
+[[chatbots.discord.channels]]
+channels = ["lite", "quick"]
+llm = "gemini"
+thinking_level = "minimal"
+"""
+    cfg = KesokuConfig.model_validate(tomllib.loads(raw_toml))
+    assert cfg.get_chatbot_default_role("discord_primary") == "default"
+    assert cfg.get_chatbot_default_role("discord_persona") == "mentor"
+    assert cfg.get_chatbot_default_role("unknown_bot") == "default"
+
+    bot2 = cfg.get_discord_config("discord_persona")
+    assert bot2 is not None
+    assert bot2.default_role == "mentor"
+    assert len(bot2.channels) == 5
+    assert [c.channels for c in bot2.channels] == [
+        ["claude"],
+        ["opus"],
+        ["argon"],
+        ["flash", "general"],
+        ["lite", "quick"],
+    ]
+
+    # Also verify WeChat & GoogleChat default_role resolution
+    cfg.chatbots.wechat.append(WechatConfig(chatbot_id="wc_persona", default_role="tutor"))
+    cfg.chatbots.google_chat.append(GoogleChatConfig(chatbot_id="gc_persona", default_role="coach"))
+    assert cfg.get_chatbot_default_role("wc_persona") == "tutor"
+    assert cfg.get_chatbot_default_role("gc_persona") == "coach"
+
+
+# origin: tests/test_round3_fixes.py K4
+@pytest.mark.asyncio
+async def test_k4_role_inheritance_new_thread_clear_explicit_override_and_resolvers(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "k4.db")
+    roles_dir = tmp_path / "roles"
+    (roles_dir / "mentor").mkdir(parents=True)
+    (roles_dir / "mentor" / "intro.md").write_text("You are Mentor Persona.", encoding="utf-8")
+    (roles_dir / "default").mkdir(parents=True)
+    (roles_dir / "default" / "intro.md").write_text("You are Default Persona.", encoding="utf-8")
+
+    db = DatabaseManager(db_path)
+    db.init_tables()
+    cfg = KesokuConfig(
+        workspace=WorkspaceConfig(
+            db_path=db_path,
+            roles_dir=str(roles_dir),
+            sessions_dir=str(tmp_path / "sessions"),
+        ),
+        agent_working_dir=str(tmp_path),
+    )
+    cfg.chatbots.discord.append(
+        DiscordConfig(enabled=True, bot_token="tok", chatbot_id="discord_persona", default_role="mentor")
+    )
+    cfg.chatbots.discord.append(
+        DiscordConfig(enabled=True, bot_token="tok2", chatbot_id="discord_plain")
+    )
+    ctx = KesokuContext(config=cfg, db=db)
+    gw = Gateway(context=ctx)
+
+    # 1. New Discord thread (no DB binding) on chatbot with default_role="mentor" -> session role "mentor"
+    sess_thread = await gw.create_session(
+        None,
+        title="New Thread",
+        chatbot_id="discord_persona",
+        channel_id="thread_9001",
+    )
+    assert sess_thread.role_name == "mentor"
+    persisted_thread = await gw.db.get_session(sess_thread.id)
+    assert persisted_thread is not None and persisted_thread.role_name == "mentor"
+
+    # 2. /clear on that channel re-creates session with "mentor"
+    bot = _DummyChatbot("discord_persona", gw)
+    await bot.clear_session_by_channel("thread_9001")
+    cleared_sess = await gw.db.get_session_by_channel("discord_persona", "thread_9001")
+    assert cleared_sess is not None
+    assert cleared_sess.id != sess_thread.id
+    assert cleared_sess.role_name == "mentor"
+
+    # 3. Resolvers across TurnExecutor, prompt.py, file.py, and memory.py all resolve "mentor"
+    # Even if a legacy session row had role_name="default", channel inheritance resolves "mentor"
+    legacy_sess = Session(id="s_legacy", title="Legacy", role_name="default")
+    await gw.db.create_session(legacy_sess)
+    await gw.db.set_active_session_for_channel("discord_persona", "chan_legacy", legacy_sess.id)
+
+    u_msg = Message(
+        id="u_leg",
+        session_id="s_legacy",
+        chatbot_id="discord_persona",
+        channel_id="chan_legacy",
+        sender="u",
+        role=MessageRole.USER,
+        content="hi",
+    )
+    await gw.post(u_msg)
+
+    tool_ctx = ToolContext(gateway=gw, session_id="s_legacy", original_msg_id="u_leg")
+    assert _resolve_role_sync(tool_ctx) == "mentor"
+    assert await _resolve_role(None, tool_ctx) == "mentor"
+
+    tr = MagicMock()
+    tr.tool_registry.get_tools_list.return_value = []
+    tr.tool_context = tool_ctx
+    executor = TurnExecutor("s_legacy", gw, tr, MagicMock(spec=TurnLogger), context=ctx)
+    assert await executor._resolve_active_role(u_msg) == "mentor"
+
+    with patch("kesoku.agent.prompt.get_config", return_value=cfg):
+        sys_prompt = build_sys_prompt(session=Session(id="s_legacy", title="Legacy", role_name="default"))
+    assert "You are Mentor Persona." in sys_prompt
+
+    # 4. /role custom_scholar wins over default_role
+    await gw.db.set_channel_role("discord_persona", "thread_9001", "custom_scholar")
+    assert await gw.db.get_channel_role_with_inheritance("discord_persona", "thread_9001") == "custom_scholar"
+
+    # 5. Chatbot without default_role falls back to "default"
+    sess_plain = await gw.create_session(
+        None,
+        title="Plain Thread",
+        chatbot_id="discord_plain",
+        channel_id="thread_plain",
+    )
+    assert sess_plain.role_name == "default"

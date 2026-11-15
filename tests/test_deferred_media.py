@@ -6,33 +6,47 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import pytest
 
-from kesoku.agent.llm import LLMResponse
+from kesoku.agent.llm import (
+    LLMResponse,
+)
 from kesoku.agent.state_snapshot import is_internal_staging_name, render_staging_artifacts
 from kesoku.agent.tools.media import analyze_media
 from kesoku.agent.tools.registry import ToolContext
 from kesoku.agent.tools.shell import run_shell_command
-from kesoku.agent.turn_executor import TurnExecutor
-from kesoku.config import DiscordConfig, KesokuConfig, WechatConfig, WorkspaceConfig
+from kesoku.agent.turn_executor import (
+    TurnExecutor,
+)
+from kesoku.config import (
+    DiscordConfig,
+    KesokuConfig,
+    WechatConfig,
+    WorkspaceConfig,
+)
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.context import KesokuContext
-from kesoku.db import AsyncDatabaseManager, Message
-from kesoku.gateway.chatbot.base import Chatbot
+from kesoku.db import AsyncDatabaseManager, DatabaseManager, Message
+from kesoku.gateway.chatbot.base import (
+    Chatbot,
+)
 from kesoku.gateway.chatbot.cli_bot import CLIChatbot
 from kesoku.gateway.chatbot.cronjob import CronjobChatbot
 from kesoku.gateway.chatbot.deferred_media import (
     DEFAULT_DEFERRED_PLACEHOLDER,
     clamp_timeout_sec,
     is_pid_alive,
+    resolve_deferred_sync,
     sanitize_error_reason,
     sanitize_placeholder,
 )
-from kesoku.gateway.chatbot.discord.adapter import DiscordChatbot
+from kesoku.gateway.chatbot.discord.adapter import MAX_TRACKED_VOICE_ANCHORS, DiscordChatbot
+from kesoku.gateway.chatbot.discord.voice import VoiceFile, send_voice_message
 from kesoku.gateway.chatbot.google_chat.adapter import GoogleChatChatbot
 from kesoku.gateway.chatbot.wechat.adapter import WechatChatbot
 from kesoku.gateway.gateway import Gateway
@@ -43,14 +57,15 @@ def _write_json(path: str, payload: dict[str, Any]) -> None:
         json.dump(payload, fh)
 
 
-async def _make_gateway(tmp_path: Any) -> tuple[Gateway, AsyncDatabaseManager]:
+async def _make_gateway(tmp_path: Any, cfg: KesokuConfig | None = None) -> tuple[Gateway, AsyncDatabaseManager]:
     sessions_dir = str(tmp_path / "sessions")
     os.makedirs(sessions_dir, exist_ok=True)
     db_path = str(tmp_path / "kesoku.db")
-    cfg = KesokuConfig(
-        agent_working_dir=str(tmp_path),
-        workspace=WorkspaceConfig(sessions_dir=sessions_dir, db_path=db_path),
-    )
+    if cfg is None:
+        cfg = KesokuConfig(
+            agent_working_dir=str(tmp_path),
+            workspace=WorkspaceConfig(sessions_dir=sessions_dir, db_path=db_path),
+        )
     ctx = KesokuContext(config=cfg)
     ctx.sync_db.init_tables()
     gw = Gateway(context=ctx)
@@ -1228,3 +1243,871 @@ async def test_capability_gating_shell_env_and_turn_executor_pivot_refresh(tmp_p
     )
     assert observed_flags == [False, True]
     assert tool_ctx.supports_deferred_media is True
+
+
+class _DummyChatbot(Chatbot):
+    """Minimal concrete Chatbot for testing base Chatbot behavior."""
+
+    def __init__(self, chatbot_id: str, gateway: Gateway) -> None:
+        super().__init__(chatbot_id=chatbot_id, gateway=gateway)
+        self.sent_chunks: list[list[str]] = []
+        self.sent_questions: list[dict[str, Any]] = []
+        self.sent_files: list[str] = []
+
+    async def handle_message(self, message: Message) -> None:
+        await self.render_outgoing_message(message)
+
+    async def send_text_chunks(self, channel_id: str, chunks: list[str], message: Message) -> None:
+        self.sent_chunks.append(list(chunks))
+
+    async def send_file_segment(self, channel_id: str, file_path: str, message: Message) -> None:
+        self.sent_files.append(file_path)
+
+    async def send_question_segment(
+        self,
+        channel_id: str,
+        question: str,
+        choices: list[str],
+        message: Message,
+        multi: bool = False,
+        max_choices: int = 1,
+    ) -> None:
+        self.sent_questions.append(
+            {"question": question, "choices": list(choices), "multi": multi, "max": max_choices}
+        )
+
+
+# origin: tests/test_round3_fixes.py K7
+@pytest.mark.asyncio
+async def test_k7_resolve_deferred_fuzzy_pending_wins_over_stale_and_staging_list(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "k7.db")
+    db = DatabaseManager(db_path)
+    db.init_tables()
+    sessions_dir = tmp_path / "sessions"
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=db_path, sessions_dir=str(sessions_dir)))
+    gw = Gateway(context=KesokuContext(config=cfg, db=db))
+    sess = await gw.create_session("s_k7", title="K7")
+    bot = _DummyChatbot("discord_test", gw)
+    staging_dir = Path(bot.get_session_staging_dir(sess.workspace_name))
+    staging_dir.mkdir(parents=True, exist_ok=True)
+
+    # Stale completed file from an earlier turn
+    stale = staging_dir / "shot_final_old.png"
+    stale.write_bytes(b"OLD")
+    old_ts = time.time() - 600
+    os.utime(stale, (old_ts, old_ts))
+
+    # Active in-flight deferred worker for shotA_final.png
+    pending_sidecar = staging_dir / "shotA_final.png.pending.json"
+    pending_sidecar.write_text(
+        json.dumps({"job_id": "j1", "created_at": time.time(), "timeout_sec": 240}),
+        encoding="utf-8",
+    )
+
+    # Noise files and excluded directories
+    (staging_dir / "background_job_123.stdout").write_text("out", encoding="utf-8")
+    (staging_dir / "cmd_output_456.txt").write_text("big", encoding="utf-8")
+    (staging_dir / "hist_001.txt").write_text("hist", encoding="utf-8")
+    (staging_dir / ".hidden_note").write_text("secret", encoding="utf-8")
+    (staging_dir / "context").mkdir()
+    (staging_dir / "context" / "80-lesson.md").write_text("ctx", encoding="utf-8")
+    (staging_dir / "game").mkdir()
+    (staging_dir / "game" / "scene.json").write_text("{}", encoding="utf-8")
+
+    # Typo'd tag [file: shot_final.png] fuzzy-matches active shotA_final.png.pending.json (>= 0.80)
+    res = resolve_deferred_sync("shot_final.png", str(staging_dir))
+    assert res is not None
+    kind, target, marker = res
+    assert kind == "pending"
+    assert os.path.basename(target) == "shotA_final.png"
+    assert marker.get("job_id") == "j1"
+
+    # Staging list shows "(生成中)" first (newer mtime), keeps real artifacts, drops all noise & cap <= 20
+    listing = await bot._get_staging_files_list(sess.id)
+    assert listing[0] == "shotA_final.png (生成中)"
+    assert "shot_final_old.png" in listing
+    for forbidden in ("background_job_", "cmd_output_", "hist_", ".hidden", "context", "game", ".pending.json"):
+        assert all(forbidden not in entry for entry in listing)
+
+
+# origin: tests/test_ttft_async_tts_v015.py
+def test_voice_inline_wait_attributes() -> None:
+    """Verify `_voice_inline_wait_sec` (60.0) & `_voice_inline_anchor_delay_sec` (1.0) defaults, no legacy grace."""
+    assert Chatbot._voice_inline_wait_sec == 60.0
+    assert WechatChatbot._voice_inline_wait_sec == 60.0
+    assert DiscordChatbot._voice_inline_wait_sec == 60.0
+    assert Chatbot._voice_inline_anchor_delay_sec == 1.0
+    assert WechatChatbot._voice_inline_anchor_delay_sec == 1.0
+    assert DiscordChatbot._voice_inline_anchor_delay_sec == 1.0
+    assert not hasattr(Chatbot, "_voice_inline_grace_sec")
+    assert not hasattr(WechatChatbot, "_voice_inline_grace_sec")
+    assert not hasattr(DiscordChatbot, "_voice_inline_grace_sec")
+
+
+# origin: tests/test_ttft_async_tts_v015.py
+@pytest.mark.asyncio
+async def test_voice_inline_grace_3_state_dispatch_ready_pending_failed(tmp_path: Any) -> None:
+    """Verify 3-state dispatch after bounded inline wait: ready -> inline, pending -> tracker, failed -> notice."""
+    gw, db = await _make_gateway(tmp_path)
+    session = await gw.create_session(session_id="sv1", title="Voice3State", chatbot_id="discord_v015", channel_id="11")
+    staging_dir = os.path.join(gw.workspace_config.sessions_dir, session.workspace_name)
+    os.makedirs(staging_dir, exist_ok=True)
+
+    bot = _make_discord_bot(gw, chatbot_id="discord_v015")
+    bot._voice_inline_wait_sec = 0.4
+    bot._voice_inline_anchor_delay_sec = 0.15
+
+    partial_msgs: dict[int, MagicMock] = {}
+
+    def _get_partial_msg(mid: int) -> MagicMock:
+        if mid not in partial_msgs:
+            pm = MagicMock(id=mid)
+            pm.add_reaction = AsyncMock()
+            pm.remove_reaction = AsyncMock()
+            pm.edit = AsyncMock()
+            pm.delete = AsyncMock()
+            partial_msgs[mid] = pm
+        return partial_msgs[mid]
+
+    partial_chan = MagicMock()
+    partial_chan.get_partial_message = MagicMock(side_effect=_get_partial_msg)
+    bot.bot.get_partial_messageable = MagicMock(return_value=partial_chan)  # type: ignore[method-assign]
+
+    sent_texts: list[tuple[int, str, Any]] = []
+    next_msg_id = 5000
+
+    mock_channel = MagicMock()
+    mock_channel.id = 11
+
+    async def fake_channel_send(*args: Any, **kwargs: Any) -> Any:
+        nonlocal next_msg_id
+        next_msg_id += 1
+        text = args[0] if args else kwargs.get("content", "")
+        sent_texts.append((next_msg_id, text, kwargs.get("reference")))
+        m = MagicMock(id=next_msg_id)
+        m.channel = mock_channel
+        return m
+
+    mock_channel.send = AsyncMock(side_effect=fake_channel_send)
+    bot._get_discord_channel = AsyncMock(return_value=mock_channel)  # type: ignore[method-assign]
+
+    voice_calls: list[tuple[str, str, dict[str, Any] | None]] = []
+
+    async def fake_send_voice_segment(
+        cid: str,
+        fpath: str,
+        message: Message,
+        *,
+        message_reference: dict[str, Any] | None = None,
+    ) -> None:
+        _ = message
+        voice_calls.append((cid, fpath, message_reference))
+
+    bot.send_voice_segment = AsyncMock(side_effect=fake_send_voice_segment)  # type: ignore[method-assign]
+    questions_sent: list[str] = []
+    bot.send_question_segment = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda cid, q, choices, m, **kw: questions_sent.append(q)
+    )
+
+    # --- Case A: Ready within grace window -> inline send_voice_segment, ZERO placeholder/reaction ---
+    wav_fast = os.path.join(staging_dir, "clip_fast.wav")
+    _write_json(
+        f"{wav_fast}.pending.json",
+        {"v": 1, "job_id": "jf1", "created_at": time.time(), "timeout_sec": 180, "pid": 0},
+    )
+
+    async def _finish_fast() -> None:
+        await asyncio.sleep(0.04)
+        with open(wav_fast, "wb") as fh:
+            fh.write(b"RIFF_FAST_WAV")
+        os.unlink(f"{wav_fast}.pending.json")
+
+    bg_fast = asyncio.create_task(_finish_fast())
+    msg_fast = Message(
+        id="m_fast_voice",
+        session_id=session.id,
+        chatbot_id="discord_v015",
+        channel_id="11",
+        sender="Assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content=f"Opening line.\n[voice: {wav_fast}]\nClosing line.",
+    )
+    await db.save_message(msg_fast)
+    await bot.render_outgoing_message(msg_fast)
+    await bg_fast
+
+    assert len(voice_calls) == 1
+    assert voice_calls[0][1] == os.path.realpath(wav_fast)
+    assert voice_calls[0][2] is None  # Sent inline in exact segment order!
+    assert [t.strip() for _, t, _ in sent_texts] == ["Opening line.", "Closing line."]
+    assert partial_msgs == {}
+
+    # --- Case B: Grace expires (`wait_for_deferred_file` -> `(None, "生成超时")`) while still pending ---
+    # MUST transition to `_start_deferred_tracking` (NOT fail!), react `🎤` on preceding text chunk,
+    # send ZERO text placeholder, then deliver with `message_reference` and remove `🎤`!
+    sent_texts.clear()
+    voice_calls.clear()
+    wav_slow = os.path.join(staging_dir, "clip_slow.wav")
+    _write_json(
+        f"{wav_slow}.pending.json",
+        {"v": 1, "job_id": "js1", "created_at": time.time(), "timeout_sec": 180, "pid": 0},
+    )
+    msg_slow = Message(
+        id="m_slow_voice",
+        session_id=session.id,
+        chatbot_id="discord_v015",
+        channel_id="11",
+        sender="Assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content=(
+            f"Spoken Japanese quote.\n[voice: {wav_slow}]\nNarrative body.\n"
+            "```ui\ntype: select\nprompt: Choose action\noptions:\n  - Go left\n  - Go right\n```"
+        ),
+    )
+    await db.save_message(msg_slow)
+    await bot.render_outgoing_message(msg_slow)
+
+    # Zero text placeholder was sent; UI prompt was delivered; `🎤` reacted on the preceding chunk!
+    assert [t.strip() for _, t, _ in sent_texts] == ["Spoken Japanese quote.", "Narrative body."]
+    quote_msg_id = sent_texts[0][0]
+    assert questions_sent == ["Choose action"]
+    partial_msgs[quote_msg_id].add_reaction.assert_awaited_once_with("🎤")
+
+    saved_slow = await db.get_message(msg_slow.id)
+    assert saved_slow is not None
+    entry_slow = saved_slow.metadata["deferred_media"][0]
+    assert entry_slow["state"] == "pending"
+    assert entry_slow["handle"] == {
+        "kind": "voice_anchor",
+        "channel_id": "11",
+        "message_id": str(quote_msg_id),
+        "reaction": "🎤",
+    }
+
+    # Now background worker completes slow WAV
+    with open(wav_slow, "wb") as fh:
+        fh.write(b"RIFF_SLOW_WAV")
+    os.unlink(f"{wav_slow}.pending.json")
+
+    await _wait_until(lambda: len(voice_calls) == 1)
+    assert voice_calls[0] == (
+        "11",
+        os.path.realpath(wav_slow),
+        {"channel_id": "11", "message_id": str(quote_msg_id), "fail_if_not_exists": False},
+    )
+    await _wait_until(lambda: partial_msgs[quote_msg_id].remove_reaction.await_count == 1)
+    assert partial_msgs[quote_msg_id].remove_reaction.await_args.args[0] == "🎤"
+    partial_msgs[quote_msg_id].delete.assert_not_awaited()
+    partial_msgs[quote_msg_id].edit.assert_not_awaited()
+
+    # --- Case C: Worker writes `.error.json` during grace wait -> transitions to `failed` cleanly ---
+    sent_texts.clear()
+    questions_sent.clear()
+    wav_err = os.path.join(staging_dir, "clip_err.wav")
+    _write_json(
+        f"{wav_err}.pending.json",
+        {"v": 1, "job_id": "je1", "created_at": time.time(), "timeout_sec": 180, "pid": 0},
+    )
+
+    async def _fail_during_grace() -> None:
+        await asyncio.sleep(0.03)
+        _write_json(f"{wav_err}.error.json", {"v": 1, "job_id": "je1", "error": "TTS server 503"})
+        os.unlink(f"{wav_err}.pending.json")
+
+    bg_err = asyncio.create_task(_fail_during_grace())
+    msg_err = Message(
+        id="m_err_voice",
+        session_id=session.id,
+        chatbot_id="discord_v015",
+        channel_id="11",
+        sender="Assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content=(
+            f"Line before broken voice.\n[voice: {wav_err}]\n"
+            "```ui\ntype: select\nprompt: Still rendered?\noptions:\n  - Yes\n```"
+        ),
+    )
+    await db.save_message(msg_err)
+    await bot.render_outgoing_message(msg_err)
+    await bg_err
+
+    anchor_err_id = sent_texts[0][0]
+    partial_msgs[anchor_err_id].add_reaction.assert_awaited_once_with("⚠️")
+    assert any("⚠️ 语音生成失败（TTS server 503）" in t for _, t, _ in sent_texts)
+    assert questions_sent == ["Still rendered?"]
+
+
+# origin: tests/test_ttft_async_tts_v015.py
+@pytest.mark.asyncio
+async def test_voice_inline_waits_in_order_and_handles_phase_b_failures(tmp_path: Any) -> None:
+    """Verify Cases D/E/F: Phase-B in-order voice delivery, Phase-B `.error.json`, and inline dead-PID failure (R1)."""
+    gw, db = await _make_gateway(tmp_path)
+    session = await gw.create_session(
+        session_id="sv_r5", title="VoiceRound5", chatbot_id="discord_v015", channel_id="12"
+    )
+    staging_dir = os.path.join(gw.workspace_config.sessions_dir, session.workspace_name)
+    os.makedirs(staging_dir, exist_ok=True)
+
+    bot = _make_discord_bot(gw, chatbot_id="discord_v015")
+    bot.bot.is_ready = MagicMock(return_value=True)  # type: ignore[method-assign]
+    bot._voice_inline_wait_sec = 3.0
+    bot._voice_inline_anchor_delay_sec = 0.05
+    bot._deferred_dead_grace_sec = 0.08
+
+    events: list[str] = []
+    partial_msgs: dict[int, MagicMock] = {}
+
+    def _get_partial_msg(mid: int) -> MagicMock:
+        if mid not in partial_msgs:
+            pm = MagicMock(id=mid)
+
+            async def _on_add(emoji: str, _mid: int = mid) -> None:
+                events.append(f"react_add:{_mid}:{emoji}")
+
+            async def _on_rem(emoji: str, _member: Any = None, _mid: int = mid) -> None:
+                events.append(f"react_rem:{_mid}:{emoji}")
+
+            pm.add_reaction = AsyncMock(side_effect=_on_add)
+            pm.remove_reaction = AsyncMock(side_effect=_on_rem)
+            pm.edit = AsyncMock()
+            pm.delete = AsyncMock()
+            partial_msgs[mid] = pm
+        return partial_msgs[mid]
+
+    partial_chan = MagicMock()
+    partial_chan.get_partial_message = MagicMock(side_effect=_get_partial_msg)
+    bot.bot.get_partial_messageable = MagicMock(return_value=partial_chan)  # type: ignore[method-assign]
+
+    sent_texts: list[tuple[int, str, Any]] = []
+    next_msg_id = 5500
+    mock_channel = MagicMock(id=12)
+
+    async def fake_channel_send(*args: Any, **kwargs: Any) -> Any:
+        nonlocal next_msg_id
+        next_msg_id += 1
+        text = (args[0] if args else kwargs.get("content", "")).strip()
+        sent_texts.append((next_msg_id, text, kwargs.get("reference")))
+        events.append(f"text:{text}")
+        return MagicMock(id=next_msg_id, channel=mock_channel)
+
+    mock_channel.send = AsyncMock(side_effect=fake_channel_send)
+    bot._get_discord_channel = AsyncMock(return_value=mock_channel)  # type: ignore[method-assign]
+
+    voice_calls: list[tuple[str, str, dict[str, Any] | None]] = []
+
+    async def fake_send_voice_segment(
+        cid: str,
+        fpath: str,
+        message: Message,
+        *,
+        message_reference: dict[str, Any] | None = None,
+    ) -> None:
+        _ = message
+        voice_calls.append((cid, fpath, message_reference))
+        events.append("voice")
+
+    async def fake_send_file_segment(cid: str, fpath: str, message: Message) -> None:
+        _ = (cid, message)
+        events.append(f"file:{os.path.basename(fpath)}")
+
+    questions_sent: list[str] = []
+
+    async def fake_send_question_segment(cid: str, q: str, choices: list[str], m: Message, **_kw: Any) -> None:
+        _ = (cid, choices, m)
+        questions_sent.append(q)
+        events.append("question")
+
+    bot.send_voice_segment = AsyncMock(side_effect=fake_send_voice_segment)  # type: ignore[method-assign]
+    bot.send_file_segment = AsyncMock(side_effect=fake_send_file_segment)  # type: ignore[method-assign]
+    bot.send_question_segment = AsyncMock(side_effect=fake_send_question_segment)  # type: ignore[method-assign]
+
+    # --- Case D: Round-5 regression — voice takes 0.35s (> anchor_delay, < wait_sec), delivered IN ORDER ---
+    sticker_gif = os.path.join(staging_dir, "04_没问题.gif")
+    with open(sticker_gif, "wb") as fh:
+        fh.write(b"GIF89a_STICKER")
+
+    wav_d = os.path.join(staging_dir, "win11_bypass.wav")
+    _write_json(
+        f"{wav_d}.pending.json",
+        {"v": 1, "job_id": "jd1", "created_at": time.time(), "timeout_sec": 180, "pid": 0},
+    )
+
+    async def _finish_d() -> None:
+        await asyncio.sleep(0.35)
+        with open(wav_d, "wb") as fh:
+            fh.write(b"RIFF_CASE_D")
+        os.unlink(f"{wav_d}.pending.json")
+
+    bg_d = asyncio.create_task(_finish_d())
+    msg_d = Message(
+        id="m_case_d",
+        session_id=session.id,
+        chatbot_id="discord_v015",
+        channel_id="12",
+        sender="Assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content=(
+            f"> 日文\n<spoiler>中文</spoiler>\n[voice: {wav_d}]\n正文段落。\n[file: {sticker_gif}]\n"
+            "```ui\ntype: select\nprompt: 下一步？\noptions:\n  - 继续\n```"
+        ),
+    )
+    await db.save_message(msg_d)
+    await bot.render_outgoing_message(msg_d)
+    await bg_d
+
+    bilingual_d_id = sent_texts[0][0]
+    delivery_events_d = [ev for ev in events if not ev.startswith("react_")]
+    assert delivery_events_d == [
+        "text:> 日文\n||中文||",
+        "voice",
+        "text:正文段落。",
+        "file:04_没问题.gif",
+        "question",
+    ]
+    assert voice_calls == [("12", os.path.realpath(wav_d), None)]
+    partial_msgs[bilingual_d_id].add_reaction.assert_awaited_once_with("🎤")
+    partial_msgs[bilingual_d_id].remove_reaction.assert_awaited_once()
+    assert partial_msgs[bilingual_d_id].remove_reaction.await_args.args[0] == "🎤"
+    assert events.index(f"react_add:{bilingual_d_id}:🎤") < events.index("voice")
+    assert events.index("voice") < events.index(f"react_rem:{bilingual_d_id}:🎤")
+    assert events.index(f"react_rem:{bilingual_d_id}:🎤") < events.index("text:正文段落。")
+
+    saved_d = await db.get_message("m_case_d")
+    assert saved_d is not None
+    assert "deferred_media" not in (saved_d.metadata or {})
+    assert saved_d.status == MessageStatus.DELIVERED
+
+    # --- Case E: Worker writes `.error.json` during Phase B -> 🎤->⚠️ + notice BEFORE trailing text ---
+    events.clear()
+    sent_texts.clear()
+    voice_calls.clear()
+    questions_sent.clear()
+
+    wav_e = os.path.join(staging_dir, "phase_b_err.wav")
+    _write_json(
+        f"{wav_e}.pending.json",
+        {"v": 1, "job_id": "je_b", "created_at": time.time(), "timeout_sec": 180, "pid": 0},
+    )
+
+    async def _fail_e() -> None:
+        await asyncio.sleep(0.25)
+        _write_json(f"{wav_e}.error.json", {"v": 1, "job_id": "je_b", "error": "CUDA OOM"})
+        os.unlink(f"{wav_e}.pending.json")
+
+    bg_e = asyncio.create_task(_fail_e())
+    msg_e = Message(
+        id="m_case_e",
+        session_id=session.id,
+        chatbot_id="discord_v015",
+        channel_id="12",
+        sender="Assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content=(
+            f"> 日文\n<spoiler>中文</spoiler>\n[voice: {wav_e}]\n正文段落。\n"
+            "```ui\ntype: select\nprompt: 报错后继续？\noptions:\n  - 好的\n```"
+        ),
+    )
+    await db.save_message(msg_e)
+    await bot.render_outgoing_message(msg_e)
+    await bg_e
+
+    bilingual_e_id = sent_texts[0][0]
+    partial_msgs[bilingual_e_id].remove_reaction.assert_awaited_once()
+    assert partial_msgs[bilingual_e_id].remove_reaction.await_args.args[0] == "🎤"
+    assert [c.args[0] for c in partial_msgs[bilingual_e_id].add_reaction.await_args_list] == ["🎤", "⚠️"]
+    texts_e = [t for _, t, _ in sent_texts]
+    assert texts_e == ["> 日文\n||中文||", "⚠️ 语音生成失败（CUDA OOM）", "正文段落。"]
+    assert questions_sent == ["报错后继续？"]
+    saved_e = await db.get_message("m_case_e")
+    assert saved_e is not None
+    assert "deferred_media" not in (saved_e.metadata or {})
+
+    # --- Case F (R1): Dead worker PID during inline wait -> unlinks pending + fails inline IN ORDER ---
+    events.clear()
+    sent_texts.clear()
+    voice_calls.clear()
+    questions_sent.clear()
+
+    wav_f = os.path.join(staging_dir, "dead_pid_voice.wav")
+    _write_json(
+        f"{wav_f}.pending.json",
+        {"v": 1, "job_id": "jf_dead", "created_at": time.time(), "timeout_sec": 180, "pid": 999999},
+    )
+    msg_f = Message(
+        id="m_case_f",
+        session_id=session.id,
+        chatbot_id="discord_v015",
+        channel_id="12",
+        sender="Assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content=(
+            f"> 日文\n<spoiler>中文</spoiler>\n[voice: {wav_f}]\n正文段落。\n"
+            "```ui\ntype: select\nprompt: 进程异常后继续？\noptions:\n  - 好的\n```"
+        ),
+    )
+    await db.save_message(msg_f)
+    with patch("kesoku.gateway.chatbot.deferred_media.is_pid_alive", return_value=False):
+        await bot.render_outgoing_message(msg_f)
+
+    assert not os.path.exists(f"{wav_f}.pending.json")
+    bilingual_f_id = sent_texts[0][0]
+    partial_msgs[bilingual_f_id].remove_reaction.assert_awaited_once()
+    assert partial_msgs[bilingual_f_id].remove_reaction.await_args.args[0] == "🎤"
+    assert [c.args[0] for c in partial_msgs[bilingual_f_id].add_reaction.await_args_list] == ["🎤", "⚠️"]
+    texts_f = [t for _, t, _ in sent_texts]
+    assert texts_f == ["> 日文\n||中文||", "⚠️ 语音生成失败（后台生成进程异常退出）", "正文段落。"]
+    assert questions_sent == ["进程异常后继续？"]
+    saved_f = await db.get_message("m_case_f")
+    assert saved_f is not None
+    assert "deferred_media" not in (saved_f.metadata or {})
+
+
+# origin: tests/test_ttft_async_tts_v015.py
+@pytest.mark.asyncio
+async def test_voice_anchor_top_of_message_falls_back_to_inbound_user_msg_not_prior_turn(tmp_path: Any) -> None:
+    """Verify top-of-message `[voice:]` anchors to triggering user `discord_message_id`, never prior turn's reply."""
+    gw, db = await _make_gateway(tmp_path)
+    session = await gw.create_session(session_id="sv2", title="TopVoice", chatbot_id="discord_v015", channel_id="22")
+    staging_dir = os.path.join(gw.workspace_config.sessions_dir, session.workspace_name)
+    os.makedirs(staging_dir, exist_ok=True)
+
+    bot = _make_discord_bot(gw, chatbot_id="discord_v015")
+    bot._voice_inline_wait_sec = 0.02
+    bot._voice_inline_anchor_delay_sec = 0.0
+
+    partial_msgs: dict[int, MagicMock] = {}
+
+    def _get_partial_msg(mid: int) -> MagicMock:
+        if mid not in partial_msgs:
+            pm = MagicMock(id=mid)
+            pm.add_reaction = AsyncMock()
+            pm.remove_reaction = AsyncMock()
+            pm.edit = AsyncMock()
+            pm.delete = AsyncMock()
+            partial_msgs[mid] = pm
+        return partial_msgs[mid]
+
+    partial_chan = MagicMock()
+    partial_chan.get_partial_message = MagicMock(side_effect=_get_partial_msg)
+    bot.bot.get_partial_messageable = MagicMock(return_value=partial_chan)  # type: ignore[method-assign]
+
+    mock_channel = MagicMock(id=22)
+    sent_id = 6000
+
+    async def fake_send(*_a: Any, **_kw: Any) -> Any:
+        nonlocal sent_id
+        sent_id += 1
+        return MagicMock(id=sent_id, channel=mock_channel)
+
+    mock_channel.send = AsyncMock(side_effect=fake_send)
+    bot._get_discord_channel = AsyncMock(return_value=mock_channel)  # type: ignore[method-assign]
+
+    # Turn 1 sends text message (id=6001)
+    m_turn1 = Message(
+        id="m_turn1_assistant",
+        session_id=session.id,
+        chatbot_id="discord_v015",
+        channel_id="22",
+        sender="Assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="Turn 1 reply text.",
+    )
+    await db.save_message(m_turn1)
+    await bot.render_outgoing_message(m_turn1)
+    assert "m_turn1_assistant" in bot._last_text_msg
+
+    # Turn 2 user message arrives with `discord_message_id = "777777"`
+    u_turn2 = Message(
+        id="u_turn2_user",
+        session_id=session.id,
+        chatbot_id="discord_v015",
+        channel_id="22",
+        sender="User",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="Speak first!",
+        metadata={"discord_message_id": "777777", "discord_message_channel_id": "22"},
+    )
+    await db.save_message(u_turn2)
+
+    # Turn 2 assistant message has `[voice:]` AT THE VERY TOP before any text chunk!
+    wav_top = os.path.join(staging_dir, "top_clip.wav")
+    _write_json(
+        f"{wav_top}.pending.json",
+        {"v": 1, "job_id": "jtop", "created_at": time.time(), "timeout_sec": 180, "pid": 0},
+    )
+    m_turn2 = Message(
+        id="m_turn2_assistant",
+        session_id=session.id,
+        chatbot_id="discord_v015",
+        channel_id="22",
+        sender="Assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        parent_id=u_turn2.id,
+        content=f"[voice: {wav_top}]\nText after leading voice.",
+    )
+    await db.save_message(m_turn2)
+    await bot.render_outgoing_message(m_turn2)
+
+    # MUST anchor on inbound user message 777777, NOT Turn 1's message 6001!
+    assert 6001 not in partial_msgs
+    assert 777777 in partial_msgs
+    partial_msgs[777777].add_reaction.assert_awaited_once_with("🎤")
+
+    saved_t2 = await db.get_message("m_turn2_assistant")
+    assert saved_t2 is not None
+    assert saved_t2.metadata["deferred_media"][0]["handle"]["message_id"] == "777777"
+    await bot.cancel_deferred_for_session(session.id)
+
+    # Verify bounded LRU on `_last_text_msg` (<= 256)
+    for i in range(300):
+        bot._record_last_text_msg(f"out_msg_{i}", MagicMock(id=9000 + i))
+    assert len(bot._last_text_msg) == MAX_TRACKED_VOICE_ANCHORS
+
+
+# origin: tests/test_ttft_async_tts_v015.py
+@pytest.mark.asyncio
+async def test_voice_anchor_startup_recovery_and_failure_never_edit_or_delete(tmp_path: Any) -> None:
+    """Verify `_recover_deferred_media` restores `voice_anchor` dicts and NEVER calls `.edit()`/`.delete()`."""
+    gw, db = await _make_gateway(tmp_path)
+    session = await gw.create_session(session_id="sv_rec", title="RecVoice", chatbot_id="discord_v015", channel_id="33")
+    staging_dir = os.path.join(gw.workspace_config.sessions_dir, session.workspace_name)
+    os.makedirs(staging_dir, exist_ok=True)
+
+    ready_wav = os.path.join(staging_dir, "recovered_voice.wav")
+    with open(ready_wav, "wb") as fh:
+        fh.write(b"RIFF_RECOVERED")
+
+    fail_wav = os.path.join(staging_dir, "failed_voice.wav")
+    _write_json(f"{fail_wav}.error.json", {"v": 1, "job_id": "j_vfail", "error": "OOM killed"})
+
+    persisted_msg = Message(
+        id="m_voice_recover",
+        session_id=session.id,
+        chatbot_id="discord_v015",
+        channel_id="33",
+        sender="Assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content=f"Hello\n[voice: {ready_wav}]\n[voice: {fail_wav}]",
+        timestamp=time.time() - 10.0,
+        status=MessageStatus.DELIVERED,
+        metadata={
+            "deferred_media": [
+                {
+                    "id": "j_vok",
+                    "path": ready_wav,
+                    "raw_path": ready_wav,
+                    "kind": "voice",
+                    "state": "pending",
+                    "marker": {"job_id": "j_vok", "created_at": time.time() - 10.0, "timeout_sec": 180, "pid": 0},
+                    "handle": {"kind": "voice_anchor", "channel_id": "33", "message_id": "88001", "reaction": "🎤"},
+                },
+                {
+                    "id": "j_vfail",
+                    "path": fail_wav,
+                    "raw_path": fail_wav,
+                    "kind": "voice",
+                    "state": "pending",
+                    "marker": {"job_id": "j_vfail", "created_at": time.time() - 10.0, "timeout_sec": 180, "pid": 0},
+                    "handle": {"kind": "voice_anchor", "channel_id": "33", "message_id": "88002", "reaction": "🎤"},
+                },
+            ]
+        },
+    )
+    await db.save_message(persisted_msg)
+
+    bot = _make_discord_bot(gw, chatbot_id="discord_v015")
+    bot.bot.is_ready = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+    partial_msgs: dict[int, MagicMock] = {}
+
+    def _get_partial(mid: int) -> MagicMock:
+        if mid not in partial_msgs:
+            pm = MagicMock(id=mid)
+            pm.add_reaction = AsyncMock()
+            pm.remove_reaction = AsyncMock()
+            pm.edit = AsyncMock(side_effect=AssertionError("edit() MUST NEVER be called on voice_anchor!"))
+            pm.delete = AsyncMock(side_effect=AssertionError("delete() MUST NEVER be called on voice_anchor!"))
+            partial_msgs[mid] = pm
+        return partial_msgs[mid]
+
+    partial_chan = MagicMock()
+    partial_chan.get_partial_message = MagicMock(side_effect=_get_partial)
+    bot.bot.get_partial_messageable = MagicMock(return_value=partial_chan)  # type: ignore[method-assign]
+
+    mock_channel = MagicMock(id=33)
+    sent_notices: list[tuple[str, Any]] = []
+    mock_channel.send = AsyncMock(
+        side_effect=lambda text, **kw: sent_notices.append((text, kw.get("reference"))) or MagicMock(id=9100)
+    )
+    bot._get_discord_channel = AsyncMock(return_value=mock_channel)  # type: ignore[method-assign]
+
+    delivered_voices: list[tuple[str, dict[str, Any] | None]] = []
+    bot.send_voice_segment = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda cid, fpath, m, *, message_reference=None: delivered_voices.append(
+            (fpath, message_reference)
+        )
+    )
+
+    await bot._recover_deferred_media()
+
+    async def _both_settled() -> bool:
+        m = await db.get_message("m_voice_recover")
+        if not m:
+            return False
+        states = [e["state"] for e in m.metadata["deferred_media"]]
+        return states == ["delivered", "failed"]
+
+    await _wait_until(_both_settled)
+
+    assert delivered_voices == [
+        (os.path.realpath(ready_wav), {"channel_id": "33", "message_id": "88001", "fail_if_not_exists": False})
+    ]
+    partial_msgs[88001].remove_reaction.assert_awaited_once()
+    assert partial_msgs[88001].remove_reaction.await_args.args[0] == "🎤"
+
+    partial_msgs[88002].remove_reaction.assert_awaited_once()
+    assert partial_msgs[88002].remove_reaction.await_args.args[0] == "🎤"
+    partial_msgs[88002].add_reaction.assert_awaited_once_with("⚠️")
+    assert len(sent_notices) == 1
+    assert sent_notices[0][0] == "⚠️ 语音生成失败（OOM killed）"
+    assert isinstance(sent_notices[0][1], discord.MessageReference)
+    assert sent_notices[0][1].fail_if_not_exists is False
+
+
+# origin: tests/test_ttft_async_tts_v015.py
+@pytest.mark.asyncio
+async def test_send_voice_message_http_400_retries_without_reference_using_fresh_file(tmp_path: Any) -> None:
+    """Verify HTTP 400 on `flags=8192 + message_reference` retries ONCE immediately without reference & fresh File."""
+    wav_in = str(tmp_path / "input.wav")
+    with open(wav_in, "wb") as fh:
+        fh.write(b"RIFF_DUMMY")
+
+    mock_channel = AsyncMock(spec=discord.Thread)
+    mock_channel.id = 12345
+    mock_channel._state = MagicMock()
+    mock_channel._state.create_message = MagicMock(return_value="created_voice_msg")
+
+    seen_payloads: list[dict[str, Any]] = []
+    seen_files_open: list[bool] = []
+    seen_file_objs: list[VoiceFile] = []
+
+    async def fake_http_send_message(channel_id: int, *, params: Any) -> dict[str, Any]:
+        assert channel_id == 12345
+        raw_json = params.multipart[0]["value"]
+        payload = json.loads(raw_json)
+        seen_payloads.append(payload)
+        f_obj = params.files[0]
+        seen_file_objs.append(f_obj)
+        seen_files_open.append(not f_obj.fp.closed)
+        if len(seen_payloads) == 1:
+            resp = MagicMock(status=400, reason="Bad Request")
+            raise discord.HTTPException(resp, "Cannot use message_reference with voice message flags")
+        return {"id": "999111"}
+
+    mock_channel._state.http = MagicMock()
+    mock_channel._state.http.send_message = AsyncMock(side_effect=fake_http_send_message)
+
+    def fake_subproc_run(cmd: list[str], **_kwargs: Any) -> MagicMock:
+        if cmd[0] == "ffmpeg":
+            with open(cmd[-1], "wb") as out_fh:
+                out_fh.write(b"OggS_OPUS_DATA")
+            return MagicMock(returncode=0, stdout="")
+        return MagicMock(returncode=0, stdout="2.75\n")
+
+    ref_dict = {"channel_id": "12345", "message_id": "77700", "fail_if_not_exists": False}
+    with patch("subprocess.run", side_effect=fake_subproc_run) as mock_run:
+        res = await send_voice_message(mock_channel, wav_in, message_reference=ref_dict)
+
+    assert res == "created_voice_msg"
+    # FFmpeg + ffprobe ran only ONCE across both HTTP attempts!
+    assert mock_run.call_count == 2
+    assert len(seen_payloads) == 2
+    assert seen_payloads[0]["flags"] == 8192
+    assert seen_payloads[0]["message_reference"] == ref_dict
+    assert seen_payloads[0]["allowed_mentions"]["replied_user"] is False
+
+    # Retry omitted message_reference cleanly and used a fresh, open VoiceFile!
+    assert seen_payloads[1]["flags"] == 8192
+    assert "message_reference" not in seen_payloads[1]
+    assert len(seen_file_objs) == 2
+    assert seen_file_objs[0] is not seen_file_objs[1]
+    assert seen_files_open == [True, True]
+
+
+# origin: tests/test_ttft_async_tts_v015.py
+@pytest.mark.asyncio
+async def test_multi_voice_same_message_anchors_and_remaining_timeout_cap(tmp_path: Any) -> None:
+    """Verify two `[voice:]` tags in one message anchor to their respective preceding chunks & cap remaining timeout."""
+    gw, db = await _make_gateway(tmp_path)
+    session = await gw.create_session(session_id="sv_m", title="MultiVoice", chatbot_id="discord_v015", channel_id="55")
+    staging_dir = os.path.join(gw.workspace_config.sessions_dir, session.workspace_name)
+    os.makedirs(staging_dir, exist_ok=True)
+
+    bot = _make_discord_bot(gw, chatbot_id="discord_v015")
+    bot._voice_inline_wait_sec = 60.0  # Full 60.0s inline wait, capped by remaining marker timeout (< 0.5s)!
+
+    seen_caps: list[float] = []
+
+    async def _spy_wait(candidates: list[str], **kwargs: Any) -> tuple[str | None, str | None]:
+        _ = candidates
+        cap = float(kwargs["max_wait_cap"])
+        seen_caps.append(cap)
+        await asyncio.sleep(min(cap, 0.2))
+        return (None, "生成超时")
+
+    mock_channel = MagicMock(id=55)
+    seq_id = 7000
+
+    async def _send_chunk(*_a: Any, **_kw: Any) -> Any:
+        nonlocal seq_id
+        seq_id += 1
+        return MagicMock(id=seq_id, channel=mock_channel)
+
+    mock_channel.send = AsyncMock(side_effect=_send_chunk)
+    bot._get_discord_channel = AsyncMock(return_value=mock_channel)  # type: ignore[method-assign]
+    partial_chan = MagicMock()
+    partial_chan.get_partial_message = MagicMock(
+        side_effect=lambda mid: MagicMock(id=mid, add_reaction=AsyncMock(), remove_reaction=AsyncMock())
+    )
+    bot.bot.get_partial_messageable = MagicMock(return_value=partial_chan)  # type: ignore[method-assign]
+
+    now = time.time()
+    w1 = os.path.join(staging_dir, "line1.wav")
+    w2 = os.path.join(staging_dir, "line2.wav")
+    # Markers near their 10s clamped timeout -> remaining timeouts (~0.15s, ~0.19s) << 60.0s and < 1.0s!
+    _write_json(f"{w1}.pending.json", {"v": 1, "job_id": "jw1", "created_at": now - 9.85, "timeout_sec": 10, "pid": 0})
+    _write_json(f"{w2}.pending.json", {"v": 1, "job_id": "jw2", "created_at": now - 9.65, "timeout_sec": 10, "pid": 0})
+
+    msg = Message(
+        id="m_two_voices",
+        session_id=session.id,
+        chatbot_id="discord_v015",
+        channel_id="55",
+        sender="Assistant",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content=f"First line.\n[voice: {w1}]\nSecond line.\n[voice: {w2}]",
+    )
+    await db.save_message(msg)
+    with patch("kesoku.gateway.chatbot.base.wait_for_deferred_file", side_effect=_spy_wait):
+        await bot.render_outgoing_message(msg)
+
+    assert len(seen_caps) == 2
+    assert all(cap < 0.5 for cap in seen_caps)  # Capped by remaining marker timeout (< 4.0s)!
+
+    saved = await db.get_message("m_two_voices")
+    assert saved is not None
+    entries = saved.metadata["deferred_media"]
+    assert entries[0]["handle"]["message_id"] == "7001"
+    assert entries[1]["handle"]["message_id"] == "7002"
+    await bot.cancel_deferred_for_session(session.id)

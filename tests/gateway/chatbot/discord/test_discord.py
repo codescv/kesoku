@@ -2,16 +2,30 @@
 
 import asyncio
 import datetime
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
+import aiohttp
 import discord
 import pytest
 
-from kesoku.config import DiscordChannelOverride, DiscordConfig, KesokuConfig
+from kesoku.config import (
+    DiscordChannelOverride,
+    DiscordConfig,
+    KesokuConfig,
+    WorkspaceConfig,
+)
 from kesoku.constants import MessageRole, MessageStatus, MessageType
-from kesoku.db import Message, Session
+from kesoku.context import KesokuContext
+from kesoku.db import DatabaseManager, Message, Session
+from kesoku.gateway.chatbot.base import (
+    ChannelUnavailableError,
+    Chatbot,
+    DeliveryAbortedError,
+)
 from kesoku.gateway.chatbot.discord import DiscordChatbot
+from kesoku.gateway.chatbot.discord import persistent_ui as pui
 from kesoku.gateway.gateway import Gateway
 
 
@@ -2127,3 +2141,429 @@ async def test_discord_skips_final_response_thought_rest_calls(
             )
 
 
+class _DummyChatbot(Chatbot):
+    """Minimal concrete Chatbot for testing base Chatbot behavior."""
+
+    def __init__(self, chatbot_id: str, gateway: Gateway) -> None:
+        super().__init__(chatbot_id=chatbot_id, gateway=gateway)
+        self.sent_chunks: list[list[str]] = []
+        self.sent_questions: list[dict[str, Any]] = []
+        self.sent_files: list[str] = []
+
+    async def handle_message(self, message: Message) -> None:
+        await self.render_outgoing_message(message)
+
+    async def send_text_chunks(self, channel_id: str, chunks: list[str], message: Message) -> None:
+        self.sent_chunks.append(list(chunks))
+
+    async def send_file_segment(self, channel_id: str, file_path: str, message: Message) -> None:
+        self.sent_files.append(file_path)
+
+    async def send_question_segment(
+        self,
+        channel_id: str,
+        question: str,
+        choices: list[str],
+        message: Message,
+        multi: bool = False,
+        max_choices: int = 1,
+    ) -> None:
+        self.sent_questions.append(
+            {"question": question, "choices": list(choices), "multi": multi, "max": max_choices}
+        )
+
+
+def _make_discord_http_exc(status: int, code: int = 0, text: str = "err") -> discord.HTTPException:
+    resp = MagicMock()
+    resp.status = status
+    resp.reason = text
+    exc = discord.HTTPException(resp, text)
+    exc.status = status
+    exc.code = code
+    return exc
+
+
+def _make_discord_not_found(code: int = 10062, text: str = "Unknown interaction") -> discord.NotFound:
+    resp = MagicMock()
+    resp.status = 404
+    resp.reason = "Not Found"
+    exc = discord.NotFound(resp, {"code": code, "message": text})
+    exc.code = code
+    return exc
+
+
+def _make_discord_server_error(status: int = 503, text: str = "Service Unavailable") -> discord.DiscordServerError:
+    resp = MagicMock()
+    resp.status = status
+    resp.reason = text
+    exc = discord.DiscordServerError(resp, text)
+    exc.status = status
+    return exc
+
+
+# origin: tests/test_round3_fixes.py K2
+@pytest.mark.asyncio
+async def test_k2_discord_send_file_retries_503_twice_with_fresh_file(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "k2.db")
+    db = DatabaseManager(db_path)
+    db.init_tables()
+    cfg = KesokuConfig(
+        workspace=WorkspaceConfig(db_path=db_path, sessions_dir=str(tmp_path / "sessions")),
+        discord=DiscordConfig(enabled=True, bot_token="tok", chatbot_id="discord_test"),
+    )
+    gw = Gateway(context=KesokuContext(config=cfg, db=db))
+    sess = await gw.create_session("s_k2", title="K2", chatbot_id="discord_test", channel_id="3001")
+    bot = DiscordChatbot(chatbot_id="discord_test", gateway=gw, bot_token="tok", discord_config=cfg.discord)
+
+    img_path = tmp_path / "photo.png"
+    img_path.write_bytes(b"\x89PNG\r\n\x1a\nDATA")
+
+    channel = MagicMock()
+    send_attempts = 0
+
+    async def flaky_send(*args: Any, **kwargs: Any) -> Any:
+        nonlocal send_attempts
+        send_attempts += 1
+        f_obj = kwargs.get("file")
+        assert f_obj is not None
+        assert not f_obj.fp.closed
+        if send_attempts <= 2:
+            raise _make_discord_server_error(503)
+        return MagicMock(id=999)
+
+    channel.send = AsyncMock(side_effect=flaky_send)
+    bot.bot.get_channel = MagicMock(return_value=channel)
+
+    opened_files: list[discord.File] = []
+    real_file_cls = discord.File
+
+    def spy_file(*args: Any, **kwargs: Any) -> discord.File:
+        inst = real_file_cls(*args, **kwargs)
+        opened_files.append(inst)
+        return inst
+
+    msg = Message(
+        id="m_k2_ok",
+        session_id=sess.id,
+        chatbot_id="discord_test",
+        channel_id="3001",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content=f"[file: {img_path}]",
+    )
+    await gw.post(msg)
+
+    with (
+        patch("kesoku.gateway.chatbot.discord.adapter.asyncio.sleep", new=AsyncMock()),
+        patch("kesoku.gateway.chatbot.discord.adapter.discord.File", side_effect=spy_file),
+    ):
+        await bot.render_outgoing_message(msg)
+
+    assert send_attempts == 3
+    assert len(opened_files) == 3
+    assert all(f.fp.closed for f in opened_files)
+    raw = await gw.db.get_session_messages(sess.id)
+    assert not any(m.metadata.get("is_self_healing_retry") for m in raw)
+
+
+# origin: tests/test_round3_fixes.py K2
+@pytest.mark.asyncio
+async def test_k2_existing_file_503x3_and_timeout_render_ui_without_self_healing(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "k2_ui.db")
+    db = DatabaseManager(db_path)
+    db.init_tables()
+    cfg = KesokuConfig(
+        workspace=WorkspaceConfig(db_path=db_path, sessions_dir=str(tmp_path / "sessions")),
+        discord=DiscordConfig(enabled=True, bot_token="tok", chatbot_id="discord_test"),
+    )
+    gw = Gateway(context=KesokuContext(config=cfg, db=db))
+    sess = await gw.create_session("s_k2_ui", title="K2 UI", chatbot_id="discord_test", channel_id="3002")
+    bot = DiscordChatbot(chatbot_id="discord_test", gateway=gw, bot_token="tok", discord_config=cfg.discord)
+
+    img_path = tmp_path / "panel.png"
+    img_path.write_bytes(b"\x89PNG\r\n\x1a\nPANEL")
+
+    sent_texts: list[str] = []
+    sent_views: list[Any] = []
+    channel = MagicMock()
+
+    async def send_503_on_file(*args: Any, **kwargs: Any) -> Any:
+        if "file" in kwargs:
+            raise _make_discord_server_error(503)
+        if "view" in kwargs or "embed" in kwargs:
+            sent_views.append(kwargs)
+            return MagicMock(id=501)
+        if args:
+            sent_texts.append(str(args[0]))
+        return MagicMock(id=500)
+
+    channel.send = AsyncMock(side_effect=send_503_on_file)
+    bot.bot.get_channel = MagicMock(return_value=channel)
+
+    reply_body = (
+        f"Scene text\n[file: {img_path}]\n"
+        "```ui\ntype: select\nprompt: Pick next action\noptions:\n  - Inspect\n  - Leave\n```"
+    )
+    msg1 = Message(
+        id="m_503x3",
+        session_id=sess.id,
+        chatbot_id="discord_test",
+        channel_id="3002",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content=reply_body,
+    )
+    await gw.post(msg1)
+
+    with patch("kesoku.gateway.chatbot.discord.adapter.asyncio.sleep", new=AsyncMock()):
+        await bot.render_outgoing_message(msg1)
+
+    assert any("⚠️ 附件发送失败（网络错误，已重试）: panel.png" in t for t in sent_texts)
+    assert len(sent_views) == 1
+    assert not any(m.metadata.get("is_self_healing_retry") for m in await gw.db.get_session_messages(sess.id))
+
+    # Subcase B: DeliveryAbortedError (timeout exhaustion) on an existing file also delivers ⚠️ + renders UI
+    dummy_bot = _DummyChatbot("discord_test", gw)
+    dummy_bot.send_file_segment = AsyncMock(side_effect=DeliveryAbortedError("Timeout sending file"))  # type: ignore[method-assign]
+    msg2 = Message(
+        id="m_timeout",
+        session_id=sess.id,
+        chatbot_id="discord_test",
+        channel_id="3002",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content=reply_body,
+    )
+    await gw.post(msg2)
+    await dummy_bot.render_outgoing_message(msg2)
+
+    flat_chunks = [c for grp in dummy_bot.sent_chunks for c in grp]
+    assert any("⚠️ 附件发送失败（网络错误，已重试）: panel.png" in c for c in flat_chunks)
+    assert len(dummy_bot.sent_questions) == 1
+    assert not any(m.metadata.get("is_self_healing_retry") for m in await gw.db.get_session_messages(sess.id))
+
+
+# origin: tests/test_round3_fixes.py K2
+@pytest.mark.asyncio
+async def test_k2_missing_file_self_heals_with_ui_note_and_channel_unavailable_aborts(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "k2_abort.db")
+    db = DatabaseManager(db_path)
+    db.init_tables()
+    cfg = KesokuConfig(
+        workspace=WorkspaceConfig(db_path=db_path, sessions_dir=str(tmp_path / "sessions")),
+        discord=DiscordConfig(enabled=True, bot_token="tok", chatbot_id="discord_test"),
+    )
+    gw = Gateway(context=KesokuContext(config=cfg, db=db))
+    sess = await gw.create_session("s_k2_ab", title="K2 Abort", chatbot_id="discord_test", channel_id="3003")
+
+    # 1. Missing file triggers self-healing containing the ```ui reminder
+    dummy_bot = _DummyChatbot("discord_test", gw)
+    dummy_bot.send_file_segment = AsyncMock(side_effect=FileNotFoundError("no such file"))  # type: ignore[method-assign]
+    msg_missing = Message(
+        id="m_missing",
+        session_id=sess.id,
+        chatbot_id="discord_test",
+        channel_id="3003",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="[file: nonexistent.png]\n```ui\ntype: select\nprompt: Q\noptions:\n  - A\n```",
+    )
+    await gw.post(msg_missing)
+    await dummy_bot.render_outgoing_message(msg_missing)
+    assert dummy_bot.sent_questions == []
+    healing_rows = [
+        m for m in await gw.db.get_session_messages(sess.id) if m.metadata.get("is_self_healing_retry")
+    ]
+    assert len(healing_rows) == 1
+    assert "Re-send the full reply including any ```ui block of the failed message." in healing_rows[0].content
+
+    # 2. ChannelUnavailableError on an existing file aborts the whole message (no ⚠️ text, no UI)
+    existing = tmp_path / "ok.png"
+    existing.write_bytes(b"PNG")
+    bot = DiscordChatbot(chatbot_id="discord_test", gateway=gw, bot_token="tok", discord_config=cfg.discord)
+    bot.bot.get_channel = MagicMock(return_value=None)
+    bot.bot.fetch_channel = AsyncMock(side_effect=_make_discord_not_found(10003, "Unknown Channel"))
+
+    msg_gone = Message(
+        id="m_gone",
+        session_id=sess.id,
+        chatbot_id="discord_test",
+        channel_id="3003",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content=f"[file: {existing}]\n```ui\ntype: select\nprompt: Q\noptions:\n  - A\n```",
+    )
+    await gw.post(msg_gone)
+    with pytest.raises(ChannelUnavailableError):
+        await bot._get_discord_channel_with_abort(msg_gone)
+    await bot.render_outgoing_message(msg_gone)
+    # Still only the 1 earlier healing row
+    healing_after = [
+        m for m in await gw.db.get_session_messages(sess.id) if m.metadata.get("is_self_healing_retry")
+    ]
+    assert len(healing_after) == 1
+
+
+# origin: tests/test_round3_fixes.py K2
+@pytest.mark.asyncio
+async def test_k2_render_outgoing_message_text_failure_marks_error_and_sends_fallback(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "k2_txt.db")
+    db = DatabaseManager(db_path)
+    db.init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=db_path, sessions_dir=str(tmp_path / "sessions")))
+    gw = Gateway(context=KesokuContext(config=cfg, db=db))
+    sess = await gw.create_session("s_txt", title="Txt", chatbot_id="mock_bot", channel_id="c_txt")
+
+    bot = _DummyChatbot("mock_bot", gw)
+    calls: list[list[str]] = []
+
+    async def fail_first(channel_id: str, chunks: list[str], message: Message) -> None:
+        calls.append(list(chunks))
+        if len(calls) == 1:
+            raise RuntimeError("network reset")
+
+    bot.send_text_chunks = fail_first  # type: ignore[method-assign]
+    msg = Message(
+        id="m_txt_fail",
+        session_id=sess.id,
+        chatbot_id="mock_bot",
+        channel_id="c_txt",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="Long reply text",
+        status=MessageStatus.PENDING,
+    )
+    await gw.post(msg)
+    await bot.render_outgoing_message(msg)
+
+    persisted = await gw.db.get_message("m_txt_fail")
+    assert persisted is not None
+    assert persisted.status == MessageStatus.ERROR
+    assert calls == [["Long reply text"], ["⚠️ 回复发送失败，请再说一次"]]
+
+
+# origin: tests/test_round3_fixes.py K2
+@pytest.mark.asyncio
+async def test_k2_deferred_placeholder_and_reply_ref_fallback_retry_transient_errors(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "k2_def.db")
+    db = DatabaseManager(db_path)
+    db.init_tables()
+    cfg = KesokuConfig(
+        workspace=WorkspaceConfig(db_path=db_path, sessions_dir=str(tmp_path / "sessions")),
+        discord=DiscordConfig(enabled=True, bot_token="tok", chatbot_id="discord_test"),
+    )
+    gw = Gateway(context=KesokuContext(config=cfg, db=db))
+    sess = await gw.create_session("s_def", title="Def", chatbot_id="discord_test", channel_id="3009")
+    bot = DiscordChatbot(chatbot_id="discord_test", gateway=gw, bot_token="tok", discord_config=cfg.discord)
+    bot.bot.is_ready = MagicMock(return_value=True)
+
+    channel = MagicMock()
+    placeholder_calls = 0
+
+    async def flaky_placeholder(*args: Any, **kwargs: Any) -> Any:
+        nonlocal placeholder_calls
+        placeholder_calls += 1
+        if placeholder_calls == 1:
+            raise aiohttp.ClientConnectionError("reset")
+        return MagicMock(id=888, channel=MagicMock(id=3009))
+
+    channel.send = AsyncMock(side_effect=flaky_placeholder)
+    bot.bot.get_channel = MagicMock(return_value=channel)
+
+    msg = Message(
+        id="m_def",
+        session_id=sess.id,
+        chatbot_id="discord_test",
+        channel_id="3009",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="hi",
+    )
+    with patch("kesoku.gateway.chatbot.discord.adapter.asyncio.sleep", new=AsyncMock()):
+        handle = await bot.send_deferred_placeholder("3009", {"type": "file", "path": "a.png"}, msg, {})
+    assert handle is not None
+    assert placeholder_calls == 2
+
+    # deliver_deferred_attachment: permanent edit error (400) -> reply-reference fallback retries 429 once then succeeds
+    img = tmp_path / "done.png"
+    img.write_bytes(b"PNG")
+    handle.edit = AsyncMock(side_effect=_make_discord_http_exc(400, text="Bad Request"))
+    ref_calls = 0
+
+    async def flaky_ref(*args: Any, **kwargs: Any) -> Any:
+        nonlocal ref_calls
+        ref_calls += 1
+        if ref_calls == 1:
+            raise _make_discord_http_exc(429, text="Rate limited")
+        return MagicMock(id=889)
+
+    channel.send = AsyncMock(side_effect=flaky_ref)
+    with patch("kesoku.gateway.chatbot.discord.adapter.asyncio.sleep", new=AsyncMock()):
+        await bot.deliver_deferred_attachment("3009", str(img), msg, handle, "file")
+    assert ref_calls == 2
+
+
+# origin: tests/test_round3_fixes.py K6
+@pytest.mark.asyncio
+async def test_k6_expired_interaction_10062_persists_edits_and_posts_choice() -> None:
+    client = object()
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
+
+    class MemDB:
+        async def save_ui_prompt(self, sid: str, mid: str, spec: dict[str, Any]) -> None:
+            rows[(sid, mid)] = dict(spec)
+
+        async def get_ui_prompt(self, sid: str, mid: str) -> dict[str, Any] | None:
+            r = rows.get((sid, mid))
+            return dict(r) if r else None
+
+    mem_db = MemDB()
+    spec = pui.build_question_spec("Where next?", ["Option Alpha", "Option Beta"], multi=False, max_choices=1)
+    await mem_db.save_ui_prompt("s_ui", "m_ui", spec)
+
+    chatbot = MagicMock()
+    chatbot.chatbot_id = "discord_test"
+    chatbot.gateway.db = mem_db
+    chatbot.gateway.post = AsyncMock()
+    chatbot._typing_tasks = {"chan_ui": MagicMock()}
+    pui.register_chatbot(client, chatbot)  # type: ignore[arg-type]
+
+    interaction = MagicMock()
+    interaction.client = client
+    interaction.response.defer = AsyncMock(side_effect=_make_discord_not_found(10062))
+    interaction.followup.send = AsyncMock()
+    interaction.edit_original_response = AsyncMock()
+    interaction.channel_id = "chan_ui"
+    interaction.user.id = 99
+    interaction.user.display_name = "Player"
+    sent_msg = MagicMock(id=321)
+    sent_msg.created_at.timestamp.return_value = 500.0
+    interaction.channel.send = AsyncMock(return_value=sent_msg)
+    interaction.message.edit = AsyncMock()
+
+    await pui.handle_question_answer(interaction, "s_ui", "m_ui", [1])
+
+    saved = await mem_db.get_ui_prompt("s_ui", "m_ui")
+    assert saved is not None and saved.get("answered") == "Option Beta"
+    interaction.edit_original_response.assert_not_awaited()
+    interaction.message.edit.assert_awaited_once()
+    chatbot.gateway.post.assert_awaited_once()
+    posted_msg = chatbot.gateway.post.call_args[0][0]
+    assert posted_msg.content == "Option Beta"
+    assert posted_msg.role == MessageRole.USER
+
+    # Re-clicking the same option when expired (10062) notifies via channel.send instead of followup.send
+    interaction.channel.send.reset_mock()
+    await pui.handle_question_answer(interaction, "s_ui", "m_ui", [1])
+    interaction.followup.send.assert_not_awaited()
+    interaction.channel.send.assert_awaited_once()
+    assert "Already answered: Option Beta" in interaction.channel.send.call_args[0][0]
+
+    # Non-10062 NotFound (e.g. 10008 Unknown Message) does NOT post a choice
+    await mem_db.save_ui_prompt("s_ui2", "m_ui2", pui.build_question_spec("Q2", ["A", "B"], False, 1))
+    chatbot.gateway.post.reset_mock()
+    interaction2 = MagicMock()
+    interaction2.client = client
+    interaction2.response.defer = AsyncMock(side_effect=_make_discord_not_found(10008, "Unknown Message"))
+    await pui.handle_question_answer(interaction2, "s_ui2", "m_ui2", [0])
+    chatbot.gateway.post.assert_not_awaited()

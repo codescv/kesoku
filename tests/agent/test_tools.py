@@ -1,17 +1,35 @@
 """Unit tests for Kesoku agent tools and skill registry."""
 
+import asyncio
+import os
 import re
-from unittest.mock import MagicMock
+import time
+from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from kesoku.agent.tools import ShellCommandError, ToolContext, WebSearchTool, run_shell_command
+from kesoku.agent.llm import LLMResponse
+from kesoku.agent.tools import ActiveJobsRegistry, ShellCommandError, ToolContext, WebSearchTool, run_shell_command
+from kesoku.agent.tools.media import analyze_media
+from kesoku.config import (
+    KesokuConfig,
+    WorkspaceConfig,
+)
+from kesoku.context import KesokuContext
+from kesoku.db import DatabaseManager, Message, Session
+from kesoku.gateway.chatbot.base import (
+    Chatbot,
+    InboundMessageAttachment,
+    InboundMessageDTO,
+)
+from kesoku.gateway.gateway import Gateway
 
 
 @pytest.mark.asyncio
 async def test_web_search_tool_success() -> None:
     """Test WebSearchTool successfully executes search and formats grounding sources."""
-    from unittest.mock import AsyncMock
 
     mock_client = MagicMock()
     mock_res = MagicMock()
@@ -47,7 +65,6 @@ async def test_web_search_tool_success() -> None:
 @pytest.mark.asyncio
 async def test_web_search_tool_api_failure() -> None:
     """Test WebSearchTool handles API call exceptions gracefully."""
-    from unittest.mock import AsyncMock
 
     mock_client = MagicMock()
     mock_client.aio.models.generate_content = AsyncMock(side_effect=Exception("API Quota Exceeded"))
@@ -374,9 +391,8 @@ async def test_manual_compact_command(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_analyze_media_tool_success(tmp_path) -> None:
     """Test analyze_media tool successfully reads a file and invokes LLM analysis."""
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import patch
 
-    from kesoku.agent.llm import LLMResponse
     from kesoku.agent.tools.media import analyze_media
 
     media_file = tmp_path / "test_image.png"
@@ -419,11 +435,10 @@ async def test_analyze_media_tool_not_found() -> None:
 @pytest.mark.asyncio
 async def test_grep_slash_command(tmp_path, monkeypatch) -> None:
     """Verify that chatbot /grep command triggers memory_search tool under the hood."""
-    import time
 
     from kesoku.config import KesokuConfig, WorkspaceConfig
     from kesoku.context import KesokuContext
-    from kesoku.db import DatabaseManager, Message, Session
+    from kesoku.db import DatabaseManager, Message
     from kesoku.gateway.chatbot.base import Chatbot
     from kesoku.gateway.gateway import Gateway
 
@@ -516,7 +531,6 @@ async def test_run_shell_command_forbidden_patterns(tmp_path) -> None:
 
 
 # --- agent.disabled_tools -------------------------------------------------------------------
-from unittest.mock import patch  # noqa: E402
 
 from kesoku.agent.tools.registry import ToolRegistry  # noqa: E402
 
@@ -745,7 +759,6 @@ async def test_registry_stop_all_for_session_terminates_group_and_drops_history(
 async def test_run_shell_command_background_job_bookkeeping(tmp_path) -> None:
     """A backgrounded command is registered with its command/stderr path and recorded with its exit code."""
     import asyncio
-    from unittest.mock import AsyncMock
 
     import kesoku.config
     from kesoku.agent.tools import ActiveJobsRegistry
@@ -785,3 +798,125 @@ async def test_run_shell_command_background_job_bookkeeping(tmp_path) -> None:
     finally:
         await active_jobs.stop_all_for_session("bg_sess")
         kesoku.config._global_config = original_config
+
+
+class _DummyChatbot(Chatbot):
+    """Minimal concrete Chatbot for testing base Chatbot behavior."""
+
+    def __init__(self, chatbot_id: str, gateway: Gateway) -> None:
+        super().__init__(chatbot_id=chatbot_id, gateway=gateway)
+        self.sent_chunks: list[list[str]] = []
+        self.sent_questions: list[dict[str, Any]] = []
+        self.sent_files: list[str] = []
+
+    async def handle_message(self, message: Message) -> None:
+        await self.render_outgoing_message(message)
+
+    async def send_text_chunks(self, channel_id: str, chunks: list[str], message: Message) -> None:
+        self.sent_chunks.append(list(chunks))
+
+    async def send_file_segment(self, channel_id: str, file_path: str, message: Message) -> None:
+        self.sent_files.append(file_path)
+
+    async def send_question_segment(
+        self,
+        channel_id: str,
+        question: str,
+        choices: list[str],
+        message: Message,
+        multi: bool = False,
+        max_choices: int = 1,
+    ) -> None:
+        self.sent_questions.append(
+            {"question": question, "choices": list(choices), "multi": multi, "max": max_choices}
+        )
+
+
+# origin: tests/test_round3_fixes.py K8
+@pytest.mark.asyncio
+async def test_k8_foreground_shell_unlinks_background_job_logs_and_keeps_bg(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "k8.db")
+    db = DatabaseManager(db_path)
+    db.init_tables()
+    sessions_dir = tmp_path / "sessions"
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=db_path, sessions_dir=str(sessions_dir)))
+    cfg.shell.mode = "blocklist"
+    cfg.shell.background_threshold_seconds = 5.0
+    gw = Gateway(context=KesokuContext(config=cfg, db=db))
+    sess = await gw.create_session("s_k8", title="K8")
+
+    from kesoku.utils.path import PathResolver
+
+    tctx = ToolContext(
+        gateway=gw,
+        session_id=sess.id,
+        session_workspace=sess.workspace_name,
+        active_jobs=ActiveJobsRegistry(),
+        kesoku_context=gw.context,
+    )
+
+    with (
+        patch("kesoku.agent.tools.shell.get_config", return_value=cfg),
+        patch("kesoku.utils.path.get_config", return_value=cfg),
+    ):
+        staging_dir = Path(PathResolver.get_session_staging_dir(sess.workspace_name))
+        out = await run_shell_command("echo hello_k8", context=tctx)
+        assert "hello_k8" in out
+        assert [f for f in os.listdir(staging_dir) if f.startswith("background_job_")] == []
+
+        # Truncated foreground output keeps cmd_output_*.txt while still unlinking background_job_*
+        long_out = await run_shell_command(
+            "python3 -c \"print('X' * 2500)\"", max_output_chars=1200, context=tctx
+        )
+        assert "cmd_output_" in long_out
+        assert [f for f in os.listdir(staging_dir) if f.startswith("background_job_")] == []
+        assert len([f for f in os.listdir(staging_dir) if f.startswith("cmd_output_")]) == 1
+
+        # Backgrounded command retains its background_job_*.stdout/.stderr while running
+        cfg.shell.background_threshold_seconds = 0.2
+        bg_out = await run_shell_command("sleep 2", context=tctx)
+        assert "transitioned to background execution" in bg_out
+        bg_files = [f for f in os.listdir(staging_dir) if f.startswith("background_job_")]
+        assert len(bg_files) == 2
+        await tctx.active_jobs.stop_all_for_session(sess.id)
+        await asyncio.sleep(0.05)
+
+
+# origin: tests/test_round3_fixes.py K10
+def test_k10_format_inbound_content_and_analyze_media_docstring(tmp_path: Path) -> None:
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=str(tmp_path / "k10.db")))
+    DatabaseManager(cfg.workspace.db_path).init_tables()
+    gw = Gateway(context=KesokuContext(config=cfg))
+    bot = _DummyChatbot("discord_test", gw)
+
+    dto = InboundMessageDTO(
+        sender_id="u1",
+        channel_id="c1",
+        text="Check these files",
+        attachments=[
+            InboundMessageAttachment(path="/tmp/a.jpg", mime_type="image/jpeg", filename="a.jpg"),
+            InboundMessageAttachment(path="/tmp/b.ogg", mime_type="audio/ogg", filename="b.ogg"),
+            InboundMessageAttachment(path="/tmp/c.pdf", mime_type="application/pdf", filename="c.pdf"),
+            InboundMessageAttachment(path="/tmp/d.txt", mime_type="text/plain", filename="d.txt"),
+        ],
+    )
+    formatted = bot._format_inbound_content(dto)
+    lines = formatted.splitlines()
+    img_line = next(line for line in lines if "a.jpg" in line)
+    aud_line = next(line for line in lines if "b.ogg" in line)
+    pdf_line = next(line for line in lines if "c.pdf" in line)
+    txt_line = next(line for line in lines if "d.txt" in line)
+
+    expected_clause = (
+        "— image/audio attachments are already visible to you in this message; do not call analyze_media on them"
+    )
+    assert expected_clause in img_line
+    assert expected_clause in aud_line
+    assert expected_clause not in pdf_line
+    assert expected_clause not in txt_line
+
+    assert analyze_media.__doc__ is not None
+    assert (
+        "Use only for files that are not part of the current user message and that you did not just generate yourself."
+        in analyze_media.__doc__
+    )
