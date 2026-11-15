@@ -1077,3 +1077,102 @@ async def test_mode_stop_triggers_mode_exit_extraction(env, monkeypatch) -> None
     monkeypatch.setattr(bot.policy, "current_mode", lambda sid: "story")
     await bot.start_mode(sid, "quiz", "dev-1")
     assert calls == [(sid, "mode_exit")]
+
+
+# ---------------------------------------------------------------------------------------------- v0.3.6
+
+
+class _SentenceLLM:
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.prompts: list[str] = []
+
+    async def generate(self, prompt: str, **_: Any) -> Any:
+        self.prompts.append(prompt)
+        await asyncio.sleep(0.05)
+        return type("Res", (), {"content": self.content})()
+
+
+_SENTENCE_YAML = """```yaml
+- surface: こんにちは
+  reading: こんにちは
+  pos: 寒暄语
+  gloss_zh: 你好
+- surface: 今日
+  reading: きょう
+  pos: 名词
+  gloss_zh: 今天
+- surface: よろしくね
+  reading: よろしくね
+  pos: 惯用表达
+  gloss_zh: 请多关照哦
+  lemma: よろしく
+```"""
+
+
+async def test_lexical_explain_analyzes_whole_sentence_once(env, monkeypatch) -> None:
+    sid = await create_session(env)
+    llm = _SentenceLLM(_SENTENCE_YAML)
+    monkeypatch.setattr(env["ctx"], "get_llm", lambda *a, **k: llm)
+    text = "こんにちは！今日もよろしくね。"
+
+    first = await rpc(env, "lexical.explain", {"session_id": sid, "text": text, "token": "今日"})
+    assert first["type"] != "error", first
+    body = first["payload"]
+    assert body["token"]["surface"] == "今日" and body["token"]["reading"] == "きょう"
+    assert [t["surface"] for t in body["tokens"]] == ["こんにちは", "今日", "よろしくね"]
+    assert "<sentence>こんにちは！今日もよろしくね。</sentence>" in llm.prompts[0]
+    assert "所有核心词汇与意群" in llm.prompts[0]
+    assert "**今日**" in body["explanation_markdown"]
+
+    # Another word of the same sentence: served from the sentence cache, zero extra LLM calls.
+    second = await rpc(env, "lexical.explain", {"session_id": sid, "text": text, "token": "よろしくね"})
+    assert second["payload"]["token"]["gloss_zh"] == "请多关照哦"
+    # A sub-span of a cached chunk is answered from its chunk (surface is the tapped token).
+    sub = await rpc(env, "lexical.explain", {"session_id": sid, "text": text, "token": "よろしく"})
+    assert sub["payload"]["token"]["surface"] == "よろしく"
+    assert "よろしくね" in sub["payload"]["token"]["note"]
+    assert len(llm.prompts) == 1
+
+    # Concurrent taps on a new sentence share one in-flight analysis.
+    text2 = "今日はよろしくね"
+    replies = await asyncio.gather(
+        rpc(env, "lexical.explain", {"session_id": sid, "text": text2, "token": "今日"}),
+        rpc(env, "lexical.explain", {"session_id": sid, "text": text2, "token": "よろしくね"}),
+    )
+    assert all(r["type"] != "error" for r in replies)
+    assert len(llm.prompts) == 2
+
+
+def test_parse_lexical_tokens_guarantees_target_entry() -> None:
+    from kesoku.gateway.chatbot.app.commands import _parse_lexical_tokens
+
+    toks = _parse_lexical_tokens("行こう", "- surface: 行こうよ\n  reading: いこうよ\n  gloss_zh: 走吧\n")
+    assert toks[-1]["surface"] == "行こう" and toks[-1]["gloss_zh"] == "走吧"
+    wrapped = _parse_lexical_tokens("猫", "tokens:\n  - surface: 猫\n    reading: ねこ\n")
+    assert wrapped == [{"surface": "猫", "reading": "ねこ"}]
+    single = _parse_lexical_tokens("犬", "reading: いぬ\ngloss_zh: 狗\n")
+    assert single[-1]["surface"] == "犬" and single[-1]["reading"] == "いぬ"
+
+
+async def test_media_hydrate_pkmn_art_and_staging_refs(env) -> None:
+    sid = await create_session(env)
+    tmp = env["tmp"]
+    art = tmp / "games" / "pokemon_assistant" / "data" / "art"
+    art.mkdir(parents=True)
+    (art / "0987.webp").write_bytes(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+    ok = await rpc(env, "media.hydrate", {"session_id": sid, "ref": "[file:pkmn/0987.webp]"})
+    assert ok["type"] == "media.ready", ok
+    ok2 = await rpc(env, "media.hydrate", {"session_id": sid, "ref": "games/pokemon_assistant/data/art/0987.webp"})
+    assert ok2["type"] == "media.ready", ok2
+
+    staging = tmp / "sessions" / sid
+    (staging / "out").mkdir(parents=True, exist_ok=True)
+    (staging / "out" / "card.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    st = await rpc(env, "media.hydrate", {"session_id": sid, "ref": "out/card.png"})
+    assert st["type"] == "media.ready", st
+
+    (tmp / "secret.txt").write_text("s", encoding="utf-8")
+    for ref in ("pkmn/../../../../secret.txt", "pkmn/missing.webp", "games/../secret.txt", "pkmn/\x00.webp"):
+        bad = await rpc(env, "media.hydrate", {"session_id": sid, "ref": ref})
+        assert bad["type"] == "error" and bad["payload"]["code"] in ("NOT_FOUND", "BAD_REQUEST"), ref

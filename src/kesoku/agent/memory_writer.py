@@ -284,15 +284,20 @@ def bullet_key_prefix(text: str) -> str | None:
     return _PUNCT_WS_RE.sub("", key.lower()) or None
 
 
+_COURSE_QUALIFIER_RE = re.compile(r"新版|旧版|标准|初级|中级|高级|上册|下册|全册|第一册|第二册|第三册|第四册|\s+")
+_SUBJECT_PROGRESS_RE = re.compile(r"([\u4e00-\u9fffA-Za-z]{2,8}?)(?:水平与)?(?:学习|课程)进度")
+
+
 def _course_families(text: str) -> set[str]:
+    """Course identities in a bullet: `book:<title stem>` for 《…》 titles, `subj:<subject>` for `<X>学习进度`."""
+    s = text or ""
     families: set[str] = set()
-    for m in _COURSE_RE.finditer(text):
-        name = m.group(1)
-        families.add("新标日" if "新标日" in name else _PUNCT_WS_RE.sub("", name.lower()))
-    if "新标日" in text:
-        families.add("新标日")
-    if "日语" in text or "日本語" in text:
-        families.add("日语")
+    for m in _COURSE_RE.finditer(s):
+        stem = _PUNCT_WS_RE.sub("", _COURSE_QUALIFIER_RE.sub("", m.group(1)))
+        if len(stem) >= 2:
+            families.add(f"book:{stem.lower()}")
+    for m in _SUBJECT_PROGRESS_RE.finditer(s):
+        families.add(f"subj:{m.group(1).lower()}")
     return families
 
 
@@ -307,11 +312,6 @@ def is_same_course_progress(a: str, b: str) -> bool:
     fa, fb = _course_families(a), _course_families(b)
     if not fa or not fb:
         return False
-    # Treat `新标日` as a Japanese course so `日语…第1课` and `《新标日初级上》第1课` collide.
-    if "新标日" in fa:
-        fa = fa | {"日语"}
-    if "新标日" in fb:
-        fb = fb | {"日语"}
     if not (fa & fb):
         return False
     la, lb = _lesson_numbers(a), _lesson_numbers(b)

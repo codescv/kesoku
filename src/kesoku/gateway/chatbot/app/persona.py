@@ -29,6 +29,7 @@ import re
 import shutil
 import time
 import warnings
+from collections import OrderedDict
 from typing import Any
 
 from PIL import Image, ImageOps
@@ -45,6 +46,7 @@ from kesoku.agent.user_profile import (
     BIO_MAX_BYTES,
     CHARACTER_DIR_RE,
     NICKNAME_MAX,
+    USER_MD_REL_PATH,
     UserProfileStore,
     sync_profile_block_to_role,
     sync_profile_to_roles,
@@ -93,6 +95,9 @@ POLL_MAX_SEC = 2.0
 VOICE_PREVIEW_TIMEOUT_SEC = 60.0
 VOICE_PREVIEW_MAX_BYTES = 8 * 1024 * 1024
 VOICE_PREVIEW_DEFAULT_TEXT = "你好，很高兴认识你。"
+VOICE_PREVIEW_DEFAULT_TEXT_JA = "こんにちは！今日もよろしくね。"
+VOICE_PREVIEW_CACHE_MAX = 32
+QWEN_TTS_CLIENT_REL = os.path.join("qwen-tts", "scripts", "tts_client.py")
 CLEANUP_INTERVAL_SEC = 3600.0
 MAX_ROLES = 200
 ROLE_SOURCE_IMAGE_EXTS = ("jpg", "jpeg", "png", "webp")
@@ -102,14 +107,15 @@ SOURCE_AVATAR_FILE = "source_avatar.webp"
 JOB_ID_RE = re.compile(r"^avj_[0-9A-Z]{26}$")
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _TEMPLATE_FIELD_RE = re.compile(r"\{(source|output|style|prompt|voice|text)\}")
-_TRANSFORM_HINT_RE = re.compile(
-    r"形态|变形|变身|变成|化为|化身|拟兽|兽化|动物|小笨鸟|笨鸟|肥鸟|小鸟|鸟|猫咪?|小?狗|狐狸|兔子|仓鼠|企鹅|小?龙|史莱姆|"
-    r"玩偶|毛绒|公仔|吉祥物|高达|机甲|机器人|怪物|怪兽|精灵|宝可梦|宠物|Q版|q版|"
-    r"\b(chibi|mascot|creature|animal|bird|cat|kitten|dog|puppy|fox|bunny|rabbit|hamster|penguin|dragon|slime|"
-    r"plush|plushie|doll|mecha|robot|monster|pokemon|form|transform|transformed|morph)\b",
-    re.IGNORECASE,
+_CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
+_ASCII_WORD_RE = re.compile(r"[A-Za-z0-9_]{3,}")
+CHARACTER_CONTEXT_LINE_MAX = 400
+CHARACTER_CONTEXT_MAX_LINES = 3
+# Generic avatar-instruction vocabulary that says nothing about a specific character (never matched alone).
+_CONTEXT_STOP_TOKENS = frozenset(
+    {"形态", "变成", "变身", "变为", "头像", "风格", "画风", "一个", "一只", "可爱", "生成", "图片", "照片",
+     "the", "and", "with", "style", "avatar", "form"}
 )
-_BENNIAO_HINT_RE = re.compile(r"小笨鸟|笨鸟|肥鸟")
 
 STYLE_TEXT: dict[str, str] = {
     "anime_clean": "clean Japanese anime character illustration, crisp line art, soft cel shading",
@@ -140,64 +146,93 @@ def sanitize_prompt_hint(raw: str | None) -> str:
 
 
 _FACE_ONLY_REFERENCE = (
-    "CRITICAL: Use Image 1 ONLY as a reference for facial features, eye shape, hairstyle, and hair color. "
-    "Completely IGNORE and REMOVE any microphone, stage headset, earpiece, hands holding objects, stage props, "
-    "or background elements present in Image 1 (do NOT draw any microphone or headset unless explicitly "
-    "requested in the user hint)."
+    "CRITICAL — Reference Image 1 is for FACIAL IDENTITY ONLY: "
+    "extract ONLY the subject's facial features (face shape, eyes, eyebrows, nose, mouth) "
+    "and hairstyle/hair color from Image 1. "
+    "Completely IGNORE and strip away all props, handheld items, accessories, headwear, clothing/outfits, "
+    "background, lighting, and original art/photo style from Image 1 unless explicitly requested in <user_hint>."
 )
-_FACE_ONLY_REFERENCE_PROP_REQUESTED = (
-    "CRITICAL: Use Image 1 ONLY as a reference for facial features, eye shape, hairstyle, and hair color. "
-    "Completely IGNORE and REMOVE any stage props, hands holding objects, text/watermarks, or background "
-    "elements present in Image 1; only draw a microphone / headset / stage prop because the user hint "
-    "explicitly requests it."
+_HINT_PRIORITY = (
+    "PRIORITY — <user_hint> overrides the reference image's body, species/form, outfit, pose, and scene. "
+    "If <user_hint> describes a non-human, chibi, mascot, animal, or transformed form, transform the subject's "
+    "ENTIRE body into that form while keeping only recognizable hairstyle/hair color and eye/expression cues "
+    "from Image 1 (NEVER draw a normal human with a separate animal or object sitting on their head unless "
+    "<user_hint> literally asks for that)."
 )
-_PROP_HINT_RE = re.compile(r"话筒|麦克风|耳麦|耳返|microphone|\bmic\b|headset|舞台|stage", re.IGNORECASE)
 
 
-def _face_only_clause(hint: str) -> str:
-    """Return the Image-1 face-only reference clause (relaxed when the hint itself asks for a mic/stage prop)."""
-    if hint and _PROP_HINT_RE.search(hint):
-        return _FACE_ONLY_REFERENCE_PROP_REQUESTED
-    return _FACE_ONLY_REFERENCE
+def _tagless(value: str) -> str:
+    """Single-line text that cannot open or close the prompt's pseudo-XML tags."""
+    return _clean_line(value).replace("<", "‹").replace(">", "›")
 
 
-def build_avatar_prompt(style_label: str, variant: str, hint: str) -> str:
-    """Build the identity-preserving restyle or creature-transformation prompt for one candidate.
+def build_avatar_prompt(
+    style_prompt: str,
+    hint: str | None = None,
+    *,
+    has_source_reference: bool = False,
+    character_context: str | None = None,
+    variant: str | None = None,
+) -> str:
+    """Build a character-agnostic avatar prompt for one candidate.
 
-    Image 1 is strictly a facial identity / eye shape / hairstyle / hair-color reference: stage photos often
-    contain a microphone (话筒) or headset, which must never leak into new avatars unless the hint asks for it.
+    With a source reference, Image 1 contributes facial identity + hairstyle only (props, outfit, background
+    and art style are always discarded); `<user_hint>` overrides body/form/outfit/scene, and
+    `<character_context>` (notes from the role's own workspace files) disambiguates hint terms.
     """
-    face_only = _face_only_clause(hint)
-    if hint and _TRANSFORM_HINT_RE.search(hint):
-        benniao_desc = ""
-        if _BENNIAO_HINT_RE.search(hint):
-            benniao_desc = (
-                " ('小笨鸟' is the character's canonical chibi bird mascot form: a cute chubby round white chibi "
-                "bird with brown fringe bangs and brown side hair-locks framing a round white bird face, a small "
-                "yellow beak, expressive eyes, rosy pink blush cheeks, brown feathered wings, and a small red "
-                "ribbon bow on the chest)"
-            )
-        return (
-            f"Transform the character from Image 1 completely into the following non-human / mascot / stylized "
-            f"form: {hint}{benniao_desc}; art style: {style_label}; carry over signature hair/bangs motif, hair "
-            f"color, and requested accessories from the hint into the transformed creature design; {face_only} "
-            f"CRITICAL: the subject itself MUST BE the transformed creature/mascot filling the center of the "
-            f"square avatar — DO NOT draw a human person, DO NOT draw a human face or human head, and DO NOT place "
-            f"a bird/animal on top of a human head; {variant}; centered square avatar composition, clean simple "
-            f"background"
-        )
-    if hint:
-        return (
-            f"Restyle the person in Image 1 as a {style_label} square portrait avatar, applying this primary "
-            f"customization: {hint}; preserve facial identity, eye shape, hairstyle and hair color from Image 1 "
-            f"unless modified by '{hint}', while stripping any microphone, headset, props, or background clutter "
-            f"from Image 1; {face_only} {variant}; square head-and-shoulders composition, simple background"
-        )
-    return (
-        f"Restyle the person in Image 1 as a {style_label} portrait avatar; keep the same face shape, hairstyle, "
-        f"hair color while stripping any microphone, headset, props, or background clutter from Image 1; "
-        f"{face_only} {variant}; square head-and-shoulders composition, simple background"
-    )
+    style = _clean_line(style_prompt) or "clean illustration"
+    hint_text = _tagless(hint or "")
+    context_lines = [_tagless(ln)[:CHARACTER_CONTEXT_LINE_MAX] for ln in (character_context or "").splitlines()]
+    context_text = "\n".join(ln for ln in context_lines if ln)
+    if has_source_reference:
+        parts = [f"Create a {style} square avatar of the subject in Image 1."]
+        parts.append(_FACE_ONLY_REFERENCE)
+        if hint_text:
+            parts.append(_HINT_PRIORITY)
+    else:
+        parts = [f"Create a {style} square avatar."]
+    if context_text:
+        parts.append(f"<character_context>{context_text}</character_context>")
+    if hint_text:
+        parts.append(f"<user_hint>{hint_text}</user_hint>")
+    if variant:
+        parts.append(f"Composition variant: {_clean_line(variant)}.")
+    parts.append("Centered square avatar composition, clean simple background.")
+    return "\n".join(parts)
+
+
+def hint_context_tokens(hint: str | None) -> list[str]:
+    """Lookup tokens from a hint: CJK runs plus their 2/3-char substrings, and ASCII words (longest first)."""
+    if not hint or not hint.strip():
+        return []
+    tokens: set[str] = set()
+    for run in _CJK_RUN_RE.findall(hint):
+        tokens.add(run)
+        for n in (2, 3):
+            tokens.update(run[i : i + n] for i in range(len(run) - n + 1))
+    tokens.update(w.lower() for w in _ASCII_WORD_RE.findall(hint))
+    return sorted((t for t in tokens if t.lower() not in _CONTEXT_STOP_TOKENS), key=lambda t: (-len(t), t))
+
+
+def match_character_context(lines: list[str], tokens: list[str]) -> str | None:
+    """Return the best-matching workspace lines (≤ 3, each ≤ 400 chars) for `tokens`, or None."""
+    if not tokens:
+        return None
+    scored: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+    for idx, raw in enumerate(lines):
+        line = _clean_line(raw)
+        if not line or line.startswith("#") or "[file:" in line or line in seen:
+            continue
+        low = line.lower()
+        score = sum(len(t) for t in tokens if t.lower() in low)
+        if score:
+            seen.add(line)
+            scored.append((score, idx, line[:CHARACTER_CONTEXT_LINE_MAX]))
+    if not scored:
+        return None
+    best = sorted(scored, key=lambda x: (-x[0], x[1]))[:CHARACTER_CONTEXT_MAX_LINES]
+    return "\n".join(line for _, _, line in sorted(best, key=lambda x: x[1]))
 
 
 def fill_argv_template(template: list[str], values: dict[str, str]) -> list[str]:
@@ -366,6 +401,7 @@ class PersonaService:
         self._job_locks: dict[str, asyncio.Lock] = {}
         self._job_candidates: dict[str, list[dict[str, Any]]] = {}
         self._cleanup_task: asyncio.Task[Any] | None = None
+        self._voice_cache: OrderedDict[tuple[str, str], bytes] = OrderedDict()
 
     # ------------------------------------------------------------------ lifecycle
     @property
@@ -723,21 +759,42 @@ class PersonaService:
 
     # ------------------------------------------------------------------ voice.preview
     async def handle_voice_preview(self, ctx: RequestContext, payload: dict[str, Any]) -> Reply:
-        """`voice.preview{voice_preset, text?}` → `media.ready{kind:"voice"}` via `voice_preview_command`."""
-        voice = _clean_line(require_str(payload, "voice_preset", max_len=64)).lstrip("-").strip()
-        if not voice:
-            raise ProtocolError("BAD_REQUEST", "'voice_preset' must be a non-empty string")
-        text_raw = optional_str(payload, "text", max_len=80)
-        text = sanitize_prompt_hint(text_raw) if text_raw else VOICE_PREVIEW_DEFAULT_TEXT
-        text = text or VOICE_PREVIEW_DEFAULT_TEXT
+        """`voice.preview{voice_preset?, role_id?, text?}` → `media.ready{kind:"voice"}`.
+
+        Uses `voice_preview_command` when configured; otherwise resolves the role's own workspace TTS
+        (`roles/<id>/scripts/<id>-tts.sh`, else `skills/qwen-tts/scripts/tts_client.py` + a reference `.wav`).
+        """
+        voice = _clean_line(str(payload.get("voice_preset") or "default")).lstrip("-").strip()[:64] or "default"
+        role_id = _clean_line(str(payload.get("role_id") or "")).strip()[:64]
+        text_raw = payload.get("text")
+        if text_raw is not None and not isinstance(text_raw, str):
+            raise ProtocolError("BAD_REQUEST", "'text' must be a string")
+        text = sanitize_prompt_hint(text_raw) if text_raw else ""
         template = list(self.host.app_config.voice_preview_command or [])
-        if not template:
+        plan = None if template else await asyncio.to_thread(self._resolve_workspace_tts, voice, role_id)
+        if not template and plan is None:
             raise ProtocolError("BAD_REQUEST", "voice preview is not configured on this host")
+        if not text:
+            japanese = plan is not None and plan["japanese"]
+            text = VOICE_PREVIEW_DEFAULT_TEXT_JA if japanese else VOICE_PREVIEW_DEFAULT_TEXT
+        cache_key = (f"{role_id}:{voice}", text)
         output = await asyncio.to_thread(self._voice_output_path)
-        argv = fill_argv_template(template, {"voice": voice, "text": text, "output": output})
         try:
-            await self._run_process(argv, VOICE_PREVIEW_TIMEOUT_SEC)
-            head = await asyncio.to_thread(self._read_voice_output, output)
+            head = self._voice_cache.get(cache_key)
+            if head is not None:
+                self._voice_cache.move_to_end(cache_key)
+                await asyncio.to_thread(atomic_write_bytes, output, head)
+            else:
+                if template:
+                    argv = fill_argv_template(template, {"voice": voice, "text": text, "output": output})
+                else:
+                    argv = self._workspace_tts_argv(plan or {}, text, output)
+                env = {**os.environ, "KESOKU_DEFERRED_MEDIA": "0"}
+                await self._run_process(argv, VOICE_PREVIEW_TIMEOUT_SEC, env=env)
+                head = await asyncio.to_thread(self._read_voice_output, output)
+                self._voice_cache[cache_key] = head
+                while len(self._voice_cache) > VOICE_PREVIEW_CACHE_MAX:
+                    self._voice_cache.popitem(last=False)
             size = len(head)
             mime = sniff_audio_mime(head)
             uploaded = await self.host.media.upload_file(output, purpose="asset", mime=mime)
@@ -757,6 +814,48 @@ class PersonaService:
         if duration is not None:
             result["duration_ms"] = duration
         return Reply("media.ready", result)
+
+    def _resolve_workspace_tts(self, voice: str, role_id: str) -> dict[str, Any] | None:
+        """Pick a workspace TTS route for the first candidate role that has one (None when unavailable)."""
+        candidates = [
+            v
+            for v in dict.fromkeys((voice, role_id, self.host.app_config.default_role))
+            if v and is_valid_role_id(v)
+        ]
+        roles_root = self.host.roles_dir
+        for cid in candidates:
+            script = safe_resolve(roles_root, os.path.join(cid, "scripts", f"{cid}-tts.sh"))
+            if script and os.path.isfile(script):
+                return {"kind": "script", "script": script, "japanese": True}
+        client = None
+        for base in dict.fromkeys((os.path.join(self.host.awd, "skills"), self._skills_dir())):
+            path = os.path.join(base, QWEN_TTS_CLIENT_REL)
+            if os.path.isfile(path):
+                client = path
+                break
+        if client is None:
+            return None
+        ref_wav = None
+        for cid in candidates:
+            audio_dir = safe_resolve(roles_root, os.path.join(cid, "audio"))
+            if not audio_dir or not os.path.isdir(audio_dir):
+                continue
+            wavs = sorted(n for n in os.listdir(audio_dir) if n.lower().endswith(".wav"))
+            wavs = [n for n in wavs if os.path.isfile(os.path.join(audio_dir, n))]
+            if wavs:
+                ref_wav = os.path.join(audio_dir, wavs[0])
+                break
+        return {"kind": "qwen", "script": client, "ref_wav": ref_wav, "japanese": ref_wav is not None}
+
+    @staticmethod
+    def _workspace_tts_argv(plan: dict[str, Any], text: str, output: str) -> list[str]:
+        """Build the argv for a `_resolve_workspace_tts` plan."""
+        if plan.get("kind") == "script":
+            return ["bash", plan["script"], text, output, "--sync"]
+        argv = ["uv", "run", plan["script"], "--text", text, "--output", output, "--sync"]
+        if plan.get("ref_wav"):
+            argv += ["--ref-audio", plan["ref_wav"]]
+        return argv
 
     def _voice_output_path(self) -> str:
         """Allocate a voice preview output path under `<sessions_dir>/voice_previews/`."""
@@ -778,7 +877,9 @@ class PersonaService:
         """Working directory for launched tools (`$AWD` when it exists)."""
         return self.host.awd if os.path.isdir(self.host.awd) else None
 
-    async def _run_process(self, argv: list[str], limit_sec: float) -> tuple[int, str]:
+    async def _run_process(
+        self, argv: list[str], limit_sec: float, *, env: dict[str, str] | None = None
+    ) -> tuple[int, str]:
         """Run argv (never through a shell) within `limit_sec`; raise `_CandidateFailed` on failure."""
         if not argv:
             raise _CandidateFailed("empty command")
@@ -790,6 +891,7 @@ class PersonaService:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
+                env=env,
             )
         except OSError as e:
             raise _CandidateFailed(f"cannot launch generator: {e.strerror or e}") from e
@@ -812,8 +914,36 @@ class PersonaService:
 
     # ------------------------------------------------------------------ user_profile.*
     async def handle_user_profile_get(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
-        """`user_profile.get` → `UserProfile`."""
-        return await asyncio.to_thread(lambda: self._profile_view(self.profiles.public_view()))
+        """`user_profile.get{import_existing?}` → `UserProfile`.
+
+        The first read (no saved profile yet) imports the user's existing info from the workspace
+        (`instructions/User.md`, role `user/profile.md` memories, `characters/*` avatar) so it is never re-typed;
+        `import_existing: true` re-runs the import and merges it on demand.
+        """
+        force = payload.get("import_existing") is True
+        async with self._meta_lock:
+            imported = await asyncio.to_thread(self._maybe_import_profile_sync, force)
+        view = await asyncio.to_thread(lambda: self._profile_view(self.profiles.public_view()))
+        if imported:
+            await self.host.broadcast("user_profile.updated", view)
+        return view
+
+    def _user_md_path(self) -> str:
+        return os.path.join(self.host.awd, USER_MD_REL_PATH)
+
+    def _maybe_import_profile_sync(self, force: bool) -> bool:
+        """Import workspace profile info when forced or never imported; True when the profile changed."""
+        if not force and not self.profiles.needs_import():
+            return False
+        imported = self.profiles.import_from_workspace(
+            self.host.awd, self.host.roles_dir, characters_dir=self.characters_dir
+        )
+        if not (imported["nickname"] or imported["bio"] or imported["avatar_imported"]):
+            return False
+        before = self.profiles.load()
+        after = self.profiles.apply_import(imported, overwrite=force)
+        keys = ("nickname", "bio", "character_dir", "avatar_rev", "cameo_opt_in")
+        return any(before.get(k) != after.get(k) for k in keys)
 
     async def handle_user_profile_put(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
         """`user_profile.put{nickname, bio, cameo_opt_in, avatar_object?}` → save + sync + broadcast."""
@@ -836,6 +966,8 @@ class PersonaService:
         if payload.get("avatar_object"):
             avatar = await self._avatar_webp_from_object(ctx, payload["avatar_object"])
         async with self._meta_lock:
+            if payload.get("import_existing") is True:
+                await asyncio.to_thread(self._maybe_import_profile_sync, True)
             view = await asyncio.to_thread(self._put_profile_sync, nickname, bio, cameo, avatar)
         await self.host.broadcast("user_profile.updated", view)
         return {"ok": True, "profile": view}
@@ -870,6 +1002,7 @@ class PersonaService:
             self.registry.list_role_ids(),
             profile["nickname"],
             profile["bio"],
+            instructions_user_md=self._user_md_path(),
         )
         return self._profile_view(self.profiles.public_view(profile))
 
@@ -1098,6 +1231,37 @@ class PersonaService:
         raise ProtocolError("AVATAR_SOURCE_INVALID", "no existing avatar image; please upload a photo first")
 
     # ------------------------------------------------------------------ avatar.generate
+    def _resolve_character_context(self, role_id: str, hint: str | None) -> str | None:
+        """Find lines in the role's own workspace files that explain terms used in `hint` (generic lookup).
+
+        Sources: `<roles_dir>/<role_id>/intro.md` (headings and `[file:` listings skipped) and string fields of
+        `<characters_dir>/<role_id>/characters.json`. Returns ≤ 3 lines (each ≤ 400 chars) or None.
+        """
+        tokens = hint_context_tokens(hint)
+        if not tokens or not is_valid_role_id(role_id):
+            return None
+        lines: list[str] = []
+        intro = safe_resolve(self.host.roles_dir, os.path.join(role_id, INTRO_MD))
+        if intro and os.path.isfile(intro):
+            with contextlib.suppress(OSError):
+                lines.extend(self._read_capped(intro).splitlines())
+        cdir = self._character_dir(role_id, create=False)
+        entries: list[dict[str, Any]] = []
+        if cdir:
+            with contextlib.suppress(ProtocolError):
+                entries = self._load_registry(os.path.join(cdir, "characters.json"))
+        if entries:
+            for entry in entries:
+                for key, value in entry.items():
+                    if key == "image":
+                        continue
+                    if isinstance(value, dict):
+                        values = list(value.values())
+                    else:
+                        values = value if isinstance(value, list) else [value]
+                    lines.extend(str(v) for v in values if isinstance(v, str))
+        return match_character_context(lines, tokens)
+
     async def handle_avatar_generate(self, ctx: RequestContext, payload: dict[str, Any]) -> Reply:
         """`avatar.generate` → immediate `avatar.job`; candidates follow as `media.ready` / `media.failed`.
 
@@ -1122,6 +1286,9 @@ class PersonaService:
         style_label = STYLE_TEXT.get(style_preset, style_preset.replace("_", " "))
         # Fail fast when no generator is available (argv built again per candidate).
         self._generator_argv("source.png", "cand.png", style_label, "probe")
+        character_context = (
+            await asyncio.to_thread(self._resolve_character_context, target_id, hint) if target_type == "role" else None
+        )
 
         async with self._rate_lock:
             since = time.time() - AVATAR_RATE_WINDOW_SEC
@@ -1164,7 +1331,11 @@ class PersonaService:
             )
         self._job_candidates[job_id] = [dict(c) for c in candidates]
         self._job_locks[job_id] = asyncio.Lock()
-        self._spawn(self._run_job(job_id, ctx.device_id, job_dir, source, style_label, hint, placeholders))
+        self._spawn(
+            self._run_job(
+                job_id, ctx.device_id, job_dir, source, style_label, hint, placeholders, character_context
+            )
+        )
         return Reply("avatar.job", {"job_id": job_id, "placeholders": placeholders, "eta_ms": AVATAR_ETA_MS})
 
     async def _run_job(
@@ -1176,12 +1347,15 @@ class PersonaService:
         style_label: str,
         hint: str,
         placeholders: list[str],
+        character_context: str | None = None,
     ) -> None:
         """Run every candidate concurrently and record the final job status."""
         try:
             await asyncio.gather(
                 *(
-                    self._run_candidate(job_id, device_id, job_dir, source, style_label, hint, i, ph)
+                    self._run_candidate(
+                        job_id, device_id, job_dir, source, style_label, hint, i, ph, character_context
+                    )
                     for i, ph in enumerate(placeholders)
                 ),
                 return_exceptions=True,
@@ -1218,13 +1392,20 @@ class PersonaService:
         hint: str,
         index: int,
         placeholder_id: str,
+        character_context: str | None = None,
     ) -> None:
         """Generate, normalize, upload and announce one candidate (never raises except cancellation)."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.watch_timeout_sec
         output = os.path.join(job_dir, f"cand_{index}.png")
         webp_path = os.path.join(job_dir, f"cand_{index}.webp")
-        prompt = build_avatar_prompt(style_label, VARIANTS[index % len(VARIANTS)], hint)
+        prompt = build_avatar_prompt(
+            style_label,
+            hint,
+            has_source_reference=True,
+            character_context=character_context,
+            variant=VARIANTS[index % len(VARIANTS)],
+        )
         try:
             argv = self._generator_argv(source, output, style_label, prompt)
             _, tail = await self._run_process(argv, self.watch_timeout_sec)

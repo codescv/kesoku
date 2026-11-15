@@ -97,3 +97,113 @@ def test_profile_store_defaults_and_validation(tmp_path):
     updated = store.update(nickname="Robin")
     assert updated["nickname"] == "Robin"
     assert json.loads(store.path and open(store.path, encoding="utf-8").read())["nickname"] == "Robin"
+
+
+# ---------------------------------------------------------------- v0.3.6 import + cross-channel sync
+
+USER_MD = (
+    "# USER PROFILE\n"
+    "- Male\n"
+    "- Discord handle: @bottlemerchant\n"
+    "- Nickname: 小张 (In Japanese: 小張(シャオジャン) — pass kana)\n"
+    "  - In Japanese (text and TTS) the name is always 小張(シャオジャン).\n"
+    "- Hobbie: Guitar, Gym\n"
+    "- AI Research Engineer\n"
+    "\n"
+    "# Files\n"
+    "- Blog drafts: `blog/`.\n"
+    "\n"
+    "# Time & Location\n"
+    "- travels often.\n"
+)
+MEMORY_PROFILE = (
+    '---\ndescription: "用户核心档案"\nvisibility: PINNED\n---\n\n'
+    "## 学习\n"
+    "- 日语水平与学习进度：已完成《新版标准日本语》初级第 21 课 #direct #session:bbccb454 #time:2026-11-12\n\n"
+    "## 健康与饮食\n"
+    "- 乳糖不耐受，完全不吃辣 #direct #session:ff5f9f8f #time:2026-11-09\n\n"
+    "## 历史\n"
+    "- 旧事实 #time:2025-01-01\n"
+)
+
+
+def _workspace(tmp_path):
+    from PIL import Image
+
+    awd = tmp_path / "band"
+    (awd / "instructions").mkdir(parents=True)
+    (awd / "instructions" / "User.md").write_text(USER_MD, encoding="utf-8")
+    mem = awd / "roles" / "tutor" / "memories" / "user"
+    mem.mkdir(parents=True)
+    (mem / "profile.md").write_text(MEMORY_PROFILE, encoding="utf-8")
+    (awd / "roles" / "plain" / "memories").mkdir(parents=True)
+    cdir = awd / "characters" / "xiaozhang"
+    (cdir / "images").mkdir(parents=True)
+    Image.new("RGB", (64, 80), (200, 10, 10)).save(cdir / "images" / "xiaozhang.jpeg", "JPEG")
+    (cdir / "characters.json").write_text(
+        json.dumps([{"name": "Xiao Zhang", "draftable": False, "aliases": ["小张", "小張"],
+                     "image": "characters/xiaozhang/images/xiaozhang.jpeg"}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return awd
+
+
+def test_import_from_workspace_reads_user_md_memories_and_avatar(tmp_path):
+    awd = _workspace(tmp_path)
+    store = up.UserProfileStore(str(awd))
+    assert store.needs_import()
+    got = store.import_from_workspace(str(awd), str(awd / "roles"))
+    assert got["nickname"] == "小张"
+    lines = got["bio"].splitlines()
+    assert lines[:4] == [
+        "- Male", "- Discord handle: @bottlemerchant", "- Hobbie: Guitar, Gym", "- AI Research Engineer"
+    ]
+    assert "- 日语水平与学习进度：已完成《新版标准日本语》初级第 21 课" in lines
+    assert "- 乳糖不耐受，完全不吃辣" in lines
+    assert not any("#session" in ln or "旧事实" in ln or "Nickname" in ln for ln in lines)
+    assert got["avatar_imported"] is True and got["character_dir"] == "xiaozhang"
+    assert set(got["sources"]) == {"instructions/User.md", "roles/tutor/memories/user/profile.md"}
+
+    saved = store.apply_import(got)
+    assert saved["nickname"] == "小张" and saved["character_dir"] == "xiaozhang" and saved["avatar_rev"] == 1
+    assert store.public_view()["avatar_ref"] == "user/avatar.webp"
+    assert not store.needs_import()
+
+
+def test_sync_writes_user_md_in_place_without_duplicating_memory(tmp_path, db):
+    awd = _workspace(tmp_path)
+    store = up.UserProfileStore(str(awd))
+    bio = store.import_from_workspace(str(awd), str(awd / "roles"))["bio"] + "\n- 喜欢拉面"
+    up.sync_profile_to_roles(db, str(awd / "roles"), ["tutor", "plain"], "小张", bio)
+
+    md = (awd / "instructions" / "User.md").read_text(encoding="utf-8")
+    head = md.split("# Files", 1)[0]
+    assert md.endswith(USER_MD[USER_MD.index("\n# Files") :])  # other sections verbatim
+    assert "- Nickname: 小张 (In Japanese: 小張(シャオジャン) — pass kana)\n  - In Japanese (text and TTS)" in head
+    assert head.index("- Discord handle") < head.index("- Nickname") < head.index("- Hobbie")
+    assert "- 喜欢拉面" in head and head.count("- Male") == 1
+    # Memory-owned facts stay only in the role memory (the memory writer keeps updating them).
+    assert "乳糖不耐受" not in md and "日语水平" not in md
+    tutor = (awd / "roles" / "tutor" / "memories" / "user" / "profile.md").read_text(encoding="utf-8")
+    assert up.BLOCK_START not in tutor and tutor.count("乳糖不耐受") == 1
+    assert not (awd / "roles" / "plain" / "memories" / "user" / "profile.md").exists()
+
+    # Renaming keeps the parenthetical note; a second identical sync is a no-op.
+    up.sync_profile_to_roles(db, str(awd / "roles"), ["tutor", "plain"], "阿张", bio)
+    md2 = (awd / "instructions" / "User.md").read_text(encoding="utf-8")
+    assert "- Nickname: 阿张 (In Japanese: 小張(シャオジャン) — pass kana)" in md2
+    assert up.sync_profile_to_roles(db, str(awd / "roles"), ["tutor", "plain"], "阿张", bio) == []
+    assert (awd / "instructions" / "User.md").read_text(encoding="utf-8") == md2
+
+
+def test_sync_without_user_md_dedupes_block_against_existing_bullets(tmp_path, db):
+    roles = tmp_path / "roles"
+    mem = roles / "tutor" / "memories" / "user"
+    mem.mkdir(parents=True)
+    (mem / "profile.md").write_text(MEMORY_PROFILE, encoding="utf-8")
+    bio = "- 乳糖不耐受，完全不吃辣\n- 喜欢拉面"
+    changed = up.sync_profile_to_roles(db, str(roles), ["tutor"], "Sam", bio, instructions_user_md="")
+    assert changed == ["tutor"]
+    text = (mem / "profile.md").read_text(encoding="utf-8")
+    assert text.count("乳糖不耐受") == 1
+    assert "- 简介：喜欢拉面" in text and "称呼：Sam" in text

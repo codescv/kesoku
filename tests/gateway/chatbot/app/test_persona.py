@@ -598,6 +598,105 @@ async def test_voice_preview(make_service, tmp_path):
         assert w.getnframes() == 8000
 
 
+TTS_SCRIPT = """#!/bin/bash
+set -e
+echo "$PWD|$KESOKU_DEFERRED_MEDIA|$3|$1" >> "$PWD/tts_calls.log"
+python3 - "$2" <<'PY'
+import sys, wave
+with wave.open(sys.argv[1], "wb") as w:
+    w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+    w.writeframes(b"\\x00\\x00" * 4000)
+PY
+"""
+
+
+async def test_voice_preview_resolves_role_tts_script_from_workspace(make_service):
+    svc, host = make_service()
+    script = os.path.join(host.roles_dir, "default", "scripts", "default-tts.sh")
+    _write(script, TTS_SCRIPT.encode("utf-8"))
+    reply = await svc.handle_voice_preview(_ctx(), {"role_id": "default"})
+    assert reply.type == "media.ready" and reply.payload["duration_ms"] == 500
+    with open(os.path.join(host.awd, "tts_calls.log"), encoding="utf-8") as f:
+        calls = f.read().splitlines()
+    cwd, deferred, flag, text = calls[0].split("|")
+    assert os.path.realpath(cwd) == os.path.realpath(host.awd)
+    assert deferred == "0" and flag == "--sync" and text == persona_mod.VOICE_PREVIEW_DEFAULT_TEXT_JA
+
+    # Same role/voice/text → cached audio, the script is not run again.
+    again = await svc.handle_voice_preview(_ctx(), {"role_id": "default"})
+    assert again.payload["duration_ms"] == 500
+    with open(os.path.join(host.awd, "tts_calls.log"), encoding="utf-8") as f:
+        assert len(f.read().splitlines()) == 1
+    # voice_preset naming the role works too (default_role fallback also covers unknown presets).
+    await svc.handle_voice_preview(_ctx(), {"voice_preset": "calm", "text": "テスト"})
+    with open(os.path.join(host.awd, "tts_calls.log"), encoding="utf-8") as f:
+        assert f.read().splitlines()[-1].endswith("|テスト")
+
+
+async def test_voice_preview_falls_back_to_qwen_tts_client(make_service, monkeypatch):
+    svc, host = make_service()
+    await _expect_error("BAD_REQUEST", svc.handle_voice_preview(_ctx(), {"role_id": "default"}))
+    client = os.path.join(host.awd, "skills", "qwen-tts", "scripts", "tts_client.py")
+    _write(client, b"# client")
+    seen = []
+
+    async def fake_run(argv, limit_sec, *, env=None):
+        seen.append((argv, limit_sec, env))
+        out = argv[argv.index("--output") + 1]
+        with wave.open(out, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(8000)
+            w.writeframes(b"\x00\x00" * 800)
+        return 0, ""
+
+    monkeypatch.setattr(svc, "_run_process", fake_run)
+    await svc.handle_voice_preview(_ctx(), {"role_id": "default"})
+    argv, limit, env = seen[-1]
+    assert argv[:3] == ["uv", "run", client] and "--sync" in argv and "--ref-audio" not in argv
+    assert argv[argv.index("--text") + 1] == persona_mod.VOICE_PREVIEW_DEFAULT_TEXT
+    assert limit == 60.0 and env["KESOKU_DEFERRED_MEDIA"] == "0"
+
+    _write(os.path.join(host.roles_dir, "default", "audio", "b.wav"), b"x")
+    _write(os.path.join(host.roles_dir, "default", "audio", "a.wav"), b"x")
+    await svc.handle_voice_preview(_ctx(), {"role_id": "default", "text": "やあ"})
+    argv = seen[-1][0]
+    assert argv[argv.index("--ref-audio") + 1].endswith(os.path.join("audio", "a.wav"))
+
+
+async def test_user_profile_get_auto_imports_existing_workspace_info(make_service):
+    svc, host = make_service()
+    awd = host.awd
+    _write(os.path.join(awd, "instructions", "User.md"),
+           b"# USER PROFILE\n- Nickname: Kai (pronounced Kye)\n- Guitarist\n\n# Files\n- notes/\n")
+    _write(os.path.join(host.roles_dir, "default", "memories", "user", "profile.md"),
+           "---\nvisibility: PINNED\n---\n\n## 饮食\n- 不吃辣 #direct #time:2026-11-01\n".encode())
+    _write(os.path.join(svc.characters_dir, "kai", "images", "kai.png"), _png_bytes((90, 90), (1, 2, 250)))
+    _write_json(os.path.join(svc.characters_dir, "kai", "characters.json"),
+                [{"name": "Kai", "aliases": [], "image": "characters/kai/images/kai.png"}])
+
+    got = await svc.handle_user_profile_get(_ctx(), {})
+    assert got["nickname"] == "Kai" and got["bio"] == "- Guitarist\n- 不吃辣"
+    assert got["avatar_ref"] == "user/avatar.webp" and got["character_dir"] == "kai" and got["cameo_opt_in"] is True
+    assert os.path.isfile(svc.profiles.path)
+    assert host.broadcasts[-1] == ("user_profile.updated", got)
+
+    # Saving does not duplicate anything across channels: User.md section updated in place, memory untouched.
+    await svc.handle_user_profile_put(_ctx(), {"nickname": "Kai", "bio": got["bio"] + "\n- Drummer"})
+    with open(os.path.join(awd, "instructions", "User.md"), encoding="utf-8") as f:
+        md = f.read()
+    assert md == "# USER PROFILE\n- Nickname: Kai (pronounced Kye)\n- Guitarist\n- Drummer\n\n# Files\n- notes/\n"
+    with open(os.path.join(host.roles_dir, "default", "memories", "user", "profile.md"), encoding="utf-8") as f:
+        mem = f.read()
+    assert "kesoku:user-profile" not in mem and mem.count("不吃辣") == 1
+
+    # A cleared profile is not re-imported implicitly; `import_existing` re-imports on demand.
+    await svc.handle_user_profile_put(_ctx(), {"nickname": "", "bio": ""})
+    assert (await svc.handle_user_profile_get(_ctx(), {}))["nickname"] == ""
+    again = await svc.handle_user_profile_get(_ctx(), {"import_existing": True})
+    assert again["nickname"] == "Kai" and "- 不吃辣" in again["bio"]
+
+
 async def test_start_stop_lifecycle(make_service):
     svc, host = make_service()
     await svc.start()
@@ -754,46 +853,91 @@ async def test_avatar_source_paths_outside_awd_are_rejected(make_service, tmp_pa
     assert _source_png(host, reply.payload["job_id"])[0] == (40, 40)
 
 
-def test_build_avatar_prompt_transformation_and_benniao():
-    from kesoku.gateway.chatbot.app.persona import build_avatar_prompt
+def test_build_avatar_prompt_is_generic_and_face_only():
+    from kesoku.gateway.chatbot.app.persona import _FACE_ONLY_REFERENCE, build_avatar_prompt
 
-    p_benniao = build_avatar_prompt("clean Japanese anime", "front-facing", "变成齐刘海小笨鸟形态，黑框眼镜")
-    assert "Transform the character from Image 1 completely" in p_benniao
-    assert "DO NOT draw a human person" in p_benniao
-    assert "chubby round white chibi bird" in p_benniao
-    assert "黑框眼镜" in p_benniao
+    plain = build_avatar_prompt("clean Japanese anime", None, has_source_reference=True, variant="front-facing")
+    assert _FACE_ONLY_REFERENCE in plain
+    assert "PRIORITY" not in plain and "<user_hint>" not in plain.replace(_FACE_ONLY_REFERENCE, "")
+    assert "Composition variant: front-facing." in plain
 
-    p_cat = build_avatar_prompt("watercolor", "three-quarter view", "猫咪形态")
-    assert "Transform the character from Image 1 completely" in p_cat
-    assert "DO NOT place a bird/animal on top of a human head" in p_cat
+    hinted = build_avatar_prompt("watercolor", "变成企鹅形态，戴红围巾", has_source_reference=True)
+    assert _FACE_ONLY_REFERENCE in hinted
+    assert "PRIORITY — <user_hint> overrides" in hinted
+    assert "transform the subject's ENTIRE body" in hinted
+    assert "<user_hint>变成企鹅形态，戴红围巾</user_hint>" in hinted
 
-    p_human = build_avatar_prompt("watercolor", "front-facing", "戴红围巾")
-    assert "Restyle the person in Image 1" in p_human
-    assert "applying this primary customization: 戴红围巾" in p_human
+    ctx = build_avatar_prompt(
+        "watercolor", "企鹅形态", has_source_reference=True, character_context="- 企鹅形态：白色圆滚滚 <b>"
+    )
+    assert ctx.index("<character_context>") < ctx.index("<user_hint>企鹅形态</user_hint>")
+    assert "<character_context>- 企鹅形态：白色圆滚滚 ‹b›</character_context>" in ctx
+
+    no_ref = build_avatar_prompt("pixel", "a cat", has_source_reference=False)
+    assert _FACE_ONLY_REFERENCE not in no_ref and "PRIORITY" not in no_ref and "<user_hint>a cat</user_hint>" in no_ref
 
 
-def test_build_avatar_prompt_face_only_reference_strips_microphone():
-    from kesoku.gateway.chatbot.app.persona import build_avatar_prompt
+def test_persona_and_memory_writer_have_no_character_or_prop_hardcoding():
+    root = os.path.dirname(persona_mod.__file__)
+    banned = ("小笨鸟", "笨鸟", "肥鸟", "话筒", "麦克风", "耳麦", "斋藤飞鸟", "飞鸟", "microphone", "新标日")
+    for path in (
+        os.path.join(root, "persona.py"),
+        os.path.join(root, "..", "..", "..", "agent", "memory_writer.py"),
+        os.path.join(root, "..", "..", "..", "agent", "user_profile.py"),
+    ):
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        for word in banned:
+            assert word not in text, (path, word)
 
-    clause = "Use Image 1 ONLY as a reference for facial features, eye shape, hairstyle, and hair color"
-    prompts = {
-        "default": build_avatar_prompt("clean Japanese anime", "front-facing", ""),
-        "hint": build_avatar_prompt("watercolor", "front-facing", "戴红围巾"),
-        "creature": build_avatar_prompt("watercolor", "front-facing", "变成齐刘海小笨鸟形态"),
-    }
-    for name, p in prompts.items():
-        assert clause in p, name
-        assert "IGNORE and REMOVE any microphone, stage headset, earpiece" in p, name
-        assert "do NOT draw any microphone or headset unless explicitly requested" in p, name
-        assert "signature accessories" not in p, name
-    for name in ("default", "hint"):
-        assert "stripping any microphone, headset, props, or background clutter from Image 1" in prompts[name]
 
-    # An explicit mic request in the hint relaxes the microphone ban but keeps the face-only reference.
-    p_mic = build_avatar_prompt("watercolor", "front-facing", "手拿话筒唱歌")
-    assert clause in p_mic
-    assert "do NOT draw any microphone" not in p_mic
-    assert "explicitly requests it" in p_mic
+async def test_character_context_from_role_workspace_files(make_service):
+    svc, host = make_service()
+    await svc.handle_persona_upsert(_ctx(), {"display_name": "Mika", "role_id": "mika"})
+    with open(os.path.join(host.roles_dir, "mika", "intro.md"), "w", encoding="utf-8") as f:
+        f.write(
+            "# 小企鹅形态\n"
+            "- 性格：开朗\n"
+            "- 小企鹅形态：圆滚滚的白色小企鹅，保留黑色齐刘海，胸前系蓝色领结\n"
+            "[file: roles/mika/stickers/小企鹅.gif]\n"
+        )
+    _write_json(
+        os.path.join(svc.characters_dir, "mika", "characters.json"),
+        [{"name": "Mika", "aliases": ["米卡"], "image": "roles/mika/images/mika.jpg", "note": "米卡的企鹅吉祥物"}],
+    )
+    got = svc._resolve_character_context("mika", "变成小企鹅形态")
+    assert got is not None and "圆滚滚的白色小企鹅" in got
+    assert "# " not in got and "[file:" not in got
+    assert svc._resolve_character_context("mika", "企鹅") is not None
+    assert svc._resolve_character_context("mika", "戴红帽子") is None
+    assert svc._resolve_character_context("mika", "  ") is None
+    assert svc._resolve_character_context("mika", None) is None
+    assert svc._resolve_character_context("../mika", "企鹅") is None
+
+
+PROMPT_SPY_GEN = textwrap.dedent(
+    """
+    import sys
+    from PIL import Image
+    source, output, style, prompt = sys.argv[1:5]
+    open(output + ".prompt.txt", "w", encoding="utf-8").write(prompt)
+    Image.new("RGB", (300, 200), (10, 120, 200)).save(output, "PNG")
+    """
+)
+
+
+async def test_avatar_generate_passes_character_context_into_prompt(make_service):
+    svc, host = make_service(generator=PROMPT_SPY_GEN)
+    await _make_hana(svc, host)
+    with open(os.path.join(host.roles_dir, "hana", "intro.md"), "w", encoding="utf-8") as f:
+        f.write("# Name\nHana\n- 团子形态：粉色糯米团子，保留双马尾\n")
+    reply = await _generate_without_upload(svc, "role", "hana", prompt_hint="团子形态")
+    job_dir = os.path.join(host.sessions_dir, "avatar_jobs", reply.payload["job_id"])
+    with open(os.path.join(job_dir, "cand_0.png.prompt.txt"), encoding="utf-8") as f:
+        prompt = f.read()
+    assert "<character_context>- 团子形态：粉色糯米团子，保留双马尾</character_context>" in prompt
+    assert "<user_hint>团子形态</user_hint>" in prompt
+    assert "FACIAL IDENTITY ONLY" in prompt
 
 
 async def test_source_avatar_preserved_across_ai_avatar_apply(make_service):

@@ -352,3 +352,16 @@ async def test_update_file_on_memory_dir_enforces_lock_pinned_allowlist_and_retu
         )
         assert "Error:" in out_bad
         assert "visibility: PINNED" in out_bad
+
+
+def test_course_families_are_generic() -> None:
+    from kesoku.agent.memory_writer import _course_families, is_same_course_progress
+
+    assert _course_families("已完成《新版标准日本语》初级第 21 课") == {"book:日本语"}
+    assert _course_families("《Python 编程 上册》第3课") == {"book:python编程"}
+    assert "subj:数学" in _course_families("数学学习进度：第5课")
+    assert "subj:吉他" in _course_families("吉他水平与学习进度：第2课")
+    assert _course_families("今天天气不错") == set()
+    assert is_same_course_progress("《微积分》第3课进度：片段 1/4", "已完成《微积分》第3课")
+    assert not is_same_course_progress("《微积分》第3课进度：完成", "《线性代数》第3课进度：完成")
+    assert is_same_course_progress("法语学习进度：完成第4课", "法语学习进度：推进到第4课片段 2")
