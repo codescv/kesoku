@@ -244,6 +244,28 @@ def test_devices_upsert_revoke_and_inactive(db):
     assert db.get_app_device("nope") is None
 
 
+def test_delete_app_device_removes_device_and_redeemed_pairings(db):
+    now = time.time()
+    db.upsert_app_device("dev_keep", "Laptop", "pair", created_at=now)
+    db.upsert_app_device("dev_gone", "Test Phone", "pair", created_at=now + 1)
+
+    db.insert_app_pairing("hash_keep", "salt_k", "Laptop", now, now + 120)
+    assert db.mark_app_pairing_redeemed("hash_keep", "dev_keep") is True
+    db.insert_app_pairing("hash_gone", "salt_g", "Test Phone", now + 1, now + 120)
+    assert db.mark_app_pairing_redeemed("hash_gone", "dev_gone") is True
+    db.insert_app_pairing("hash_pending", "salt_p", "Pending", now + 2, now + 120)
+
+    assert db.delete_app_device("dev_gone") is True
+    assert db.delete_app_device("dev_gone") is False
+    assert db.delete_app_device("missing") is False
+
+    assert db.get_app_device("dev_gone") is None
+    assert db.get_app_pairing("hash_gone") is None
+    assert db.get_app_device("dev_keep") is not None
+    assert db.get_app_pairing("hash_keep") is not None
+    assert db.get_app_pairing("hash_pending") is not None
+
+
 def test_pairings_single_active_offer_and_redeem(db):
     now = time.time()
     db.insert_app_pairing("h1", "s1", "first", now, now + 120)

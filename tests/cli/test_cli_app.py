@@ -141,7 +141,7 @@ def _install_clock(monkeypatch: pytest.MonkeyPatch, on_sleep: Callable[[_FakeClo
 def test_app_subcommand_is_registered() -> None:
     result = runner.invoke(app, ["app", "--help"])
     assert result.exit_code == 0, result.output
-    for cmd in ("pair", "devices", "revoke", "status"):
+    for cmd in ("pair", "devices", "revoke", "delete", "status"):
         assert cmd in result.output
 
 
@@ -330,6 +330,38 @@ def test_revoke_then_revoke_again(cfg_path: Path, db: DatabaseManager) -> None:
     second = _invoke("revoke", "dev-r", "-c", str(cfg_path))
     assert second.exit_code == 0, second.output
     assert "already revoked" in second.output
+
+
+def test_revoke_with_delete_flag_and_delete_command(cfg_path: Path, db: DatabaseManager) -> None:
+    now = time.time()
+    db.upsert_app_device("dev-del-1", "Temp 1", "pair", created_at=now)
+    db.insert_app_pairing("h_del_1", "s_del_1", "Temp 1", now, now + 120)
+    db.mark_app_pairing_redeemed("h_del_1", "dev-del-1")
+
+    res1 = _invoke("revoke", "dev-del-1", "--delete", "-c", str(cfg_path))
+    assert res1.exit_code == 0, res1.output
+    assert "Deleted device dev-del-1" in res1.output
+    assert db.get_app_device("dev-del-1") is None
+    assert db.get_app_pairing("h_del_1") is None
+
+    # Already-revoked device is still permanently deleted by `revoke -D`
+    db.upsert_app_device("dev-del-2", "Temp 2", "pair", created_at=now)
+    db.revoke_app_device("dev-del-2")
+    res2 = _invoke("revoke", "dev-del-2", "-D", "-c", str(cfg_path))
+    assert res2.exit_code == 0, res2.output
+    assert "Deleted device dev-del-2" in res2.output
+    assert db.get_app_device("dev-del-2") is None
+
+    # Dedicated `kesoku app delete` command
+    db.upsert_app_device("dev-del-3", "Temp 3", "pair", created_at=now)
+    res3 = _invoke("delete", "dev-del-3", "-c", str(cfg_path))
+    assert res3.exit_code == 0, res3.output
+    assert "Deleted device dev-del-3" in res3.output
+    assert db.get_app_device("dev-del-3") is None
+
+    res_missing = _invoke("delete", "missing-dev", "-c", str(cfg_path))
+    assert res_missing.exit_code == 1
+    assert "Unknown device 'missing-dev'" in res_missing.output
 
 
 # --------------------------------------------------------------------------- status

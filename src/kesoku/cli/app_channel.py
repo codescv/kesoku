@@ -20,7 +20,7 @@ from kesoku.gateway.chatbot.app.pairing import PAIRING_TTL_SECONDS, create_pairi
 from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
-app_app = typer.Typer(help="Manage the app channel: pair devices, list / revoke devices, show status.")
+app_app = typer.Typer(help="Manage the app channel: pair devices, list / revoke / delete devices, show status.")
 
 ConfigOpt = Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")]
 ServiceNameOpt = Annotated[
@@ -175,6 +175,14 @@ def devices_cmd(
 @app_app.command("revoke")
 def revoke_cmd(
     device_id: Annotated[str, typer.Argument(help="Device id to revoke")],
+    delete: Annotated[
+        bool,
+        typer.Option(
+            "--delete",
+            "-D",
+            help="Permanently delete the device record from kesoku.db instead of only marking it revoked.",
+        ),
+    ] = False,
     name: ServiceNameOpt = None,
     config: ConfigOpt = "config.toml",
     user: UserScopeOpt = True,
@@ -185,10 +193,33 @@ def revoke_cmd(
     if db.get_app_device(device_id) is None:
         console.print(f"[bold red]Unknown device '{device_id}'.[/bold red]")
         raise typer.Exit(code=1)
-    if db.revoke_app_device(device_id):
+    revoked = db.revoke_app_device(device_id)
+    if delete:
+        db.delete_app_device(device_id)
+        console.print(f"[green]Deleted device {device_id}.[/green]")
+        return
+    if revoked:
         console.print(f"[green]Revoked device {device_id}.[/green]")
     else:
         console.print(f"Device {device_id} was already revoked.")
+
+
+@app_app.command("delete")
+def delete_cmd(
+    device_id: Annotated[str, typer.Argument(help="Device id to permanently delete")],
+    name: ServiceNameOpt = None,
+    config: ConfigOpt = "config.toml",
+    user: UserScopeOpt = True,
+) -> None:
+    """Revoke and permanently delete a device record from kesoku.db."""
+    _, db, _ = _load(config, name=name, user=user)
+    console = Console()
+    if db.get_app_device(device_id) is None:
+        console.print(f"[bold red]Unknown device '{device_id}'.[/bold red]")
+        raise typer.Exit(code=1)
+    db.revoke_app_device(device_id)
+    db.delete_app_device(device_id)
+    console.print(f"[green]Deleted device {device_id}.[/green]")
 
 
 @app_app.command("status")

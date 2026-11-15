@@ -383,6 +383,14 @@ class AppTablesMixin:
                 )
                 return cur.rowcount > 0
 
+    def delete_app_device(self, device_id: str) -> bool:
+        """Permanently delete a device and any redeemed pairing row referencing it; returns True when deleted."""
+        with self.connection_provider.connection() as conn:
+            with conn:
+                conn.execute("DELETE FROM app_pairings WHERE redeemed_device_id = ?", (device_id,))
+                cur = conn.execute("DELETE FROM app_devices WHERE device_id = ?", (device_id,))
+                return cur.rowcount > 0
+
     def touch_app_device(self, device_id: str, ts: float | None = None) -> None:
         """Update `last_seen_at` for a device."""
         with self.connection_provider.connection() as conn:

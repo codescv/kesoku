@@ -255,6 +255,9 @@ def build_sys_prompt(
 You are working in the agent working directory (AWD).
 This is where you find the files you need by default.
 Unless the user explicitly instructs otherwise, do not refer to any file outside this directory.
+- `$AWD/notes.md` (in the AWD root, distinct from per-session `$STAGING_DIR/notes.md`) is the user's global sticky
+  notes / scratchpad (`简易便签`) shared with the Kesoku App UI (`便签` panel). Read or update `$AWD/notes.md` with
+  `read_file` / `update_file` when the user asks about their sticky notes or temporary jottings.
     """
 
     session_dir_info = ""

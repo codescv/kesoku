@@ -849,8 +849,9 @@ class RequestHandlers:
 
     # ------------------------------------------------------------------ devices
     async def handle_device_list(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
-        """`device.list{}` -> `{devices:[...]}` (current device flagged)."""
-        rows = await asyncio.to_thread(self.db.list_app_devices, True)
+        """`device.list{include_revoked?}` -> `{devices:[...]}` (current device flagged)."""
+        include_revoked = bool(payload.get("include_revoked", False))
+        rows = await asyncio.to_thread(self.db.list_app_devices, include_revoked=include_revoked)
         devices = [
             {
                 "device_id": r["device_id"],

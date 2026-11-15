@@ -231,6 +231,12 @@ async def test_unknown_device_auto_registered_and_revoked_device_rejected(env) -
     revoke = await rpc(env, "device.revoke", {"device_id": "dev-new"}, device="dev-1")
     assert revoke["payload"]["revoked"] is True
     assert env["link"].of_type("device.revoked")[-1]["payload"]["device_ids"] == ["dev-new"]
+    listed_active = (await rpc(env, "device.list", {}, device="dev-1"))["payload"]["devices"]
+    assert all(d["device_id"] != "dev-new" for d in listed_active)
+    listed_with_revoked = (
+        await rpc(env, "device.list", {"include_revoked": True}, device="dev-1")
+    )["payload"]["devices"]
+    assert any(d["device_id"] == "dev-new" and d["revoked_at"] is not None for d in listed_with_revoked)
     denied = await rpc(env, "device.list", {}, device="dev-new")
     assert denied["type"] == "error" and denied["payload"]["code"] == "UNAUTHORIZED"
 
@@ -766,6 +772,40 @@ async def test_pairing_offer_redeem_burn_and_hash(env) -> None:
     await bot.pairing.poll_once()
     assert "dev-web" in link.of_type("device.revoked")[-1]["payload"]["device_ids"]
     assert "dev-web" in bot._hello_extra()["revoked_device_ids"]
+
+
+async def test_pairing_redeem_prefers_custom_offer_name_over_generic_client_name(env) -> None:
+    from kesoku.gateway.chatbot.app.pairing import create_pairing_offer
+
+    bot = env["bot"]
+    # 1. Custom offer name overrides generic client fallbacks ("Android", "iPhone", "", "device").
+    offer_android = create_pairing_offer(bot.sync_db, "Chii Pixel 9")
+    await bot._on_frame(
+        make_envelope("pair.redeem", {"device_id": "dev-pixel", "name": "Android", "platform": "android"})
+    )
+    assert bot.sync_db.get_app_device("dev-pixel")["name"] == "Chii Pixel 9"
+    assert bot.sync_db.get_app_pairing(offer_android["code_hash"])["redeemed_device_id"] == "dev-pixel"
+
+    offer_iphone = create_pairing_offer(bot.sync_db, "Chii iPhone 17")
+    await bot._on_frame(
+        make_envelope("pair.redeem", {"device_id": "dev-iphone", "name": "iPhone", "platform": "ios"})
+    )
+    assert bot.sync_db.get_app_device("dev-iphone")["name"] == "Chii iPhone 17"
+    assert bot.sync_db.get_app_pairing(offer_iphone["code_hash"])["redeemed_device_id"] == "dev-iphone"
+
+    # 2. Custom non-generic client name is preserved even when offer has a custom name.
+    create_pairing_offer(bot.sync_db, "Offer Tablet")
+    await bot._on_frame(
+        make_envelope("pair.redeem", {"device_id": "dev-custom", "name": "Studio iPad Pro", "platform": "ios"})
+    )
+    assert bot.sync_db.get_app_device("dev-custom")["name"] == "Studio iPad Pro"
+
+    # 3. Default offer name ("device") falls back to the client-provided platform name.
+    create_pairing_offer(bot.sync_db, "device")
+    await bot._on_frame(
+        make_envelope("pair.redeem", {"device_id": "dev-default", "name": "Android", "platform": "android"})
+    )
+    assert bot.sync_db.get_app_device("dev-default")["name"] == "Android"
 
 
 async def test_auto_session_rename_emits_session_updated_not_turn_event(env) -> None:

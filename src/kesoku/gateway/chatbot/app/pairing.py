@@ -23,6 +23,9 @@ PAIRING_TTL_SECONDS = 120
 DEVICE_INACTIVITY_REVOKE_SECONDS = 180 * 86400
 DEVICE_NAME_MAX = 80
 TOUCH_INTERVAL_SECONDS = 60.0
+GENERIC_DEVICE_NAMES = frozenset(
+    {"", "device", "android", "iphone", "ios", "ipad", "web", "macos", "windows", "linux"}
+)
 
 
 def hash_pairing_code(code: str, salt: str) -> str:
@@ -119,8 +122,14 @@ class PairingService:
             logger.warning("Ignoring pair.redeem without a valid device_id")
             return None
         offer = await asyncio.to_thread(self.db.get_active_app_pairing, self._clock())
-        name = payload.get("name") if isinstance(payload.get("name"), str) and payload.get("name") else None
-        name = (name or (offer["name"] if offer else "device"))[:DEVICE_NAME_MAX]
+        raw_payload_name = payload.get("name")
+        payload_name = raw_payload_name.strip() if isinstance(raw_payload_name, str) else ""
+        offer_name = str(offer.get("name") or "").strip() if offer else ""
+        if offer_name and offer_name != "device" and payload_name.lower() in GENERIC_DEVICE_NAMES:
+            resolved_name = offer_name
+        else:
+            resolved_name = payload_name or offer_name or "device"
+        name = resolved_name[:DEVICE_NAME_MAX]
         platform = payload.get("platform") if isinstance(payload.get("platform"), str) else None
         await asyncio.to_thread(self.db.upsert_app_device, device_id, name, "pair", platform, self._clock())
         if offer is not None:
