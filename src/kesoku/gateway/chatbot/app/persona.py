@@ -1018,9 +1018,16 @@ class PersonaService:
         cdir = profile.get("character_dir") or "user"
         if not profile["cameo_opt_in"]:
             self._restore_reference(cdir)
-        elif not prev.get("cameo_opt_in"):
-            names = [profile["nickname"]] if profile["nickname"] else []
-            self._register_reference(cdir, None, names)
+        else:
+            ref_data: bytes | None = avatar
+            cdir_real = self._character_dir(cdir, create=False)
+            has_ref = bool(cdir_real and os.path.isfile(os.path.join(cdir_real, "images", REF_FACE_FILE)))
+            if ref_data is None and not has_ref:
+                with contextlib.suppress(ProtocolError):
+                    ref_data = self._load_existing_avatar_source_sync("user", "user")
+            if ref_data is not None or not prev.get("cameo_opt_in") or nickname is not None:
+                names = [profile["nickname"]] if profile["nickname"] else []
+                self._register_reference(cdir, ref_data, names)
         sync_profile_to_roles(
             self.host.sync_db,
             self.host.roles_dir,

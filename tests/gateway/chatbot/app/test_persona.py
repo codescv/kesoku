@@ -520,6 +520,45 @@ async def test_avatar_apply_user_registers_and_cameo_off_restores(make_service):
         assert json.load(f)[0]["image"] == "characters/user/images/ref_face.webp"
 
 
+async def test_user_profile_cameo_with_direct_uploaded_photo_without_ai_avatar(make_service):
+    svc, host = make_service()
+    obj = host.media.put(_png_bytes((600, 600)))
+    res = await svc.handle_user_profile_put(
+        _ctx(),
+        {"nickname": "Chii", "bio": "Direct photo reference", "cameo_opt_in": True, "avatar_object": obj},
+    )
+    assert res["ok"] is True
+    assert res["profile"]["cameo_opt_in"] is True
+    assert res["profile"]["avatar_ai"] is False
+    assert res["profile"]["avatar_ref"] == "user/avatar.webp"
+    ref_file = os.path.join(svc.characters_dir, "user", "images", "ref_face.webp")
+    assert os.path.isfile(ref_file)
+    reg = os.path.join(svc.characters_dir, "user", "characters.json")
+    with open(reg, encoding="utf-8") as f:
+        entries = json.load(f)
+    assert entries == [
+        {
+            "name": "Chii",
+            "aliases": [],
+            "image": "characters/user/images/ref_face.webp",
+            "draftable": False,
+        }
+    ]
+    # Turning cameo off and back on with an existing direct photo (no AI avatar) also works:
+    await svc.handle_user_profile_put(
+        _ctx(), {"nickname": "Chii", "bio": "Direct photo reference", "cameo_opt_in": False}
+    )
+    with open(reg, encoding="utf-8") as f:
+        assert json.load(f)[0]["image"] == ""
+    os.unlink(ref_file)
+    await svc.handle_user_profile_put(
+        _ctx(), {"nickname": "Chii", "bio": "Direct photo reference", "cameo_opt_in": True}
+    )
+    assert os.path.isfile(ref_file)
+    with open(reg, encoding="utf-8") as f:
+        assert json.load(f)[0]["image"] == "characters/user/images/ref_face.webp"
+
+
 async def test_avatar_generate_failures_emit_media_failed(make_service):
     svc, host = make_service(generator=GEN_FAIL)
     reply = await _generate(svc, host, target_type="user", target_id="me")
