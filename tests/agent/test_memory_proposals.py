@@ -156,6 +156,61 @@ def test_dismiss_blocklists_fingerprints_and_expiry(tmp_path) -> None:
         store.confirm_sync(q["proposal_id"])
 
 
+def test_stage_skips_facts_already_on_disk(tmp_path) -> None:
+    cfg, db = _cfg(tmp_path)
+    mem_dir = tmp_path / "roles" / "tutor" / "memories"
+    (mem_dir / "user").mkdir(parents=True)
+    (mem_dir / "user" / "profile.md").write_text(
+        "---\ndescription: profile\n---\n## 饮食\n- 用户有乳糖不耐受，喝拿铁要换燕麦奶 #direct #time:2026-11-01\n"
+        "## 历史\n- 住在大阪 #direct #superseded\n",
+        encoding="utf-8",
+    )
+    store = ProposalStore(db, cfg)
+    known = _op("用户有乳糖不耐受，喝拿铁需要换燕麦奶")
+    contained = _op("乳糖不耐受")
+    legacy = _op("住在大阪")  # only present as a legacy #superseded line -> still proposable
+    fresh = _op("最喜欢的乐队是 Aqours")
+    p = store.stage_sync(
+        session_id="s1", role="tutor", ops=[known, contained, legacy, fresh], memories_dir=mem_dir
+    )
+    assert p is not None
+    assert [o["text"] for o in p["ops"]] == ["住在大阪", "最喜欢的乐队是 Aqours"]
+    # Everything already remembered -> no card at all.
+    assert store.stage_sync(session_id="s2", role="tutor", ops=[known, contained]) is None
+
+
+def test_stage_supersedes_overlapping_pending_card_of_same_session(tmp_path) -> None:
+    cfg, db = _cfg(tmp_path)
+    store = ProposalStore(db, cfg)
+    first = store.stage_sync(
+        session_id="s1",
+        role="tutor",
+        ops=[
+            _op("日语学习进度：正在学习《新标日初级上》第1课，推进至片段 2/9", "topics/japanese_study.md"),
+            _op("宠物：养了一只橘猫"),
+        ],
+    )
+    assert first is not None and "superseded_ids" not in first
+    second = store.stage_sync(
+        session_id="s1",
+        role="tutor",
+        ops=[_op("日语学习进度：已完成《新标日初级上》第1课", "topics/japanese_study.md")],
+    )
+    assert second is not None and second["superseded_ids"] == [first["proposal_id"]]
+    texts = [o["text"] for o in second["ops"]]
+    assert texts == ["日语学习进度：已完成《新标日初级上》第1课", "宠物：养了一只橘猫"]
+    assert db.get_memory_proposal(first["proposal_id"])["status"] == "expired"
+    pending = [x for x in db.list_memory_proposals(status="pending") if x["role"] == "tutor"]
+    assert [x["proposal_id"] for x in pending] == [second["proposal_id"]]
+
+    # A different session is not merged; unrelated facts in the same session stack normally.
+    lesson2 = _op("日语学习进度：已完成第2课", "topics/japanese_study.md")
+    other = store.stage_sync(session_id="s2", role="tutor", ops=[lesson2])
+    assert other is not None and "superseded_ids" not in other
+    unrelated = store.stage_sync(session_id="s1", role="tutor", ops=[_op("生日是 3 月 14 日", "user/profile.md")])
+    assert unrelated is not None and "superseded_ids" not in unrelated
+
+
 async def test_stage_notifies_listeners(tmp_path) -> None:
     cfg, db = _cfg(tmp_path)
     seen: list[dict[str, Any]] = []

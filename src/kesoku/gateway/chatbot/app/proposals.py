@@ -75,7 +75,18 @@ class ProposalService:
         self._emit = emit_session_event
 
     async def on_staged(self, proposal: dict[str, Any]) -> None:
-        """Listener for newly staged proposals: emit a sequenced `memory.proposal` event."""
+        """Listener for newly staged proposals: emit a sequenced `memory.proposal` event.
+
+        Older pending cards merged into this proposal are first retired via `memory.proposal.resolved`
+        (`status:"expired"`, `superseded_by`) so clients never show stacked confirmation cards.
+        """
+        for old_id in proposal.get("superseded_ids") or []:
+            try:
+                await self._emit(proposal["session_id"], "memory.proposal.resolved", {
+                    "proposal_id": old_id, "status": "expired", "superseded_by": proposal["proposal_id"],
+                })
+            except Exception as e:
+                logger.warning(f"Failed to broadcast superseded proposal {old_id}: {e}")
         payload = proposal_for_wire(proposal)
         payload.pop("status", None)
         # `message_id` is the triggering user message, i.e. the turn id clients key assistant replies by.

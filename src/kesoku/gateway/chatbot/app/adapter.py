@@ -389,6 +389,10 @@ class AppChatbot(Chatbot):
             "lexical.explain": r.handle_lexical_explain,
             "workspace.list": r.handle_workspace_list,
             "workspace.read": r.handle_workspace_read,
+            "workspace.write": r.handle_workspace_write,
+            "workspace.mkdir": r.handle_workspace_mkdir,
+            "workspace.delete": r.handle_workspace_delete,
+            "workspace.download": r.handle_workspace_download,
             "device.list": r.handle_device_list,
             "device.revoke": r.handle_device_revoke,
             "ping": r.handle_ping,
@@ -638,11 +642,13 @@ class AppChatbot(Chatbot):
         mode = self.app_config.get_mode(mode_id)
         if mode is None:
             raise ProtocolError("BAD_REQUEST", "unknown mode")
+        current = await asyncio.to_thread(self.policy.current_mode, session_id)
         if not mode.launch_prompt:
-            current = await asyncio.to_thread(self.policy.current_mode, session_id)
             if current != mode_id and current != "chat":
                 return await self.stop_mode(session_id, device_id, None)
             return None
+        if current != mode_id:
+            await self._notify_mode_exit(session_id, current)
         override = mode.llm_override.model_dump(exclude_none=True) if mode.llm_override else None
         if override:
             await asyncio.to_thread(self.sync_db.upsert_app_session_prefs, session_id, llm_override=override)
@@ -659,6 +665,7 @@ class AppChatbot(Chatbot):
     async def stop_mode(self, session_id: str, device_id: str, instance_id: str | None) -> dict[str, Any] | None:
         """Inject the stop prompt of the session's current mode (or the configured default)."""
         current = await asyncio.to_thread(self.policy.current_mode, session_id)
+        await self._notify_mode_exit(session_id, current)
         mode = self.app_config.get_mode(current)
         text = (mode.stop_prompt if mode and mode.stop_prompt else None) or self.app_config.mode_stop_prompt
         if instance_id:
@@ -676,6 +683,18 @@ class AppChatbot(Chatbot):
             llm_override=None,
             mode_hint="chat",
         )
+
+    async def _notify_mode_exit(self, session_id: str, previous_mode: str | None) -> None:
+        """Extract the finished lesson/game once (T2 `mode_exit`) when leaving a non-chat interactive mode."""
+        if not previous_mode or previous_mode == "chat":
+            return
+        consolidator = getattr(self.gateway.context, "memory_consolidator", None)
+        if consolidator is None or not hasattr(consolidator, "notify_close"):
+            return
+        try:
+            await consolidator.notify_close(session_id, reason="mode_exit")
+        except Exception as e:
+            logger.warning(f"Failed to notify memory consolidator on mode exit ({previous_mode}): {e}")
 
     async def set_session_role(self, session_id: str, role: str) -> None:
         """Rebind a session's persona in place (one session per app channel)."""

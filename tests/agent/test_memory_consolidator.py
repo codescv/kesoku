@@ -299,7 +299,7 @@ async def test_triggers_debounce_budget_backoff_and_consolidate_file_splitter(tm
         db,
         sid="s_trig",
         turn_idx=1,
-        user_text="记住以后所有测试都用 pytest 运行",
+        user_text="请记住以后所有测试都用 pytest 运行",
         asst_text="好的",
         ts=now + 1,
     )
@@ -895,3 +895,54 @@ async def test_minimal_thinking_unsupported_falls_back_to_low(tmp_path, monkeypa
     assert seen_levels == ["minimal", "low", "low"]
     await consolidator.stop(wait_seconds=1.0)
 
+
+
+@pytest.mark.asyncio
+async def test_confirm_only_session_skips_signal_and_raises_batch_threshold(tmp_path, monkeypatch) -> None:
+    """Interactive `confirm_only` modes never fire T1-immediate; batch needs max(min_turns * 3, 16) = 24 turns."""
+    db_path = str(tmp_path / "co.db")
+    db = DatabaseManager(db_path)
+    db.init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=db_path, roles_dir=str(tmp_path / "roles")))
+    cfg.agent_working_dir = str(tmp_path)
+    assert cfg.agent.memory_extraction_min_turns == 8
+    assert cfg.agent.memory_extraction_min_chars == 4000
+    ctx = KesokuContext(config=cfg, llm=None, db=db)
+    consolidator = MemoryConsolidator(ctx, prewarm_embeddings=False, enable_timers=False)
+    enqueued: list[EpisodeExtract] = []
+    monkeypatch.setattr(consolidator, "enqueue", lambda job: enqueued.append(job) or True)  # type: ignore[assignment]
+
+    policies = {"s_class": "confirm_only", "s_chat": None}
+    ctx.memory_policy_override_provider = lambda sid: policies.get(sid)
+    now = 1_760_000_000.0
+    for sid in policies:
+        db.create_session(Session(id=sid, title=sid, created_at=now, updated_at=now, role_name="tutor"))
+
+    # Generic classroom words no longer match the tightened default regex.
+    import re as _re
+
+    sig = cfg.agent.memory_extraction_signal_regex
+    assert not _re.search(sig, "我学会了这个句型，记住了")
+    assert _re.search(sig, "请记住我对花生过敏")
+
+    # confirm_only: an explicit signal does NOT trigger T1-immediate; 23 turns stay below the batch floor.
+    for i in range(1, 24):
+        text = f"请记住我是大学生，第{i}句练习文本"
+        u, _ = _save_turn(db, sid="s_class", turn_idx=i, user_text=text, asst_text="はい", ts=now + i)
+        await consolidator.notify_turn(session_id="s_class", role="tutor", user_msg=u)
+    assert enqueued == []
+    text = "第24句练习文本，继续上课"
+    u, _ = _save_turn(db, sid="s_class", turn_idx=24, user_text=text, asst_text="はい", ts=now + 24)
+    await consolidator.notify_turn(session_id="s_class", role="tutor", user_msg=u)
+    assert [j.reason for j in enqueued] == ["batch"]
+
+    # Normal chat session: the same signal fires immediately.
+    enqueued.clear()
+    u, _ = _save_turn(db, sid="s_chat", turn_idx=1, user_text="请记住我对花生过敏", asst_text="好的", ts=now + 100)
+    await consolidator.notify_turn(session_id="s_chat", role="tutor", user_msg=u)
+    assert [j.reason for j in enqueued] == ["signal"]
+
+    # Mode exit (T2) extracts the finished lesson once.
+    enqueued.clear()
+    assert await consolidator.notify_close("s_class", reason="mode_exit") is True
+    assert [j.reason for j in enqueued] == ["mode_exit"]

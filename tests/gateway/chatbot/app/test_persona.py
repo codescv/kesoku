@@ -772,6 +772,30 @@ def test_build_avatar_prompt_transformation_and_benniao():
     assert "applying this primary customization: 戴红围巾" in p_human
 
 
+def test_build_avatar_prompt_face_only_reference_strips_microphone():
+    from kesoku.gateway.chatbot.app.persona import build_avatar_prompt
+
+    clause = "Use Image 1 ONLY as a reference for facial features, eye shape, hairstyle, and hair color"
+    prompts = {
+        "default": build_avatar_prompt("clean Japanese anime", "front-facing", ""),
+        "hint": build_avatar_prompt("watercolor", "front-facing", "戴红围巾"),
+        "creature": build_avatar_prompt("watercolor", "front-facing", "变成齐刘海小笨鸟形态"),
+    }
+    for name, p in prompts.items():
+        assert clause in p, name
+        assert "IGNORE and REMOVE any microphone, stage headset, earpiece" in p, name
+        assert "do NOT draw any microphone or headset unless explicitly requested" in p, name
+        assert "signature accessories" not in p, name
+    for name in ("default", "hint"):
+        assert "stripping any microphone, headset, props, or background clutter from Image 1" in prompts[name]
+
+    # An explicit mic request in the hint relaxes the microphone ban but keeps the face-only reference.
+    p_mic = build_avatar_prompt("watercolor", "front-facing", "手拿话筒唱歌")
+    assert clause in p_mic
+    assert "do NOT draw any microphone" not in p_mic
+    assert "explicitly requests it" in p_mic
+
+
 async def test_source_avatar_preserved_across_ai_avatar_apply(make_service):
     svc, host = make_service()
     # Upload a direct photo (120x80 red) via persona.upsert

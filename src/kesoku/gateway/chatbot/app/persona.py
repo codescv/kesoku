@@ -139,8 +139,35 @@ def sanitize_prompt_hint(raw: str | None) -> str:
     return text[: LIMITS["PROMPT_HINT_MAX"]]
 
 
+_FACE_ONLY_REFERENCE = (
+    "CRITICAL: Use Image 1 ONLY as a reference for facial features, eye shape, hairstyle, and hair color. "
+    "Completely IGNORE and REMOVE any microphone, stage headset, earpiece, hands holding objects, stage props, "
+    "or background elements present in Image 1 (do NOT draw any microphone or headset unless explicitly "
+    "requested in the user hint)."
+)
+_FACE_ONLY_REFERENCE_PROP_REQUESTED = (
+    "CRITICAL: Use Image 1 ONLY as a reference for facial features, eye shape, hairstyle, and hair color. "
+    "Completely IGNORE and REMOVE any stage props, hands holding objects, text/watermarks, or background "
+    "elements present in Image 1; only draw a microphone / headset / stage prop because the user hint "
+    "explicitly requests it."
+)
+_PROP_HINT_RE = re.compile(r"话筒|麦克风|耳麦|耳返|microphone|\bmic\b|headset|舞台|stage", re.IGNORECASE)
+
+
+def _face_only_clause(hint: str) -> str:
+    """Return the Image-1 face-only reference clause (relaxed when the hint itself asks for a mic/stage prop)."""
+    if hint and _PROP_HINT_RE.search(hint):
+        return _FACE_ONLY_REFERENCE_PROP_REQUESTED
+    return _FACE_ONLY_REFERENCE
+
+
 def build_avatar_prompt(style_label: str, variant: str, hint: str) -> str:
-    """Build the identity-preserving restyle or creature-transformation prompt for one candidate."""
+    """Build the identity-preserving restyle or creature-transformation prompt for one candidate.
+
+    Image 1 is strictly a facial identity / eye shape / hairstyle / hair-color reference: stage photos often
+    contain a microphone (话筒) or headset, which must never leak into new avatars unless the hint asks for it.
+    """
+    face_only = _face_only_clause(hint)
     if hint and _TRANSFORM_HINT_RE.search(hint):
         benniao_desc = ""
         if _BENNIAO_HINT_RE.search(hint):
@@ -153,20 +180,23 @@ def build_avatar_prompt(style_label: str, variant: str, hint: str) -> str:
         return (
             f"Transform the character from Image 1 completely into the following non-human / mascot / stylized "
             f"form: {hint}{benniao_desc}; art style: {style_label}; carry over signature hair/bangs motif, hair "
-            f"color, and requested accessories from Image 1 into the transformed creature design; CRITICAL: the "
-            f"subject itself MUST BE the transformed creature/mascot filling the center of the square avatar — "
-            f"DO NOT draw a human person, DO NOT draw a human face or human head, and DO NOT place a bird/animal "
-            f"on top of a human head; {variant}; centered square avatar composition, clean simple background"
+            f"color, and requested accessories from the hint into the transformed creature design; {face_only} "
+            f"CRITICAL: the subject itself MUST BE the transformed creature/mascot filling the center of the "
+            f"square avatar — DO NOT draw a human person, DO NOT draw a human face or human head, and DO NOT place "
+            f"a bird/animal on top of a human head; {variant}; centered square avatar composition, clean simple "
+            f"background"
         )
     if hint:
         return (
             f"Restyle the person in Image 1 as a {style_label} square portrait avatar, applying this primary "
-            f"customization: {hint}; preserve facial identity and hair color from Image 1 unless modified by "
-            f"'{hint}'; {variant}; square head-and-shoulders composition, simple background"
+            f"customization: {hint}; preserve facial identity, eye shape, hairstyle and hair color from Image 1 "
+            f"unless modified by '{hint}', while stripping any microphone, headset, props, or background clutter "
+            f"from Image 1; {face_only} {variant}; square head-and-shoulders composition, simple background"
         )
     return (
         f"Restyle the person in Image 1 as a {style_label} portrait avatar; keep the same face shape, hairstyle, "
-        f"hair color and signature accessories; {variant}; square head-and-shoulders composition, simple background"
+        f"hair color while stripping any microphone, headset, props, or background clutter from Image 1; "
+        f"{face_only} {variant}; square head-and-shoulders composition, simple background"
     )
 
 

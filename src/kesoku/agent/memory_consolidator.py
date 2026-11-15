@@ -690,6 +690,11 @@ def consolidate_role_sync(
     return touched
 
 
+# Mid-session T1-batch floors for interactive `confirm_only` modes (lessons / games extract on exit instead).
+CONFIRM_ONLY_MIN_TURNS_FLOOR = 16
+CONFIRM_ONLY_MIN_CHARS_FLOOR = 8000
+
+
 class MemoryConsolidator:
     """Per-role single-writer background extraction and consolidation coordinator."""
 
@@ -909,9 +914,13 @@ class MemoryConsolidator:
         pending_turns = int(cursor.get("pending_user_turns") or 0)
         pending_chars = int(cursor.get("pending_chars") or 0)
 
+        # Interactive `confirm_only` modes (jp_classroom / galgame / trpg / ...) must not nag mid-lesson: no
+        # T1-immediate, and a much higher T1-batch bar. They extract on mode exit (T2), close, or idle (T4).
+        confirm_only = await self._is_confirm_only_session(session_id)
+
         # T1-immediate: narrow configurable signal regex, never on clicked options, debounced per session
         sig_pat = (cfg.agent.memory_extraction_signal_regex or "").strip()
-        if not clicked_option and sig_pat and cleaned_user:
+        if not confirm_only and not clicked_option and sig_pat and cleaned_user:
             if re.search(sig_pat, cleaned_user):
                 debounce_s = float(cfg.agent.memory_extraction_debounce_seconds)
                 now = time.monotonic()
@@ -930,10 +939,38 @@ class MemoryConsolidator:
         # T1-batch: >= min_turns or >= min_chars (requiring >= 20 meaningful chars so pure "ok" spam waits)
         min_turns = int(cfg.agent.memory_extraction_min_turns)
         min_chars = int(cfg.agent.memory_extraction_min_chars)
+        if confirm_only:
+            min_turns = max(min_turns * 3, CONFIRM_ONLY_MIN_TURNS_FLOOR) if min_turns > 0 else 0
+            min_chars = max(min_chars, CONFIRM_ONLY_MIN_CHARS_FLOOR) if min_chars > 0 else 0
         if pending_chars >= 20 and (
             (min_turns > 0 and pending_turns >= min_turns) or (min_chars > 0 and pending_chars >= min_chars)
         ):
             self.enqueue(EpisodeExtract(role=safe_role, session_id=session_id, reason="batch"))
+
+    async def _is_confirm_only_session(self, session_id: str) -> bool:
+        """Return True when the session currently runs under an interactive `confirm_only` memory policy.
+
+        Consults an optional `proposal_hook.is_confirm_only_session(session_id)` first, then the channel's
+        authoritative `memory_policy_override_provider` (per-mode app policy). Errors are treated as False.
+        """
+        if not session_id:
+            return False
+        hook = getattr(self, "_proposal_hook", None) or getattr(self.context, "proposal_hook", None)
+        checker = getattr(hook, "is_confirm_only_session", None) if hook is not None else None
+        provider = getattr(self.context, "memory_policy_override_provider", None)
+        if not callable(checker) and not callable(provider):
+            return False
+        try:
+            if callable(checker):
+                res = checker(session_id)
+                if asyncio.iscoroutine(res):
+                    res = await res
+                return bool(res)
+            policy = await self._run_on_worker(provider, session_id)
+            return str(policy or "").strip().lower() == "confirm_only"
+        except Exception as e:
+            logger.debug(f"confirm_only policy lookup failed for session '{session_id}': {e}")
+            return False
 
     async def _delayed_signal_enqueue(self, role: str, session_id: str, delay: float) -> None:
         try:
@@ -1428,6 +1465,7 @@ class MemoryConsolidator:
                         ops=confirm_ops,
                         message_id=confirm_msg_id,
                         source_mode=source_mode,
+                        memories_dir=mem_dir,
                     )
                     if confirm_ops
                     else None

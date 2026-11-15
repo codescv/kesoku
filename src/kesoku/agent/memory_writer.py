@@ -242,6 +242,115 @@ def bullet_similarity(a: str, b: str) -> float:
     return len(sa & sb) / union if union else 0.0
 
 
+# Fuzzy heading reuse: `bullet_similarity >= 0.45` or connector-free char Jaccard >= 0.60 (short CJK headings).
+SECTION_FUZZY_THRESHOLD = 0.45
+SECTION_CHAR_FUZZY_THRESHOLD = 0.60
+_SECTION_FUZZY_EXCLUDED = frozenset({HISTORY_SECTION_NAME, "其他", DEFAULT_SECTION_NAME})
+_SECTION_CONNECTOR_CHARS = frozenset("与和及的、&/ -—_")
+
+# Slot superseding thresholds (in-place replacement instead of a second bullet).
+SLOT_SIMILARITY_THRESHOLD = 0.72
+_KEY_PREFIX_RE = re.compile(r"^\s*([^：:\n]{2,16}?)\s*[：:]\s*\S")
+_COURSE_RE = re.compile(r"《([^》]{1,40})》")
+_LESSON_RE = re.compile(r"第\s*([0-9]+|[一二三四五六七八九十百]+)\s*课")
+_PROGRESS_WORD_RE = re.compile(r"完成|进度|推进|学到|学完|学习到|进行到|片段|开始学|上到|讲到")
+_SEGMENT_RE = re.compile(r"片段|第\s*\d+\s*步")
+
+
+def section_similarity(a: str, b: str) -> float:
+    """Similarity between two `##` heading names (max of bigram Jaccard and connector-free char Jaccard)."""
+    base = bullet_similarity(a, b)
+    ca = {ch for ch in (a or "").lower() if not ch.isspace() and ch not in _SECTION_CONNECTOR_CHARS}
+    cb = {ch for ch in (b or "").lower() if not ch.isspace() and ch not in _SECTION_CONNECTOR_CHARS}
+    if not ca or not cb:
+        return base
+    char_j = len(ca & cb) / len(ca | cb)
+    # Normalise so the char-level score maps onto the shared 0.45 threshold scale.
+    scaled = char_j * (SECTION_FUZZY_THRESHOLD / SECTION_CHAR_FUZZY_THRESHOLD)
+    return max(base, scaled)
+
+
+def bullet_key_prefix(text: str) -> str | None:
+    """Return the normalised `Key：` / `Key:` slot prefix (2..16 chars) of a bullet, or None."""
+    core = _TAG_TOKEN_RE.sub("", text or "").strip()
+    m = _KEY_PREFIX_RE.match(core)
+    if not m:
+        return None
+    key = m.group(1).strip()
+    if len(key) < 2 or key.isdigit() or key.lower() in {"http", "https", "ftp", "file", "mailto"}:
+        return None
+    if any(ch in key for ch in "，。,;；！？!?"):
+        return None
+    return _PUNCT_WS_RE.sub("", key.lower()) or None
+
+
+def _course_families(text: str) -> set[str]:
+    families: set[str] = set()
+    for m in _COURSE_RE.finditer(text):
+        name = m.group(1)
+        families.add("新标日" if "新标日" in name else _PUNCT_WS_RE.sub("", name.lower()))
+    if "新标日" in text:
+        families.add("新标日")
+    if "日语" in text or "日本語" in text:
+        families.add("日语")
+    return families
+
+
+def _lesson_numbers(text: str) -> set[str]:
+    return {m.group(1) for m in _LESSON_RE.finditer(text)}
+
+
+def is_same_course_progress(a: str, b: str) -> bool:
+    """Return True when both bullets record study progress for the same course lesson (or segment run)."""
+    if not (_PROGRESS_WORD_RE.search(a) and _PROGRESS_WORD_RE.search(b)):
+        return False
+    fa, fb = _course_families(a), _course_families(b)
+    if not fa or not fb:
+        return False
+    # Treat `新标日` as a Japanese course so `日语…第1课` and `《新标日初级上》第1课` collide.
+    if "新标日" in fa:
+        fa = fa | {"日语"}
+    if "新标日" in fb:
+        fb = fb | {"日语"}
+    if not (fa & fb):
+        return False
+    la, lb = _lesson_numbers(a), _lesson_numbers(b)
+    if la and lb:
+        return bool(la & lb)
+    return bool(_SEGMENT_RE.search(a) and _SEGMENT_RE.search(b))
+
+
+def is_same_memory_slot(existing: str, incoming: str) -> bool:
+    """Slot rule: near-duplicate text, same `Key：` prefix, or same course-lesson progress."""
+    if bullet_similarity(existing, incoming) >= SLOT_SIMILARITY_THRESHOLD:
+        return True
+    ka, kb = bullet_key_prefix(existing), bullet_key_prefix(incoming)
+    if ka and kb and ka == kb:
+        return True
+    return is_same_course_progress(existing, incoming)
+
+
+def strip_superseded_bullets(doc: _MemoryDocument) -> bool:
+    """Drop legacy `#superseded` bullets everywhere and remove `## 历史` once empty. Returns True if changed."""
+    changed = False
+    kept_sections: list[_MemorySection] = []
+    for sec in doc.sections:
+        new_lines: list[str] = []
+        for ln in sec.lines:
+            pb = _parse_bullet_line(ln)
+            if pb is not None and pb.superseded:
+                changed = True
+                continue
+            new_lines.append(ln)
+        sec.lines = new_lines
+        if sec.name == HISTORY_SECTION_NAME and not any(ln.strip() for ln in sec.lines):
+            changed = True
+            continue
+        kept_sections.append(sec)
+    doc.sections = kept_sections
+    return changed
+
+
 @dataclass
 class _MemorySection:
     """A `## Heading` section inside a Markdown memory file."""
@@ -295,6 +404,17 @@ class _MemoryDocument:
         for sec in self.sections:
             if sec.name.lower() == clean_name.lower():
                 return sec
+        if clean_name not in _SECTION_FUZZY_EXCLUDED:
+            best: _MemorySection | None = None
+            best_score = 0.0
+            for sec in self.sections:
+                if sec.name in _SECTION_FUZZY_EXCLUDED:
+                    continue
+                score = section_similarity(sec.name, clean_name)
+                if score >= SECTION_FUZZY_THRESHOLD and score > best_score:
+                    best, best_score = sec, score
+            if best is not None:
+                return best
         new_sec = _MemorySection(name=clean_name, lines=[])
         # Keep `## 历史` at the bottom if it already exists.
         hist_idx = next((i for i, s in enumerate(self.sections) if s.name == HISTORY_SECTION_NAME), None)
@@ -482,7 +602,8 @@ class MemoryWriter:
                     )
 
                 doc = _MemoryDocument.parse(disk_raw)
-                file_changed = False
+                # Legacy `#superseded` archive lines are clutter: replaced bullets are now rewritten in place.
+                file_changed = strip_superseded_bullets(doc)
 
                 for op in file_ops:
                     kind = str(op.get("op") or "").strip().lower()
@@ -652,26 +773,9 @@ class MemoryWriter:
                     ):
                         return False
 
-                    sim = bullet_similarity(existing.core_text, incoming.core_text)
-                    if existing.confidence == "#direct" and incoming.confidence == "#direct" and sim < 0.80:
-                        archived = _ParsedBullet(
-                            core_text=existing.core_text,
-                            confidence=existing.confidence,
-                            time_date=existing.time_date,
-                            session_id=existing.session_id,
-                            superseded=True,
-                            extra_tags=list(existing.extra_tags),
-                        )
-                        hist_sec = doc.get_or_create_section(HISTORY_SECTION_NAME)
-                        archived_line = archived.render()
-                        if archived_line not in hist_sec.lines:
-                            hist_sec.lines.append(archived_line)
-
-                    if sec is target_sec:
-                        sec.lines[idx] = incoming.render()
-                    else:
-                        sec.lines.pop(idx)
-                        target_sec.lines.append(incoming.render())
+                    # Replace in place (no `## 历史` / `#superseded` archive) and purge other same-slot copies.
+                    sec.lines[idx] = incoming.render()
+                    cls._purge_slot_duplicates(doc, incoming, keep_sec=sec, keep_idx=idx)
                     return True
             logger.debug(f"replaces target '{replaces}' not found; treating as plain upsert.")
 
@@ -723,5 +827,65 @@ class MemoryWriter:
                 sec.lines[idx] = rendered
                 return True
 
+        # Slot superseding: same `Key：` prefix, same course-lesson progress, or Jaccard >= 0.72 -> in place.
+        for sec in [target_sec, *(s for s in doc.sections if s is not target_sec and s.name != HISTORY_SECTION_NAME)]:
+            for idx, ln in enumerate(sec.lines):
+                existing = _parse_bullet_line(ln)
+                if existing is None or existing.superseded:
+                    continue
+                if not is_same_memory_slot(existing.core_text, incoming.core_text):
+                    continue
+                if existing.confidence == "#direct" and incoming.confidence != "#direct":
+                    return False
+                if existing.time_date and incoming.time_date and incoming.time_date < existing.time_date:
+                    return False
+                merged_extra = list(incoming.extra_tags)
+                for tag in existing.extra_tags:
+                    if tag not in merged_extra:
+                        merged_extra.append(tag)
+                replacement = _ParsedBullet(
+                    core_text=incoming.core_text,
+                    confidence=incoming.confidence,
+                    time_date=incoming.time_date,
+                    session_id=incoming.session_id,
+                    superseded=False,
+                    extra_tags=merged_extra,
+                )
+                rendered = replacement.render()
+                changed = sec.lines[idx] != rendered
+                sec.lines[idx] = rendered
+                changed = cls._purge_slot_duplicates(doc, incoming, keep_sec=sec, keep_idx=idx) or changed
+                return changed
+
         target_sec.lines.append(incoming.render())
         return True
+
+    @classmethod
+    def _purge_slot_duplicates(
+        cls,
+        doc: _MemoryDocument,
+        incoming: _ParsedBullet,
+        *,
+        keep_sec: _MemorySection,
+        keep_idx: int,
+    ) -> bool:
+        """Remove other bullets occupying the same slot as `incoming` (keeps `keep_sec.lines[keep_idx]`)."""
+        removed = False
+        for sec in doc.sections:
+            if sec.name == HISTORY_SECTION_NAME:
+                continue
+            new_lines: list[str] = []
+            for idx, ln in enumerate(sec.lines):
+                if sec is keep_sec and idx == keep_idx:
+                    new_lines.append(ln)
+                    continue
+                pb = _parse_bullet_line(ln)
+                if pb is not None and is_same_memory_slot(pb.core_text, incoming.core_text):
+                    if pb.confidence == "#direct" and incoming.confidence != "#direct":
+                        new_lines.append(ln)
+                        continue
+                    removed = True
+                    continue
+                new_lines.append(ln)
+            sec.lines = new_lines
+        return removed

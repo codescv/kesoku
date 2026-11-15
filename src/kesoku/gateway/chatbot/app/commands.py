@@ -8,9 +8,15 @@ proposals in `proposals.py`, per-mode memory policies in `memory_policy.py`.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import contextlib
 import json
+import mimetypes
 import os
 import re
+import shutil
+import tempfile
 import time
 import uuid
 from collections import OrderedDict
@@ -76,6 +82,14 @@ WORKSPACE_MEDIA_EXTS = (
     ".mp4",
     ".webm",
 )
+WORKSPACE_WRITE_MAX_BYTES = 10 * 1024 * 1024
+WORKSPACE_DOWNLOAD_MAX_BYTES = 15 * 1024 * 1024
+# Engine<->relay text frames are capped at 1 MiB, so larger downloads go through a signed media URL instead.
+WORKSPACE_DOWNLOAD_INLINE_MAX_BYTES = 640 * 1024
+WORKSPACE_DELETE_SCAN_MAX_ENTRIES = 20000
+# Top-level `$AWD` directories that may be edited inside but never deleted as a whole.
+WORKSPACE_PROTECTED_TOP_DIRS = frozenset({"roles", "instructions", "skills", "sessions"})
+_WORKSPACE_DB_NAME_RE = re.compile(r"\.(?:db|sqlite3?)(?:[-.][a-z0-9_-]*)*$", re.IGNORECASE)
 _FRONTMATTER_BLOCK_RE = re.compile(r"\A---\r?\n(?P<body>.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
 _VISIBILITY_LINE_RE = re.compile(r"^visibility\s*:.*$", re.MULTILINE)
 CROSS_CHANNEL_IGNORE_GLOBS = ["game-*"]
@@ -969,6 +983,44 @@ class RequestHandlers:
             return True
         return False
 
+    @classmethod
+    def _is_workspace_protected(cls, name: str) -> bool:
+        """Blocked names plus database sidecars (`kesoku.db.bak`, `x.sqlite-journal`) for mutating RPCs."""
+        return cls._is_workspace_blocked(name) or bool(_WORKSPACE_DB_NAME_RE.search(name or ""))
+
+    def _resolve_workspace_mutation(self, payload: dict[str, Any]) -> tuple[str, str, str]:
+        """Resolve `path` (or legacy `rel_path`) for write/mkdir/delete/download.
+
+        Returns:
+            `(rel_path, lexical_abs_path, real_abs_path)`; the root itself and protected segments are rejected.
+        """
+        raw = payload.get("path", payload.get("rel_path"))
+        if not isinstance(raw, str) or not raw.strip():
+            raise ProtocolError("BAD_REQUEST", "path is required")
+        rel_path, real_path = self._resolve_workspace_path(raw, allow_root=False)
+        parts = rel_path.split("/")
+        if any(self._is_workspace_protected(p) for p in parts):
+            raise ProtocolError("BAD_REQUEST", "access to this path is restricted")
+        lexical = os.path.join(self.app.awd, *parts)
+        parent = os.path.dirname(lexical)
+        if os.path.realpath(parent) != os.path.realpath(self.app.awd) and not realpath_within(self.app.awd, parent):
+            raise ProtocolError("BAD_REQUEST", "path escapes workspace")
+        return rel_path, lexical, real_path
+
+    @staticmethod
+    def _classify_workspace_file(path: str) -> str:
+        """Return `dir`, `media`, `text` or `binary` for a workspace entry (sniffs the first 4 KiB)."""
+        if os.path.isdir(path):
+            return "dir"
+        if os.path.splitext(path)[1].lower() in WORKSPACE_MEDIA_EXTS:
+            return "media"
+        try:
+            with open(path, "rb") as f:
+                head = f.read(4096)
+        except OSError:
+            return "binary"
+        return "binary" if b"\x00" in head else "text"
+
     def _resolve_workspace_path(self, rel_path_raw: Any, *, allow_root: bool) -> tuple[str, str]:
         """Resolve and jail a relative path inside `$AWD`."""
         if rel_path_raw is None:
@@ -1088,9 +1140,171 @@ class RequestHandlers:
                 "mtime": mtime,
                 "content": text,
                 "truncated": truncated,
+                # Saving a truncated preview would cut the file, so only complete text files are editable.
+                "writable": not truncated and not self._is_workspace_protected(name),
             }
 
         return await asyncio.to_thread(_read_file)
+
+    async def handle_workspace_write(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
+        """`workspace.write{path, content? | base64?, overwrite?=true, append?=false}` -> atomic jailed write.
+
+        `append:true` (base64 or text) appends a chunk to an existing file so clients can upload files larger
+        than one 1 MiB relay frame in several requests; the resulting file is still capped at 10 MiB.
+        """
+        rel_path, lexical, real_path = self._resolve_workspace_mutation(payload)
+        content = payload.get("content")
+        b64 = payload.get("base64")
+        if content is not None and not isinstance(content, str):
+            raise ProtocolError("BAD_REQUEST", "content must be a string")
+        if b64 is not None and not isinstance(b64, str):
+            raise ProtocolError("BAD_REQUEST", "base64 must be a string")
+        if b64 is not None and content is not None:
+            raise ProtocolError("BAD_REQUEST", "provide either content or base64, not both")
+        overwrite = payload.get("overwrite", True)
+        append = payload.get("append", False)
+        if not isinstance(overwrite, bool) or not isinstance(append, bool):
+            raise ProtocolError("BAD_REQUEST", "overwrite/append must be booleans")
+        if b64 is not None:
+            if len(b64) > (WORKSPACE_WRITE_MAX_BYTES * 4) // 3 + 8:
+                raise ProtocolError("BAD_REQUEST", "file too large (max 10 MiB)")
+            raw_b64 = b64.split(",", 1)[1] if b64.startswith("data:") and "," in b64 else b64
+            try:
+                data = base64.b64decode("".join(raw_b64.split()), validate=True)
+            except (binascii.Error, ValueError) as e:
+                raise ProtocolError("BAD_REQUEST", "invalid base64 payload") from e
+        else:
+            data = (content or "").encode("utf-8")
+        if len(data) > WORKSPACE_WRITE_MAX_BYTES:
+            raise ProtocolError("BAD_REQUEST", "file too large (max 10 MiB)")
+
+        def _write() -> dict[str, Any]:
+            if os.path.isdir(lexical) or os.path.isdir(real_path):
+                raise ProtocolError("BAD_REQUEST", "path is a directory")
+            exists = os.path.lexists(lexical)
+            if exists and not overwrite and not append:
+                raise ProtocolError("BAD_REQUEST", "file already exists")
+            parent = os.path.dirname(real_path)
+            try:
+                os.makedirs(parent, exist_ok=True)
+            except (FileExistsError, NotADirectoryError) as e:
+                raise ProtocolError("BAD_REQUEST", "parent path is not a directory") from e
+            in_root = os.path.realpath(parent) == os.path.realpath(self.app.awd)
+            if not (in_root or realpath_within(self.app.awd, parent)):
+                raise ProtocolError("BAD_REQUEST", "path escapes workspace")
+            if append and os.path.isfile(real_path):
+                if os.path.getsize(real_path) + len(data) > WORKSPACE_WRITE_MAX_BYTES:
+                    raise ProtocolError("BAD_REQUEST", "file too large (max 10 MiB)")
+                with open(real_path, "ab") as f:
+                    f.write(data)
+            else:
+                mode = (os.stat(real_path).st_mode & 0o777) if os.path.isfile(real_path) else 0o644
+                fd, tmp = tempfile.mkstemp(prefix=".kesoku-upload-", dir=parent)
+                try:
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(data)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.chmod(tmp, mode)
+                    os.replace(tmp, real_path)
+                except BaseException:
+                    with contextlib.suppress(OSError):
+                        os.unlink(tmp)
+                    raise
+            st = os.stat(real_path)
+            return {
+                "path": rel_path,
+                "name": os.path.basename(real_path),
+                "size": int(st.st_size),
+                "mtime": float(st.st_mtime),
+                "kind": self._classify_workspace_file(real_path),
+            }
+
+        return await asyncio.to_thread(_write)
+
+    async def handle_workspace_mkdir(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
+        """`workspace.mkdir{path}` -> create a jailed directory (parents included, idempotent)."""
+        rel_path, _lexical, real_path = self._resolve_workspace_mutation(payload)
+
+        def _mkdir() -> dict[str, Any]:
+            if os.path.exists(real_path) and not os.path.isdir(real_path):
+                raise ProtocolError("BAD_REQUEST", "a file with this name already exists")
+            try:
+                os.makedirs(real_path, exist_ok=True)
+            except (FileExistsError, NotADirectoryError) as e:
+                raise ProtocolError("BAD_REQUEST", "parent path is not a directory") from e
+            if not realpath_within(self.app.awd, real_path):
+                raise ProtocolError("BAD_REQUEST", "path escapes workspace")
+            return {"path": rel_path, "name": os.path.basename(real_path), "kind": "dir"}
+
+        return await asyncio.to_thread(_mkdir)
+
+    async def handle_workspace_delete(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
+        """`workspace.delete{path}` -> delete a jailed file / symlink / directory tree.
+
+        The `$AWD` root, protected top-level directories (`roles`, `instructions`, `skills`, `sessions`) and
+        trees containing protected entries (`.git`, `.env*`, databases) are refused.
+        """
+        rel_path, lexical, real_path = self._resolve_workspace_mutation(payload)
+        if rel_path.lower() in WORKSPACE_PROTECTED_TOP_DIRS:
+            raise ProtocolError("BAD_REQUEST", "this top-level directory is protected")
+
+        def _delete() -> dict[str, Any]:
+            if os.path.islink(lexical):
+                os.unlink(lexical)
+                return {"path": rel_path, "deleted": True}
+            if not os.path.exists(real_path):
+                raise ProtocolError("NOT_FOUND", "path not found")
+            if os.path.isdir(real_path):
+                if os.path.realpath(real_path) == os.path.realpath(self.app.awd):
+                    raise ProtocolError("BAD_REQUEST", "cannot delete the workspace root")
+                scanned = 0
+                for root, dirs, files in os.walk(real_path, followlinks=False):
+                    for name in (*dirs, *files):
+                        scanned += 1
+                        if scanned > WORKSPACE_DELETE_SCAN_MAX_ENTRIES:
+                            raise ProtocolError("BAD_REQUEST", "directory too large to delete from the app")
+                        if self._is_workspace_protected(name):
+                            raise ProtocolError("BAD_REQUEST", f"directory contains a protected entry: {name}")
+                shutil.rmtree(real_path)
+            else:
+                os.unlink(real_path)
+            return {"path": rel_path, "deleted": True}
+
+        return await asyncio.to_thread(_delete)
+
+    async def handle_workspace_download(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
+        """`workspace.download{path}` -> `{path, name, size, mime_type, base64}` (≤ 15 MiB).
+
+        Files up to 640 KiB are inlined as base64 (relay text frames are capped at 1 MiB); larger files are
+        uploaded to media storage and returned as a signed `url` (+ `object`, `expires_at`) with no `base64`.
+        """
+        rel_path, _lexical, real_path = self._resolve_workspace_mutation(payload)
+        if not await asyncio.to_thread(os.path.isfile, real_path):
+            if await asyncio.to_thread(os.path.isdir, real_path):
+                raise ProtocolError("BAD_REQUEST", "cannot download a directory")
+            raise ProtocolError("NOT_FOUND", "file not found")
+        size = int((await asyncio.to_thread(os.stat, real_path)).st_size)
+        if size > WORKSPACE_DOWNLOAD_MAX_BYTES:
+            raise ProtocolError("BAD_REQUEST", "file too large to download (max 15 MiB)")
+        name = os.path.basename(real_path)
+        mime_type = mimetypes.guess_type(name)[0] or (
+            "text/markdown" if name.lower().endswith(".md") else "application/octet-stream"
+        )
+        out: dict[str, Any] = {"path": rel_path, "name": name, "size": size, "mime_type": mime_type}
+        if size <= WORKSPACE_DOWNLOAD_INLINE_MAX_BYTES:
+            raw = await asyncio.to_thread(lambda: open(real_path, "rb").read())  # noqa: SIM115
+            out["base64"] = base64.b64encode(raw).decode("ascii")
+            return out
+        try:
+            uploaded = await self.app.media.upload_file(real_path, purpose="asset", mime=mime_type)
+        except Exception as e:
+            logger.warning(f"workspace.download media upload failed for '{rel_path}': {e}")
+            raise ProtocolError("ENGINE_OFFLINE", "media storage unavailable for large download") from e
+        out.update(
+            {"url": uploaded.get("url"), "object": uploaded.get("object"), "expires_at": uploaded.get("expires_at")}
+        )
+        return out
 
     # ------------------------------------------------------------------ misc
     async def handle_ping(self, ctx: RequestContext, payload: dict[str, Any]) -> Reply:

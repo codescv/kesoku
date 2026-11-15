@@ -14,9 +14,19 @@ import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
-from kesoku.agent.memory_writer import MemoryWriter, normalize_rel_memory_path
+from kesoku.agent.memory_writer import (
+    MemoryWriter,
+    _MemoryDocument,
+    _normalize_core,
+    _parse_bullet_line,
+    bullet_key_prefix,
+    bullet_similarity,
+    is_same_course_progress,
+    normalize_rel_memory_path,
+)
 from kesoku.config import KesokuConfig
 from kesoku.db.manager import DatabaseManager
 from kesoku.logger import setup_logger
@@ -29,6 +39,10 @@ PROPOSAL_MAX_OPS = 10
 PROPOSAL_SECTION_MAX_CHARS = 200
 PROPOSAL_MAX_TAGS = 8
 PROPOSABLE_OP_KINDS = frozenset({"upsert_bullet"})
+# An op is "already known" when a bullet on disk is this similar (or contains it verbatim).
+DISK_COVERED_SIMILARITY = 0.72
+# Older pending proposals of the same session touching the same slot at this similarity are merged/superseded.
+PENDING_OVERLAP_SIMILARITY = 0.60
 
 ProposalListener = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -112,6 +126,60 @@ def sanitize_proposal_op(op: Mapping[str, Any], memories_dir: str) -> dict[str, 
     return out
 
 
+def _disk_bullets(mem_dir: str, rel_path: str, cache: dict[str, list[str]]) -> list[str]:
+    """Return the active (non-`#superseded`) bullet texts of `rel_path` inside `mem_dir` (cached per call)."""
+    if rel_path in cache:
+        return cache[rel_path]
+    out: list[str] = []
+    abs_p = os.path.join(mem_dir, rel_path)
+    try:
+        if os.path.isfile(abs_p):
+            with open(abs_p, encoding="utf-8", errors="replace") as f:
+                doc = _MemoryDocument.parse(f.read())
+            for sec in doc.sections:
+                for ln in sec.lines:
+                    pb = _parse_bullet_line(ln)
+                    if pb is not None and not pb.superseded:
+                        out.append(pb.core_text)
+    except OSError as e:
+        logger.debug(f"Could not read memory file '{abs_p}' for proposal filtering: {e}")
+    cache[rel_path] = out
+    return out
+
+
+def op_covered_by_disk(op: Mapping[str, Any], existing_bullets: Sequence[str]) -> bool:
+    """Return True when an `upsert_bullet` op only restates a fact that is already on disk."""
+    text = str(op.get("text") or "")
+    norm_text = _normalize_core(text)
+    if not norm_text:
+        return True
+    has_replaces = bool(str(op.get("replaces") or "").strip())
+    for existing in existing_bullets:
+        norm_ex = _normalize_core(existing)
+        if not norm_ex:
+            continue
+        if norm_ex == norm_text:
+            return True
+        if has_replaces:
+            continue
+        if norm_text in norm_ex or bullet_similarity(existing, text) >= DISK_COVERED_SIMILARITY:
+            return True
+    return False
+
+
+def ops_overlap(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
+    """Return True when two proposal ops update the same file slot (same key / lesson / similar text)."""
+    if str(a.get("file") or "") != str(b.get("file") or ""):
+        return False
+    ta, tb = str(a.get("text") or ""), str(b.get("text") or "")
+    if bullet_similarity(ta, tb) >= PENDING_OVERLAP_SIMILARITY:
+        return True
+    ka, kb = bullet_key_prefix(ta), bullet_key_prefix(tb)
+    if ka and kb and ka == kb:
+        return True
+    return is_same_course_progress(ta, tb)
+
+
 class ProposalStore:
     """Stages, lists, confirms, dismisses and expires `confirm_only` memory proposals."""
 
@@ -144,14 +212,22 @@ class ProposalStore:
         ops: Sequence[Mapping[str, Any]],
         message_id: str | None = None,
         source_mode: str | None = None,
+        memories_dir: str | Path | None = None,
     ) -> dict[str, Any] | None:
         """Validate, de-duplicate and persist candidate ops as one pending proposal (no `$MEMORY_DIR` writes).
+
+        * Ops already covered by a bullet on disk (`memories_dir`, defaulting to the role's `$MEMORY_DIR`) are
+          dropped, so the user is never asked to confirm a fact that is already remembered.
+        * Older *pending* proposals of the same `(role, session_id)` that touch the same slot are merged into
+          the new proposal and marked `expired` (listed in the returned dict's `superseded_ids`), so incremental
+          turns never stack several confirmation cards.
 
         Returns:
             The stored proposal dict, or None when nothing remains after filtering.
         """
         safe_role = role or "default"
-        mem_dir = resolve_role_memories_dir(self.cfg, safe_role)
+        mem_dir = os.path.abspath(str(memories_dir)) if memories_dir else resolve_role_memories_dir(self.cfg, safe_role)
+        disk_cache: dict[str, list[str]] = {}
         cleaned: list[dict[str, Any]] = []
         seen: set[str] = set()
         for op in ops:
@@ -163,23 +239,47 @@ class ProposalStore:
             fp = op_fingerprint(proj)
             if fp in seen:
                 continue
+            if op_covered_by_disk(proj, _disk_bullets(mem_dir, proj["file"], disk_cache)):
+                logger.debug(f"Skipping proposal op already on disk in '{proj['file']}': {proj['text'][:60]!r}")
+                continue
             seen.add(fp)
             cleaned.append(proj)
         if not cleaned:
             return None
 
         blocked = self.db.get_blocklisted_fingerprints(seen)
+        cleaned = [o for o in cleaned if op_fingerprint(o) not in blocked]
+        if not cleaned:
+            return None
+
         pending_fps: set[str] = set()
+        superseded: list[dict[str, Any]] = []
+        carried: list[dict[str, Any]] = []
         for existing in self.db.list_memory_proposals(status="pending", limit=500):
             if existing.get("role") != safe_role:
                 continue
-            for eop in existing.get("ops") or []:
-                if isinstance(eop, Mapping):
-                    pending_fps.add(op_fingerprint(eop))
-        remaining = [o for o in cleaned if op_fingerprint(o) not in blocked and op_fingerprint(o) not in pending_fps]
-        remaining = remaining[:PROPOSAL_MAX_OPS]
+            eops = [eop for eop in (existing.get("ops") or []) if isinstance(eop, Mapping)]
+            same_session = existing.get("session_id") == session_id
+            if same_session and any(ops_overlap(eop, nop) for eop in eops for nop in cleaned):
+                superseded.append(existing)
+                for eop in eops:
+                    if not any(ops_overlap(eop, nop) for nop in cleaned):
+                        carried.append(dict(eop))
+                continue
+            for eop in eops:
+                pending_fps.add(op_fingerprint(eop))
+
+        remaining = [o for o in cleaned if op_fingerprint(o) not in pending_fps]
         if not remaining:
             return None
+        merged_fps = {op_fingerprint(o) for o in remaining}
+        for cop in carried:
+            fp = op_fingerprint(cop)
+            if fp in merged_fps or fp in blocked:
+                continue
+            merged_fps.add(fp)
+            remaining.append(cop)
+        remaining = remaining[:PROPOSAL_MAX_OPS]
 
         now = float(self._clock())
         proposal_id = f"mp_{uuid.uuid4().hex[:16]}"
@@ -194,7 +294,14 @@ class ProposalStore:
             created_at=now,
             expires_at=now + PROPOSAL_TTL_SECONDS,
         )
-        return self.db.get_memory_proposal(proposal_id)
+        superseded_ids: list[str] = []
+        for old in superseded:
+            if self.db.resolve_memory_proposal(str(old["proposal_id"]), "expired", ts=now):
+                superseded_ids.append(str(old["proposal_id"]))
+        stored = self.db.get_memory_proposal(proposal_id)
+        if stored is not None and superseded_ids:
+            stored["superseded_ids"] = superseded_ids
+        return stored
 
     async def notify(self, proposal: dict[str, Any]) -> None:
         """Notify every registered listener of a newly staged proposal (errors are logged, never raised)."""

@@ -946,3 +946,134 @@ async def test_workspace_list_and_read_jailed(env) -> None:
     for forbidden in ("../outside.txt", ".env", "kesoku.db", "/etc/passwd"):
         err = await rpc(env, "workspace.read", {"rel_path": forbidden})
         assert err["type"] == "error" and err["payload"]["code"] == "BAD_REQUEST"
+
+
+async def test_workspace_write_mkdir_delete_download_crud(env) -> None:
+    import base64 as _b64
+
+    tmp = env["tmp"]
+    (tmp / "README.md").write_text("# Agent Workspace\n", encoding="utf-8")
+
+    # read exposes `writable` for complete text files
+    read_md = (await rpc(env, "workspace.read", {"rel_path": "README.md"}))["payload"]
+    assert read_md["writable"] is True
+
+    # text write (creates parent dirs) + overwrite in place
+    w = await rpc(env, "workspace.write", {"path": "notes/todo.md", "content": "- 买牛奶\n"})
+    assert w["type"] == "workspace.write.result", w
+    assert w["payload"]["path"] == "notes/todo.md" and w["payload"]["name"] == "todo.md"
+    assert w["payload"]["kind"] == "text" and w["payload"]["size"] == len("- 买牛奶\n".encode())
+    assert (tmp / "notes" / "todo.md").read_text(encoding="utf-8") == "- 买牛奶\n"
+    w2 = (await rpc(env, "workspace.write", {"path": "notes/todo.md", "content": "done"}))["payload"]
+    assert w2["size"] == 4 and (tmp / "notes" / "todo.md").read_text(encoding="utf-8") == "done"
+    no_over = await rpc(env, "workspace.write", {"path": "notes/todo.md", "content": "x", "overwrite": False})
+    assert no_over["type"] == "error" and no_over["payload"]["code"] == "BAD_REQUEST"
+
+    # base64 binary upload + chunked append
+    png = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
+    up = (await rpc(env, "workspace.write", {"path": "uploads/pic.png", "base64": _b64.b64encode(png[:100]).decode()}))
+    assert up["payload"]["kind"] == "media"
+    chunk2 = _b64.b64encode(png[100:]).decode()
+    await rpc(env, "workspace.write", {"path": "uploads/pic.png", "base64": chunk2, "append": True})
+    assert (tmp / "uploads" / "pic.png").read_bytes() == png
+    bad_b64 = await rpc(env, "workspace.write", {"path": "uploads/x.bin", "base64": "@@not-base64@@"})
+    assert bad_b64["type"] == "error"
+
+    # mkdir (idempotent) and writing onto a directory is rejected
+    mk = (await rpc(env, "workspace.mkdir", {"path": "projects/new_dir"}))
+    assert mk["type"] == "workspace.mkdir.result"
+    assert mk["payload"] == {"path": "projects/new_dir", "name": "new_dir", "kind": "dir"}
+    assert (tmp / "projects" / "new_dir").is_dir()
+    assert (await rpc(env, "workspace.mkdir", {"path": "projects/new_dir"}))["type"] == "workspace.mkdir.result"
+    on_dir = await rpc(env, "workspace.write", {"path": "projects/new_dir", "content": "x"})
+    assert on_dir["type"] == "error"
+
+    # download inlines base64
+    dl = await rpc(env, "workspace.download", {"path": "uploads/pic.png"})
+    assert dl["type"] == "workspace.download.result"
+    assert dl["payload"]["mime_type"] == "image/png" and dl["payload"]["size"] == len(png)
+    assert _b64.b64decode(dl["payload"]["base64"]) == png
+    assert (await rpc(env, "workspace.download", {"path": "projects"}))["type"] == "error"
+    missing = await rpc(env, "workspace.download", {"path": "nope.txt"})
+    assert missing["payload"]["code"] == "NOT_FOUND"
+
+    # delete file + recursive user folder; root / protected top-level dirs are refused
+    d1 = await rpc(env, "workspace.delete", {"path": "notes/todo.md"})
+    assert d1["type"] == "workspace.delete.result" and d1["payload"] == {"path": "notes/todo.md", "deleted": True}
+    assert not (tmp / "notes" / "todo.md").exists()
+    (tmp / "projects" / "new_dir" / "a.txt").write_text("a", encoding="utf-8")
+    assert (await rpc(env, "workspace.delete", {"path": "projects"}))["payload"]["deleted"] is True
+    assert not (tmp / "projects").exists()
+    for protected in ("roles", "skills", "instructions", "", "/"):
+        err = await rpc(env, "workspace.delete", {"path": protected})
+        assert err["type"] == "error", protected
+    assert (tmp / "roles" / "helper" / "intro.md").exists()
+    # files inside protected top-level dirs remain editable / deletable
+    assert (await rpc(env, "workspace.delete", {"path": "roles/other_role/intro.md"}))["payload"]["deleted"] is True
+    # a folder hiding a database is not recursively deleted
+    (tmp / "data").mkdir()
+    (tmp / "data" / "cache.sqlite3").write_bytes(b"x")
+    assert (await rpc(env, "workspace.delete", {"path": "data"}))["type"] == "error"
+    assert (tmp / "data" / "cache.sqlite3").exists()
+
+
+async def test_workspace_mutations_reject_traversal_and_hidden(env) -> None:
+    tmp = env["tmp"]
+    (tmp / ".env").write_text("SECRET=1", encoding="utf-8")
+    cases = ("../outside.txt", "notes/../../outside.txt", "/etc/passwd", ".env", ".env.local", "kesoku.db",
+             "kesoku.db-wal", "backup/kesoku.db.bak", ".git/config", "__pycache__/x.pyc", "id.pem")
+    for bad in cases:
+        for rpc_type, extra in (
+            ("workspace.write", {"content": "x"}),
+            ("workspace.mkdir", {}),
+            ("workspace.delete", {}),
+            ("workspace.download", {}),
+        ):
+            err = await rpc(env, rpc_type, {"path": bad, **extra})
+            assert err["type"] == "error" and err["payload"]["code"] == "BAD_REQUEST", (rpc_type, bad, err)
+    assert (tmp / ".env").read_text(encoding="utf-8") == "SECRET=1"
+    assert (tmp / "kesoku.db").exists()
+    assert not (tmp.parent / "outside.txt").exists()
+    # symlink escaping the workspace is refused
+    outside = tmp.parent / f"{tmp.name}_outside"
+    outside.mkdir()
+    (tmp / "escape").symlink_to(outside, target_is_directory=True)
+    err = await rpc(env, "workspace.write", {"path": "escape/pwn.txt", "content": "x"})
+    assert err["type"] == "error"
+    assert not (outside / "pwn.txt").exists()
+    # oversize payload
+    big = await rpc(env, "workspace.write", {"path": "big.txt", "content": "x" * (10 * 1024 * 1024 + 1)})
+    assert big["type"] == "error"
+
+
+async def test_mode_stop_triggers_mode_exit_extraction(env, monkeypatch) -> None:
+    bot = env["bot"]
+    calls: list[tuple[str, str]] = []
+
+    class FakeConsolidator:
+        async def notify_close(self, session_id: str, role: str | None = None, reason: str = "close") -> bool:
+            calls.append((session_id, reason))
+            return True
+
+    env["gw"].context.memory_consolidator = FakeConsolidator()
+    sent: list[str] = []
+
+    async def fake_ingest(**kw: Any) -> dict[str, Any]:
+        sent.append(kw["text"])
+        return {"ok": True}
+
+    monkeypatch.setattr(bot, "ingest_app_message", fake_ingest)
+    monkeypatch.setattr(bot.policy, "current_mode", lambda sid: "quiz")
+    await bot.stop_mode("s1", "dev-1", None)
+    assert calls == [("s1", "mode_exit")] and sent
+
+    calls.clear()
+    monkeypatch.setattr(bot.policy, "current_mode", lambda sid: "chat")
+    await bot.stop_mode("s1", "dev-1", None)
+    assert calls == []
+
+    # Switching from one interactive mode straight into another also closes out the previous one.
+    sid = await create_session(env)
+    monkeypatch.setattr(bot.policy, "current_mode", lambda sid: "story")
+    await bot.start_mode(sid, "quiz", "dev-1")
+    assert calls == [(sid, "mode_exit")]

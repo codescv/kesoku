@@ -85,7 +85,7 @@ def test_memory_writer_auto_section_dedup_tags_and_conflict_reapply(tmp_path, mo
 
 
 def test_memory_writer_contradiction_supersede_and_retract_rules(tmp_path, monkeypatch) -> None:
-    """Verify `#direct > #inferred`, newer `#time` wins, `#superseded` history archive, and `retract`."""
+    """Verify `#direct > #inferred`, newer `#time` wins, clean in-place replacement, and `retract`."""
     monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", lambda texts: [[0.2] * 384 for _ in texts])
 
     mem_dir = tmp_path / "roles" / "tutor" / "memories"
@@ -119,7 +119,7 @@ def test_memory_writer_contradiction_supersede_and_retract_rules(tmp_path, monke
     assert "常住在大阪梅田" in after_inferred
     assert "可能住在神户" not in after_inferred
 
-    # 2. Newer `#direct` replacing older `#direct` supersedes it and moves old bullet to `## 历史` with `#superseded`
+    # 2. Newer `#direct` replacing older `#direct` replaces it in place (no `## 历史` / `#superseded` clutter)
     MemoryWriter.apply_ops(
         [
             {
@@ -152,10 +152,92 @@ def test_memory_writer_contradiction_supersede_and_retract_rules(tmp_path, monke
     assert fm.description == "User current Tokyo residence and move history"
     assert "已搬家到东京目黑区" in body
     assert "周末常去奈良散步" not in body
-    assert "## 历史" in body
-    hist_part = body.split("## 历史", 1)[1]
-    assert "常住在大阪梅田" in hist_part
-    assert "#superseded" in hist_part
+    assert "## 历史" not in body
+    assert "常住在大阪梅田" not in body
+    assert "#superseded" not in body
+
+
+def test_memory_writer_strips_legacy_superseded_and_fuzzy_sections(tmp_path) -> None:
+    """Legacy `#superseded` lines are purged, and near-identical headings reuse the existing section."""
+    mem_dir = tmp_path / "roles" / "tutor" / "memories"
+    (mem_dir / "topics").mkdir(parents=True)
+    target = mem_dir / "topics" / "india_trip.md"
+    target.write_text(
+        "---\ndescription: 印度之行\n---\n"
+        "## 行程与足迹\n- 参观了红堡 #direct #time:2026-11-01\n\n"
+        "## 餐饮与酒店\n- 住在康诺特广场附近 #direct #time:2026-11-01\n\n"
+        "## 历史\n- 旧计划去孟买 #direct #time:2026-10-01 #superseded\n",
+        encoding="utf-8",
+    )
+    MemoryWriter.apply_ops(
+        [
+            {"op": "upsert_bullet", "file": "topics/india_trip.md", "section": "行程与景点足迹",
+             "text": "去了胡马雍陵拍照", "tags": ["#direct"]},
+            {"op": "upsert_bullet", "file": "topics/india_trip.md", "section": "德里足迹与行程",
+             "text": "坐地铁去了印度门", "tags": ["#direct"]},
+        ],
+        role="tutor",
+        memories_dir=str(mem_dir),
+        event_date="2026-11-14",
+    )
+    body = target.read_text(encoding="utf-8")
+    assert "#superseded" not in body and "## 历史" not in body and "孟买" not in body
+    assert body.count("## ") == 2
+    assert "## 行程与景点足迹" not in body and "## 德里足迹与行程" not in body
+    trip_part = body.split("## 行程与足迹", 1)[1].split("## 餐饮与酒店", 1)[0]
+    assert "胡马雍陵" in trip_part and "印度门" in trip_part
+
+
+def test_memory_writer_slot_prefix_and_course_progress_replace_in_place(tmp_path) -> None:
+    """Same `Key：` prefix and same course-lesson progress overwrite the existing bullet instead of stacking."""
+    mem_dir = tmp_path / "roles" / "tutor" / "memories"
+    (mem_dir / "user").mkdir(parents=True)
+    (mem_dir / "topics").mkdir(parents=True)
+    profile = mem_dir / "user" / "profile.md"
+    profile.write_text(
+        "---\ndescription: 用户档案\n---\n"
+        "## 学习\n- 日语水平与学习进度：零基础，刚开始学五十音 #direct #time:2026-11-10\n"
+        "## 生活\n- 宠物：养了一只橘猫 #direct #time:2026-11-01\n",
+        encoding="utf-8",
+    )
+    study = mem_dir / "topics" / "japanese_study.md"
+    study.write_text(
+        "---\ndescription: 日语学习\n---\n"
+        "## 日语学习进度\n"
+        "- 正在学习《新标日初级上》第1课，推进至片段 2/9 #direct #time:2026-11-14\n"
+        "- 《新标日初级上》第1课进度：推进至片段 7/9 #direct #time:2026-11-14\n"
+        "## 弱点\n- 容易混淆 は 和 が #direct #time:2026-11-14\n",
+        encoding="utf-8",
+    )
+    MemoryWriter.apply_ops(
+        [
+            {"op": "upsert_bullet", "file": "user/profile.md", "section": "学习",
+             "text": "日语水平与学习进度：已完成《新标日初级上》第1课", "tags": ["#direct"]},
+            {"op": "upsert_bullet", "file": "user/profile.md", "section": "生活",
+             "text": "宠物：养了一只橘猫和一只柴犬", "tags": ["#direct"]},
+        ],
+        role="tutor",
+        memories_dir=str(mem_dir),
+        event_date="2026-11-14",
+    )
+    prof = profile.read_text(encoding="utf-8")
+    assert prof.count("日语水平与学习进度") == 1 and "零基础" not in prof
+    assert prof.count("宠物：") == 1 and "柴犬" in prof
+
+    MemoryWriter.apply_ops(
+        [
+            {"op": "upsert_bullet", "file": "topics/japanese_study.md", "section": "日语学习进度",
+             "text": "已完成《新标日初级上》第1课全部 9 个片段", "tags": ["#direct"]},
+        ],
+        role="tutor",
+        memories_dir=str(mem_dir),
+        session_id="app_c4e2",
+        event_date="2026-11-14",
+    )
+    st = study.read_text(encoding="utf-8")
+    assert st.count("第1课") == 1 and "片段 2/9" not in st and "片段 7/9" not in st
+    assert "已完成《新标日初级上》第1课全部 9 个片段" in st
+    assert "容易混淆 は 和 が" in st  # durable weak point is not a progress slot
 
 
 def test_memory_writer_pinned_allowlist_rejected_tags_and_12kib_cap(tmp_path, monkeypatch) -> None:
