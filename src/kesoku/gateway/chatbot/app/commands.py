@@ -316,7 +316,8 @@ class RequestHandlers:
             "has_more": result["has_more"],
         }
         active = self.app.active_turn_snapshot(session_id)
-        if active is not None:
+        if active is not None or not result["has_more"]:
+            # An explicit null on the final page lets clients drop a stale typing indicator / preview.
             done["active_turn"] = active
         await self.app.send_to_device(ctx.device_id, "sync.done", done, reply_to=ctx.request_id, session_id=session_id)
 
@@ -549,6 +550,7 @@ class RequestHandlers:
         agent = self.app.gateway.agent
         if agent is not None:
             await agent.stop_session_worker(session_id, immediate=False)
+        self.app._active_turns.pop(session_id, None)
         return {"session_id": session_id, "stopped": True}
 
     # ------------------------------------------------------------------ modes & prefs

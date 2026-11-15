@@ -348,3 +348,98 @@ async def test_session_create_with_translator_mode_and_prefs(env, monkeypatch) -
     bad = await rpc(env, "session.create", {"mode": "translator", "prefs": {"formality": "rude"}})
     assert bad["type"] == "error" and bad["payload"]["code"] == "BAD_REQUEST"
     assert len((await rpc(env, "session.list", {"limit": 50}))["payload"]["sessions"]) == before
+
+
+# ---------------------------------------------------------------------------------------------- v0.3.8 typing
+
+
+async def _send(env: dict[str, Any], sid: str, cid: str, text: str = "hi") -> str:
+    ack = await rpc(env, "message.send", {"session_id": sid, "client_msg_id": cid, "text": text})
+    assert ack["type"] == "message.ack", ack
+    return str(ack["payload"]["message_id"])
+
+
+async def test_v038_turn_active_immediately_after_ingest_and_cleared_on_final(env) -> None:
+    bot, link, gw = env["bot"], env["link"], env["gw"]
+    sid = await create_session(env)
+    mid = await _send(env, sid, "t1")
+    # Active before any token: snapshot / resume can show the typing indicator, and devices got a stream.clear.
+    assert bot.active_turn_snapshot(sid) == {"turn_id": mid, "round_id": 0, "preview_text": ""}
+    clear = [e for e in link.of_type("stream.clear") if e["session_id"] == sid][-1]
+    assert clear["payload"] == {"turn_id": mid, "round_id": 0}
+    assert "seq" not in clear
+    user_seq = [e for e in link.of_type("message.user") if e["session_id"] == sid][-1]["seq"]
+    assert link.sent.index(clear) > link.sent.index(
+        next(e for e in link.sent if e.get("type") == "message.user" and e.get("seq") == user_seq)
+    )
+    snap = await rpc(env, "session.open", {"session_id": sid})
+    assert snap["type"] == "session.snapshot", snap
+    assert snap["payload"]["active_turn"]["turn_id"] == mid
+    done = await rpc(env, "sync.replay", {"session_id": sid, "after_seq": 0})
+    assert done["type"] == "sync.done" and done["payload"]["active_turn"]["turn_id"] == mid
+
+    reply = _msg(sid, MessageRole.ASSISTANT, "hello", sender="Kesoku", parent_id=mid, status=MessageStatus.PENDING)
+    await gw.db.save_message(reply)
+    await bot.render_outgoing_message(reply)
+    assert bot.active_turn_snapshot(sid) is None
+    done = await rpc(env, "sync.replay", {"session_id": sid, "after_seq": 0})
+    # Explicit null on the last page so devices drop a stale typing indicator.
+    assert "active_turn" in done["payload"] and done["payload"]["active_turn"] is None
+
+
+async def test_v038_turn_events_reactivate_and_self_healing_final_clears(env) -> None:
+    bot, link, gw = env["bot"], env["link"], env["gw"]
+    sid = await create_session(env)
+    mid = await _send(env, sid, "t2", "穿毛衣")
+    bot._active_turns.pop(sid)  # e.g. engine restarted mid-turn
+    thought = _msg(sid, MessageRole.ASSISTANT, "thinking…", sender="Kesoku", parent_id=mid,
+                   status=MessageStatus.PENDING)
+    thought.type = MessageType.THOUGHT
+    await bot._emit_turn_event(thought)
+    assert bot.active_turn_snapshot(sid)["turn_id"] == mid
+
+    broken = _msg(sid, MessageRole.ASSISTANT, "哼！\n[voice: sweater.wav]", sender="Kesoku", parent_id=mid,
+                  status=MessageStatus.PENDING)
+    await gw.db.save_message(broken)
+    await bot.render_outgoing_message(broken)
+    assert _finals(link, sid) == []
+    assert bot.active_turn_snapshot(sid) is not None  # still typing while the self-healing retry runs
+    healing_msg = _msg(sid, MessageRole.SYSTEM, "File transmission failed", sender="System",
+                       status=MessageStatus.PROCESSED, metadata={"is_self_healing_retry": True})
+    await gw.db.save_message(healing_msg)
+    healed = _msg(sid, MessageRole.ASSISTANT, "哼！", sender="Kesoku", parent_id=healing_msg.id,
+                  status=MessageStatus.PENDING)
+    await gw.db.save_message(healed)
+    await bot.render_outgoing_message(healed)
+    assert [f["payload"]["turn_id"] for f in _finals(link, sid)] == [healing_msg.id]
+    # The retry finalized under a different turn id, yet the session is no longer marked as typing.
+    assert bot.active_turn_snapshot(sid) is None
+
+
+async def test_v038_notification_final_keeps_turn_and_turn_stop_clears(env) -> None:
+    bot, gw = env["bot"], env["gw"]
+    sid = await create_session(env)
+    mid = await _send(env, sid, "t3")
+    note = _msg(sid, MessageRole.ASSISTANT, "📌 note", sender="Notification", parent_id=mid,
+                status=MessageStatus.PENDING)
+    await gw.db.save_message(note)
+    await bot.render_outgoing_message(note)
+    assert bot.active_turn_snapshot(sid) is not None
+    stop = await rpc(env, "turn.stop", {"session_id": sid})
+    assert stop["payload"]["stopped"] is True
+    assert bot.active_turn_snapshot(sid) is None
+
+
+async def test_v038_delivery_failure_clears_active_turn(env, monkeypatch) -> None:
+    bot, gw = env["bot"], env["gw"]
+    sid = await create_session(env)
+    mid = await _send(env, sid, "t4")
+
+    async def boom(message: Message) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(bot, "_deliver_final", boom)
+    reply = _msg(sid, MessageRole.ASSISTANT, "x", sender="Kesoku", parent_id=mid, status=MessageStatus.PENDING)
+    await gw.db.save_message(reply)
+    await bot.render_outgoing_message(reply)
+    assert bot.active_turn_snapshot(sid) is None

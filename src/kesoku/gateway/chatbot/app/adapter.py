@@ -581,6 +581,12 @@ class AppChatbot(Chatbot):
                 },
             )
             msg.metadata["app_seq"] = seq
+            # Register the turn as in-flight right away so every device (and snapshots / resumes) can show a
+            # typing indicator before the first token arrives (also when streaming is disabled).
+            self._active_turns[session_id] = {"turn_id": msg.id, "round_id": 0, "text": ""}
+            await self.send_raw(
+                make_envelope("stream.clear", {"turn_id": msg.id, "round_id": 0}, session_id=session_id)
+            )
             if not cross_channel:
                 await self.gateway.db.update_session_updated_at(session_id, time.time())
                 role = session.role_name or self.app_config.default_role
@@ -771,9 +777,12 @@ class AppChatbot(Chatbot):
         self._finalized_turns[turn_id] = None
         while len(self._finalized_turns) > FINALIZED_TURNS_MAX:
             self._finalized_turns.popitem(last=False)
-        active = self._active_turns.get(session_id)
-        if active is not None and active["turn_id"] == turn_id:
-            self._active_turns.pop(session_id, None)
+        # Always clear: a self-healing retry finalizes under a different turn id than the one registered.
+        self._active_turns.pop(session_id, None)
+
+    def _ensure_active_turn(self, session_id: str, turn_id: str) -> None:
+        if not self._turn_finalized(turn_id) and session_id not in self._active_turns:
+            self._active_turns[session_id] = {"turn_id": turn_id, "round_id": 0, "text": ""}
 
     async def _on_stream(self, channel_id: str, session_id: str, turn_id: str, text: str | None) -> None:
         """Convert cumulative preview updates into `stream.delta` / `stream.clear` (unsequenced)."""
@@ -847,6 +856,7 @@ class AppChatbot(Chatbot):
             await self.gateway.db.update_message_status(message.id, MessageStatus.ERROR)
         except Exception as e:
             logger.error(f"App delivery failed for message {message.id}: {e}", exc_info=True)
+            self._active_turns.pop(message.session_id, None)
             await self.on_message_delivery_failed(message, e)
 
     async def on_message_delivered(self, message: Message) -> None:
@@ -888,8 +898,10 @@ class AppChatbot(Chatbot):
                 self._tool_calls.pop(next(iter(self._tool_calls)))
         else:
             kind, title, status = "system", (body.strip().splitlines() or [""])[0][:80], None
+        turn_id = self._turn_id_of(message)
+        self._ensure_active_turn(message.session_id, turn_id)
         payload: dict[str, Any] = {
-            "turn_id": self._turn_id_of(message),
+            "turn_id": turn_id,
             "kind": kind,
             "message_id": message.id,
             "title": title,
@@ -902,8 +914,10 @@ class AppChatbot(Chatbot):
     async def _emit_tool_result(self, message: Message) -> None:
         meta = message.metadata or {}
         info = self._tool_calls.get(message.parent_id or "") or {}
+        turn_id = self._turn_id_of(message)
+        self._ensure_active_turn(message.session_id, turn_id)
         payload: dict[str, Any] = {
-            "turn_id": self._turn_id_of(message),
+            "turn_id": turn_id,
             "kind": "tool_result",
             "message_id": message.id,
             "tool_call_message_id": message.parent_id,
