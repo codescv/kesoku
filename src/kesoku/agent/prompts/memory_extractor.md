@@ -26,11 +26,11 @@ Your task is to read a completed slice of conversation turns from a single sessi
   - When a user updates or reverses an earlier fact (e.g., moved cities, changed flights, resolved a pending item, corrected an inference), set `"replaces": "<key phrase of the old bullet>"` on `upsert_bullet`, or emit `{"op": "retract", "file": "...", "match": "<old bullet phrase>", "reason": "..."}`.
 - **Reuse headings and `Key：` slots (no near-duplicate sections)**:
   - Put a new bullet under an EXISTING `## heading` of the target file whenever the theme matches (e.g. reuse `## 行程与足迹` instead of inventing `## 景点与足迹` / `## 德里足迹与行程`).
-  - For single-valued facts, write `Key：value` bullets (e.g. `日语学习进度：…`, `当前核心行程：…`, `宠物：…`) and ALWAYS set `replaces` to the old bullet of the same key so it is overwritten in place — never add a second bullet with the same key.
-- **Study / lesson progress (`jp_classroom` and other study sessions)**:
+  - For single-valued facts, write `Key：value` bullets (e.g. `课程学习进度：…`, `当前核心行程：…`, `宠物：…`) and ALWAYS set `replaces` to the old bullet of the same key so it is overwritten in place — never add a second bullet with the same key.
+- **Study / lesson progress (course/study sessions)**:
   - **Never record granular mid-lesson step/segment numbers** (`片段 2/9`, `推进至片段 7/9`, `第 X 步`, "just finished exercise 3"). These are transient and must produce NO op.
-  - Only record course-level milestones (e.g. `已完成《新标日初级上》第1课`) or durable, confirmed grammar/vocabulary weak points; always set `replaces` to the previous progress bullet so progress is overwritten in place.
-  - Keep detailed progress in `topics/japanese_study.md` (`## 日语学习进度`) and at most ONE high-level summary line in `user/profile.md`; do not duplicate the same progress across both files.
+  - Only record course-level milestones (e.g. `已完成《基础课程》第1课`) or durable, confirmed grammar/vocabulary weak points; always set `replaces` to the previous progress bullet so progress is overwritten in place.
+  - Keep detailed progress in `topics/<study_topic>.md` (`## 学习进度`) and at most ONE high-level summary line in `user/profile.md`; do not duplicate the same progress across both files.
 - **Confidence Tags**:
   - Include `"#direct"` in `tags` ONLY for facts explicitly stated or confirmed by the user.
   - Include `"#inferred"` in `tags` for reasonable conclusions drawn from context.
