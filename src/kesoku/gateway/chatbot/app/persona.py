@@ -111,11 +111,15 @@ _CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
 _ASCII_WORD_RE = re.compile(r"[A-Za-z0-9_]{3,}")
 CHARACTER_CONTEXT_LINE_MAX = 400
 CHARACTER_CONTEXT_MAX_LINES = 3
-# Generic avatar-instruction vocabulary that says nothing about a specific character (never matched alone).
-_CONTEXT_STOP_TOKENS = frozenset(
-    {"形态", "变成", "变身", "变为", "头像", "风格", "画风", "一个", "一只", "可爱", "生成", "图片", "照片",
-     "the", "and", "with", "style", "avatar", "form"}
+CHARACTER_CONTEXT_HEAD_CHARS = 8
+# Generic avatar-instruction wording that says nothing about a specific character: stripped from hints
+# before lookup so only the descriptive terms are matched against the role's files.
+_HINT_FILLER_RE = re.compile(
+    r"变身成|变成|变身|变为|化为|化身|形态|模样|样子|造型|版本|风格|画风|头像|生成|一只|一个|可爱的|可爱|帮我|给我"
 )
+_CONTEXT_STOP_TOKENS = frozenset({"the", "and", "with", "style", "avatar", "form", "into", "make"})
+_LINE_MARKUP_RE = re.compile(r"^[\s>*\-+•#`_\d.)]+")
+_MEDIA_LISTING_RE = re.compile(r"\.(?:gif|png|jpe?g|webp|svg|wav|mp3|ogg|m4a|mp4|webm)\b", re.IGNORECASE)
 
 STYLE_TEXT: dict[str, str] = {
     "anime_clean": "clean Japanese anime character illustration, crisp line art, soft cel shading",
@@ -202,37 +206,58 @@ def build_avatar_prompt(
 
 
 def hint_context_tokens(hint: str | None) -> list[str]:
-    """Lookup tokens from a hint: CJK runs plus their 2/3-char substrings, and ASCII words (longest first)."""
+    """Lookup tokens from a hint: CJK runs plus their 2/3-char substrings, and ASCII words (longest first).
+
+    Generic instruction wording (变成 / 形态 / 头像 …) is removed first so it never drives the match.
+    """
     if not hint or not hint.strip():
         return []
+    text = _HINT_FILLER_RE.sub(" ", hint)
     tokens: set[str] = set()
-    for run in _CJK_RUN_RE.findall(hint):
+    for run in _CJK_RUN_RE.findall(text):
         tokens.add(run)
         for n in (2, 3):
             tokens.update(run[i : i + n] for i in range(len(run) - n + 1))
-    tokens.update(w.lower() for w in _ASCII_WORD_RE.findall(hint))
+    tokens.update(w.lower() for w in _ASCII_WORD_RE.findall(text))
     return sorted((t for t in tokens if t.lower() not in _CONTEXT_STOP_TOKENS), key=lambda t: (-len(t), t))
 
 
 def match_character_context(lines: list[str], tokens: list[str]) -> str | None:
-    """Return the best-matching workspace lines (≤ 3, each ≤ 400 chars) for `tokens`, or None."""
+    """Return the best-matching workspace lines (≤ 3, each ≤ 400 chars) for `tokens`, or None.
+
+    Headings, `[file:` tags and media file listings are skipped. A line qualifies only when it contains a
+    token of at least `min(3, longest token)` chars, so a 2-char fragment of a longer hint term never pulls in
+    unrelated lines. Lines that *start* with the term
+    (definitions such as `- <term>：…`) outrank passing mentions; only the top-scoring tier is returned.
+    """
     if not tokens:
         return None
+    min_len = min(3, max(len(t) for t in tokens))
     scored: list[tuple[int, int, str]] = []
     seen: set[str] = set()
     for idx, raw in enumerate(lines):
         line = _clean_line(raw)
         if not line or line.startswith("#") or "[file:" in line or line in seen:
             continue
+        if _MEDIA_LISTING_RE.search(line):
+            continue
         low = line.lower()
-        score = sum(len(t) for t in tokens if t.lower() in low)
-        if score:
-            seen.add(line)
-            scored.append((score, idx, line[:CHARACTER_CONTEXT_LINE_MAX]))
+        hits = [t.lower() for t in tokens if t.lower() in low]
+        strong = [t for t in hits if len(t) >= min_len]
+        if not strong:
+            continue
+        seen.add(line)
+        score = sum(len(t) * low.count(t) for t in hits)
+        head = _LINE_MARKUP_RE.sub("", low)[:CHARACTER_CONTEXT_HEAD_CHARS]
+        head_hits = [t for t in hits if t in head]
+        if head_hits:
+            score += max(len(t) for t in strong) * 2 + max(len(t) for t in head_hits)
+        scored.append((score, idx, line[:CHARACTER_CONTEXT_LINE_MAX]))
     if not scored:
         return None
-    best = sorted(scored, key=lambda x: (-x[0], x[1]))[:CHARACTER_CONTEXT_MAX_LINES]
-    return "\n".join(line for _, _, line in sorted(best, key=lambda x: x[1]))
+    best = max(sc for sc, _, _ in scored)
+    top = [x for x in scored if x[0] >= best][:CHARACTER_CONTEXT_MAX_LINES]
+    return "\n".join(line for _, _, line in sorted(top, key=lambda x: x[1]))
 
 
 def fill_argv_template(template: list[str], values: dict[str, str]) -> list[str]:

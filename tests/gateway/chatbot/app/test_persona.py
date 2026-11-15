@@ -915,6 +915,21 @@ async def test_character_context_from_role_workspace_files(make_service):
     assert svc._resolve_character_context("../mika", "企鹅") is None
 
 
+def test_match_character_context_prefers_definitions_and_skips_noise():
+    from kesoku.gateway.chatbot.app.persona import hint_context_tokens, match_character_context
+
+    lines = [
+        "- 说话规则：被叫到名字（米卡/小企鹅/企鹅等）时才开口",  # passing mention
+        "- 表情包: 01_开心.gif 02_惊呆胖企鹅.gif",  # media listing
+        "",
+        "胖企鹅形态（米卡的吉祥物，也叫小企鹅）：圆滚滚的白色企鹅，戴蓝色领结",  # definition (e.g. characters.json)
+    ]
+    assert "形态" not in hint_context_tokens("变成胖企鹅形态") and "胖企鹅" in hint_context_tokens("变成胖企鹅形态")
+    for hint in ("变成胖企鹅形态", "胖企鹅", "小企鹅形态", "企鹅"):
+        assert match_character_context(lines, hint_context_tokens(hint)) == lines[3], hint
+    assert match_character_context(lines, hint_context_tokens("戴红帽子")) is None
+
+
 PROMPT_SPY_GEN = textwrap.dedent(
     """
     import sys
