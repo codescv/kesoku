@@ -146,3 +146,70 @@ def test_inline_bilingual_fullwidth_ruby_and_plain_zh() -> None:
     assert "熱心" in b["ja_plain"]
     assert any(p.get("rt") == "ねっしん" for p in b["ruby_parts"])
     assert b["zh"] == "“……呵呵，被你这么热切地盯着看，我也会有点害羞的呀。”"
+
+
+_MULTI_LINE_QUOTE = (
+    "### ① 原文\n"
+    "> 森(もり)さんは　毎晩(まいばん)　テレビを　見(み)る。\n"
+    "> 甲(こう)：明日(あした)　ボーリングに　行(い)かない？ / "
+    "乙(おつ)：ごめん。　明日(あした)は　仕事(しごと)が　あるから…\n"
+    "<spoiler>森先生每天晚上看电视。\n"
+    "甲：明天去打保龄球怎么样？ / 乙：抱歉，明天还有工作……</spoiler>\n\n"
+    "### ② 下一题"
+)
+
+
+def test_inline_bilingual_multi_line_quote_and_multi_line_spoiler() -> None:
+    """Consecutive `> ja` lines + a `<spoiler>` spanning lines become ONE bilingual segment keeping `\\n`."""
+    from kesoku.gateway.chatbot.base import parse_message_content
+
+    segs = parse_message_content(_MULTI_LINE_QUOTE, rich_blocks=True)
+    assert [s["type"] for s in segs] == ["text", "bilingual", "text"]
+    b = segs[1]
+    assert b["ja_plain"] == (
+        "森さんは　毎晩　テレビを　見る。\n甲：明日　ボーリングに　行かない？ / 乙：ごめん。　明日は　仕事が　あるから…"
+    )
+    assert b["zh"] == "森先生每天晚上看电视。\n甲：明天去打保龄球怎么样？ / 乙：抱歉，明天还有工作……"
+    assert "\n" in b["ja_html"] and "<ruby>森<rt>もり</rt></ruby>" in b["ja_html"]
+    assert any(p["base"] == "仕事" and p.get("rt") == "しごと" for p in b["ruby_parts"])
+    assert "".join(p["base"] for p in b["ruby_parts"]) == b["ja_plain"]
+    assert "speaker" not in b  # multi-line quotes never guess a speaker
+    assert all("<spoiler>" not in (s.get("content") or "") for s in segs)
+    assert segs[2]["content"].strip() == "### ② 下一题"
+
+
+def test_inline_bilingual_multi_line_variants() -> None:
+    """Single-line spoiler after multiple quote lines, `||bar||`, voice tag, and the kana requirement."""
+    from kesoku.gateway.chatbot.base import parse_message_content
+    from kesoku.utils.ui_markup import INLINE_BILINGUAL_RE, parse_inline_bilingual_match
+
+    raw = "> 今日(きょう)は\n> いい天気(てんき)ですね。\n<spoiler>今天天气真好。</spoiler>\n[voice: /tmp/a.wav]"
+    segs = parse_message_content(raw, rich_blocks=True)
+    assert len(segs) == 1 and segs[0]["type"] == "bilingual"
+    assert segs[0]["ja_plain"] == "今日は\nいい天気ですね。"
+    assert segs[0]["zh"] == "今天天气真好。"
+    assert segs[0]["voice"] == {"ref": "/tmp/a.wav"}
+
+    bar = parse_message_content("> 行(い)こう。\n> 早(はや)く！\n||走吧。\n快点！||", rich_blocks=True)
+    assert bar[0]["type"] == "bilingual" and bar[0]["zh"] == "走吧。\n快点！"
+
+    # Kana only on the second quote line still counts.
+    m = INLINE_BILINGUAL_RE.search("> 東京\n> へ行きます\n<spoiler>去东京</spoiler>")
+    assert m is not None
+    seg = parse_inline_bilingual_match(m)
+    assert seg is not None and seg["ja_plain"] == "東京\nへ行きます"
+
+    # A quote with no kana at all is never a bilingual pair.
+    assert INLINE_BILINGUAL_RE.search("> 中文引用\n> 第二行\n<spoiler>翻译</spoiler>") is None
+    # A spoiler body is capped (no runaway match across a code fence).
+    fenced = "> 行(い)こう。\n<spoiler>走吧\n```\ncode\n```\n</spoiler>"
+    assert all(s["type"] != "bilingual" for s in parse_message_content(fenced, rich_blocks=True))
+
+
+def test_inline_bilingual_single_line_behaviour_unchanged() -> None:
+    """The classic 2-line form keeps speaker extraction."""
+    from kesoku.gateway.chatbot.base import parse_message_content
+
+    segs = parse_message_content("> ハナ：おはよう！\n<spoiler>花：早上好！</spoiler>", rich_blocks=True)
+    assert segs[0]["type"] == "bilingual"
+    assert segs[0]["speaker"] == "花" and segs[0]["ja_plain"] == "おはよう！" and segs[0]["zh"] == "早上好！"

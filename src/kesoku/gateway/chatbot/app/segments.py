@@ -15,6 +15,11 @@ from kesoku.gateway.chatbot.base import parse_message_content
 from kesoku.utils.ui_markup import card_media_refs
 
 _ATTACHMENTS_SUFFIX_RE = re.compile(r"\n*\s*Attachments:\n(?:\[Attachment: [^\n]*\]\n?)+\s*$")
+# One `[Attachment: <filename> (<mime>) saved at <path>[ — note]]` line of the injected listing.
+_ATTACHMENT_LINE_RE = re.compile(
+    r"^\[Attachment: (?P<filename>.*?) \((?P<mime>[^()\s]*)\) saved at (?P<path>.+?)(?: — [^\n]*)?\]$",
+    re.MULTILINE,
+)
 
 
 @dataclass
@@ -120,10 +125,49 @@ def user_display_text(msg: Message) -> str:
     display = meta.get("display_text")
     if isinstance(display, str):
         return display
-    content = msg.content or ""
-    if meta.get("attachments"):
-        content = _ATTACHMENTS_SUFFIX_RE.sub("", content)
-    return content
+    # Strip the injected `Attachments:\n[Attachment: ... saved at ...]` listing whenever it is present (also for
+    # messages ingested by other channels, whose metadata may not carry `attachments`/`display_text`).
+    return _ATTACHMENTS_SUFFIX_RE.sub("", msg.content or "")
+
+
+def user_attachments(msg: Message) -> list[dict[str, Any]]:
+    """Return wire attachments (`{ref, mime, filename, object, bytes}`) of a stored user message.
+
+    Prefers structured `metadata["attachments"]`; falls back to parsing the injected listing in the content so
+    history of older / cross-channel messages still renders voice and image pills instead of server paths.
+    """
+    meta = msg.metadata or {}
+    out: list[dict[str, Any]] = []
+    for a in meta.get("attachments") or []:
+        if isinstance(a, dict) and a.get("path"):
+            path = str(a.get("path"))
+            mime = a.get("mime_type") or a.get("mime") or _mime_for(path) or "application/octet-stream"
+            out.append(
+                {
+                    "ref": path,
+                    "mime": mime,
+                    "filename": a.get("filename") or os.path.basename(path),
+                    "object": a.get("object") or "",
+                    "bytes": int(a.get("bytes") or 0),
+                }
+            )
+    if out:
+        return out
+    suffix = _ATTACHMENTS_SUFFIX_RE.search(msg.content or "")
+    if not suffix:
+        return out
+    for m in _ATTACHMENT_LINE_RE.finditer(suffix.group(0)):
+        path = m.group("path").strip()
+        out.append(
+            {
+                "ref": path,
+                "mime": m.group("mime") or _mime_for(path) or "application/octet-stream",
+                "filename": m.group("filename").strip() or os.path.basename(path),
+                "object": "",
+                "bytes": 0,
+            }
+        )
+    return out
 
 
 def message_to_record(
@@ -140,18 +184,7 @@ def message_to_record(
     """
     meta = msg.metadata or {}
     if msg.role == MessageRole.USER:
-        attachments = []
-        for a in meta.get("attachments") or []:
-            if isinstance(a, dict) and a.get("path"):
-                attachments.append(
-                    {
-                        "ref": a.get("path"),
-                        "mime": a.get("mime_type") or a.get("mime") or "application/octet-stream",
-                        "filename": a.get("filename") or os.path.basename(str(a.get("path"))),
-                        "object": a.get("object") or "",
-                        "bytes": int(a.get("bytes") or 0),
-                    }
-                )
+        attachments = user_attachments(msg)
         record: dict[str, Any] = {
             "message_id": msg.id,
             "role": "user",

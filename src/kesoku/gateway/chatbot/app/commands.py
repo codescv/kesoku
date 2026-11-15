@@ -64,6 +64,9 @@ LEXICAL_CACHE_MAX = 512
 SENTENCE_LEXICAL_CACHE_MAX = 256
 LEX_FIELDS = ("surface", "reading", "pos", "gloss_zh", "lemma", "conj", "textbook", "colloquial", "note")
 PKMN_ART_REL = os.path.join("games", "pokemon_assistant", "data", "art")
+PREFS_LIST_MAX_ITEMS = 16
+PREFS_LIST_ITEM_MAX_CHARS = 40
+TRANSLATOR_PREFS_KEYS = ("native_lang", "foreign_langs", "src_lang", "dst_lang", "formality")
 WORKSPACE_LIST_MAX = 500
 WORKSPACE_TEXT_MAX_BYTES = 256 * 1024
 WORKSPACE_HIDDEN_DIRS = frozenset(
@@ -336,13 +339,18 @@ class RequestHandlers:
         return out
 
     async def handle_session_create(self, ctx: RequestContext, payload: dict[str, Any]) -> Reply:
-        """`session.create{role?, title?, mode?}` -> `session.snapshot` (optionally starting a mode)."""
+        """`session.create{role?, title?, mode?, prefs?}` -> `session.snapshot` (optionally starting a mode)."""
         role_raw = payload.get("role")
         role = self._validate_role(role_raw) if role_raw else self.app.app_config.default_role
         title = optional_str(payload, "title", max_len=TITLE_MAX_CHARS) or "New Session"
         mode_id = optional_str(payload, "mode", max_len=40)
         if mode_id is not None and self.app.app_config.get_mode(mode_id) is None:
             raise ProtocolError("BAD_REQUEST", "unknown mode")
+        prefs = payload.get("prefs")
+        if prefs is not None and not isinstance(prefs, dict):
+            raise ProtocolError("BAD_REQUEST", "prefs must be an object")
+        if prefs:
+            self._merge_prefs("", {}, prefs)  # validate before creating anything
         session_id = uuid.uuid4().hex[:8]
         channel_id = self.app.channel_for(session_id)
         await self.app.gateway.db.set_channel_role(self.app.chatbot_id, channel_id, role)
@@ -365,7 +373,9 @@ class RequestHandlers:
             {"session_id": session_id, "title": title, "role": role, "updated_at": time.time()},
         )
         if mode_id is not None and mode_id != "chat":
-            await self.app.start_mode(session_id, mode_id, ctx.device_id)
+            await self.app.start_mode(session_id, mode_id, ctx.device_id, prefs or None)
+        elif prefs:
+            await self.apply_mode_prefs(session_id, prefs)
         return Reply("session.snapshot", await self.build_snapshot(session_id), session_id=session_id)
 
     async def handle_session_open(self, ctx: RequestContext, payload: dict[str, Any]) -> Reply:
@@ -543,13 +553,16 @@ class RequestHandlers:
 
     # ------------------------------------------------------------------ modes & prefs
     async def handle_mode_start(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
-        """`mode.start{session_id, mode_id}`: inject the configured launch prompt as a user message."""
+        """`mode.start{session_id, mode_id, prefs?}`: inject the configured launch prompt as a user message."""
         session_id = require_session_id(payload)
         mode_id = require_str(payload, "mode_id", max_len=40)
         if self.app.app_config.get_mode(mode_id) is None:
             raise ProtocolError("BAD_REQUEST", "unknown mode")
         await self._get_session(session_id)
-        ack = await self.app.start_mode(session_id, mode_id, ctx.device_id)
+        prefs = payload.get("prefs")
+        if prefs is not None and not isinstance(prefs, dict):
+            raise ProtocolError("BAD_REQUEST", "prefs must be an object")
+        ack = await self.app.start_mode(session_id, mode_id, ctx.device_id, prefs or None)
         return {"session_id": session_id, "mode_id": mode_id, **(ack or {})}
 
     async def handle_mode_stop(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
@@ -566,7 +579,28 @@ class RequestHandlers:
         if not isinstance(prefs, dict):
             raise ProtocolError("BAD_REQUEST", "prefs must be an object")
         await self._get_session(session_id)
+        merged = await self.apply_mode_prefs(session_id, prefs)
+        return {"session_id": session_id, "prefs": merged}
+
+    async def apply_mode_prefs(self, session_id: str, prefs: dict[str, Any]) -> dict[str, Any]:
+        """Merge `prefs` (None values delete) over the stored session `mode_prefs`, validate, persist and sync.
+
+        Shared by `mode.prefs.set` and `mode.start{prefs}` / `session.create{mode, prefs}`.
+
+        Returns:
+            The merged prefs now stored for the session.
+
+        Raises:
+            ProtocolError: BAD_REQUEST for invalid keys / values, schema violations or > 2 KiB.
+        """
         current = (await asyncio.to_thread(self.db.get_app_session_prefs, session_id) or {}).get("mode_prefs") or {}
+        merged = self._merge_prefs(session_id, current, prefs)
+        await asyncio.to_thread(self.db.upsert_app_session_prefs, session_id, mode_prefs=merged or None)
+        await self._sync_mode_prefs_to_staging(session_id, merged)
+        return merged
+
+    def _merge_prefs(self, session_id: str, current: dict[str, Any], prefs: dict[str, Any]) -> dict[str, Any]:
+        """Pure merge + validation of `prefs` over `current` (raises ProtocolError BAD_REQUEST when invalid)."""
         merged = {**current}
         for key, value in prefs.items():
             if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,40}", key):
@@ -582,12 +616,10 @@ class RequestHandlers:
         self._validate_prefs_schema(session_id, merged)
         if len(json.dumps(merged, ensure_ascii=False).encode("utf-8")) > LIMITS["MODE_PREFS_MAX_BYTES"]:
             raise ProtocolError("BAD_REQUEST", "prefs exceed 2 KiB")
-        await asyncio.to_thread(self.db.upsert_app_session_prefs, session_id, mode_prefs=merged or None)
-        await self._sync_mode_prefs_to_staging(session_id, merged)
-        return {"session_id": session_id, "prefs": merged}
+        return merged
 
     async def _sync_mode_prefs_to_staging(self, session_id: str, prefs: dict[str, Any]) -> None:
-        """Mirror `mode_prefs` into `$STAGING_DIR/context/05-app-prefs.md` and `game/pokemon.json` when applicable."""
+        """Mirror `mode_prefs` into `context/05-app-prefs.md`, `game/pokemon.json` and `game/translator.json`."""
         try:
             session = await self._get_session(session_id)
         except Exception:  # noqa: BLE001
@@ -626,6 +658,19 @@ class RequestHandlers:
                         changed = True
                 except (OSError, ValueError):
                     pass
+
+            tr_path = os.path.join(staging, "game", "translator.json")
+            tr_updates = {k: prefs[k] for k in TRANSLATOR_PREFS_KEYS if k in prefs}
+            if tr_updates and os.path.isfile(tr_path):
+                try:
+                    with open(tr_path, encoding="utf-8") as f:
+                        tdata = json.load(f)
+                    if isinstance(tdata, dict) and any(tdata.get(k) != v for k, v in tr_updates.items()):
+                        tdata.update(tr_updates)
+                        atomic_write_text(tr_path, json.dumps(tdata, ensure_ascii=False, indent=2) + "\n")
+                        changed = True
+                except (OSError, ValueError):
+                    pass
             return changed
 
         did_change = await asyncio.to_thread(_apply)
@@ -647,6 +692,15 @@ class RequestHandlers:
                 raise ProtocolError("BAD_REQUEST", f"prefs value for '{key}' is not allowed")
             if rule == "string" and (not isinstance(value, str) or len(value) > 200):
                 raise ProtocolError("BAD_REQUEST", f"prefs value for '{key}' must be a short string")
+            if rule == "list" and (
+                not isinstance(value, list)
+                or len(value) > PREFS_LIST_MAX_ITEMS
+                or not all(isinstance(v, str) and len(v) <= PREFS_LIST_ITEM_MAX_CHARS for v in value)
+            ):
+                raise ProtocolError(
+                    "BAD_REQUEST",
+                    f"prefs value for '{key}' must be a list of ≤{PREFS_LIST_MAX_ITEMS} short strings",
+                )
 
     async def handle_model_set(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
         """`model.set{session_id, llm_override|null}`: persist the default per-session LLM override."""

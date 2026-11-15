@@ -258,21 +258,32 @@ RICH_BLOCK_RE = re.compile(
     r"^[ \t]*```(?P<kind>bilingual|card)[ \t]*\r?\n(?P<body>.*?)^[ \t]*```[ \t]*\r?$",
     re.MULTILINE | re.DOTALL,
 )
-# Unfenced 2-line / 3-line bilingual quote emitted by role intro / companion prompts:
-#   > <Japanese line containing kana>
-#   <spoiler>Chinese translation</spoiler>   (or ||Chinese|| or plain translation line)
+# Unfenced bilingual quote emitted by role intro / companion / classroom prompts:
+#   > <Japanese line(s); one or more consecutive quote lines, at least one containing kana>
+#   <spoiler>Chinese translation (may span up to 8 lines)</spoiler>   (or ||Chinese|| or a plain translation line)
 #   [voice: /optional/path.wav]
+INLINE_BILINGUAL_MAX_LINES = 8
+_KANA = r"\u3040-\u309f\u30a0-\u30ff"
+_QLINE = r"[^\r\n]*"  # body of one quote line (after the `> ` marker)
+_QNEXT = r"\r?\n[ \t]*>[ \t]*"  # newline + the next line's `> ` marker
+_ML_CHAR = r"(?:(?!</spoiler>|```)[^\r\n])"
+_BAR_CHAR = r"(?:(?!```)[^\r\n|])"
+_N = INLINE_BILINGUAL_MAX_LINES - 1
 INLINE_BILINGUAL_RE = re.compile(
-    r"^[ \t]*>[ \t]*(?P<ja>[^\r\n]*[\u3040-\u309f\u30a0-\u30ff][^\r\n]*?)[ \t]*\r?\n"
+    rf"^[ \t]*>[ \t]*(?P<ja>(?:{_QLINE}{_QNEXT}){{0,{_N}}}?[^\r\n]*[{_KANA}][^\r\n]*?(?:{_QNEXT}{_QLINE}?){{0,{_N}}}?)"
+    r"[ \t]*\r?\n"
     r"(?:"
-    r"(?:[ \t]*\r?\n)?[ \t]*(?:>[ \t]*)?<spoiler>[ \t]*(?P<zh_sp>[^\r\n]+?)[ \t]*</spoiler>[ \t]*"
-    r"|(?:[ \t]*\r?\n)?[ \t]*(?:>[ \t]*)?\|\|[ \t]*(?P<zh_bar>[^\r\n|]+?)[ \t]*\|\|[ \t]*"
-    r"|[ \t]*(?P<zh_plain>(?![>#*`\-\[\s<|])[^\r\n\u3040-\u309f\u30a0-\u30ff]*"
-    r"[^\r\n\s\u3040-\u309f\u30a0-\u30ff])[ \t]*"
+    rf"(?:[ \t]*\r?\n)?[ \t]*(?:>[ \t]*)?<spoiler>[ \t]*"
+    rf"(?P<zh_sp>{_ML_CHAR}*?(?:\r?\n{_ML_CHAR}*?){{0,{_N}}}?)[ \t]*</spoiler>[ \t]*"
+    rf"|(?:[ \t]*\r?\n)?[ \t]*(?:>[ \t]*)?\|\|[ \t]*"
+    rf"(?P<zh_bar>{_BAR_CHAR}+?(?:\r?\n{_BAR_CHAR}*?){{0,{_N}}}?)[ \t]*\|\|[ \t]*"
+    rf"|[ \t]*(?P<zh_plain>(?![>#*`\-\[\s<|])[^\r\n{_KANA}]*"
+    rf"[^\r\n\s{_KANA}])[ \t]*"
     r")"
     r"(?:\r?\n(?:[ \t]*\r?\n)?[ \t]*\[voice:\s*(?P<voice>[^\]]+?)\s*\][ \t]*)?",
     re.MULTILINE | re.IGNORECASE,
 )
+_QUOTE_CONT_RE = re.compile(r"\r?\n[ \t]*>[ \t]?")
 CARD_KIND_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _MEDIA_TAG_RE = re.compile(r"^\s*\[(?P<kind>file|voice):\s*(?P<path>[^\]]+?)\s*\]\s*$")
 # Inline ruby notations: `漢字(かな)` / `漢字（かな）` (base = preceding kanji run) and `{base|reading}`.
@@ -588,12 +599,17 @@ _ZH_SPEAKER_RE = re.compile(
 )
 
 
+def _normalize_lines(text: str) -> str:
+    """Strip every line, drop blank lines and keep line breaks between the remaining ones."""
+    return "\n".join(line.strip() for line in text.replace("\r\n", "\n").split("\n") if line.strip())
+
+
 def parse_inline_bilingual_match(match: re.Match[str]) -> dict[str, Any] | None:
     """Build a `bilingual` segment from an `INLINE_BILINGUAL_RE` match."""
-    ja = (match.group("ja") or "").strip()
-    zh = (match.group("zh_sp") or match.group("zh_bar") or match.group("zh_plain") or "").strip()
+    ja = _normalize_lines(_QUOTE_CONT_RE.sub("\n", match.group("ja") or ""))
+    zh = _normalize_lines(match.group("zh_sp") or match.group("zh_bar") or match.group("zh_plain") or "")
     voice = (match.group("voice") or "").strip()
-    if not ja or not zh:
+    if not ja or not zh or not re.search(f"[{_KANA}]", ja):
         return None
     speaker: str | None = None
     jm = _INLINE_SPEAKER_RE.match(ja)

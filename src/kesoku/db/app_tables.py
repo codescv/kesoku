@@ -268,7 +268,8 @@ class AppTablesMixin:
             session_id: Session identifier.
             before_ts: Exclusive upper timestamp bound (None = newest).
             limit: Maximum number of messages.
-            visible_only: Only user / assistant text messages (excludes thoughts, tools, notifications).
+            visible_only: Only user / assistant text messages (excludes thoughts, tools, notifications and
+                aborted / undelivered assistant replies with status `error`).
 
         Returns:
             Message models oldest to newest.
@@ -281,7 +282,8 @@ class AppTablesMixin:
         if visible_only:
             clauses.append(
                 "role IN ('user', 'assistant') AND type = 'text' AND sender <> 'Notification' "
-                "AND trim(content) <> 'Processed request successfully.'"
+                "AND trim(content) <> 'Processed request successfully.' "
+                "AND NOT (role = 'assistant' AND status = 'error')"
             )
         params.append(max(1, min(int(limit), 500)))
         sql = "SELECT * FROM messages WHERE " + " AND ".join(clauses) + " ORDER BY timestamp DESC, id DESC LIMIT ?"

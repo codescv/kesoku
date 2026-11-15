@@ -637,11 +637,22 @@ class AppChatbot(Chatbot):
         return saved
 
     # ------------------------------------------------------------------ modes / roles
-    async def start_mode(self, session_id: str, mode_id: str, device_id: str) -> dict[str, Any] | None:
-        """Inject the configured mode launch prompt as a user message (the LLM drives the actual start)."""
+    async def start_mode(
+        self, session_id: str, mode_id: str, device_id: str, prefs: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        """Inject the configured mode launch prompt as a user message (the LLM drives the actual start).
+
+        Args:
+            session_id: Target session.
+            mode_id: Configured mode id.
+            device_id: Requesting device.
+            prefs: Optional `mode.start{prefs}` merged (validated) into the stored session `mode_prefs` first.
+        """
         mode = self.app_config.get_mode(mode_id)
         if mode is None:
             raise ProtocolError("BAD_REQUEST", "unknown mode")
+        if prefs:
+            await self.requests.apply_mode_prefs(session_id, prefs)
         current = await asyncio.to_thread(self.policy.current_mode, session_id)
         if not mode.launch_prompt:
             if current != mode_id and current != "chat":
@@ -652,15 +663,52 @@ class AppChatbot(Chatbot):
         override = mode.llm_override.model_dump(exclude_none=True) if mode.llm_override else None
         if override:
             await asyncio.to_thread(self.sync_db.upsert_app_session_prefs, session_id, llm_override=override)
+        launch_prompt = mode.launch_prompt
+        if mode_id == "translator":
+            launch_prompt = await self._translator_launch_prompt(session_id) or launch_prompt
         return await self.ingest_app_message(
             session_id=session_id,
             device_id=device_id,
             client_msg_id=f"mode-{mode_id}-{int(time.time() * 1000)}",
-            text=mode.launch_prompt,
+            text=launch_prompt,
             attachments=[],
             llm_override=override,
             mode_hint=mode_id,
         )
+
+    async def _translator_launch_prompt(self, session_id: str) -> str | None:
+        """Build the translator launch prompt from the session's native / foreign language prefs (None = default).
+
+        Also mirrors the prefs into staging (`05-app-prefs.md`, `game/translator.json`) before launch so the game
+        rules see the same language pair as the prompt.
+        """
+        stored = (await asyncio.to_thread(self.sync_db.get_app_session_prefs, session_id) or {}).get("mode_prefs")
+        prefs: dict[str, Any] = stored if isinstance(stored, dict) else {}
+
+        def _s(key: str) -> str:
+            value = prefs.get(key)
+            return value.strip() if isinstance(value, str) else ""
+
+        native, src, dst = _s("native_lang"), _s("src_lang"), _s("dst_lang")
+        if not native and not (src or dst):
+            return None
+        native = native or "zh-CN"
+        foreign_raw = prefs.get("foreign_langs")
+        if isinstance(foreign_raw, str):
+            foreign_raw = foreign_raw.split(",")
+        foreigns = [
+            f.strip() for f in (foreign_raw if isinstance(foreign_raw, list) else [])
+            if isinstance(f, str) and f.strip() and f.strip().lower() != native.lower()
+        ]
+        pair_foreign = [x for x in (src, dst) if x and x.lower() != native.lower()]
+        if len(pair_foreign) == 2:
+            pair = f"母语 {native}，当前外语对 {pair_foreign[0]} ⇄ {pair_foreign[1]}"
+        else:
+            fallback = [x for x in ("ja", "en") if x != native.lower()]
+            pair = f"母语 {native} ⇄ 常用外语 {(pair_foreign or foreigns or fallback)[0]}"
+        extra = f"（常用外语：{'、'.join(foreigns)}）" if len(foreigns) > 1 else ""
+        await self.requests._sync_mode_prefs_to_staging(session_id, prefs)
+        return f"进入通用极速翻译模式：{pair}{extra}，零寒暄。"
 
     async def stop_mode(self, session_id: str, device_id: str, instance_id: str | None) -> dict[str, Any] | None:
         """Inject the stop prompt of the session's current mode (or the configured default)."""
@@ -793,6 +841,10 @@ class AppChatbot(Chatbot):
             await self._deliver_final(message)
             await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
             await self.on_message_delivered(message)
+        except DeliveryAbortedError as e:
+            # Self-healing retry is already in flight: hide the broken attempt instead of failing delivery.
+            logger.info(f"App delivery aborted for message {message.id}: {e}")
+            await self.gateway.db.update_message_status(message.id, MessageStatus.ERROR)
         except Exception as e:
             logger.error(f"App delivery failed for message {message.id}: {e}", exc_info=True)
             await self.on_message_delivery_failed(message, e)
@@ -882,11 +934,63 @@ class AppChatbot(Chatbot):
             "ts": float(message.timestamp),
             "sender": sender,
         }
+        await self._preflight_self_healing(message, jobs)
         await self.emit_session_event(message.session_id, "message.final", payload)
         if message.sender != "Notification":
             self._mark_finalized(message.session_id, turn_id)
         for job in jobs:
             await self._deliver_media_job(message, job)
+
+    async def _standard_media_available(self, message: Message, ref: str) -> tuple[bool, str]:
+        """Return `(available, resolved_path)` via the base delivery path: a ready file or any deferred sidecar."""
+        if self.supports_deferred_media:
+            try:
+                if await self._resolve_deferred(ref, message.session_id) is not None:
+                    return True, ref
+            except Exception as e:  # noqa: BLE001 - fall back to plain path resolution
+                logger.debug(f"Deferred pre-flight check failed for {ref}: {e}")
+        resolved = await self.resolve_outbound_path(ref, message.session_id)
+        return bool(resolved) and await asyncio.to_thread(os.path.isfile, resolved), resolved
+
+    async def _hydrated_media_path(self, message: Message, ref: str) -> str | None:
+        """Resolve `ref` through the jailed `media.hydrate` roots (`pkmn/` artwork, roles, characters, games...)."""
+        try:
+            staging = await self._staging_dir_for(message.session_id)
+            if staging:
+                return await asyncio.to_thread(self.requests._resolve_hydrate_candidate, staging, ref)
+            return await asyncio.to_thread(self.requests._resolve_local_ref, ref, None)
+        except Exception as e:  # noqa: BLE001 - hydration lookup is best effort
+            logger.debug(f"Hydration lookup failed for {ref}: {e}")
+            return None
+
+    async def _media_job_available(self, message: Message, job: MediaJob) -> tuple[bool, str]:
+        """Return `(available, resolved_path)`: base delivery can send it, or the client-side hydrator can."""
+        available, resolved = await self._standard_media_available(message, job.ref)
+        if available:
+            return True, resolved
+        hydrated = await self._hydrated_media_path(message, job.ref)
+        return (True, hydrated) if hydrated else (False, resolved)
+
+    async def _preflight_self_healing(self, message: Message, jobs: list[MediaJob]) -> None:
+        """Abort a first-attempt final whose media refs are missing on disk BEFORE `message.final` is emitted.
+
+        Otherwise the broken reply reaches the client and the self-healing retry renders as a duplicate bubble.
+
+        Raises:
+            DeliveryAbortedError: When a referenced attachment is missing and self-healing was injected.
+        """
+        if not jobs or await self._is_self_healing_retry(message):
+            return
+        for job in jobs:
+            available, resolved = await self._media_job_available(message, job)
+            if available:
+                continue
+            logger.info(f"Pre-flight: attachment '[{job.kind}: {job.ref}]' missing; initiating self-healing.")
+            await self._on_stream(message.channel_id, message.session_id, str(message.parent_id or message.id), None)
+            await self._inject_self_healing_notification(
+                {"type": job.kind, "path": job.ref}, job.ref, resolved, message, FileNotFoundError(job.ref)
+            )
+            raise DeliveryAbortedError(f"Self-healing initiated for failed attachment: {job.ref}")
 
     async def _role_display_name(self, role_id: str | None) -> str | None:
         """Return the persona display name for `role_id` (None when unknown or unreadable)."""
@@ -903,6 +1007,13 @@ class AppChatbot(Chatbot):
     async def _deliver_media_job(self, message: Message, job: MediaJob) -> None:
         token = _CURRENT_MEDIA.set(job)
         try:
+            available, _ = await self._standard_media_available(message, job.ref)
+            hydrated = None if available else await self._hydrated_media_path(message, job.ref)
+            if hydrated:
+                # Only resolvable via hydration roots (e.g. `pkmn/0987.webp`): upload directly, never self-heal.
+                kind = "voice" if job.kind == "voice" else "file"
+                await self._upload_and_announce(message, hydrated, kind, job.placeholder_id, job.ref)
+                return
             await self._attempt_send_attachment({"type": job.kind, "path": job.ref}, message)
         except DeliveryAbortedError as e:
             await self._emit_media_failed(message, job.placeholder_id, str(e))

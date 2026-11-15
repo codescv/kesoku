@@ -434,6 +434,8 @@ async def test_final_message_segments_media_and_turn_events(env) -> None:
     staging = env["tmp"] / "sessions" / sid
     staging.mkdir(parents=True, exist_ok=True)
     (staging / "scene.png").write_bytes(b"\x89PNG data")
+    # A failed deferred job (error sidecar) passes the pre-flight check and surfaces as `media.failed`.
+    (staging / "missing_file.png.error.json").write_text(json.dumps({"error": "render failed"}), encoding="utf-8")
     user = Message(session_id=sid, chatbot_id="app", channel_id=f"app:{sid}", sender="dev-1", role=MessageRole.USER,
                    content="hi", status=MessageStatus.PROCESSED)
     await gw.db.save_message(user)
