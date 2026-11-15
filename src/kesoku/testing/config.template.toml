@@ -1,0 +1,67 @@
+# kesoku.testing default config template.
+# [profiles.<name>] tables are deep-merged on top and then removed; dotted overrides are applied last.
+
+[workspace]
+db_path = "kesoku.db"
+skills_dir = "skills"
+roles_dir = "roles"
+sessions_dir = "sessions"
+
+[agent]
+llm = "gemini"
+user_prompts = []
+raw_llm_logs = true
+auto_context_search = false
+memory_pinned_enabled = false
+recent_sessions_enabled = false
+memory_extraction_enabled = false
+disabled_tools = ["chat_search", "view_message", "analyze_media", "web_search"]
+strip_historical_question_options = true
+recent_user_messages_limit = 100
+context_consolidation_k = 4
+compression_strategy = "watermark"
+protect_front_turns = 1
+protect_tail_turns = 4
+context_high_watermark = 64000
+context_low_watermark = 24000
+protect_tail_min_tokens = 12000
+watermark_chunk_tokens = 24000
+watermark_chunk_min_turns = 2
+
+[gemini]
+model_name = "gemini-3.8-flash"
+context_model_name = "gemini-3.8-flash"
+auth_mode = "vertex"
+project_id = "gps-babel-tower"
+location = "global"
+thinking_level = "medium"
+safety_threshold = "off"
+context_caching = true
+context_caching_mode = "implicit"
+
+[shell]
+enabled = true
+use_shell = true
+mode = "blocklist"
+blocklist_patterns = []
+background_threshold_seconds = 300.0
+
+[shell.forbidden_patterns]
+"/google/bin/releases/jetski-devs/tools/cli|\\bjetski\\b" = "Delegation to external agents is disabled in this environment. Solve the task yourself with your own tools."
+"(^|;|&&|\\|)\\s*(python|python3|pip|pytest)\\b" = "Please use 'uv' (uv run python / uv run pytest)."
+"holdout|kesoku_bench|kesoku-wt|find\\s+(/|~)" = "Access denied."
+
+# --- profiles ---------------------------------------------------------------------------------------
+
+[profiles.default]
+
+[profiles.compaction_forced.agent]
+protect_tail_turns = 2
+
+[profiles.compaction_small.agent]
+protect_tail_turns = 2
+context_high_watermark = 8000
+context_low_watermark = 4000
+protect_tail_min_tokens = 1500
+watermark_chunk_tokens = 2500
+watermark_chunk_min_turns = 2
