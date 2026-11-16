@@ -23,7 +23,7 @@ from kesoku.agent.context_dir import (
     insert_extra_entries,
     render_context_blocks,
 )
-from kesoku.agent.context_policy import resolve_context_policy, resolve_memory_policy
+from kesoku.agent.context_policy import most_restrictive_policy, resolve_context_policy, resolve_memory_policy
 from kesoku.agent.history import (
     build_history,
     prepare_history_for_llm,
@@ -580,6 +580,7 @@ class TurnExecutor:
         self._recent_sessions_chars: int = 0
         self._recent_sessions_rendered: bool = False
         self._turn_context_policy: str = "full"
+        self._turn_context_policy_msg_id: str | None = None
         # Authoritative override resolved once per turn (keyed by the turn's user message id).
         self._turn_policy_override_msg_id: str | None = None
         self._turn_policy_override: str | None = None
@@ -1714,7 +1715,13 @@ class TurnExecutor:
             {e.name: e.memory_policy for e in raw_context_entries},
             cfg,
         )
-        self._turn_context_policy = await self._apply_memory_policy_override(current_msg, static_policy)
+        round_policy = await self._apply_memory_policy_override(current_msg, static_policy)
+        if self._turn_context_policy_msg_id != current_msg.id:
+            self._turn_context_policy = round_policy
+            self._turn_context_policy_msg_id = current_msg.id
+        else:
+            self._turn_context_policy = most_restrictive_policy(self._turn_context_policy, round_policy)
+        await self._persist_user_context_policy(current_msg, latest_user_msg)
 
         # 3. Prepend Consolidated Passive Synchronization, Preferences, and Context Compression Guidelines
         # (if Bootstrap)
@@ -1886,6 +1893,36 @@ class TurnExecutor:
         )
 
         return latest_user_msg
+
+    async def _persist_user_context_policy(
+        self,
+        current_msg: Message,
+        latest_user_msg: Message | None = None,
+    ) -> None:
+        """Persist `self._turn_context_policy` onto the active USER message in memory and SQLite."""
+        target_msg = current_msg if current_msg.role == MessageRole.USER else latest_user_msg
+        if target_msg is None or target_msg.role != MessageRole.USER or is_excluded_from_memory(target_msg):
+            return
+        policy = self._turn_context_policy or "full"
+        cur_meta = dict(target_msg.metadata or {})
+        needs_db_update = cur_meta.get("context_policy") != policy
+        cur_meta["context_policy"] = policy
+        target_msg.metadata = cur_meta
+        if latest_user_msg is not None and latest_user_msg is not target_msg:
+            latest_meta = dict(latest_user_msg.metadata or {})
+            latest_meta["context_policy"] = policy
+            latest_user_msg.metadata = latest_meta
+        if not needs_db_update:
+            return
+        db = getattr(self.context, "db", None)
+        update_fn = getattr(db, "update_message_metadata", None) if db is not None else None
+        if callable(update_fn):
+            try:
+                res = update_fn(target_msg.id, cur_meta)
+                if inspect.isawaitable(res):
+                    await res
+            except Exception as e:
+                logger.warning(f"Failed to persist context_policy metadata for message '{target_msg.id}': {e}")
 
     async def _apply_memory_policy_override(self, current_msg: Message, static_policy: str) -> str:
         """Apply the registered authoritative memory policy override (resolved once per turn).
@@ -2472,6 +2509,7 @@ class TurnExecutor:
         self._last_round_tool_errors = sum(
             1 for rm in result_msgs if getattr(rm, "metadata", None) and rm.metadata.get("tool_error")
         )
+        self._turn_policy_override_msg_id = None
 
         # Check if history was compacted and session was transitioned
         tool_ctx = self.tool_runner.tool_context

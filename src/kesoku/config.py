@@ -325,11 +325,8 @@ class AgentConfig(BaseModel):
         description="Optional workspace prompt files appended to the base memory extractor rubric",
     )
     memory_extraction_signal_regex: str = Field(
-        default=(
-            r"(?:我叫|我的名字|我是.{1,15}(?:人|生|师|员)|我住在|搬到|换工作|生日是|过敏|讨厌吃|最喜欢|"
-            r"决定去|计划去|买了|养了|以后都用|请记住|别忘了)"
-        ),
-        description="Configurable regex triggering immediate debounced T1 memory extraction (empty disables signal T1)",
+        default="",
+        description="Deprecated legacy regex for T1 memory extraction (kept for config.toml backward compatibility)",
     )
     memory_extraction_min_turns: int = Field(
         default=8,

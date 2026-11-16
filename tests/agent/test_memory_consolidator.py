@@ -899,7 +899,7 @@ async def test_minimal_thinking_unsupported_falls_back_to_low(tmp_path, monkeypa
 
 @pytest.mark.asyncio
 async def test_confirm_only_session_skips_signal_and_raises_batch_threshold(tmp_path, monkeypatch) -> None:
-    """Interactive `confirm_only` modes never fire T1-immediate; batch needs max(min_turns * 3, 16) = 24 turns."""
+    """Interactive `confirm_only` modes never fire T1-immediate; normal chat triggers debounced LLM check in EN/ZH."""
     db_path = str(tmp_path / "co.db")
     db = DatabaseManager(db_path)
     db.init_tables()
@@ -907,42 +907,228 @@ async def test_confirm_only_session_skips_signal_and_raises_batch_threshold(tmp_
     cfg.agent_working_dir = str(tmp_path)
     assert cfg.agent.memory_extraction_min_turns == 8
     assert cfg.agent.memory_extraction_min_chars == 4000
+    assert cfg.agent.memory_extraction_signal_regex == ""
     ctx = KesokuContext(config=cfg, llm=None, db=db)
     consolidator = MemoryConsolidator(ctx, prewarm_embeddings=False, enable_timers=False)
     enqueued: list[EpisodeExtract] = []
     monkeypatch.setattr(consolidator, "enqueue", lambda job: enqueued.append(job) or True)  # type: ignore[assignment]
 
-    policies = {"s_class": "confirm_only", "s_chat": None}
+    policies = {"s_class": "confirm_only", "s_chat": None, "s_chat_en": None}
     ctx.memory_policy_override_provider = lambda sid: policies.get(sid)
     now = 1_760_000_000.0
     for sid in policies:
         db.create_session(Session(id=sid, title=sid, created_at=now, updated_at=now, role_name="tutor"))
 
-    # Generic classroom words no longer match the tightened default regex.
-    import re as _re
-
-    sig = cfg.agent.memory_extraction_signal_regex
-    assert not _re.search(sig, "我学会了这个句型，记住了")
-    assert _re.search(sig, "请记住我对花生过敏")
-
-    # confirm_only: an explicit signal does NOT trigger T1-immediate; 23 turns stay below the batch floor.
+    # confirm_only: meaningful >=15-char turns do NOT trigger T1-immediate; 23 turns stay below the batch floor.
     for i in range(1, 24):
-        text = f"请记住我是大学生，第{i}句练习文本"
-        u, _ = _save_turn(db, sid="s_class", turn_idx=i, user_text=text, asst_text="はい", ts=now + i)
+        text = f"我是正在学日语的大学生，这是第{i:02d}句课堂造句练习文本"
+        u, _ = _save_turn(
+            db, sid="s_class", turn_idx=i, user_text=text, asst_text="はい", ts=now + i, policy="confirm_only"
+        )
         await consolidator.notify_turn(session_id="s_class", role="tutor", user_msg=u)
     assert enqueued == []
-    text = "第24句练习文本，继续上课"
-    u, _ = _save_turn(db, sid="s_class", turn_idx=24, user_text=text, asst_text="はい", ts=now + 24)
+    text = "这是第24句课堂造句练习文本，我们继续上课吧"
+    u, _ = _save_turn(
+        db, sid="s_class", turn_idx=24, user_text=text, asst_text="はい", ts=now + 24, policy="confirm_only"
+    )
     await consolidator.notify_turn(session_id="s_class", role="tutor", user_msg=u)
     assert [j.reason for j in enqueued] == ["batch"]
 
-    # Normal chat session: the same signal fires immediately.
+    # Normal chat session: short greetings ("ok", "好的") or clicked options do NOT fire T1-immediate.
     enqueued.clear()
-    u, _ = _save_turn(db, sid="s_chat", turn_idx=1, user_text="请记住我对花生过敏", asst_text="好的", ts=now + 100)
-    await consolidator.notify_turn(session_id="s_chat", role="tutor", user_msg=u)
+    u_short, _ = _save_turn(db, sid="s_chat", turn_idx=1, user_text="ok", asst_text="好的", ts=now + 90)
+    await consolidator.notify_turn(session_id="s_chat", role="tutor", user_msg=u_short)
+    assert enqueued == []
+
+    u_click, _ = _save_turn(
+        db,
+        sid="s_chat",
+        turn_idx=2,
+        user_text="选A：继续聊聊东京生活和日常通勤路线",
+        asst_text="好的",
+        ts=now + 95,
+    )
+    await consolidator.notify_turn(session_id="s_chat", role="tutor", user_msg=u_click, clicked_option=True)
+    assert enqueued == []
+
+    # Normal chat session (Chinese, no keyword regex needed): meaningful >=15-char turn fires debounced T1-immediate.
+    u_zh, _ = _save_turn(
+        db,
+        sid="s_chat",
+        turn_idx=3,
+        user_text="下周四我打算坐新干线去京都看红叶，顺便拜访老朋友",
+        asst_text="好的",
+        ts=now + 100,
+    )
+    await consolidator.notify_turn(session_id="s_chat", role="tutor", user_msg=u_zh)
+    assert [j.reason for j in enqueued] == ["signal"]
+
+    # Normal chat session (English, no keyword regex needed): meaningful >=15-char turn fires debounced T1-immediate.
+    enqueued.clear()
+    u_en, _ = _save_turn(
+        db,
+        sid="s_chat_en",
+        turn_idx=1,
+        user_text="I moved to Seattle last month and I love hiking in the Cascades",
+        asst_text="Got it!",
+        ts=now + 110,
+    )
+    await consolidator.notify_turn(session_id="s_chat_en", role="tutor", user_msg=u_en)
     assert [j.reason for j in enqueued] == ["signal"]
 
     # Mode exit (T2) extracts the finished lesson once.
     enqueued.clear()
     assert await consolidator.notify_close("s_class", reason="mode_exit") is True
     assert [j.reason for j in enqueued] == ["mode_exit"]
+
+
+@pytest.mark.asyncio
+async def test_turn_executor_persists_context_policy_metadata_and_extracts_without_backfill_markers(
+    tmp_path, monkeypatch
+) -> None:
+    """Verify `TurnExecutor` persists `metadata['context_policy']` on USER rows so extraction needs no regex markers."""
+    from unittest.mock import MagicMock
+
+    from kesoku.agent.turn_executor import TurnExecutor
+    from kesoku.gateway.gateway import Gateway
+
+    monkeypatch.setattr("kesoku.utils.embedding.get_embedding", lambda text: [0.4] * 384)
+    monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", lambda texts: [[0.4] * 384 for _ in texts])
+
+    db_path = str(tmp_path / "nomarkers.db")
+    db = DatabaseManager(db_path)
+    db.init_tables()
+    roles_dir = tmp_path / "roles"
+    sessions_dir = tmp_path / "sessions"
+    cfg = KesokuConfig(
+        workspace=WorkspaceConfig(
+            db_path=db_path,
+            roles_dir=str(roles_dir),
+            sessions_dir=str(sessions_dir),
+        )
+    )
+    cfg.agent_working_dir = str(tmp_path)
+    cfg.agent.auto_context_search = False
+    cfg.agent.memory_isolated_contexts = ["game-stage*"]
+    cfg.agent.memory_confirm_contexts = ["game-trpg*"]
+    assert cfg.agent.memory_backfill_context_markers == []
+
+    captured_prompts: list[str] = []
+
+    class PolicyExtractorLLM(BaseLLM):
+        async def generate(self, prompt: str | None = None, **kwargs: Any) -> LLMResponse:
+            captured_prompts.append(prompt or "")
+            is_confirm_pass = (
+                "[scenario frame — keep only real-world facts]" in (prompt or "")
+                and "我对海鲜过敏" in (prompt or "")
+            )
+            if is_confirm_pass:
+                payload = {
+                    "episode_summary": "跑团中提到海鲜过敏",
+                    "open_threads": [],
+                    "ops": [
+                        {
+                            "op": "upsert_bullet",
+                            "file": "user/profile.md",
+                            "section": "饮食",
+                            "text": "对海鲜过敏",
+                            "tags": ["#direct"],
+                            "pinned": True,
+                        }
+                    ],
+                }
+            else:
+                payload = {
+                    "episode_summary": "用户住在上海静安区",
+                    "open_threads": [],
+                    "ops": [
+                        {
+                            "op": "upsert_bullet",
+                            "file": "user/profile.md",
+                            "section": "住址",
+                            "text": "住在上海静安区",
+                            "tags": ["#direct"],
+                            "pinned": True,
+                        }
+                    ],
+                }
+            return LLMResponse(
+                content=json.dumps(payload, ensure_ascii=False),
+                prompt_tokens=100,
+                completion_tokens=40,
+                total_tokens=140,
+            )
+
+    llm = PolicyExtractorLLM()
+    ctx = KesokuContext(config=cfg, llm=llm, db=db)
+    gw = Gateway(context=ctx)
+    sid = "sess_nomarkers"
+    now = 1_760_000_000.0
+    await gw.db.create_session(Session(id=sid, title="No Markers", created_at=now, updated_at=now, role_name="tutor"))
+
+    staging = sessions_dir / sid
+    ctx_dir = staging / "context"
+    ctx_dir.mkdir(parents=True, exist_ok=True)
+    tool_runner = MagicMock()
+    te = TurnExecutor(sid, gw, tool_runner, None, context=ctx)
+
+    async def _run_turn_with_context(turn_idx: int, user_text: str, asst_text: str) -> None:
+        u = Message(
+            id=f"{sid}_u{turn_idx}",
+            session_id=sid,
+            chatbot_id="discord",
+            channel_id="ch1",
+            sender="user",
+            role=MessageRole.USER,
+            type=MessageType.TEXT,
+            content=user_text,
+            timestamp=now + turn_idx * 10,
+            status=MessageStatus.PROCESSED,
+        )
+        await gw.db.save_message(u)
+        hist = await gw.db.get_session_messages(sid)
+        await te._inject_context_and_trigger_consolidation(hist, u, llm, session_staging_dir=str(staging))
+        a = Message(
+            id=f"{sid}_a{turn_idx}",
+            session_id=sid,
+            chatbot_id="discord",
+            channel_id="ch1",
+            sender="assistant",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content=asst_text,
+            timestamp=now + turn_idx * 10 + 1,
+            status=MessageStatus.DELIVERED,
+            parent_id=u.id,
+        )
+        await gw.db.save_message(a)
+
+    # Turn 1: no game context -> persisted as `full`
+    await _run_turn_with_context(1, "我平时住在上海静安区工作", "记下了")
+    assert db.get_message(f"{sid}_u1").metadata.get("context_policy") == "full"  # type: ignore[union-attr]
+
+    # Turn 2: `game-trpg` context active -> persisted as `confirm_only`
+    (ctx_dir / "10-game-trpg.md").write_text("TRPG active\n", encoding="utf-8")
+    await _run_turn_with_context(2, "跑团休息时提一句我对海鲜过敏", "好的，记下了")
+    assert db.get_message(f"{sid}_u2").metadata.get("context_policy") == "confirm_only"  # type: ignore[union-attr]
+
+    # Turn 3: `game-stage` context active (and left on disk at session end!) -> persisted as `isolated`
+    (ctx_dir / "10-game-trpg.md").unlink()
+    (ctx_dir / "10-game-stage.md").write_text("Stage contest active\n", encoding="utf-8")
+    await _run_turn_with_context(3, "我的舞台偶像角色叫星野露比", "舞台演出开始")
+    assert db.get_message(f"{sid}_u3").metadata.get("context_policy") == "isolated"  # type: ignore[union-attr]
+
+    # Extract window with ZERO backfill regex markers while `10-game-stage.md` is still on disk:
+    # Turn 1 (`full`) writes to profile.md, Turn 2 (`confirm_only`) stages a proposal, Turn 3 (`isolated`) is omitted!
+    consolidator = MemoryConsolidator(ctx, prewarm_embeddings=False, enable_timers=False)
+    outcome = await consolidator.run_episode_extract(EpisodeExtract(role="tutor", session_id=sid))
+    assert outcome.status == "ok"
+    assert outcome.ops_applied == 1
+    assert outcome.proposal_id != ""
+    assert len(captured_prompts) == 2
+    assert all("星野露比" not in p for p in captured_prompts)
+
+    profile_text = (roles_dir / "tutor" / "memories" / "user" / "profile.md").read_text(encoding="utf-8")
+    assert "住在上海静安区" in profile_text
+    assert "对海鲜过敏" not in profile_text  # staged as confirm_only proposal, not auto-written!
+    await consolidator.stop(wait_seconds=1.0)

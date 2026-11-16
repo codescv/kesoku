@@ -704,6 +704,7 @@ def consolidate_role_sync(
 # Mid-session T1-batch floors for interactive `confirm_only` modes (lessons / games extract on exit instead).
 CONFIRM_ONLY_MIN_TURNS_FLOOR = 16
 CONFIRM_ONLY_MIN_CHARS_FLOOR = 8000
+MIN_MEANINGFUL_USER_CHARS = 15
 
 
 class MemoryConsolidator:
@@ -927,25 +928,29 @@ class MemoryConsolidator:
 
         # Interactive `confirm_only` modes (jp_classroom / galgame / trpg / ...) must not nag mid-lesson: no
         # T1-immediate, and a much higher T1-batch bar. They extract on mode exit (T2), close, or idle (T4).
-        confirm_only = await self._is_confirm_only_session(session_id)
+        msg_policy = (
+            normalize_policy(user_msg.metadata.get("context_policy"))
+            if isinstance(user_msg.metadata, Mapping)
+            else None
+        )
+        confirm_only = msg_policy == "confirm_only" or await self._is_confirm_only_session(session_id)
 
-        # T1-immediate: narrow configurable signal regex, never on clicked options, debounced per session
-        sig_pat = (cfg.agent.memory_extraction_signal_regex or "").strip()
-        if not confirm_only and not clicked_option and sig_pat and cleaned_user:
-            if re.search(sig_pat, cleaned_user):
-                debounce_s = float(cfg.agent.memory_extraction_debounce_seconds)
-                now = time.monotonic()
-                last_ts = self._debounce_last_ts.get(session_id)
-                if last_ts is None or (now - last_ts) >= debounce_s:
-                    self._debounce_last_ts[session_id] = now
-                    self.enqueue(EpisodeExtract(role=safe_role, session_id=session_id, reason="signal"))
-                    return
-                if session_id not in self._debounce_timers or self._debounce_timers[session_id].done():
-                    delay = max(0.05, debounce_s - (now - last_ts))
-                    self._debounce_timers[session_id] = asyncio.create_task(
-                        self._delayed_signal_enqueue(safe_role, session_id, delay)
-                    )
+        # T1-immediate: any meaningful non-clicked user message (>= 15 chars) in a non-confirm_only session
+        # triggers debounced background LLM extraction so EpisodeExtractor decides whether facts are worth saving
+        # without relying on language-specific keyword regexes.
+        if not confirm_only and not clicked_option and len(cleaned_user.strip()) >= MIN_MEANINGFUL_USER_CHARS:
+            debounce_s = float(cfg.agent.memory_extraction_debounce_seconds)
+            now = time.monotonic()
+            last_ts = self._debounce_last_ts.get(session_id)
+            if last_ts is None or (now - last_ts) >= debounce_s:
+                self._debounce_last_ts[session_id] = now
+                self.enqueue(EpisodeExtract(role=safe_role, session_id=session_id, reason="signal"))
                 return
+            if session_id not in self._debounce_timers or self._debounce_timers[session_id].done():
+                delay = max(0.05, debounce_s - (now - last_ts))
+                self._debounce_timers[session_id] = asyncio.create_task(
+                    self._delayed_signal_enqueue(safe_role, session_id, delay)
+                )
 
         # T1-batch: >= min_turns or >= min_chars (requiring >= 20 meaningful chars so pure "ok" spam waits)
         min_turns = int(cfg.agent.memory_extraction_min_turns)
@@ -1293,9 +1298,11 @@ class MemoryConsolidator:
         for turn, inf_pol in zip(turns, inferred_policies, strict=True):
             explicit = next(
                 (
-                    normalize_policy(m.metadata.get("context_policy"))
+                    pol
                     for m in turn
-                    if m.role == MessageRole.USER and isinstance(m.metadata, Mapping)
+                    if m.role == MessageRole.USER
+                    and isinstance(m.metadata, Mapping)
+                    and (pol := normalize_policy(m.metadata.get("context_policy"))) is not None
                 ),
                 None,
             )
