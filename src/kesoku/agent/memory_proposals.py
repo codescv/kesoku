@@ -17,6 +17,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from kesoku.agent.memory_store import resolve_shared_profile_path
 from kesoku.agent.memory_writer import (
     MemoryWriter,
     _MemoryDocument,
@@ -131,7 +132,8 @@ def _disk_bullets(mem_dir: str, rel_path: str, cache: dict[str, list[str]]) -> l
     if rel_path in cache:
         return cache[rel_path]
     out: list[str] = []
-    abs_p = os.path.join(mem_dir, rel_path)
+    shared_profile = resolve_shared_profile_path(mem_dir) if rel_path == "user/profile.md" else None
+    abs_p = shared_profile if shared_profile is not None else os.path.join(mem_dir, rel_path)
     try:
         if os.path.isfile(abs_p):
             with open(abs_p, encoding="utf-8", errors="replace") as f:

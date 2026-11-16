@@ -24,7 +24,12 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from kesoku.agent.memory_store import default_pinned_cache, parse_memory_frontmatter, sync_role_memories
+from kesoku.agent.memory_store import (
+    default_pinned_cache,
+    parse_memory_frontmatter,
+    resolve_shared_profile_path,
+    sync_role_memories,
+)
 from kesoku.agent.memory_writer import (
     atomic_write_text,
     normalize_rel_memory_path,
@@ -746,6 +751,9 @@ class RequestHandlers:
         rel = normalize_rel_memory_path(rel_path, mem_dir)
         if not rel or not rel.endswith(".md"):
             raise ProtocolError("BAD_REQUEST", "rel_path must be a .md file inside the memory directory")
+        shared_profile = resolve_shared_profile_path(mem_dir) if rel == "user/profile.md" else None
+        if shared_profile is not None:
+            return mem_dir, rel, shared_profile
         abs_path = os.path.join(mem_dir, rel)
         if os.path.exists(mem_dir) and not realpath_within(mem_dir, abs_path):
             raise ProtocolError("BAD_REQUEST", "rel_path escapes the memory directory")
@@ -758,6 +766,26 @@ class RequestHandlers:
 
         def _scan() -> list[dict[str, Any]]:
             out: list[dict[str, Any]] = []
+            seen_rels: set[str] = set()
+            shared_profile = resolve_shared_profile_path(mem_dir)
+            if shared_profile is not None and os.path.isfile(shared_profile):
+                try:
+                    st = os.stat(shared_profile)
+                    with open(shared_profile, encoding="utf-8", errors="replace") as f:
+                        head = f.read(4096)
+                    fm, _ = parse_memory_frontmatter(head)
+                    out.append(
+                        {
+                            "rel_path": "user/profile.md",
+                            "pinned": fm.visibility == "PINNED",
+                            "bytes": int(st.st_size),
+                            "updated_at": float(st.st_mtime),
+                            "title": fm.description,
+                        }
+                    )
+                    seen_rels.add("user/profile.md")
+                except OSError:
+                    pass
             if not os.path.isdir(mem_dir):
                 return out
             for root, dirs, files in os.walk(mem_dir):
@@ -768,6 +796,9 @@ class RequestHandlers:
                     path = os.path.join(root, name)
                     if not os.path.isfile(path) or not realpath_within(mem_dir, path):
                         continue
+                    rel_p = os.path.relpath(path, mem_dir).replace(os.sep, "/")
+                    if rel_p in seen_rels:
+                        continue
                     try:
                         st = os.stat(path)
                         with open(path, encoding="utf-8", errors="replace") as f:
@@ -777,7 +808,7 @@ class RequestHandlers:
                     fm, _ = parse_memory_frontmatter(head)
                     out.append(
                         {
-                            "rel_path": os.path.relpath(path, mem_dir).replace(os.sep, "/"),
+                            "rel_path": rel_p,
                             "pinned": fm.visibility == "PINNED",
                             "bytes": int(st.st_size),
                             "updated_at": float(st.st_mtime),
@@ -810,10 +841,16 @@ class RequestHandlers:
 
     async def _write_memory(self, role: str, mem_dir: str, abs_path: str, content: str) -> int:
         def _write() -> int:
-            with with_memory_lock(mem_dir):
+            shared_profile = resolve_shared_profile_path(mem_dir)
+            is_shared = shared_profile is not None and os.path.abspath(abs_path) == os.path.abspath(shared_profile)
+            lock_dir = os.path.dirname(shared_profile) if is_shared and shared_profile is not None else mem_dir
+            with with_memory_lock(lock_dir):
                 size = atomic_write_text(abs_path, content)
             sync_role_memories(self.db, role, mem_dir)
-            default_pinned_cache.invalidate(role)
+            if is_shared:
+                default_pinned_cache.invalidate()
+            else:
+                default_pinned_cache.invalidate(role)
             return size
 
         return await asyncio.to_thread(_write)

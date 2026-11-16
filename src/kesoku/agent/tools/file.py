@@ -333,7 +333,9 @@ def _resolve_memory_target(
     resolved_path: str,
     context: ToolContext | None,
 ) -> tuple[str, str, str, object | None, object] | None:
-    """If `resolved_path` lies inside a role's `$MEMORY_DIR`, return `(role, memories_dir, rel_path, sync_db, cfg)`."""
+    """Resolve `resolved_path` inside `$MEMORY_DIR` or shared `user/profile.md` to `(role, mem_dir, rel, db, cfg)`."""
+    from kesoku.agent.memory_store import resolve_shared_profile_path
+
     gw = getattr(context, "gateway", None) if context is not None else None
     gw_ctx = getattr(gw, "context", None) if gw is not None else None
     cfg = gw_ctx.config if gw_ctx is not None else get_config()
@@ -342,10 +344,13 @@ def _resolve_memory_target(
 
     abs_resolved = os.path.abspath(resolved_path)
 
-    # 1. Check active role's resolved memories directory
+    # 1. Check active role's resolved memories directory (and shared `$AWD/user/profile.md`)
     active_role = _resolve_role_sync(context)
     try:
         active_mem_dir = os.path.abspath(PathResolver.get_role_memories_dir(active_role))
+        shared_profile = resolve_shared_profile_path(active_mem_dir)
+        if shared_profile is not None and abs_resolved == os.path.abspath(shared_profile):
+            return active_role, active_mem_dir, "user/profile.md", sync_db, cfg
         if os.path.commonpath([active_mem_dir, abs_resolved]) == active_mem_dir and abs_resolved != active_mem_dir:
             rel_p = os.path.relpath(abs_resolved, active_mem_dir).replace(os.sep, "/")
             return active_role, active_mem_dir, rel_p, sync_db, cfg
@@ -358,6 +363,11 @@ def _resolve_memory_target(
         if not os.path.isabs(roles_dir) and cfg.agent_working_dir:
             roles_dir = os.path.join(cfg.agent_working_dir, roles_dir)
         abs_roles = os.path.abspath(roles_dir)
+        shared_ws_profile = os.path.abspath(os.path.join(os.path.dirname(abs_roles), "user", "profile.md"))
+        if abs_resolved == shared_ws_profile:
+            mem_dir = os.path.join(abs_roles, active_role, "memories")
+            if resolve_shared_profile_path(mem_dir) is not None:
+                return active_role, mem_dir, "user/profile.md", sync_db, cfg
         if os.path.commonpath([abs_roles, abs_resolved]) == abs_roles and abs_resolved != abs_roles:
             rel_from_roles = os.path.relpath(abs_resolved, abs_roles).split(os.sep)
             if len(rel_from_roles) >= 3 and rel_from_roles[1] == "memories":
@@ -380,6 +390,7 @@ def _post_memory_write_sync(
     sync_db: object | None,
     cfg: object,
     context: ToolContext | None,
+    shared: bool = False,
 ) -> None:
     """Sync SQLite memory embeddings, bump index version, and enqueue ConsolidateFile if over cap."""
     from kesoku.agent.memory_store import bump_memory_index_version, default_pinned_cache, sync_role_memories
@@ -390,7 +401,10 @@ def _post_memory_write_sync(
             sync_role_memories(sync_db, role, memories_dir)
         else:
             bump_memory_index_version(role)
-        default_pinned_cache.invalidate(role)
+        if shared:
+            default_pinned_cache.invalidate()
+        else:
+            default_pinned_cache.invalidate(role)
 
         max_bytes = int(getattr(getattr(cfg, "agent", None), "memory_file_max_bytes", 12288) or 12288)
         if max_bytes > 0 and written_bytes > max_bytes and context is not None:
@@ -415,13 +429,20 @@ def _update_memory_file_locked(
     context: ToolContext | None,
 ) -> str:
     """Execute `update_file` under `with_memory_lock()`, enforcing PINNED allow-list and atomic replace (`H5`)."""
+    from kesoku.agent.memory_store import resolve_shared_profile_path
     from kesoku.agent.memory_writer import atomic_write_text, validate_pinned_write, with_memory_lock
 
     role, memories_dir, rel_path, sync_db, cfg = mem_target
     pinned_files = list(getattr(getattr(cfg, "agent", None), "memory_pinned_files", ["user/profile.md"]))
+    shared_profile = resolve_shared_profile_path(memories_dir) if rel_path == "user/profile.md" else None
+    if shared_profile is not None:
+        resolved_path = shared_profile
+        lock_dir = os.path.dirname(shared_profile)
+    else:
+        lock_dir = memories_dir
 
     written_bytes = 0
-    with with_memory_lock(memories_dir):
+    with with_memory_lock(lock_dir):
         if old_content is None or old_content == "":
             if os.path.isdir(resolved_path):
                 return f"Error: '{file_name}' is a directory."
@@ -506,6 +527,7 @@ def _update_memory_file_locked(
         sync_db=sync_db,
         cfg=cfg,
         context=context,
+        shared=shared_profile is not None,
     )
     return out_msg
 
@@ -669,6 +691,13 @@ def read_file(
         The numbered lines with a header and a continuation footer, or an error message.
     """
     resolved_path = PathResolver.resolve(expand_path_variables(file_name, context))
+    mem_target = _resolve_memory_target(resolved_path, context)
+    if mem_target is not None and mem_target[2] == "user/profile.md":
+        from kesoku.agent.memory_store import resolve_shared_profile_path
+
+        shared_profile = resolve_shared_profile_path(mem_target[1])
+        if shared_profile is not None:
+            resolved_path = shared_profile
     if not os.path.exists(resolved_path):
         return f"Error: File '{file_name}' not found.{_suggestion_text(resolved_path)}"
     if os.path.isdir(resolved_path):

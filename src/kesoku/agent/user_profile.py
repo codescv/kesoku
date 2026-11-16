@@ -31,7 +31,7 @@ import time
 from collections.abc import Iterable
 from typing import Any
 
-from kesoku.agent.memory_store import default_pinned_cache, sync_role_memories
+from kesoku.agent.memory_store import default_pinned_cache, parse_memory_frontmatter, sync_role_memories
 from kesoku.agent.memory_writer import atomic_write_text, with_memory_lock
 from kesoku.db.manager import DatabaseManager
 
@@ -44,6 +44,7 @@ DEFAULT_CHARACTER_DIR = "user"
 CHARACTER_DIR_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
 NICKNAME_MAX = 32
 BIO_MAX_BYTES = 2048
+PROFILE_MD_MAX_BYTES = 12288
 _BLOCK_RE = re.compile(re.escape(BLOCK_START) + r".*?" + re.escape(BLOCK_END) + r"\n?", re.DOTALL)
 _FRONTMATTER_RE = re.compile(r"\A---\r?\n.*?\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
@@ -451,13 +452,54 @@ class UserProfileStore:
         """Absolute path of the user avatar."""
         return os.path.join(self.user_dir, "avatar.webp")
 
+    def profile_md_path(self) -> str:
+        """Absolute path of the shared `$AWD/user/profile.md` core memory file."""
+        return os.path.join(self.user_dir, "profile.md")
+
+    def read_profile_md(self) -> str | None:
+        """Return the Markdown body of `$AWD/user/profile.md` without YAML frontmatter, or None when absent."""
+        path = self.profile_md_path()
+        if not os.path.isfile(path):
+            return None
+        raw = _read_text(path)
+        _, body = parse_memory_frontmatter(raw)
+        return body
+
+    def write_profile_md(self, content: str) -> str:
+        """Atomically write `$AWD/user/profile.md` under `with_memory_lock(user_dir)` with `visibility: PINNED`."""
+        target = self.profile_md_path()
+        cleaned = (content or "").replace("\x00", "").strip()
+        with with_memory_lock(self.user_dir):
+            existing_raw = _read_text(target)
+            if _FRONTMATTER_RE.match(cleaned):
+                fm, body = parse_memory_frontmatter(cleaned)
+            else:
+                fm, _ = parse_memory_frontmatter(existing_raw)
+                body = cleaned
+            desc = " ".join((fm.description or "").split()).strip()
+            if not desc:
+                desc = "用户核心档案（身份、健康、饮食、语言水平与长期偏好）"
+            escaped_desc = desc.replace('"', '\\"')
+            fm_lines = ["---", f'description: "{escaped_desc}"', "visibility: PINNED"]
+            if fm.cues:
+                cues_yaml = ", ".join(f'"{c.replace(chr(34), "")}"' for c in fm.cues if c)
+                if cues_yaml:
+                    fm_lines.append(f"cues: [{cues_yaml}]")
+            fm_lines.append("---")
+            rendered = "\n".join(fm_lines) + (f"\n\n{body}\n" if body else "\n")
+            atomic_write_text(target, rendered)
+        default_pinned_cache.invalidate()
+        return body
+
     def exists(self) -> bool:
         """True when `profile.json` has been written."""
         return os.path.isfile(self.path)
 
     def get(self) -> dict[str, Any]:
-        """Profile plus `avatar` (absolute path or None)."""
+        """Profile plus `profile_md` and `avatar` (absolute path or None)."""
         out = self.load()
+        md_body = self.read_profile_md()
+        out["profile_md"] = md_body if md_body is not None else out.get("bio", "")
         out["avatar"] = self.avatar_path() if os.path.isfile(self.avatar_path()) else None
         return out
 
@@ -465,6 +507,8 @@ class UserProfileStore:
         """True when no profile was saved yet, or it is still blank and was never imported."""
         if not self.exists():
             return True
+        if os.path.isfile(self.profile_md_path()):
+            return False
         p = self.load()
         return not p["nickname"] and not p["bio"].strip() and not p.get("imported_at")
 
@@ -497,6 +541,17 @@ class UserProfileStore:
             if nickname or md_facts:
                 sources.append(USER_MD_REL_PATH.replace(os.sep, "/"))
         block_bio: list[str] = []
+        shared_path = os.path.join(awd, PROFILE_REL_PATH)
+        if os.path.isfile(shared_path):
+            shared_text = _read_text(shared_path)
+            if shared_text:
+                mem_nick, facts = memory_profile_facts(shared_text)
+                blk_nick, blk_bio = parse_profile_block(shared_text)
+                nickname = nickname or mem_nick or blk_nick
+                mem_facts.extend(facts)
+                block_bio.extend(bio_lines(blk_bio))
+                if facts or mem_nick or blk_nick or blk_bio:
+                    sources.append(PROFILE_REL_PATH)
         try:
             role_names = sorted(os.listdir(roles))
         except OSError:
@@ -610,12 +665,15 @@ class UserProfileStore:
             return self.save(profile)
 
     def public_view(self, profile: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Return the `UserProfile` wire shape (adds `avatar_ref`)."""
+        """Return the `UserProfile` wire shape (adds `profile_md` and `avatar_ref`)."""
         p = profile if profile is not None else self.load()
         has_avatar = os.path.isfile(self.avatar_path())
+        md_body = self.read_profile_md()
+        bio_val = p.get("bio", "")
         return {
             "nickname": p.get("nickname", ""),
-            "bio": p.get("bio", ""),
+            "bio": bio_val,
+            "profile_md": md_body if md_body is not None else bio_val,
             "cameo_opt_in": bool(p.get("cameo_opt_in")),
             "avatar_rev": int(p.get("avatar_rev") or 0),
             "avatar_ref": "user/avatar.webp" if has_avatar else None,

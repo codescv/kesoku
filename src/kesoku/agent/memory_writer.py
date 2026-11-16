@@ -18,6 +18,7 @@ from kesoku.agent.memory_store import (
     bump_memory_index_version,
     default_pinned_cache,
     parse_memory_frontmatter,
+    resolve_shared_profile_path,
     sync_role_memories,
 )
 from kesoku.db.manager import DatabaseManager
@@ -498,11 +499,16 @@ class MemoryWriter:
         """Compute lock-free SHA-256 digests of `rel_paths` prior to an LLM extractor call."""
         snaps: dict[str, str] = {}
         abs_mem = os.path.abspath(memories_dir)
+        shared_profile = resolve_shared_profile_path(abs_mem)
         for rel in rel_paths:
             norm = normalize_rel_memory_path(rel, abs_mem)
             if not norm:
                 continue
-            abs_p = os.path.join(abs_mem, norm)
+            abs_p = (
+                shared_profile
+                if (norm == "user/profile.md" and shared_profile is not None)
+                else os.path.join(abs_mem, norm)
+            )
             if os.path.isfile(abs_p):
                 try:
                     with open(abs_p, "rb") as f:
@@ -580,10 +586,27 @@ class MemoryWriter:
         if not ops_by_file:
             return result
 
+        shared_profile = resolve_shared_profile_path(abs_mem)
+        lock_dirs = sorted(
+            {
+                os.path.dirname(shared_profile)
+                if (rel_p == "user/profile.md" and shared_profile is not None)
+                else abs_mem
+                for rel_p in ops_by_file
+            }
+        )
         touched_pinned = False
-        with with_memory_lock(abs_mem):
+        touched_shared_profile = False
+        with contextlib.ExitStack() as stack:
+            for l_dir in lock_dirs:
+                stack.enter_context(with_memory_lock(l_dir))
             for rel_path, file_ops in ops_by_file.items():
-                abs_target = os.path.join(abs_mem, rel_path)
+                is_shared = rel_path == "user/profile.md" and shared_profile is not None
+                abs_target = (
+                    shared_profile
+                    if (is_shared and shared_profile is not None)
+                    else os.path.join(abs_mem, rel_path)
+                )
                 disk_raw = ""
                 if os.path.isfile(abs_target):
                     try:
@@ -663,6 +686,8 @@ class MemoryWriter:
 
                 written_bytes = atomic_write_text(abs_target, rendered)
                 result.touched_files.append(rel_path)
+                if is_shared:
+                    touched_shared_profile = True
                 if doc.visibility == "PINNED":
                     touched_pinned = True
                 if max_file_bytes > 0 and written_bytes > max_file_bytes:
@@ -674,7 +699,9 @@ class MemoryWriter:
                 sync_role_memories(db, safe_role, abs_mem)
             else:
                 bump_memory_index_version(safe_role)
-            if touched_pinned:
+            if touched_shared_profile:
+                default_pinned_cache.invalidate()
+            elif touched_pinned:
                 default_pinned_cache.invalidate(safe_role)
 
         return result

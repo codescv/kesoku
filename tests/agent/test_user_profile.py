@@ -207,3 +207,68 @@ def test_sync_without_user_md_dedupes_block_against_existing_bullets(tmp_path, d
     text = (mem / "profile.md").read_text(encoding="utf-8")
     assert text.count("乳糖不耐受") == 1
     assert "- 简介：喜欢拉面" in text and "称呼：Sam" in text
+
+
+def test_shared_user_profile_md_ai_memory_writer_and_cross_role_visibility(tmp_path, db, monkeypatch):
+    """Verify `$AWD/user/profile.md` is shared across roles for `MemoryWriter` and `load_pinned_memories`."""
+    from kesoku.agent.memory_store import default_pinned_cache, resolve_shared_profile_path
+    from kesoku.agent.memory_writer import MemoryWriter
+
+    monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", lambda texts: [[0.4] * 384 for _ in texts])
+
+    awd = tmp_path / "workspace"
+    tutor_mem = awd / "roles" / "tutor" / "memories"
+    coder_mem = awd / "roles" / "coder" / "memories"
+    tutor_mem.mkdir(parents=True)
+    coder_mem.mkdir(parents=True)
+
+    store = up.UserProfileStore(str(awd))
+    body = store.write_profile_md("## 基本信息\n- 称呼：小张 #direct\n")
+    assert "称呼：小张" in body
+    assert store.read_profile_md() == "## 基本信息\n- 称呼：小张 #direct"
+    assert store.public_view()["profile_md"] == "## 基本信息\n- 称呼：小张 #direct"
+
+    shared_expected = str(awd / "user" / "profile.md")
+    assert resolve_shared_profile_path(str(tutor_mem)) == shared_expected
+    assert resolve_shared_profile_path(str(coder_mem)) == shared_expected
+    assert resolve_shared_profile_path(str(tmp_path / "isolated_memories")) is None
+
+    # Both roles see the shared PINNED profile even though `roles/*/memories/user/profile.md` does not exist
+    assert not (tutor_mem / "user" / "profile.md").exists()
+    assert not (coder_mem / "user" / "profile.md").exists()
+    assert load_pinned_memories("tutor", str(tutor_mem)) == [("user/profile.md", "## 基本信息\n- 称呼：小张 #direct")]
+    assert load_pinned_memories("coder", str(coder_mem)) == [("user/profile.md", "## 基本信息\n- 称呼：小张 #direct")]
+
+    block_coder_before = default_pinned_cache.get_block("coder", memories_dir=str(coder_mem))
+    assert "称呼：小张" in block_coder_before
+
+    # AI MemoryWriter writes to `user/profile.md` from role `tutor` -> updates shared `$AWD/user/profile.md`
+    snaps = MemoryWriter.snapshot_files(str(tutor_mem), ["user/profile.md"])
+    assert snaps["user/profile.md"] != ""
+    res = MemoryWriter.apply_ops(
+        [
+            {
+                "op": "upsert_bullet",
+                "file": "user/profile.md",
+                "section": "健康与饮食",
+                "text": "乳糖不耐受，避免鲜奶与奶酪",
+                "tags": ["#direct"],
+                "pinned": True,
+            }
+        ],
+        role="tutor",
+        memories_dir=str(tutor_mem),
+        db=db,
+        session_id="abcd1234",
+        event_date="2026-11-16",
+        snapshots=snaps,
+    )
+    assert res.ops_applied == 1
+    assert res.touched_files == ["user/profile.md"]
+    assert not (tutor_mem / "user" / "profile.md").exists()
+    assert (awd / "user" / ".memory.lock").exists()
+
+    # Role `coder` immediately sees the AI update in its `<memory_pinned>` cache and `UserProfileStore`
+    block_coder_after = default_pinned_cache.get_block("coder", memories_dir=str(coder_mem))
+    assert "乳糖不耐受，避免鲜奶与奶酪" in block_coder_after
+    assert "乳糖不耐受，避免鲜奶与奶酪" in (store.read_profile_md() or "")

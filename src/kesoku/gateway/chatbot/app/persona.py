@@ -46,6 +46,7 @@ from kesoku.agent.user_profile import (
     BIO_MAX_BYTES,
     CHARACTER_DIR_RE,
     NICKNAME_MAX,
+    PROFILE_MD_MAX_BYTES,
     USER_MD_REL_PATH,
     UserProfileStore,
     sync_profile_block_to_role,
@@ -741,13 +742,18 @@ class PersonaService:
         meta["updated_at"] = time.time()
         self.registry.write_meta(role_id, meta)
         if creating:
-            profile = self.profiles.load()
-            try:
-                sync_profile_block_to_role(
-                    self.host.sync_db, role_id, os.path.join(d, "memories"), profile["nickname"], profile["bio"]
-                )
-            except OSError as e:
-                logger.warning("Could not seed user profile block into new role %s: %s", role_id, e)
+            if os.path.isfile(self.profiles.profile_md_path()):
+                with contextlib.suppress(Exception):
+                    sync_role_memories(self.host.sync_db, role_id, os.path.join(d, "memories"))
+                default_pinned_cache.invalidate(role_id)
+            else:
+                profile = self.profiles.load()
+                try:
+                    sync_profile_block_to_role(
+                        self.host.sync_db, role_id, os.path.join(d, "memories"), profile["nickname"], profile["bio"]
+                    )
+                except OSError as e:
+                    logger.warning("Could not seed user profile block into new role %s: %s", role_id, e)
         return self._role_view(self.registry.get(role_id) or {})
 
     async def handle_persona_delete(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
@@ -971,7 +977,7 @@ class PersonaService:
         return any(before.get(k) != after.get(k) for k in keys)
 
     async def handle_user_profile_put(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
-        """`user_profile.put{nickname, bio, cameo_opt_in, avatar_object?}` → save + sync + broadcast."""
+        """`user_profile.put{nickname, bio?, profile_md?, cameo_opt_in, avatar_object?}` → save + sync + broadcast."""
         nickname = payload.get("nickname")
         if nickname is not None:
             if not isinstance(nickname, str):
@@ -984,6 +990,11 @@ class PersonaService:
             if not isinstance(bio, str) or len(bio.encode("utf-8")) > BIO_MAX_BYTES:
                 raise ProtocolError("BAD_REQUEST", "'bio' must be a string ≤ 2 KiB")
             bio = bio.replace("\x00", "").strip()
+        profile_md = payload.get("profile_md")
+        if profile_md is not None:
+            if not isinstance(profile_md, str) or len(profile_md.encode("utf-8")) > PROFILE_MD_MAX_BYTES:
+                raise ProtocolError("BAD_REQUEST", "'profile_md' must be a string ≤ 12 KiB")
+            profile_md = profile_md.replace("\x00", "").strip()
         cameo = payload.get("cameo_opt_in")
         if cameo is not None and not isinstance(cameo, bool):
             raise ProtocolError("BAD_REQUEST", "'cameo_opt_in' must be a boolean")
@@ -993,20 +1004,27 @@ class PersonaService:
         async with self._meta_lock:
             if payload.get("import_existing") is True:
                 await asyncio.to_thread(self._maybe_import_profile_sync, True)
-            view = await asyncio.to_thread(self._put_profile_sync, nickname, bio, cameo, avatar)
+            view = await asyncio.to_thread(self._put_profile_sync, nickname, bio, cameo, avatar, profile_md)
         await self.host.broadcast("user_profile.updated", view)
         return {"ok": True, "profile": view}
 
     def _put_profile_sync(
-        self, nickname: str | None, bio: str | None, cameo: bool | None, avatar: bytes | None
+        self,
+        nickname: str | None,
+        bio: str | None,
+        cameo: bool | None,
+        avatar: bytes | None,
+        profile_md: str | None = None,
     ) -> dict[str, Any]:
-        """Persist the profile, reconcile the face reference and sync managed blocks (worker thread)."""
+        """Persist the profile, reconcile the face reference and sync `$AWD/user/profile.md` (worker thread)."""
         prev = self.profiles.load()
         profile = dict(prev)
         if nickname is not None:
             profile["nickname"] = nickname
         if bio is not None:
             profile["bio"] = bio
+        elif profile_md is not None:
+            profile["bio"] = ""
         if cameo is not None:
             profile["cameo_opt_in"] = cameo
         if avatar is not None:
@@ -1028,14 +1046,24 @@ class PersonaService:
             if ref_data is not None or not prev.get("cameo_opt_in") or nickname is not None:
                 names = [profile["nickname"]] if profile["nickname"] else []
                 self._register_reference(cdir, ref_data, names)
-        sync_profile_to_roles(
-            self.host.sync_db,
-            self.host.roles_dir,
-            self.registry.list_role_ids(),
-            profile["nickname"],
-            profile["bio"],
-            instructions_user_md=self._user_md_path(),
-        )
+        if profile_md is not None:
+            self.profiles.write_profile_md(profile_md)
+            for rid in self.registry.list_role_ids():
+                mem_dir = os.path.join(self.host.roles_dir, rid, "memories")
+                with contextlib.suppress(Exception):
+                    sync_role_memories(self.host.sync_db, rid, mem_dir)
+            default_pinned_cache.invalidate()
+        elif os.path.isfile(self.profiles.profile_md_path()):
+            default_pinned_cache.invalidate()
+        else:
+            sync_profile_to_roles(
+                self.host.sync_db,
+                self.host.roles_dir,
+                self.registry.list_role_ids(),
+                profile["nickname"],
+                profile["bio"],
+                instructions_user_md=self._user_md_path(),
+            )
         return self._profile_view(self.profiles.public_view(profile))
 
     # ------------------------------------------------------------------ characters.json registry

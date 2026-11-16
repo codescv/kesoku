@@ -70,6 +70,25 @@ def bump_memory_index_version(role: str) -> int:
         return memory_index_version[safe_role]
 
 
+def resolve_shared_profile_path(memories_dir: str) -> str | None:
+    """Return `$AWD/user/profile.md` when `memories_dir` is `<awd>/roles/<role>/memories` and shared profile exists."""
+    if not memories_dir:
+        return None
+    abs_mem = os.path.abspath(memories_dir)
+    if os.path.basename(abs_mem) != "memories":
+        return None
+    roles_dir = os.path.dirname(os.path.dirname(abs_mem))
+    if os.path.basename(roles_dir) != "roles":
+        return None
+    shared_path = os.path.join(os.path.dirname(roles_dir), "user", "profile.md")
+    local_path = os.path.join(abs_mem, "user", "profile.md")
+    if os.path.isfile(shared_path) or (
+        os.path.isdir(os.path.dirname(shared_path)) and not os.path.isfile(local_path)
+    ):
+        return shared_path
+    return None
+
+
 @dataclass
 class MemoryFrontmatter:
     """Parsed YAML frontmatter metadata for a Markdown memory file."""
@@ -336,7 +355,10 @@ def sync_role_memories(
     existing_rows = db.get_memory_files_by_role(safe_role)
     existing_by_path: dict[str, dict[str, Any]] = {row["rel_path"]: row for row in existing_rows}
 
-    if not os.path.isdir(target_dir):
+    shared_profile = resolve_shared_profile_path(target_dir)
+    has_shared_profile = bool(shared_profile and os.path.isfile(shared_profile))
+
+    if not os.path.isdir(target_dir) and not has_shared_profile:
         if existing_rows:
             db.delete_memory_files_by_ids([int(r["id"]) for r in existing_rows])
             bump_memory_index_version(safe_role)
@@ -345,14 +367,17 @@ def sync_role_memories(
         return 0
 
     disk_files: dict[str, str] = {}
-    for root, dirs, files in os.walk(target_dir):
-        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
-        for fname in sorted(files):
-            if fname.startswith(".") or not fname.lower().endswith(".md"):
-                continue
-            abs_path = os.path.join(root, fname)
-            rel_path = os.path.relpath(abs_path, target_dir).replace(os.sep, "/")
-            disk_files[rel_path] = abs_path
+    if os.path.isdir(target_dir):
+        for root, dirs, files in os.walk(target_dir):
+            dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+            for fname in sorted(files):
+                if fname.startswith(".") or not fname.lower().endswith(".md"):
+                    continue
+                abs_path = os.path.join(root, fname)
+                rel_path = os.path.relpath(abs_path, target_dir).replace(os.sep, "/")
+                disk_files[rel_path] = abs_path
+    if has_shared_profile and shared_profile is not None:
+        disk_files["user/profile.md"] = shared_profile
 
     deleted_ids = [
         int(row["id"])
@@ -756,7 +781,9 @@ def load_pinned_memories(
     """Load `(rel_path, body)` pairs for `visibility: PINNED` files of `role`."""
     safe_role = role or "default"
     target_dir = os.path.abspath(memories_dir or PathResolver.get_role_memories_dir(safe_role))
-    if not os.path.isdir(target_dir):
+    shared_profile = resolve_shared_profile_path(target_dir)
+    has_shared_profile = bool(shared_profile and os.path.isfile(shared_profile))
+    if not os.path.isdir(target_dir) and not has_shared_profile:
         return []
 
     candidate_paths: list[str] = []
@@ -779,10 +806,16 @@ def load_pinned_memories(
 
     results: list[tuple[str, str]] = []
     for rel_path in candidate_paths:
-        abs_path = os.path.abspath(os.path.join(target_dir, rel_path))
-        try:
-            if os.path.commonpath([target_dir, abs_path]) != target_dir or not os.path.isfile(abs_path):
+        if rel_path == "user/profile.md" and has_shared_profile and shared_profile is not None:
+            abs_path = shared_profile
+        else:
+            abs_path = os.path.abspath(os.path.join(target_dir, rel_path))
+            try:
+                if os.path.commonpath([target_dir, abs_path]) != target_dir or not os.path.isfile(abs_path):
+                    continue
+            except ValueError:
                 continue
+        try:
             with open(abs_path, encoding="utf-8", errors="replace") as f:
                 raw_text = f.read()
         except OSError:

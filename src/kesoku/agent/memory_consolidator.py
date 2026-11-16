@@ -34,6 +34,7 @@ from kesoku.agent.memory_store import (
     bump_memory_index_version,
     default_pinned_cache,
     parse_memory_frontmatter,
+    resolve_shared_profile_path,
     search_role_memories,
     sync_role_memories,
 )
@@ -272,11 +273,16 @@ class EpisodeExtractor:
         snapshot_targets: list[str] = list(pinned_files)
 
         pinned_sections: list[str] = []
+        shared_profile = resolve_shared_profile_path(mem_dir)
         for p_rel in pinned_files:
             norm_p = normalize_rel_memory_path(p_rel, mem_dir)
             if not norm_p:
                 continue
-            abs_p = os.path.join(mem_dir, norm_p)
+            abs_p = (
+                shared_profile
+                if (norm_p == "user/profile.md" and shared_profile is not None)
+                else os.path.join(mem_dir, norm_p)
+            )
             if os.path.isfile(abs_p):
                 try:
                     with open(abs_p, encoding="utf-8", errors="replace") as f:
@@ -381,14 +387,16 @@ def consolidate_file_sync(
     norm_rel = normalize_rel_memory_path(rel_path, abs_mem)
     if not norm_rel:
         return []
-    abs_target = os.path.join(abs_mem, norm_rel)
+    shared_profile = resolve_shared_profile_path(abs_mem) if norm_rel == "user/profile.md" else None
+    abs_target = shared_profile if shared_profile is not None else os.path.join(abs_mem, norm_rel)
+    lock_dir = os.path.dirname(shared_profile) if shared_profile is not None else abs_mem
     if not os.path.isfile(abs_target):
         return []
 
     touched: list[str] = []
     demoted_ops: list[dict[str, Any]] = []
 
-    with with_memory_lock(abs_mem):
+    with with_memory_lock(lock_dir):
         try:
             with open(abs_target, encoding="utf-8", errors="replace") as f:
                 raw_text = f.read()
@@ -579,7 +587,10 @@ def consolidate_file_sync(
     if touched:
         sync_role_memories(db, role, abs_mem)
         bump_memory_index_version(role)
-        default_pinned_cache.invalidate(role)
+        if shared_profile is not None and norm_rel in touched:
+            default_pinned_cache.invalidate()
+        else:
+            default_pinned_cache.invalidate(role)
     return touched
 
 

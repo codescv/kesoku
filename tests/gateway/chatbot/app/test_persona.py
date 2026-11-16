@@ -333,6 +333,61 @@ async def test_user_profile_put_syncs_blocks_and_broadcasts(make_service):
         assert json.load(f)["bio"] == "Builds things"
 
 
+async def test_user_profile_put_profile_md_and_shared_memory_writer_coexistence(make_service, monkeypatch):
+    from kesoku.agent.memory_store import load_pinned_memories
+    from kesoku.agent.memory_writer import MemoryWriter
+
+    monkeypatch.setattr("kesoku.utils.embedding.get_embeddings", lambda texts: [[0.3] * 384 for _ in texts])
+
+    svc, host = make_service()
+    await svc.handle_persona_upsert(_ctx(), {"display_name": "Alice", "role_id": "alice"})
+    await _expect_error("BAD_REQUEST", svc.handle_user_profile_put(_ctx(), {"profile_md": 123}))
+    await _expect_error("BAD_REQUEST", svc.handle_user_profile_put(_ctx(), {"profile_md": "x" * 12289}))
+
+    md_input = "## 基本信息\n- AI Research Engineer #direct\n\n## 健康与饮食\n- 乳糖不耐受 #direct"
+    res = await svc.handle_user_profile_put(
+        _ctx(),
+        {"nickname": "Sam", "cameo_opt_in": False, "profile_md": md_input},
+    )
+    assert res["ok"] is True
+    assert res["profile"]["nickname"] == "Sam"
+    assert res["profile"]["profile_md"] == md_input
+    assert host.broadcasts[-1] == ("user_profile.updated", res["profile"])
+
+    shared_md_path = os.path.join(host.awd, "user", "profile.md")
+    assert os.path.isfile(shared_md_path)
+    assert not os.path.exists(os.path.join(host.awd, "instructions", "User.md"))
+    for rid in ("default", "alice"):
+        assert not os.path.exists(os.path.join(host.roles_dir, rid, "memories", "user", "profile.md"))
+        pinned = load_pinned_memories(rid, os.path.join(host.roles_dir, rid, "memories"))
+        assert pinned == [("user/profile.md", md_input)]
+
+    # AI MemoryWriter updates `user/profile.md` from `alice` -> reflected in `user_profile.get` and all roles
+    MemoryWriter.apply_ops(
+        [
+            {
+                "op": "upsert_bullet",
+                "file": "user/profile.md",
+                "section": "学习",
+                "text": "日语学习进度：已完成初级第 21 课",
+                "tags": ["#direct"],
+                "pinned": True,
+            }
+        ],
+        role="alice",
+        memories_dir=os.path.join(host.roles_dir, "alice", "memories"),
+        db=host.sync_db,
+        session_id="sess1234",
+        event_date="2026-11-16",
+    )
+    got = await svc.handle_user_profile_get(_ctx(), {})
+    assert "AI Research Engineer" in got["profile_md"]
+    assert "已完成初级第 21 课" in got["profile_md"]
+    for rid in ("default", "alice"):
+        pinned = load_pinned_memories(rid, os.path.join(host.roles_dir, rid, "memories"))
+        assert len(pinned) == 1 and "已完成初级第 21 课" in pinned[0][1]
+
+
 # ---------------------------------------------------------------- avatar.generate
 
 
