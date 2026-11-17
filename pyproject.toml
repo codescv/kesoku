@@ -42,7 +42,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["src", "."]
-addopts = ""
+addopts = "-n 12 --ignore=tests/benchmarks -m 'not slow'"
 markers = ["slow: slow tests (kesoku-bench verify-gold over every task)"]
 
 
@@ -52,6 +52,7 @@ dev = [
     "mkdocs-static-i18n>=1.3.1",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
+    "pytest-xdist>=3.6.0",
     "ruff>=0.9.0",
 ]
 
