@@ -1,7 +1,7 @@
-"""Generic staging-state mirror: forwards `game/*.json` and `context/*.md` changes as `state.sync`.
+"""Generic staging-state mirror: forwards `notes.md`, `game/*.json` and `context/*.md` changes as `state.sync`.
 
-The watcher has zero knowledge of file names, fields or rules: changed JSON files are forwarded parsed,
-Markdown context files as (truncated) text. Clients decide what to render.
+The watcher has zero knowledge of game fields or rules: changed JSON files are forwarded parsed,
+Markdown context/notes files as (truncated) text. Clients decide what to render.
 """
 
 from __future__ import annotations
@@ -21,7 +21,9 @@ logger = setup_logger(__name__)
 
 STATE_JSON_DIR = "game"
 STATE_TEXT_DIR = "context"
+NOTES_REL = "notes.md"
 CONTEXT_TEXT_MAX_BYTES = 8 * 1024
+NOTES_TEXT_MAX_BYTES = 64 * 1024
 STATE_JSON_MAX_BYTES = 512 * 1024
 MAX_STATE_FILES = 64
 _MISTAKES_REL = "game/mistakes.json"
@@ -53,6 +55,14 @@ def _global_mistakes_path(staging_dir: str) -> str | None:
 def _read_state_files_sync(staging_dir: str) -> dict[str, tuple[tuple[int, int], str]]:
     """List candidate state files `{rel: ((mtime_ns, size), abs_path)}` jailed inside `staging_dir`."""
     out: dict[str, tuple[tuple[int, int], str]] = {}
+    # Check pinned session notes first so `notes.md` is never starved by `MAX_STATE_FILES`.
+    notes_path = os.path.join(staging_dir, NOTES_REL)
+    try:
+        if os.path.isfile(notes_path) and realpath_within(staging_dir, notes_path):
+            st = os.stat(notes_path)
+            out[NOTES_REL] = ((st.st_mtime_ns, st.st_size), notes_path)
+    except OSError:
+        pass
     for sub, suffix in ((STATE_JSON_DIR, ".json"), (STATE_TEXT_DIR, ".md")):
         base = os.path.join(staging_dir, sub)
         if not os.path.isdir(base) or not realpath_within(staging_dir, base):
@@ -138,9 +148,10 @@ def _load_state_file_sync(rel: str, path: str, staging_dir: str | None = None) -
                 return False, None
             with open(path, encoding="utf-8") as f:
                 return True, json.load(f)
+        max_bytes = NOTES_TEXT_MAX_BYTES if rel == NOTES_REL else CONTEXT_TEXT_MAX_BYTES
         with open(path, "rb") as f:
-            raw = f.read(CONTEXT_TEXT_MAX_BYTES + 1)
-        text = raw[:CONTEXT_TEXT_MAX_BYTES].decode("utf-8", errors="ignore")
+            raw = f.read(max_bytes + 1)
+        text = raw[:max_bytes].decode("utf-8", errors="ignore")
         return True, text
     except (OSError, ValueError):
         return False, None

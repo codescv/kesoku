@@ -15,8 +15,9 @@ from kesoku.config import AppConfig, AppModeConfig, KesokuConfig, WorkspaceConfi
 from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.context import KesokuContext
 from kesoku.db import DatabaseManager, Message
-from kesoku.gateway.chatbot.app.adapter import AppChatbot
+from kesoku.gateway.chatbot.app.adapter import TRANSLATOR_PURE_AUDIO_PROMPT, AppChatbot
 from kesoku.gateway.chatbot.app.protocol import (
+    LIMITS,
     ProtocolError,
     decode_binary_frame,
     encode_binary_frame,
@@ -26,6 +27,7 @@ from kesoku.gateway.chatbot.app.protocol import (
     reply_type_for,
 )
 from kesoku.gateway.chatbot.app.segments import MediaJob, message_to_record, user_attachments, user_display_text
+from kesoku.gateway.chatbot.app.state_watcher import MAX_STATE_FILES, NOTES_TEXT_MAX_BYTES
 from kesoku.gateway.chatbot.base import DeliveryAbortedError
 from kesoku.gateway.gateway import Gateway
 
@@ -1754,3 +1756,272 @@ async def test_v038_delivery_failure_clears_active_turn(translator_env, monkeypa
     await gw.db.save_message(reply)
     await bot.render_outgoing_message(reply)
     assert bot.active_turn_snapshot(sid) is None
+
+
+# ---------------------------------------------------------------------------- v0.3.13 session notes & translator voice
+
+
+async def test_session_notes_get_put_and_live_state_sync(env) -> None:
+    bot, link = env["bot"], env["link"]
+    sid = await create_session(env)
+    staging = env["tmp"] / "sessions" / sid
+
+    # Missing notes.md returns empty content (never NOT_FOUND).
+    initial = await rpc(env, "session.notes.get", {"session_id": sid})
+    assert initial["type"] == "session.notes.get.result"
+    assert initial["payload"] == {"session_id": sid, "content": "", "bytes": 0, "updated_at": None}
+
+    # Saving notes writes atomically and emits incremental `state.sync` with `notes.md`.
+    note_text = "# Session Rules\n- Keep responses concise 📌\n"
+    put_res = await rpc(env, "session.notes.put", {"session_id": sid, "content": note_text})
+    assert put_res["type"] == "session.notes.put.result"
+    assert put_res["payload"]["session_id"] == sid
+    assert put_res["payload"]["content"] == note_text
+    assert put_res["payload"]["bytes"] == len(note_text.encode("utf-8"))
+    assert isinstance(put_res["payload"]["updated_at"], float)
+
+    syncs = [e for e in link.of_type("state.sync") if e["session_id"] == sid]
+    assert syncs and syncs[-1]["payload"]["files"] == {"notes.md": note_text}
+    assert syncs[-1]["payload"]["removed"] == []
+
+    # `session.notes.get` and `session.open` reflect the persisted notes.md.
+    got = await rpc(env, "session.notes.get", {"session_id": sid})
+    assert got["payload"]["content"] == note_text
+    assert got["payload"]["bytes"] == len(note_text.encode("utf-8"))
+    assert got["payload"]["updated_at"] == pytest.approx(put_res["payload"]["updated_at"])
+
+    snap = (await rpc(env, "session.open", {"session_id": sid}))["payload"]
+    assert snap["state_files"]["notes.md"] == note_text
+
+    # Simulated AI `update_file` modifying `$STAGING_DIR/notes.md` emits a new `state.sync` upon scan.
+    agent_note = "# Session Rules\n- Updated by agent tool call\n- Track quest clues\n"
+    (staging / "notes.md").write_text(agent_note, encoding="utf-8")
+    scan_payload = await bot.state_watcher.scan(sid)
+    assert scan_payload is not None
+    assert scan_payload["files"] == {"notes.md": agent_note}
+
+    # Whitespace-only `session.notes.put` unlinks `notes.md` and emits `removed: ["notes.md"]`.
+    cleared = await rpc(env, "session.notes.put", {"session_id": sid, "content": "   \n\t  "})
+    assert cleared["type"] == "session.notes.put.result"
+    assert cleared["payload"]["content"] == ""
+    assert cleared["payload"]["bytes"] == 0
+    assert isinstance(cleared["payload"]["updated_at"], float)
+    assert not (staging / "notes.md").exists()
+
+    last_sync = [e for e in link.of_type("state.sync") if e["session_id"] == sid][-1]["payload"]
+    assert last_sync["removed"] == ["notes.md"]
+    assert last_sync["files"] == {}
+
+    after_clear = await rpc(env, "session.notes.get", {"session_id": sid})
+    assert after_clear["payload"] == {"session_id": sid, "content": "", "bytes": 0, "updated_at": None}
+
+
+async def test_session_notes_limits_validation_and_symlink_jail(env) -> None:
+    bot = env["bot"]
+    sid = await create_session(env)
+    staging = env["tmp"] / "sessions" / sid
+    staging.mkdir(parents=True, exist_ok=True)
+
+    # Validation errors on bad session_id, missing session, non-string content, and >64 KiB payloads.
+    assert (await rpc(env, "session.notes.get", {"session_id": "../bad"}))["payload"]["code"] == "BAD_REQUEST"
+    assert (await rpc(env, "session.notes.get", {"session_id": "deadbeef"}))["payload"]["code"] == "NOT_FOUND"
+    assert (await rpc(env, "session.notes.put", {"session_id": "deadbeef", "content": "hi"}))["payload"]["code"] == (
+        "NOT_FOUND"
+    )
+    for bad_content in (None, 42, ["list"], {"a": 1}):
+        err = await rpc(env, "session.notes.put", {"session_id": sid, "content": bad_content})
+        assert err["type"] == "error" and err["payload"]["code"] == "BAD_REQUEST"
+
+    # Full 64 KiB succeeds and is NOT truncated at the 8 KiB context/*.md cap.
+    max_bytes = LIMITS["SESSION_NOTES_MAX_BYTES"]
+    assert max_bytes == 64 * 1024 and NOTES_TEXT_MAX_BYTES == 64 * 1024
+    exact_64k = "a" * max_bytes
+    ok_64k = await rpc(env, "session.notes.put", {"session_id": sid, "content": exact_64k})
+    assert ok_64k["type"] == "session.notes.put.result" and ok_64k["payload"]["bytes"] == max_bytes
+    snap = (await rpc(env, "session.open", {"session_id": sid}))["payload"]
+    assert len(snap["state_files"]["notes.md"]) == max_bytes
+
+    # 64 KiB + 1 byte (ASCII and multibyte UTF-8) is rejected.
+    too_big_ascii = await rpc(env, "session.notes.put", {"session_id": sid, "content": "a" * (max_bytes + 1)})
+    assert too_big_ascii["payload"]["code"] == "BAD_REQUEST"
+    too_big_utf8 = await rpc(env, "session.notes.put", {"session_id": sid, "content": "中" * ((max_bytes // 3) + 2)})
+    assert too_big_utf8["payload"]["code"] == "BAD_REQUEST"
+
+    # Oversized notes.md written directly on disk is safely truncated to <= 64 KiB UTF-8 on read & state_watcher.
+    (staging / "notes.md").write_text("中" * 25000, encoding="utf-8")
+    trunc_get = (await rpc(env, "session.notes.get", {"session_id": sid}))["payload"]
+    assert 0 < trunc_get["bytes"] <= max_bytes
+    assert trunc_get["bytes"] == len(trunc_get["content"].encode("utf-8"))
+    scan = await bot.state_watcher.scan(sid)
+    assert scan is not None and len(scan["files"]["notes.md"].encode("utf-8")) <= max_bytes
+
+    # Symlink escape outside staging is ignored on get/watcher and rejected on put without touching target.
+    outside = env["tmp"] / "outside_secret.md"
+    outside.write_text("TOP SECRET", encoding="utf-8")
+    os.unlink(staging / "notes.md")
+    os.symlink(outside, staging / "notes.md")
+
+    sym_get = (await rpc(env, "session.notes.get", {"session_id": sid}))["payload"]
+    assert sym_get == {"session_id": sid, "content": "", "bytes": 0, "updated_at": None}
+    sym_scan = await bot.state_watcher.scan(sid)
+    assert sym_scan is not None and "notes.md" in sym_scan["removed"]
+    sym_put = await rpc(env, "session.notes.put", {"session_id": sid, "content": "attempt overwrite"})
+    assert sym_put["type"] == "error" and sym_put["payload"]["code"] == "BAD_REQUEST"
+    assert outside.read_text(encoding="utf-8") == "TOP SECRET"
+
+
+async def test_state_watcher_notes_md_never_starved_by_max_state_files(env) -> None:
+    bot = env["bot"]
+    sid = await create_session(env)
+    staging = env["tmp"] / "sessions" / sid
+    game_dir = staging / "game"
+    ctx_dir = staging / "context"
+    game_dir.mkdir(parents=True, exist_ok=True)
+    ctx_dir.mkdir(parents=True, exist_ok=True)
+
+    (staging / "notes.md").write_text("pinned priority note", encoding="utf-8")
+    for idx in range(MAX_STATE_FILES + 6):
+        (game_dir / f"g{idx:03d}.json").write_text(json.dumps({"i": idx}), encoding="utf-8")
+    (ctx_dir / "10-extra.md").write_text("extra", encoding="utf-8")
+
+    payload = await bot.state_watcher.scan(sid)
+    assert payload is not None
+    assert payload["files"]["notes.md"] == "pinned priority note"
+    assert len(payload["files"]) == MAX_STATE_FILES
+
+
+async def test_translator_pure_audio_inbound_prompt_preserves_clean_user_bubble(translator_env, monkeypatch) -> None:
+    bot, link, gw = translator_env["bot"], translator_env["link"], translator_env["gw"]
+    posted: list[Message] = []
+    orig_post = gw.post
+
+    async def capture(msg: Message) -> Message:
+        posted.append(msg)
+        return await orig_post(msg)
+
+    monkeypatch.setattr(gw, "post", capture)
+
+    async def fake_get(url: str, max_bytes: int) -> bytes:
+        key = url.split("store.invalid/", 1)[1].split("?", 1)[0]
+        return link.objects[key]["data"]
+
+    bot.media._http_get = fake_get
+
+    def _stage_blob(sid: str, ext: str, data: bytes = b"FAKEAUDIO") -> str:
+        obj = f"media/{sid}/{uuid.uuid4()}.{ext}"
+        link.objects[obj] = {"data": data, "device": "dev-1", "issued_at": time.time()}
+        return obj
+
+    # 1. Deferred translator session (`pending_mode == "translator"`): first message is pure audio (`text == ""`).
+    prefs = {"native_lang": "zh-CN", "foreign_langs": ["ja", "en"], "src_lang": "ja", "dst_lang": "zh-CN"}
+    sid = await create_session(translator_env, mode="translator", prefs=prefs)
+    obj1 = _stage_blob(sid, "webm")
+    ack1 = await rpc(
+        translator_env,
+        "message.send",
+        {
+            "session_id": sid,
+            "client_msg_id": "aud-1",
+            "text": "",
+            "attachments": [{"object": obj1, "mime": "audio/webm;codecs=opus", "filename": "voice1.webm", "bytes": 9}],
+        },
+    )
+    assert ack1["type"] == "message.ack", ack1
+    msg1 = posted[-1]
+    assert "进入通用极速翻译模式：母语 zh-CN ⇄ 常用外语 ja（常用外语：ja、en），零寒暄。" in msg1.content
+    assert TRANSLATOR_PURE_AUDIO_PROMPT in msg1.content
+    assert "Attachments:\n[Attachment: voice1.webm" in msg1.content
+    assert msg1.metadata["display_text"] == ""
+    user_evt1 = [e for e in link.of_type("message.user") if e["session_id"] == sid][-1]["payload"]
+    assert user_evt1["text"] == ""
+    assert len(user_evt1["attachments"]) == 1
+    hist1 = (await rpc(translator_env, "history.page", {"session_id": sid}))["payload"]["messages"]
+    assert hist1[-1]["text"] == "" and len(hist1[-1]["attachments"]) == 1
+
+    # 2. Active translator session (`game/games.json` active, `pending_mode` already cleared): pure audio turn.
+    game_dir = translator_env["tmp"] / "sessions" / sid / "game"
+    game_dir.mkdir(parents=True, exist_ok=True)
+    (game_dir / "games.json").write_text(json.dumps([{"game": "translator", "active": True}]), encoding="utf-8")
+    obj2 = _stage_blob(sid, "m4a")
+    ack2 = await rpc(
+        translator_env,
+        "message.send",
+        {
+            "session_id": sid,
+            "client_msg_id": "aud-2",
+            "text": "",
+            "attachments": [{"object": obj2, "mime": "AUDIO/MP4", "filename": "voice2.m4a", "bytes": 9}],
+        },
+    )
+    assert ack2["type"] == "message.ack", ack2
+    msg2 = posted[-1]
+    assert msg2.content.startswith(f"{TRANSLATOR_PURE_AUDIO_PROMPT}\n\nAttachments:\n")
+    assert "进入通用极速翻译模式" not in msg2.content
+    assert msg2.metadata["display_text"] == ""
+    user_evt2 = [e for e in link.of_type("message.user") if e["session_id"] == sid][-1]["payload"]
+    assert user_evt2["text"] == ""
+
+    # 3. Audio WITH explicit text in translator mode keeps user text without injecting the pure-audio prompt.
+    obj3 = _stage_blob(sid, "wav")
+    await rpc(
+        translator_env,
+        "message.send",
+        {
+            "session_id": sid,
+            "client_msg_id": "aud-3",
+            "text": "请翻成敬语",
+            "attachments": [{"object": obj3, "mime": "audio/wav", "filename": "voice3.wav", "bytes": 9}],
+        },
+    )
+    assert posted[-1].content.startswith("请翻成敬语\n\nAttachments:\n")
+    assert TRANSLATOR_PURE_AUDIO_PROMPT not in posted[-1].content
+    assert posted[-1].metadata["display_text"] == "请翻成敬语"
+
+    # 4. Pure image attachment in translator mode does NOT inject the pure-audio prompt.
+    obj4 = _stage_blob(sid, "jpg", b"\xff\xd8\xff")
+    await rpc(
+        translator_env,
+        "message.send",
+        {
+            "session_id": sid,
+            "client_msg_id": "img-1",
+            "text": "",
+            "attachments": [{"object": obj4, "mime": "image/jpeg", "filename": "menu.jpg", "bytes": 3}],
+        },
+    )
+    assert posted[-1].content.startswith("Attachments:\n")
+    assert TRANSLATOR_PURE_AUDIO_PROMPT not in posted[-1].content
+
+    # 5. Pure audio in plain `chat` mode (and in a cross-channel session) does NOT inject the translator prompt.
+    sid_chat = await create_session(translator_env)
+    obj5 = _stage_blob(sid_chat, "webm")
+    await rpc(
+        translator_env,
+        "message.send",
+        {
+            "session_id": sid_chat,
+            "client_msg_id": "chat-aud-1",
+            "text": "",
+            "attachments": [{"object": obj5, "mime": "audio/webm", "filename": "chat.webm", "bytes": 9}],
+        },
+    )
+    assert posted[-1].content.startswith("Attachments:\n")
+    assert TRANSLATOR_PURE_AUDIO_PROMPT not in posted[-1].content
+
+    cross_sess = await gw.create_session(title="Cross", chatbot_id="discord", channel_id="d-chan", role="helper")
+    cross_game = translator_env["tmp"] / "sessions" / cross_sess.workspace_name / "game"
+    cross_game.mkdir(parents=True, exist_ok=True)
+    (cross_game / "games.json").write_text(json.dumps([{"game": "translator", "active": True}]), encoding="utf-8")
+    obj6 = _stage_blob(cross_sess.id, "webm")
+    await rpc(
+        translator_env,
+        "message.send",
+        {
+            "session_id": cross_sess.id,
+            "client_msg_id": "cross-aud-1",
+            "text": "",
+            "attachments": [{"object": obj6, "mime": "audio/webm", "filename": "cross.webm", "bytes": 9}],
+        },
+    )
+    assert posted[-1].content.startswith("Attachments:\n")
+    assert TRANSLATOR_PURE_AUDIO_PROMPT not in posted[-1].content

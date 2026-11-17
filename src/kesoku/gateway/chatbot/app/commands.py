@@ -416,6 +416,78 @@ class RequestHandlers:
         await self.app.broadcast("session.deleted", {"session_id": session_id})
         return {"session_id": session_id, "deleted": True}
 
+    def _session_notes_target(self, session: Any) -> tuple[str, str]:
+        """Resolve and jail `(staging_dir, notes_path)` for `session` inside `sessions_dir`."""
+        staging = os.path.join(self.app.sessions_dir, session.workspace_name)
+        if not realpath_within(self.app.sessions_dir, staging):
+            raise ProtocolError("BAD_REQUEST", "invalid session staging path")
+        return staging, os.path.join(staging, "notes.md")
+
+    async def handle_session_notes_get(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
+        """`session.notes.get{session_id}` -> `{session_id, content, bytes, updated_at}`."""
+        session_id = require_session_id(payload)
+        session = await self._get_session(session_id)
+        staging, notes_path = self._session_notes_target(session)
+        max_bytes = LIMITS["SESSION_NOTES_MAX_BYTES"]
+
+        def _read() -> dict[str, Any]:
+            if os.path.isfile(notes_path) and realpath_within(staging, notes_path):
+                try:
+                    with open(notes_path, "rb") as f:
+                        raw = f.read(max_bytes)
+                    st = os.stat(notes_path)
+                except FileNotFoundError:
+                    pass
+                else:
+                    text = raw.decode("utf-8", errors="ignore")
+                    return {
+                        "session_id": session_id,
+                        "content": text,
+                        "bytes": len(text.encode("utf-8")),
+                        "updated_at": float(st.st_mtime),
+                    }
+            return {"session_id": session_id, "content": "", "bytes": 0, "updated_at": None}
+
+        return await asyncio.to_thread(_read)
+
+    async def handle_session_notes_put(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
+        """`session.notes.put{session_id, content}` -> atomic write / unlink + `state.sync` scan."""
+        session_id = require_session_id(payload)
+        content = payload.get("content")
+        if not isinstance(content, str):
+            raise ProtocolError("BAD_REQUEST", "content must be a string")
+        if len(content.encode("utf-8")) > LIMITS["SESSION_NOTES_MAX_BYTES"]:
+            raise ProtocolError("BAD_REQUEST", "notes too large")
+        session = await self._get_session(session_id)
+        staging, notes_path = self._session_notes_target(session)
+
+        if not content.strip():
+            def _clear() -> None:
+                if os.path.isdir(notes_path) and not os.path.islink(notes_path):
+                    raise ProtocolError("BAD_REQUEST", "notes path is a directory")
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(notes_path)
+
+            await asyncio.to_thread(_clear)
+            await self.app.state_watcher.scan(session_id)
+            return {"session_id": session_id, "content": "", "bytes": 0, "updated_at": time.time()}
+
+        def _write() -> tuple[int, float]:
+            os.makedirs(staging, exist_ok=True)
+            if not realpath_within(self.app.sessions_dir, staging):
+                raise ProtocolError("BAD_REQUEST", "invalid session staging path")
+            if os.path.islink(notes_path) or not realpath_within(staging, notes_path):
+                raise ProtocolError("BAD_REQUEST", "invalid notes path")
+            if os.path.isdir(notes_path):
+                raise ProtocolError("BAD_REQUEST", "notes path is a directory")
+            atomic_write_text(notes_path, content)
+            st = os.stat(notes_path)
+            return int(st.st_size), float(st.st_mtime)
+
+        size, mtime = await asyncio.to_thread(_write)
+        await self.app.state_watcher.scan(session_id)
+        return {"session_id": session_id, "content": content, "bytes": size, "updated_at": mtime}
+
     async def handle_session_search(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
         """`session.search{q, role?, all_channels?, limit}` over FTS5 messages + digests."""
         query = require_str(payload, "q", max_len=200).strip()

@@ -96,11 +96,14 @@ For detailed user and developer guides, see [`docs/en/dev/architecture.md`](en/d
    Every client request is a V1 envelope (`protocol.py`) answered by exactly one reply (`<type>.result` unless
    overridden, or `error{code}`), dispatched in `adapter.py` / `commands.py` / `persona.py` / `proposals.py` /
    `memory_policy.py`.
-2. **Sequenced outbox (`outbox.py`, `app_outbox`)**: only the adapter allocates per-session `seq` for persisted session
-   events (`message.user`, `message.final`, `turn.event`, `media.*`, `state.sync`, `session.updated`,
-   `memory.proposal*`); `sync.replay` re-sends them with their original ids, then `sync.done` (or `sync.reset` when the
-   cursor predates retention). Streaming previews (`stream.delta` / `stream.clear`, code-point offsets, per-round
-   buffers) are never sequenced. `stream_min_interval_sec` is registered per chatbot (`Gateway.get_stream_min_interval`).
+2. **Sequenced outbox (`outbox.py`, `app_outbox`) & live state mirror (`state_watcher.py`)**: only the adapter allocates
+   per-session `seq` for persisted session events (`message.user`, `message.final`, `turn.event`, `media.*`,
+   `state.sync`, `session.updated`, `memory.proposal*`); `sync.replay` re-sends them with their original ids, then
+   `sync.done` (or `sync.reset` when the cursor predates retention). `StateWatcher` mirrors `$STAGING_DIR/notes.md`
+   (≤ 64 KiB, paired with `session.notes.get` / `session.notes.put`), `game/*.json`, and `context/*.md` into
+   `session.snapshot` and incremental `state.sync` events. Streaming previews (`stream.delta` / `stream.clear`,
+   code-point offsets, per-round buffers) are never sequenced. `stream_min_interval_sec` is registered per chatbot
+   (`Gateway.get_stream_min_interval`).
 3. **Rich fenced blocks (`utils/ui_markup.py`)**: ```` ```bilingual ```` and ```` ```card ```` (free-form `kind`) parse into
    structured segments only when `parse_message_content(..., rich_blocks=True)`; every other platform receives a clean
    text fallback (media tags inside are still delivered).

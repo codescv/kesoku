@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from benchmarks.kesoku_bench.harness import grading as gr
-from benchmarks.kesoku_bench.harness.fixture import materialize_grading_tests, overlay_gold
+from benchmarks.kesoku_bench.harness.fixture import materialize_grading_tests, overlay_gold, sanitized_env
 from benchmarks.kesoku_bench.harness.taskspec import load_task
 
 JUNIT = """<?xml version="1.0" encoding="utf-8"?>
@@ -164,7 +164,7 @@ def test_run_pytest_real_repo(make_task: Callable[..., Path], tmp_path: Path) ->
     spec = load_task(make_task())
     repo = tmp_path / "repo"
     shutil.copytree(spec.repo_dir, repo)
-    subprocess.run(["uv", "sync", "--quiet"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["uv", "sync", "--quiet"], cwd=repo, env=sanitized_env(), check=True, capture_output=True)
     materialize_grading_tests(spec, repo)
     (repo / "tests" / "test_holdout_broken.py").write_text("import does_not_exist\n")
     ids = [*spec.grading.fail_to_pass, *spec.grading.pass_to_pass, "tests/test_holdout_broken.py"]

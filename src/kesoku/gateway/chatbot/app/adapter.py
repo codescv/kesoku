@@ -63,6 +63,10 @@ CLIENT_MSG_CACHE_MAX = 4096
 ENGINE_CONTROL_TYPES = frozenset(
     {"pair.redeem", "pair.burned", "device.registered", "engine.welcome", "engine.status", "pong", "error"}
 )
+TRANSLATOR_PURE_AUDIO_PROMPT = (
+    "请先把这段语音完整识别成文字填入 source；若识别出的文字主要是母语（native_lang），"
+    "则增加当前外语翻译填入 target；反之（主要是外语）则增加母语翻译填入 target，仅输出 1 个 kind: translation 卡片块。"
+)
 
 _CURRENT_MEDIA: contextvars.ContextVar[MediaJob | None] = contextvars.ContextVar("app_current_media", default=None)
 
@@ -358,6 +362,8 @@ class AppChatbot(Chatbot):
             "session.open": r.handle_session_open,
             "session.rename": r.handle_session_rename,
             "session.delete": r.handle_session_delete,
+            "session.notes.get": r.handle_session_notes_get,
+            "session.notes.put": r.handle_session_notes_put,
             "session.search": r.handle_session_search,
             "history.page": r.handle_history_page,
             "message.send": r.handle_message_send,
@@ -549,6 +555,24 @@ class AppChatbot(Chatbot):
                                 if text.strip() and launch_prompt not in text
                                 else (text.strip() or launch_prompt)
                             )
+            if (
+                not text.strip()
+                and not cross_channel
+                and any((a.mime_type or "").lower().startswith("audio/") for a, _, _ in saved)
+            ):
+                # Pure-audio turns in translator mode keep the user's bubble clean (`display_text == text`)
+                # while instructing the LLM to transcribe `source` and translate into `target`.
+                eff_mode = (
+                    mode_hint
+                    or (pending_mode if isinstance(pending_mode, str) and pending_mode else None)
+                    or await asyncio.to_thread(self.policy.current_mode, session_id)
+                )
+                if eff_mode == "translator":
+                    llm_text = (
+                        f"{llm_text.strip()}\n\n{TRANSLATOR_PURE_AUDIO_PROMPT}"
+                        if llm_text.strip()
+                        else TRANSLATOR_PURE_AUDIO_PROMPT
+                    )
             metadata: dict[str, Any] = {
                 **(extra_metadata or {}),
                 "client_msg_id": client_msg_id,

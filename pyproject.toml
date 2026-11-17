@@ -1,6 +1,6 @@
 [project]
 name = "kesoku"
-version = "0.3.12"
+version = "0.3.13"
 description = "Kesoku - A readable AI Agent implementation"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -41,7 +41,7 @@ include = [
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = ["src", "."]
 addopts = ""
 markers = ["slow: slow tests (kesoku-bench verify-gold over every task)"]
 
