@@ -183,9 +183,11 @@ graph TD
 
 *   **提示词**：仅主智能体回合（子智能体、压缩、记忆提取、命名器均不受影响）在输出格式规则之后追加一条规则：最终回复必须以一行恰好为 `<<<REPLY>>>`（`kesoku.constants.REPLY_MARKER`）的标记开头。
 *   **切分**（`kesoku/agent/reply_channel.py`）：首个标记行之前的文本保存为 THOUGHT 行，元数据为 `{"final_response": true, "reclassified": "pre_reply"}`（后续回合不再回放）；TEXT 行只保留回复正文，并记录 `metadata.reply_channel = "found" | "missing"`。缺少标记时按原样投递（fail-open）。Stop hook 草稿使用同一切分；标记后为空时走常规空回复重试。
-*   **流式预览**：标记行出现之前不发布任何预览。
+*   **始终解析**：提示词规则按需开启，但精确的标记行永远不会投递给用户。若通道关闭的回合仍输出标记（例如模式切换后模仿历史中的契约行），同样执行切分，TEXT 行记录 `reply_channel = "found_off"`（回放时不前置标记）。
+*   **流式预览**：通道开启时，标记行出现之前不发布任何预览；通道关闭时正常预览，但不会显示标记行。
+*   **显式缓存**：缓存键包含回复通道状态（`cached_content` 请求不携带系统指令），切换开关时不会复用另一种提示词构建的缓存。
 *   **回放**：仅 `reply_channel == "found"` 的 TEXT 行在回放时前置标记行，旧行保持不变。
-*   **遥测**：`turn_metrics.rounds[]` 每轮新增 `thought_tokens`、`parts`（响应分片形状，如 `thought:120`、`text:300`、`sig`、`fc:<name>`）、`reply_marker`（`found | missing | off`）与 `pre_reply_chars`。
+*   **遥测**：`turn_metrics.rounds[]` 每轮新增 `thought_tokens`、`parts`（响应分片形状，如 `thought:120`、`text:300`、`sig`、`fc:<name>`）、`reply_marker`（`found | missing | found_off | off`）与 `pre_reply_chars`。
 *   **修复**：`kesoku history reclassify <message_id> --prefix-chars N [--dry-run] [--yes]` 将已有助手 TEXT 行的前 N 个字符移入 `reclassified: "manual"` 的 THOUGHT 行（操作前请先备份数据库）。
 
 ---

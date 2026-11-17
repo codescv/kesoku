@@ -57,15 +57,21 @@ def split_reply(text: str, marker: str) -> ReplySplit:
 
 
 class ReplyStreamGate:
-    """Incremental gate for streamed previews: nothing passes until the marker line is seen.
+    """Incremental gate for streamed previews of the accumulated response text.
 
     `feed` receives the *accumulated* text of the stream so far (not deltas), so a marker that
     is split across chunk boundaries is handled naturally.
+
+    - strict (reply channel on for the turn): nothing passes until the marker line is seen.
+    - lenient (reply channel off): text passes through, but a marker line the model emits anyway
+      (e.g. imitated from history) is never shown: once it is complete, only the post-marker reply
+      is previewed, and a trailing partial marker line is held back.
     """
 
-    def __init__(self, marker: str) -> None:
-        """Create a gate for `marker`."""
+    def __init__(self, marker: str, strict: bool = True) -> None:
+        """Create a gate for `marker` (`strict=False` for turns where the channel is off)."""
         self.marker = marker
+        self.strict = strict
         self._opened = False
 
     @property
@@ -73,27 +79,31 @@ class ReplyStreamGate:
         """Whether the marker line has been seen."""
         return self._opened
 
+    def _hide_partial_marker_tail(self, text: str) -> str:
+        """Drop a trailing (still growing) line that could become a marker line."""
+        last_nl = text.rfind("\n")
+        tail = text[last_nl + 1 :].strip()
+        if tail and self.marker.startswith(tail):
+            return text[: last_nl + 1].rstrip() if last_nl >= 0 else ""
+        return text
+
     def feed(self, accumulated: str) -> str | None:
-        """Return the post-marker reply text for `accumulated`, or None while the marker is unseen.
+        """Return the preview text for `accumulated`, or None while nothing may be shown.
 
         The marker line only counts once it is complete (terminated by a newline), so a partial
         line such as ``"<<<REP"`` or a line that continues past the marker never opens the gate.
         """
         if not self._opened:
-            if self.marker not in accumulated:
-                return None
+            complete = accumulated.rpartition("\n")[0] if self.marker in accumulated else ""
             # Only complete lines can be judged: the last line may still be growing.
-            complete, _, _tail = accumulated.rpartition("\n")
-            if not any(_is_marker_line(ln, self.marker) for ln in complete.split("\n")):
+            if complete and any(_is_marker_line(ln, self.marker) for ln in complete.split("\n")):
+                self._opened = True
+            elif self.strict:
                 return None
-            self._opened = True
+            else:
+                return self._hide_partial_marker_tail(accumulated)
         result = split_reply(accumulated, self.marker)
         if not result.found:
             return None
         # A trailing partial marker line in the reply must not leak into the preview.
-        reply = result.reply
-        last_nl = reply.rfind("\n")
-        tail = reply[last_nl + 1 :]
-        if tail and self.marker.startswith(tail.strip()) and tail.strip():
-            reply = reply[: last_nl + 1].rstrip() if last_nl >= 0 else ""
-        return reply
+        return self._hide_partial_marker_tail(result.reply)

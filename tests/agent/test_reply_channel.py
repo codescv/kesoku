@@ -95,3 +95,20 @@ def test_gate_hides_trailing_partial_second_marker() -> None:
     gate = ReplyStreamGate(M)
     assert gate.feed(f"plan\n{M}\nPart one.\n{M[:4]}") == "Part one."
     assert gate.feed(f"plan\n{M}\nPart one.\n{M}\nPart two.") == "Part one.\nPart two."
+
+
+def test_lenient_gate_passes_text_through_without_marker() -> None:
+    gate = ReplyStreamGate(M, strict=False)
+    assert gate.feed("Hello") == "Hello"
+    assert gate.feed("Hello there.\nSecond") == "Hello there.\nSecond"
+    assert gate.opened is False
+
+
+def test_lenient_gate_hides_stray_marker_and_switches_to_reply() -> None:
+    gate = ReplyStreamGate(M, strict=False)
+    assert gate.feed("plan text\n") == "plan text\n"
+    assert gate.feed(f"plan text\n{M[:5]}") == "plan text"  # partial marker held back
+    assert gate.feed(f"plan text\n{M}") == "plan text"  # marker line not complete yet
+    assert gate.feed(f"plan text\n{M}\nVisible") == "Visible"
+    assert gate.opened is True
+    assert gate.feed(f"plan text\n{M}\nVisible reply.") == "Visible reply."

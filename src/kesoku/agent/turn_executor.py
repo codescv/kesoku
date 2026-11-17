@@ -764,20 +764,36 @@ class TurnExecutor:
                 return REPLY_MARKER
         return None
 
+    def _turn_cache_key(self, llm: BaseLLM) -> str:
+        """Explicit-cache key for this turn: the reply-channel rule lives in the cached system instruction.
+
+        A `cached_content` request sends no system instruction, so caches created with and without the rule must
+        never be shared; toggling the channel switches to a separate entry instead of serving a stale prompt.
+        """
+        base = _cache_model_key(llm)
+        return f"{base}|reply_channel" if self._turn_reply_marker else base
+
     def _split_final_response(self, res: LLMResponse) -> tuple[str, str]:
         """Apply the reply channel to a final (tool-free) response.
 
-        Replaces `res.content` with the reply (marker lines removed) when the marker is found, and records the
-        outcome on the current round record.
+        The prompt rule is opt-in, but parsing is always on: an exact marker line is never delivered, even in a
+        turn where the channel is off (e.g. the model imitates contracted rows from history after a mode switch,
+        or a cached system prompt still carries the rule). Replaces `res.content` with the reply (marker lines
+        removed) when a marker line is found, and records the outcome on the current round record.
 
         Returns:
-            `(pre_reply_text, state)` where state is "found", "missing" or "off".
+            `(pre_reply_text, state)` where state is "found", "missing", "found_off" (marker emitted while the
+            channel is off; split anyway) or "off".
         """
         marker = self._turn_reply_marker
-        if not marker:
+        split = split_reply(res.content or "", marker or REPLY_MARKER)
+        if marker:
+            state = "found" if split.found else "missing"
+        elif split.found:
+            state = "found_off"
+            logger.info(f"Reply marker emitted while the reply channel is off in session {self.session_id}")
+        else:
             return "", "off"
-        split = split_reply(res.content or "", marker)
-        state = "found" if split.found else "missing"
         if split.found:
             res.content = split.reply
         if self._turn_rounds:
@@ -1085,7 +1101,7 @@ class TurnExecutor:
                 implicit_caching = (not cfg.gemini.context_caching) or (cfg.gemini.context_caching_mode == "implicit")
                 active_cache_name: str | None = None
                 cached_messages_len: int = 0
-                model_key = _cache_model_key(llm)
+                model_key = self._turn_cache_key(llm)
                 ttl_cfg_secs = resolve_gemini_cache_ttl(cfg.gemini)
 
                 if implicit_caching:
@@ -1156,8 +1172,11 @@ class TurnExecutor:
                 active_publisher = publisher
                 llm_call_t0 = time.perf_counter()
                 first_stream_chunk_ms: float | None = None
-                # With the reply channel on, nothing is previewed until the marker line has been streamed.
-                reply_gate = ReplyStreamGate(self._turn_reply_marker) if self._turn_reply_marker else None
+                # With the reply channel on, nothing is previewed until the marker line has been streamed; with it
+                # off, text passes through but a stray marker line (and anything before it) is never previewed.
+                reply_gate = ReplyStreamGate(
+                    self._turn_reply_marker or REPLY_MARKER, strict=bool(self._turn_reply_marker)
+                )
 
                 async def _on_stream_chunk_timed(delta: str, accumulated: str) -> None:
                     nonlocal first_stream_chunk_ms
@@ -1165,11 +1184,10 @@ class TurnExecutor:
                         first_stream_chunk_ms = round((time.perf_counter() - llm_call_t0) * 1000.0, 2)
                     if active_publisher is None:
                         return
-                    if reply_gate is not None:
-                        gated = reply_gate.feed(accumulated)
-                        if gated is None:
-                            return
-                        accumulated = gated
+                    gated = reply_gate.feed(accumulated)
+                    if gated is None:
+                        return
+                    accumulated = gated
                     await active_publisher.on_chunk(delta, accumulated)
 
                 gen_kwargs: dict[str, Any] = (
@@ -1221,8 +1239,7 @@ class TurnExecutor:
                         generate_cached_content = None
                         llm_call_t0 = time.perf_counter()
                         first_stream_chunk_ms = None
-                        if reply_gate is not None:
-                            reply_gate = ReplyStreamGate(reply_gate.marker)
+                        reply_gate = ReplyStreamGate(reply_gate.marker, strict=reply_gate.strict)
                         retry_kwargs: dict[str, Any] = (
                             {"stream": True, "on_stream_chunk": _on_stream_chunk_timed}
                             if publisher is not None
@@ -1566,7 +1583,7 @@ class TurnExecutor:
             min_tokens = EXPLICIT_CACHE_MIN_PREFIX_TOKENS if configured_min == 4096 else configured_min
 
             caches_map = _ensure_worker_cache_map(worker, default_llm=llm, default_ttl=ttl_secs)
-            model_key = _cache_model_key(llm)
+            model_key = self._turn_cache_key(llm)
             model_label = str(getattr(llm, "model_name", None) or "default")
             entry = caches_map.get(model_key)
 

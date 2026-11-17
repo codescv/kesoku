@@ -595,7 +595,8 @@ class AppChatbot(Chatbot):
                 metadata.setdefault("mode_hint", "chat")
                 metadata["ignore_context_globs"] = list(CROSS_CHANNEL_IGNORE_GLOBS)
             # The reply channel is a server-side mode setting: never trust a client-supplied key, and stamp it
-            # only from the mode resolved here for the session.
+            # only from the mode resolved here for the session. (On user rows the key is a bool switch; on
+            # assistant TEXT rows the turn executor records the outcome "found" / "missing" / "found_off".)
             metadata.pop("reply_channel", None)
             rc_mode_id = metadata.get("mode_hint") or await asyncio.to_thread(self.policy.current_mode, session_id)
             rc_mode = self.app_config.get_mode(rc_mode_id) if isinstance(rc_mode_id, str) else None

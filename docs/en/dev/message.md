@@ -235,9 +235,11 @@ A server-side switch on `[[chatbots.app.modes]]` (`reply_channel = true`) or on 
 
 *   **Prompt**: for main-agent turns only (never sub-agents, compression, memory extraction or the namer), one rule is inserted after the output formatting rules: the final reply must start with a line containing exactly `<<<REPLY>>>` (`kesoku.constants.REPLY_MARKER`).
 *   **Split** (`kesoku/agent/reply_channel.py`): text before the first marker line is stored as a THOUGHT row with `{"final_response": true, "reclassified": "pre_reply"}` (dropped from later turns); the TEXT row holds only the reply and records `metadata.reply_channel = "found" | "missing"`. A missing marker is fail-open (text delivered as before). Stop-hook drafts use the same split; an empty reply after the marker goes through the normal empty-response retry.
-*   **Streaming**: previews stay hidden until the marker line has streamed.
+*   **Always parsed**: the prompt rule is opt-in, but an exact marker line is never delivered. If a turn with the channel off still emits one (e.g. imitated from contracted rows after a mode switch), the same split applies and the TEXT row records `reply_channel = "found_off"` (not replayed with the marker).
+*   **Streaming**: with the channel on, previews stay hidden until the marker line has streamed; with it off, previews pass through but never show a marker line.
+*   **Explicit cache**: the cache key includes the reply-channel state, since `cached_content` requests carry no system instruction; toggling never reuses a cache built with the other prompt.
 *   **Replay**: only TEXT rows with `reply_channel == "found"` are replayed with the marker line prepended; older rows are unchanged.
-*   **Telemetry**: every `turn_metrics.rounds[]` entry carries `thought_tokens`, `parts` (run-length response part shapes such as `thought:120`, `text:300`, `sig`, `fc:<name>`), `reply_marker` (`found | missing | off`) and `pre_reply_chars`.
+*   **Telemetry**: every `turn_metrics.rounds[]` entry carries `thought_tokens`, `parts` (run-length response part shapes such as `thought:120`, `text:300`, `sig`, `fc:<name>`), `reply_marker` (`found | missing | found_off | off`) and `pre_reply_chars`.
 *   **Repair**: `kesoku history reclassify <message_id> --prefix-chars N [--dry-run] [--yes]` moves the first N characters of an existing assistant TEXT row into a `reclassified: "manual"` THOUGHT row (back up the database first).
 
 ---

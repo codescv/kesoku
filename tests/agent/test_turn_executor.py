@@ -3553,21 +3553,73 @@ async def test_final_response_without_marker_is_unchanged(temp_db: str) -> None:
 
 @pytest.mark.asyncio
 async def test_reply_channel_off_keeps_legacy_behaviour(temp_db: str) -> None:
-    """Without the opt-in, no rule is injected, text is untouched, and telemetry reports `off`."""
+    """Without the opt-in and without a marker, no rule is injected, text is untouched, telemetry reports `off`."""
     from kesoku.constants import REPLY_MARKER
 
     sid = "sess_rc_off"
-    content = f"{_RC_PLAN}\n{REPLY_MARKER}\n{_RC_REPLY}"
-    gw, executor, llm, user_msg, _events, worker = await _rc_env(
-        temp_db, sid, [LLMResponse(content=content, total_tokens=5)], reply_channel=False
+    gw, executor, llm, user_msg, events, worker = await _rc_env(
+        temp_db, sid, [LLMResponse(content=_RC_REPLY, total_tokens=5)], reply_channel=False
     )
     await _rc_run(executor, user_msg, worker, sid)
 
     assert REPLY_MARKER not in (llm.system_prompts[0] or "")
     texts = _rc_rows(await gw.db.get_session_history(sid, limit=0), MessageType.TEXT)
-    assert texts[0].content == content
+    assert texts[0].content == _RC_REPLY
     assert "reply_channel" not in texts[0].metadata
     assert texts[0].metadata["turn_metrics"]["rounds"][-1]["reply_marker"] == "off"
+    assert [e for e in events if e], "previews pass through when the channel is off"
+
+
+@pytest.mark.asyncio
+async def test_off_turn_marker_from_replayed_rows_never_reaches_user(temp_db: str) -> None:
+    """Channel off for this turn, contracted rows in history, model imitates the marker: it is still split."""
+    from kesoku.constants import REPLY_MARKER
+
+    sid = "sess_rc_off_replay"
+    content = f"{_RC_PLAN}\n{REPLY_MARKER}\n{_RC_REPLY}"
+    gw, executor, llm, user_msg, events, worker = await _rc_env(
+        temp_db, sid, [LLMResponse(content=content, total_tokens=5)], reply_channel=False
+    )
+    prior_user = Message(
+        session_id=sid, chatbot_id="discord", channel_id="rc", sender="u1", role=MessageRole.USER,
+        content="Earlier question", status=MessageStatus.PROCESSED, timestamp=user_msg.timestamp - 100,
+    )
+    prior_reply = Message(
+        session_id=sid, chatbot_id="discord", channel_id="rc", sender="Kesoku", role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT, content="Earlier contracted reply", status=MessageStatus.DELIVERED,
+        parent_id=prior_user.id, timestamp=user_msg.timestamp - 99, metadata={"reply_channel": "found"},
+    )
+    await gw.post(prior_user)
+    await gw.post(prior_reply)
+    await _rc_run(executor, user_msg, worker, sid)
+
+    assert REPLY_MARKER not in (llm.system_prompts[0] or "")
+    msgs = await gw.db.get_session_history(sid, limit=0)
+    final = [t for t in _rc_rows(msgs, MessageType.TEXT) if t.parent_id == user_msg.id]
+    assert len(final) == 1
+    assert final[0].content == _RC_REPLY
+    assert final[0].metadata["reply_channel"] == "found_off"  # never replayed with the marker later
+    rnd = final[0].metadata["turn_metrics"]["rounds"][-1]
+    assert rnd["reply_marker"] == "found_off" and rnd["pre_reply_chars"] == len(_RC_PLAN)
+    pre_rows = [t for t in _rc_rows(msgs, MessageType.THOUGHT) if t.metadata.get("reclassified") == "pre_reply"]
+    assert [p.content for p in pre_rows] == [_RC_PLAN]
+    assert all(REPLY_MARKER not in e for e in events if e)
+
+
+def test_explicit_cache_key_isolated_by_reply_channel(temp_db: str) -> None:
+    """Caches created with and without the reply-channel rule are never shared (cached_content has no prompt)."""
+    from kesoku.constants import REPLY_MARKER
+
+    DatabaseManager(temp_db).init_tables()
+    ctx = KesokuContext(config=KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db)))
+    executor = TurnExecutor("sess_rc_cache", Gateway(context=ctx), MagicMock(), None, context=ctx)
+    llm = MockLLM()
+    executor._turn_reply_marker = None
+    off_key = executor._turn_cache_key(llm)
+    executor._turn_reply_marker = REPLY_MARKER
+    on_key = executor._turn_cache_key(llm)
+    assert off_key != on_key
+    assert on_key.startswith(off_key)
 
 
 @pytest.mark.asyncio
