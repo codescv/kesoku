@@ -2763,7 +2763,8 @@ async def test_process_turn_streaming_tool_discard_and_final_thought_metadata(te
     db_msgs = await gw.db.get_session_history("sess_stream_turn", limit=0)
     thoughts = [m for m in db_msgs if m.role == MessageRole.ASSISTANT and m.type == MessageType.THOUGHT]
     assert len(thoughts) == 2
-    assert thoughts[0].content == "Tool planning thought"
+    # K4: tool-round thought keeps both the reasoning and the visible round text
+    assert thoughts[0].content == "Tool planning thought\n\nLet me check..."
     assert thoughts[0].metadata.get("final_response") is None
     assert thoughts[1].content == "Final synthesis thought"
     assert thoughts[1].metadata.get("final_response") is True
@@ -3379,3 +3380,383 @@ async def test_k5_preemption_posts_cancelled_tool_results_and_zero_orphans(tmp_p
     for r in results:
         assert r.metadata.get("tool_error") == "cancelled"
         assert "was cancelled before it ran because the user sent a new message." in r.content
+
+
+# ---------------------------------------------------------------------------------------------- reply channel (K3/K4)
+
+_RC_PLAN = "Plan: summarize the request, then answer in two sentences."
+_RC_REPLY = "Here is the answer.\nIt has two lines."
+
+
+class _ScriptedStreamLLM(BaseLLM):
+    """LLM double that streams scripted texts chunk by chunk and records system prompts."""
+
+    def __init__(self, responses: list[LLMResponse], chunk_size: int = 7) -> None:
+        self.responses = list(responses)
+        self.chunk_size = chunk_size
+        self.system_prompts: list[str | None] = []
+        self.model_name = "scripted"
+
+    async def generate(
+        self,
+        prompt: str | None = None,
+        system_prompt: str | None = None,
+        history: list[Message] | None = None,
+        tools: list[Any] | None = None,
+        cached_content: str | None = None,
+        stream: bool = False,
+        on_stream_chunk: Any = None,
+    ) -> LLMResponse:
+        self.system_prompts.append(system_prompt)
+        res = self.responses.pop(0)
+        if stream and on_stream_chunk is not None and res.content:
+            acc = ""
+            for i in range(0, len(res.content), self.chunk_size):
+                delta = res.content[i : i + self.chunk_size]
+                acc += delta
+                await on_stream_chunk(delta, acc)
+        return res.model_copy(deep=True)
+
+
+async def _rc_env(
+    temp_db: str,
+    session_id: str,
+    responses: list[LLMResponse],
+    *,
+    reply_channel: bool = True,
+    hooks: Any = None,
+) -> tuple[Gateway, TurnExecutor, _ScriptedStreamLLM, Message, list[str | None], Any]:
+    """Build a streaming Discord-channel turn with an optional reply-channel channel override."""
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    cfg.discord.channels = [DiscordChannelOverride(channels=["rc"], stream=True, reply_channel=reply_channel)]
+    if hooks is not None:
+        cfg.hooks = hooks
+    gw = Gateway(context=KesokuContext(config=cfg))
+    await gw.create_session(session_id, title="Reply channel")
+    await gw.db.update_session_system_prompt(session_id, "Base system prompt.")
+
+    stream_events: list[str | None] = []
+
+    async def capture_stream(ch: str, sess: str, turn: str, text: str | None) -> None:
+        stream_events.append(text)
+
+    gw.register_stream_handler("discord", capture_stream)
+    user_msg = Message(
+        session_id=session_id,
+        chatbot_id="discord",
+        channel_id="rc",
+        sender="u1",
+        role=MessageRole.USER,
+        content="Question",
+        status="pending_agent",
+    )
+    await gw.post(user_msg)
+
+    llm = _ScriptedStreamLLM(responses)
+    tool_runner = MagicMock()
+    tool_runner.tool_registry.get_tools_list.return_value = []
+    tool_runner.tool_context = MagicMock(transitioned_to_session=None)
+
+    async def exec_tool(call: Any, tc_msg: Message, **kwargs: Any) -> Message:
+        return Message(
+            session_id=tc_msg.session_id,
+            chatbot_id=tc_msg.chatbot_id,
+            channel_id=tc_msg.channel_id,
+            sender=call.name,
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_RESULT,
+            content="ok",
+            status="responded",
+            parent_id=tc_msg.id,
+        )
+
+    tool_runner.execute_tool.side_effect = exec_tool
+    ctx = KesokuContext(config=cfg, llm=llm)
+    executor = TurnExecutor(session_id, gw, tool_runner, None, context=ctx)
+    worker = MagicMock()
+    type(worker).running = PropertyMock(return_value=True)
+
+    async def mock_pivot(m: Message) -> Message:
+        return m
+
+    worker.drain_queue_and_pivot.side_effect = mock_pivot
+    worker.queue_empty.return_value = True
+    return gw, executor, llm, user_msg, stream_events, worker
+
+
+async def _rc_run(executor: TurnExecutor, user_msg: Message, worker: Any, session_id: str) -> None:
+    with patch("kesoku.agent.compressor.HistoryCompressor.auto_compact_session", return_value=False):
+        await executor.process_turn(user_msg, worker, f"/tmp/{session_id}")
+
+
+def _rc_rows(msgs: list[Message], mtype: MessageType) -> list[Message]:
+    return [m for m in msgs if m.role == MessageRole.ASSISTANT and m.type == mtype]
+
+
+@pytest.mark.asyncio
+async def test_final_response_pre_reply_text_moved_to_thought_row(temp_db: str) -> None:
+    """Pre-marker text goes to a reclassified THOUGHT row, never to the stream or the TEXT row."""
+    from kesoku.constants import REPLY_MARKER
+
+    sid = "sess_rc_found"
+    content = f"{_RC_PLAN}\n{REPLY_MARKER}\n{_RC_REPLY}"
+    gw, executor, llm, user_msg, stream_events, worker = await _rc_env(
+        temp_db, sid, [LLMResponse(content=content, thought="hidden reasoning", total_tokens=5)]
+    )
+    await _rc_run(executor, user_msg, worker, sid)
+
+    # The system prompt carries the rule exactly once, after the base prompt.
+    assert llm.system_prompts[0] is not None and REPLY_MARKER in llm.system_prompts[0]
+    assert llm.system_prompts[0].startswith("Base system prompt.")
+
+    msgs = await gw.db.get_session_history(sid, limit=0)
+    thoughts = _rc_rows(msgs, MessageType.THOUGHT)
+    pre_rows = [t for t in thoughts if t.metadata.get("reclassified") == "pre_reply"]
+    assert len(pre_rows) == 1
+    assert pre_rows[0].content == _RC_PLAN
+    assert pre_rows[0].metadata["final_response"] is True
+    assert any(t.content == "hidden reasoning" for t in thoughts)
+
+    texts = _rc_rows(msgs, MessageType.TEXT)
+    assert len(texts) == 1
+    assert texts[0].content == _RC_REPLY
+    assert texts[0].metadata["reply_channel"] == "found"
+    rounds = texts[0].metadata["turn_metrics"]["rounds"]
+    assert rounds[-1]["reply_marker"] == "found"
+    assert rounds[-1]["pre_reply_chars"] == len(_RC_PLAN)
+
+    published = [e for e in stream_events if e]
+    assert published, "the post-marker reply should be previewed"
+    assert all("Plan" not in e and REPLY_MARKER not in e for e in published)
+
+
+@pytest.mark.asyncio
+async def test_final_response_without_marker_is_unchanged(temp_db: str) -> None:
+    """A final response without the marker is delivered verbatim (fail-open) and tagged `missing`."""
+    sid = "sess_rc_missing"
+    gw, executor, _llm, user_msg, stream_events, worker = await _rc_env(
+        temp_db, sid, [LLMResponse(content="Plain reply without marker.", total_tokens=5)]
+    )
+    await _rc_run(executor, user_msg, worker, sid)
+
+    msgs = await gw.db.get_session_history(sid, limit=0)
+    assert not [t for t in _rc_rows(msgs, MessageType.THOUGHT) if t.metadata.get("reclassified")]
+    texts = _rc_rows(msgs, MessageType.TEXT)
+    assert texts[0].content == "Plain reply without marker."
+    assert texts[0].metadata["reply_channel"] == "missing"
+    assert texts[0].metadata["turn_metrics"]["rounds"][-1]["reply_marker"] == "missing"
+    assert texts[0].metadata["turn_metrics"]["rounds"][-1]["pre_reply_chars"] == 0
+    # No preview is published while the marker never arrives.
+    assert [e for e in stream_events if e] == []
+
+
+@pytest.mark.asyncio
+async def test_reply_channel_off_keeps_legacy_behaviour(temp_db: str) -> None:
+    """Without the opt-in, no rule is injected, text is untouched, and telemetry reports `off`."""
+    from kesoku.constants import REPLY_MARKER
+
+    sid = "sess_rc_off"
+    content = f"{_RC_PLAN}\n{REPLY_MARKER}\n{_RC_REPLY}"
+    gw, executor, llm, user_msg, _events, worker = await _rc_env(
+        temp_db, sid, [LLMResponse(content=content, total_tokens=5)], reply_channel=False
+    )
+    await _rc_run(executor, user_msg, worker, sid)
+
+    assert REPLY_MARKER not in (llm.system_prompts[0] or "")
+    texts = _rc_rows(await gw.db.get_session_history(sid, limit=0), MessageType.TEXT)
+    assert texts[0].content == content
+    assert "reply_channel" not in texts[0].metadata
+    assert texts[0].metadata["turn_metrics"]["rounds"][-1]["reply_marker"] == "off"
+
+
+@pytest.mark.asyncio
+async def test_stop_hook_draft_uses_same_split(temp_db: str) -> None:
+    """The stop-hook draft persists the same pre/reply split as a final response would."""
+    from kesoku.agent.hooks import HookOutcome
+    from kesoku.config import HooksConfig, StopHook
+    from kesoku.constants import REPLY_MARKER
+
+    sid = "sess_rc_hook"
+    content = f"{_RC_PLAN}\n{REPLY_MARKER}\n{_RC_REPLY}"
+    hooks = HooksConfig(stop=[StopHook(name="check", when_tools_used=["any"], command="true", max_retries=1)])
+    gw, executor, _llm, user_msg, _events, worker = await _rc_env(
+        temp_db,
+        sid,
+        [LLMResponse(content=content, total_tokens=5), LLMResponse(content=content, total_tokens=5)],
+        hooks=hooks,
+    )
+    outcomes = [[HookOutcome(name="check", exit_code=1, output="fix it")], []]
+
+    async def fake_stop_hooks(*_a: Any, **_kw: Any) -> list[Any]:
+        return outcomes.pop(0)
+
+    with patch("kesoku.agent.turn_executor.run_stop_hooks", side_effect=fake_stop_hooks):
+        await _rc_run(executor, user_msg, worker, sid)
+
+    msgs = await gw.db.get_session_history(sid, limit=0)
+    texts = _rc_rows(msgs, MessageType.TEXT)
+    drafts = [t for t in texts if t.status == MessageStatus.RESPONDED and t.sender == "Kesoku"]
+    finals = [t for t in texts if t.status != MessageStatus.RESPONDED and t.sender == "Kesoku"]
+    assert len(drafts) == 1 and len(finals) == 1
+    for row in (drafts[0], finals[0]):
+        assert row.content == _RC_REPLY
+        assert row.metadata["reply_channel"] == "found"
+    pre_rows = [t for t in _rc_rows(msgs, MessageType.THOUGHT) if t.metadata.get("reclassified") == "pre_reply"]
+    assert [p.content for p in pre_rows] == [_RC_PLAN, _RC_PLAN]
+
+
+@pytest.mark.asyncio
+async def test_empty_reply_after_marker_uses_empty_response_retry(temp_db: str) -> None:
+    """A marker followed by nothing is an empty reply: the normal empty-response retry kicks in."""
+    from kesoku.constants import REPLY_MARKER
+
+    sid = "sess_rc_empty"
+    gw, executor, llm, user_msg, _events, worker = await _rc_env(
+        temp_db,
+        sid,
+        [
+            LLMResponse(content=f"{_RC_PLAN}\n{REPLY_MARKER}\n", total_tokens=5),
+            LLMResponse(content=f"{REPLY_MARKER}\n{_RC_REPLY}", total_tokens=5),
+        ],
+    )
+    await _rc_run(executor, user_msg, worker, sid)
+
+    assert len(llm.system_prompts) == 2  # retried once
+    msgs = await gw.db.get_session_history(sid, limit=0)
+    texts = _rc_rows(msgs, MessageType.TEXT)
+    assert [t.content for t in texts] == [_RC_REPLY]
+    assert texts[0].metadata["reply_channel"] == "found"
+    assert REPLY_MARKER not in texts[0].content
+    assert EMPTY_RESPONSE_RETRIES >= 1
+
+
+@pytest.mark.asyncio
+async def test_tool_round_keeps_thought_and_content(temp_db: str) -> None:
+    """K4: a tool-call round with both reasoning and visible text stores both in its THOUGHT row."""
+    from kesoku.constants import REPLY_MARKER
+
+    sid = "sess_rc_k4"
+    gw, executor, _llm, user_msg, stream_events, worker = await _rc_env(
+        temp_db,
+        sid,
+        [
+            LLMResponse(
+                content="Checking the data first.",
+                thought="Need a lookup.",
+                tool_calls=[ToolCallRequest(name="lookup", arguments={}, tool_call_id="tc1")],
+                total_tokens=5,
+            ),
+            LLMResponse(content=f"{REPLY_MARKER}\nDone.", total_tokens=5),
+        ],
+    )
+    await _rc_run(executor, user_msg, worker, sid)
+
+    msgs = await gw.db.get_session_history(sid, limit=0)
+    thoughts = _rc_rows(msgs, MessageType.THOUGHT)
+    assert thoughts[0].content == "Need a lookup.\n\nChecking the data first."
+    texts = _rc_rows(msgs, MessageType.TEXT)
+    assert [t.content for t in texts] == ["Done."]
+    rounds = texts[0].metadata["turn_metrics"]["rounds"]
+    assert rounds[0]["reply_marker"] == "off" and rounds[0]["tool_count"] == 1
+    assert rounds[1]["reply_marker"] == "found"
+    # Tool-round text is never previewed under the reply channel (no marker in that round).
+    assert all(e is None or "Checking" not in e for e in stream_events)
+
+
+def test_reply_channel_resolution(temp_db: str) -> None:
+    """Discord channel override and app-mode stamp enable the channel; absent sources leave it off."""
+    from kesoku.config import AppConfig, AppModeConfig
+    from kesoku.constants import REPLY_MARKER
+
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    cfg.discord.channels = [
+        DiscordChannelOverride(channels=["on"], reply_channel=True),
+        DiscordChannelOverride(channels=["plain"], stream=True),
+    ]
+    cfg.chatbots.app = [AppConfig(enabled=True, modes=[AppModeConfig(id="chat"), AppModeConfig(id="guided")])]
+    ctx = KesokuContext(config=cfg)
+    executor = TurnExecutor("sess_rc_res", Gateway(context=ctx), MagicMock(), None, context=ctx)
+
+    def _msg(chatbot: str, channel: str, meta: dict[str, Any] | None = None) -> Message:
+        return Message(
+            session_id="sess_rc_res", chatbot_id=chatbot, channel_id=channel, sender="u", content="x",
+            metadata=meta or {},
+        )
+
+    assert executor._resolve_reply_marker(_msg("discord", "on")) == REPLY_MARKER
+    thread = _msg("discord", "thread-1", {"parent_channel_name": "on"})
+    assert executor._resolve_reply_marker(thread) == REPLY_MARKER
+    assert executor._resolve_reply_marker(_msg("discord", "plain")) is None
+    assert executor._resolve_reply_marker(_msg("discord", "other")) is None
+    # App path: the adapter's server-side stamp enables it; absence leaves it off.
+    assert executor._resolve_reply_marker(_msg("app", "app:s1", {"reply_channel": True})) == REPLY_MARKER
+    assert executor._resolve_reply_marker(_msg("app", "app:s1")) is None
+    # The stamp is only honoured for app chatbots, and only as a literal True.
+    assert executor._resolve_reply_marker(_msg("discord", "other", {"reply_channel": True})) is None
+    assert executor._resolve_reply_marker(_msg("app", "app:s1", {"reply_channel": "yes"})) is None
+
+
+def test_client_llm_override_and_model_set_cannot_toggle_reply_channel(temp_db: str) -> None:
+    """`llm_override` never carries the reply channel: extra keys are rejected and valid overrides are ignored."""
+    from kesoku.agent.turn_executor import validate_llm_override
+    from kesoku.config import AppConfig, AppLlmOverride, AppModeConfig
+    from kesoku.constants import REPLY_MARKER
+
+    # The override schema itself has no such field and rejects unknown keys.
+    assert "reply_channel" not in AppLlmOverride.model_fields
+    assert validate_llm_override({"reply_channel": True}, ["m"]) is None
+    assert validate_llm_override({"model_name": "m", "reply_channel": False}, ["m"]) is None
+
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))
+    cfg.discord.channels = [DiscordChannelOverride(channels=["on"], reply_channel=True)]
+    cfg.chatbots.app = [AppConfig(enabled=True, allowed_models=["m"], modes=[AppModeConfig(id="chat")])]
+    ctx = KesokuContext(config=cfg)
+    executor = TurnExecutor("sess_rc_ovr", Gateway(context=ctx), MagicMock(), None, context=ctx)
+
+    def _msg(chatbot: str, channel: str, meta: dict[str, Any]) -> Message:
+        return Message(session_id="sess_rc_ovr", chatbot_id=chatbot, channel_id=channel, sender="u", content="x",
+                       metadata=meta)
+
+    # A model switch cannot turn the channel off...
+    on = _msg("discord", "on", {"llm_override": {"model_name": "m", "reply_channel": False}})
+    assert executor._resolve_reply_marker(on) == REPLY_MARKER
+    stamped = _msg("app", "app:s", {"reply_channel": True, "llm_override": {"model_name": "m"}})
+    assert executor._resolve_reply_marker(stamped) == REPLY_MARKER
+    # ...and an override (valid or not) cannot turn it on.
+    for ovr in ({"model_name": "m"}, {"model_name": "m", "reply_channel": True}, {"reply_channel": True}):
+        assert executor._resolve_reply_marker(_msg("app", "app:s", {"llm_override": ovr})) is None
+
+
+@pytest.mark.asyncio
+async def test_reply_marker_not_applied_to_subagent_or_context_model(temp_db: str, tmp_path: Path) -> None:
+    """Only the main turn sees the rule: the LLM object is not mutated and sub-agents keep raw text."""
+    from kesoku.agent.tools.subagent import delegate_subagent
+    from kesoku.constants import REPLY_MARKER
+
+    sid = "sess_rc_scope"
+    content = f"{_RC_PLAN}\n{REPLY_MARKER}\n{_RC_REPLY}"
+    gw, executor, llm, user_msg, _events, worker = await _rc_env(
+        temp_db, sid, [LLMResponse(content=content, total_tokens=5)]
+    )
+    await _rc_run(executor, user_msg, worker, sid)
+    assert REPLY_MARKER in (llm.system_prompts[0] or "")
+    # The marker is turn-executor state, not an LLM attribute shared with other callers.
+    assert not any("reply" in name.lower() for name in vars(llm))
+
+    # A context-model / compression LLM resolved from the same context gets no rule and no split.
+    assert executor.context.get_llm(use_context_compression=True) is llm
+    assert llm.responses == []
+
+    # A sub-agent run with a marker-shaped answer keeps its text verbatim and never sees the rule.
+    sub_cfg = KesokuConfig()
+    sub_cfg.agent_working_dir = str(tmp_path)
+    sub_cfg.workspace.sessions_dir = str(tmp_path / "sessions")
+    sub_llm = _ScriptedStreamLLM([LLMResponse(content=content, total_tokens=3)])
+    sub_kctx = KesokuContext(config=sub_cfg, llm=sub_llm)
+    sub_ctx = ToolContext(session_id=sid, session_workspace=sid, kesoku_context=sub_kctx)
+    out = await delegate_subagent(task="Investigate.", context=sub_ctx)
+    assert REPLY_MARKER not in (sub_llm.system_prompts[0] or "")
+    assert _RC_PLAN in out

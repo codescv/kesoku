@@ -229,6 +229,17 @@ To circumvent the strict alternating role checks (`user` ──► `model` ─�
     *   *User Visibility*: Visible to the user as a scheduled prompt.
     *   *LLM Transpilation*: Saved under `role=MessageRole.USER` with `sender="Cronjob"` and `metadata={"is_cronjob": True}` to ensure native conversational turn alternation.
 
+### 5.5 Opt-in Reply Channel (`reply_channel`)
+
+A server-side switch on `[[chatbots.app.modes]]` (`reply_channel = true`) or on a `[[discord.channels]]` override. It is **not** part of `llm_override`, so clients and `model.set` can neither enable nor disable it; the app adapter stamps `metadata.reply_channel = true` on inbound messages from the server-resolved mode and drops any client-supplied key.
+
+*   **Prompt**: for main-agent turns only (never sub-agents, compression, memory extraction or the namer), one rule is inserted after the output formatting rules: the final reply must start with a line containing exactly `<<<REPLY>>>` (`kesoku.constants.REPLY_MARKER`).
+*   **Split** (`kesoku/agent/reply_channel.py`): text before the first marker line is stored as a THOUGHT row with `{"final_response": true, "reclassified": "pre_reply"}` (dropped from later turns); the TEXT row holds only the reply and records `metadata.reply_channel = "found" | "missing"`. A missing marker is fail-open (text delivered as before). Stop-hook drafts use the same split; an empty reply after the marker goes through the normal empty-response retry.
+*   **Streaming**: previews stay hidden until the marker line has streamed.
+*   **Replay**: only TEXT rows with `reply_channel == "found"` are replayed with the marker line prepended; older rows are unchanged.
+*   **Telemetry**: every `turn_metrics.rounds[]` entry carries `thought_tokens`, `parts` (run-length response part shapes such as `thought:120`, `text:300`, `sig`, `fc:<name>`), `reply_marker` (`found | missing | off`) and `pre_reply_chars`.
+*   **Repair**: `kesoku history reclassify <message_id> --prefix-chars N [--dry-run] [--yes]` moves the first N characters of an existing assistant TEXT row into a `reclassified: "manual"` THOUGHT row (back up the database first).
+
 ---
 
 ## 6. Concrete End-to-End Trajectory Examples

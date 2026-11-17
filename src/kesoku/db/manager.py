@@ -1042,6 +1042,123 @@ class DatabaseManager(AppTablesMixin):
             with conn:
                 conn.execute("UPDATE messages SET metadata = ? WHERE id = ?", (json.dumps(metadata), message_id))
 
+    def reclassify_message_prefix(
+        self,
+        message_id: str,
+        prefix_chars: int,
+        reclassified: str = "manual",
+    ) -> tuple[Message, Message]:
+        """Move the first `prefix_chars` characters of an assistant TEXT row into a new THOUGHT row.
+
+        Runs in one transaction: the TEXT row keeps the remaining text (leading whitespace stripped) and records
+        `reclassified_prefix_chars` in its metadata; the new THOUGHT row (same session / channel / parent, placed
+        just before the TEXT row) carries `{"final_response": True, "reclassified": reclassified}` so it is kept
+        out of later turns. The message's full-text index entry is refreshed to the remaining text.
+
+        Args:
+            message_id: ID of the assistant TEXT message to edit.
+            prefix_chars: Number of leading characters to move (1 .. len(content) - 1).
+            reclassified: Value stored in the THOUGHT row's `reclassified` metadata key.
+
+        Returns:
+            `(updated_text_message, new_thought_message)`.
+
+        Raises:
+            ValueError: When the message is missing, is not an assistant TEXT row, or `prefix_chars` is out of range.
+        """
+        msg = self.get_message(message_id)
+        if msg is None:
+            raise ValueError(f"message '{message_id}' not found")
+        if msg.role != MessageRole.ASSISTANT or msg.type != MessageType.TEXT:
+            raise ValueError(f"message '{message_id}' is not an assistant text message ({msg.role}/{msg.type})")
+        content = msg.content or ""
+        if prefix_chars <= 0 or prefix_chars >= len(content):
+            raise ValueError(f"prefix_chars must be between 1 and {max(len(content) - 1, 0)} (got {prefix_chars})")
+        remaining = content[prefix_chars:].lstrip()
+        if not remaining:
+            raise ValueError("reclassifying would leave the text message empty")
+        prefix = content[:prefix_chars].rstrip()
+
+        new_meta = dict(msg.metadata or {})
+        new_meta["reclassified_prefix_chars"] = prefix_chars
+        thought = Message(
+            session_id=msg.session_id,
+            chatbot_id=msg.chatbot_id,
+            channel_id=msg.channel_id,
+            sender=msg.sender,
+            role=MessageRole.ASSISTANT,
+            type=MessageType.THOUGHT,
+            content=prefix,
+            # Just before the text row so phased/grouped ordering keeps the thought ahead of the reply.
+            timestamp=msg.timestamp - 0.001,
+            status=MessageStatus.RESPONDED,
+            parent_id=msg.parent_id,
+            summary_node_id=msg.summary_node_id,
+            metadata={"final_response": True, "reclassified": reclassified},
+        )
+        with self.connection_provider.connection() as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE messages SET content = ?, metadata = ? WHERE id = ?",
+                    (remaining, json.dumps(new_meta), message_id),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO messages
+                    (id, session_id, chatbot_id, channel_id, sender, role, type,
+                     content, metadata, timestamp, status, parent_id, summary_node_id, embedding)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    """,
+                    (
+                        thought.id,
+                        thought.session_id,
+                        thought.chatbot_id,
+                        thought.channel_id,
+                        thought.sender,
+                        thought.role,
+                        thought.type,
+                        thought.content,
+                        json.dumps(thought.metadata),
+                        thought.timestamp,
+                        thought.status,
+                        thought.parent_id,
+                        thought.summary_node_id,
+                    ),
+                )
+                if self.fts_available:
+                    try:
+                        row = conn.execute(
+                            "SELECT persona_role, context_policy, speaker_role, ts FROM messages_fts "
+                            "WHERE message_id = ?",
+                            (message_id,),
+                        ).fetchone()
+                        if row is not None:
+                            conn.execute("DELETE FROM messages_fts WHERE message_id = ?", (message_id,))
+                            tokenized = fts_tokenize(remaining, for_query=False)
+                            if tokenized:
+                                conn.execute(
+                                    """
+                                    INSERT INTO messages_fts (
+                                        message_id, session_id, persona_role, context_policy,
+                                        speaker_role, ts, raw_excerpt, text
+                                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                    """,
+                                    (
+                                        message_id,
+                                        msg.session_id,
+                                        row[0],
+                                        row[1],
+                                        row[2],
+                                        row[3],
+                                        " ".join(remaining.split())[:400],
+                                        tokenized,
+                                    ),
+                                )
+                    except sqlite3.Error as e:
+                        logger.warning(f"Failed refreshing messages_fts for reclassified message {message_id}: {e}")
+        updated = msg.model_copy(update={"content": remaining, "metadata": new_meta})
+        return updated, thought
+
     def update_session_system_prompt(self, session_id: str, content: str) -> None:
         """Update the main system prompt content for an existing session.
 

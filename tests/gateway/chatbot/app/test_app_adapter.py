@@ -2129,3 +2129,60 @@ async def test_history_question_choice_items_from_workspace_registry(env) -> Non
     assert q["layout"] == "cards"
     assert q["choice_items"][0]["avatar"] == "characters/roster/images/a.jpg"
     assert q["choice_items"][2] == {"value": "换一批", "name": "换一批"}
+
+
+async def test_reply_channel_stamped_server_side_from_resolved_mode(env) -> None:
+    """The adapter stamps `metadata.reply_channel` only from the server-resolved mode; client keys are dropped."""
+    bot, gw = env["bot"], env["gw"]
+    bot.app_config.modes.append(
+        AppModeConfig(id="guided", title="Guided", launch_prompt="begin guided", reply_channel=True)
+    )
+    sid = await create_session(env)
+    posted: list[Message] = []
+    orig_post = gw.post
+
+    async def capture(msg: Message) -> Message:
+        posted.append(msg)
+        return await orig_post(msg)
+
+    gw.post = capture
+
+    # Chat mode: a client-supplied key is dropped, and an llm_override carrying it is rejected outright.
+    await bot.ingest_app_message(
+        session_id=sid, device_id="dev-1", client_msg_id="c-chat", text="hello", attachments=[],
+        llm_override=None, extra_metadata={"reply_channel": True},
+    )
+    assert "reply_channel" not in posted[-1].metadata
+    bad = await rpc(
+        env,
+        "message.send",
+        {"session_id": sid, "client_msg_id": "c-ovr", "text": "x", "llm_override": {"reply_channel": True}},
+    )
+    assert bad["payload"]["code"] == "BAD_REQUEST"
+    rejected = await rpc(env, "model.set", {"session_id": sid, "llm_override": {"reply_channel": False}})
+    assert rejected["payload"]["code"] == "BAD_REQUEST"
+
+    # Launching the opted-in mode stamps the flag on the launch message.
+    await rpc(env, "mode.start", {"session_id": sid, "mode_id": "guided"})
+    assert posted[-1].metadata["mode_hint"] == "guided"
+    assert posted[-1].metadata["reply_channel"] is True
+
+    # While the mode is active, every message is stamped; a model switch or client key cannot turn it off.
+    _write_games(env["tmp"], sid, [{"id": "guided#1", "game": "guided", "active": True}])
+    await rpc(
+        env,
+        "message.send",
+        {"session_id": sid, "client_msg_id": "c-g1", "text": "next", "llm_override": {"model_name": "model-a"}},
+    )
+    assert posted[-1].metadata["reply_channel"] is True
+    assert posted[-1].metadata["llm_override"] == {"model_name": "model-a"}
+    await bot.ingest_app_message(
+        session_id=sid, device_id="dev-1", client_msg_id="c-g2", text="again", attachments=[],
+        llm_override=None, extra_metadata={"reply_channel": False},
+    )
+    assert posted[-1].metadata["reply_channel"] is True
+
+    # Stopping the mode (mode_hint="chat") turns it off again.
+    await rpc(env, "mode.stop", {"session_id": sid})
+    assert posted[-1].metadata["mode_hint"] == "chat"
+    assert "reply_channel" not in posted[-1].metadata

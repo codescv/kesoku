@@ -35,6 +35,7 @@ from kesoku.agent.llm import (
     _drain_blocking_stream,
     _load_attachments,
     _patch_requests_response_utf8_lines,
+    _summarize_gemini_parts,
     function_to_anthropic_tool,
     get_llm,
     history_to_turns,
@@ -2917,3 +2918,148 @@ async def test_post_compaction_cache_rebuild_and_clear_session_cleanup(tmp_path:
     await bot.clear_session_by_channel("88")
     assert ops == ["delete:reb_cache_2"]
     discard_session_cache_state("s_reb")
+
+
+def _gemini_chunk(parts: list[Any], usage: Any = None, finish: Any = None) -> Any:
+    """Build a streamed Gemini chunk carrying `parts` (test helper)."""
+    return types.GenerateContentResponse.model_construct(
+        candidates=[
+            types.Candidate.model_construct(
+                content=types.Content.model_construct(role="model", parts=parts),
+                finish_reason=finish,
+            )
+        ],
+        usage_metadata=usage,
+    )
+
+
+def test_summarize_gemini_parts_run_length_shapes_and_limit() -> None:
+    """`_summarize_gemini_parts` merges consecutive thought/text runs and folds overflow into a tail entry."""
+    sig = b"\x0a\x0b"
+    th1 = types.Part.from_text(text="abc")
+    th1.thought = True
+    th2 = types.Part.from_text(text="de")
+    th2.thought = True
+    tx1 = types.Part.from_text(text="Hello")
+    tx2 = types.Part.from_text(text=" there")
+    tx_sig = types.Part.from_text(text="!!")
+    tx_sig.thought_signature = sig
+    empty_sig = types.Part.from_text(text="")
+    empty_sig.thought_signature = sig
+    fc = types.Part.from_function_call(name="lookup", args={})
+    fc_sig = types.Part.from_function_call(name="fetch", args={})
+    fc_sig.thought_signature = sig
+
+    shapes = _summarize_gemini_parts([th1, th2, tx1, tx2, tx_sig, empty_sig, fc, fc_sig])
+    assert shapes == ["thought:5", "text:11", "text+sig:2", "sig", "fc:lookup", "fc+sig:fetch"]
+    assert _summarize_gemini_parts(None) == []
+
+    many = [types.Part.from_function_call(name=f"f{i}", args={}) for i in range(20)]
+    limited = _summarize_gemini_parts(many, limit=16)
+    assert len(limited) == 16
+    assert limited[:15] == [f"fc:f{i}" for i in range(15)]
+    assert limited[-1] == "+5"
+
+
+@pytest.mark.asyncio
+async def test_gemini_parse_records_part_shapes_and_thoughts_tokens() -> None:
+    """Non-streaming parse exposes `part_shapes` and `usage_metadata.thoughts_token_count` without changing content."""
+    sig = b"\x01\x02"
+    th = types.Part.from_text(text="Reasoning about the request.")
+    th.thought = True
+    tx = types.Part.from_text(text="Final answer.")
+    tail = types.Part.from_text(text="")
+    tail.thought_signature = sig
+    raw = types.GenerateContentResponse.model_construct(
+        candidates=[
+            types.Candidate.model_construct(
+                content=types.Content.model_construct(role="model", parts=[th, tx, tail]),
+                finish_reason=types.FinishReason.STOP,
+            )
+        ],
+        usage_metadata=types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=20, candidates_token_count=8, total_token_count=65, thoughts_token_count=37
+        ),
+    )
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = raw
+    with patch("google.genai.Client", return_value=mock_client):
+        res = await GeminiLLM().generate(prompt="Hi", stream=False)
+
+    assert res.content == "Final answer."
+    assert res.thought == "Reasoning about the request."
+    assert res.thoughts_tokens == 37
+    assert res.part_shapes == [f"thought:{len('Reasoning about the request.')}", f"text:{len('Final answer.')}", "sig"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_stream_unflagged_leading_text_leak_fixture() -> None:
+    """Regression fixture: un-flagged planning text is passed through by the provider layer.
+
+    Chunks `[text(plan)] [text(a1)] [text(a2)] [text("")+sig]` with `thoughts_token_count=0` reproduce the
+    observed symptom: the plan is streamed live and glued to the answer with no thought part. The structural
+    telemetry records the shape so such responses are diagnosable; the defence lives in the reply channel.
+    """
+    plan = "Plan: first restate the question, then answer briefly."
+    a1 = "The answer is"
+    a2 = " forty-two."
+    tail = types.Part.from_text(text="")
+    tail.thought_signature = b"\x05\x06"
+    usage = types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=50, candidates_token_count=30, total_token_count=80, thoughts_token_count=0
+    )
+    chunks = [
+        _gemini_chunk([types.Part.from_text(text=plan)]),
+        _gemini_chunk([types.Part.from_text(text=a1)]),
+        _gemini_chunk([types.Part.from_text(text=a2)]),
+        _gemini_chunk([tail], usage=usage, finish=types.FinishReason.STOP),
+    ]
+    mock_client = MagicMock()
+    mock_client.models.generate_content_stream.side_effect = lambda **_: iter(chunks)
+
+    seen: list[str] = []
+
+    async def on_chunk(_delta: str, accumulated: str) -> None:
+        seen.append(accumulated)
+
+    with patch("google.genai.Client", return_value=mock_client):
+        res = await GeminiLLM(GeminiConfig(stream=True)).generate(prompt="Hi", stream=True, on_stream_chunk=on_chunk)
+
+    # Documented provider-level pass-through: the plan is visible text, streamed and glued to the answer.
+    assert seen[0] == plan
+    assert res.content == plan + a1 + a2
+    assert res.thought is None
+    assert res.thoughts_tokens == 0
+    assert res.part_shapes == [f"text:{len(plan + a1 + a2)}", "sig"]
+
+
+def test_history_to_turns_replays_marker_only_for_contracted_rows() -> None:
+    """Only assistant TEXT rows with `reply_channel == "found"` are replayed with the marker line prepended."""
+    from kesoku.constants import REPLY_MARKER
+
+    def _m(role: str, content: str, mtype: str = "text", meta: dict[str, Any] | None = None) -> Message:
+        return Message(
+            session_id="s",
+            chatbot_id="cli",
+            channel_id="c",
+            sender="x",
+            role=role,
+            type=mtype,
+            content=content,
+            metadata=meta or {},
+        )
+
+    history = [
+        _m("user", "first question"),
+        _m("assistant", "legacy reply"),
+        _m("user", "second question"),
+        _m("assistant", "missing-marker reply", meta={"reply_channel": "missing"}),
+        _m("user", "third question"),
+        _m("assistant", "contracted reply", meta={"reply_channel": "found"}),
+        _m("user", "fourth question"),
+    ]
+    turns, _ = history_to_turns(history, None, None)
+    assistant_texts = [
+        b.text for t in turns if t.role == MessageRole.ASSISTANT for b in t.blocks if getattr(b, "type", "") == "text"
+    ]
+    assert assistant_texts == ["legacy reply", "missing-marker reply", f"{REPLY_MARKER}\ncontracted reply"]

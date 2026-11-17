@@ -594,6 +594,13 @@ class AppChatbot(Chatbot):
                 metadata["origin_channel"] = origin
                 metadata.setdefault("mode_hint", "chat")
                 metadata["ignore_context_globs"] = list(CROSS_CHANNEL_IGNORE_GLOBS)
+            # The reply channel is a server-side mode setting: never trust a client-supplied key, and stamp it
+            # only from the mode resolved here for the session.
+            metadata.pop("reply_channel", None)
+            rc_mode_id = metadata.get("mode_hint") or await asyncio.to_thread(self.policy.current_mode, session_id)
+            rc_mode = self.app_config.get_mode(rc_mode_id) if isinstance(rc_mode_id, str) else None
+            if rc_mode is not None and rc_mode.reply_channel:
+                metadata["reply_channel"] = True
 
             content = self._format_inbound_content_parts(llm_text, [a for a, _, _ in saved])
             msg = Message(

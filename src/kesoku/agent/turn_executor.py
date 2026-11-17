@@ -38,6 +38,8 @@ from kesoku.agent.memory_store import (
     search_role_episodes,
     search_role_memories,
 )
+from kesoku.agent.prompt import apply_reply_channel_rule
+from kesoku.agent.reply_channel import ReplyStreamGate, split_reply
 from kesoku.agent.repo_rules import RepoRulesManager
 from kesoku.agent.session_digest import (
     DigestUpdater,
@@ -62,7 +64,7 @@ from kesoku.utils.ui_markup import collapse_ui_blocks, extract_ui_options, parse
 
 if TYPE_CHECKING:
     from kesoku.agent.agent import SessionWorker
-from kesoku.constants import MessageRole, MessageStatus, MessageType
+from kesoku.constants import REPLY_MARKER, MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
@@ -598,6 +600,8 @@ class TurnExecutor:
         self._turn_stream: bool = False
         self._turn_cache_mode: str = "disabled"
         self._last_round_tool_errors: int = 0
+        # Opt-in reply channel marker for the current turn's main-agent final rounds (None = off).
+        self._turn_reply_marker: str | None = None
 
     @staticmethod
     def _resolve_cache_mode(cfg: KesokuConfig, llm: BaseLLM) -> str:
@@ -740,6 +744,68 @@ class TurnExecutor:
             logger.warning(f"Ignoring invalid metadata.llm_override on message {current_msg.id}: {raw!r}")
         return validated
 
+    def _resolve_reply_marker(self, current_msg: Message) -> str | None:
+        """Return the reply-channel marker when the opt-in reply channel is enabled for `current_msg`.
+
+        Sources (both server-side; `llm_override` never affects it):
+          - a matching Discord channel override with `reply_channel = true`;
+          - for app chatbots, the `metadata.reply_channel` stamp written by the app adapter from the session's
+            server-resolved mode (client-supplied keys are dropped at ingestion).
+        """
+        override = self._resolve_channel_override(current_msg)
+        if override is not None and override.reply_channel:
+            return REPLY_MARKER
+        raw_meta = getattr(current_msg, "metadata", None)
+        metadata = raw_meta if isinstance(raw_meta, dict) else {}
+        if metadata.get("reply_channel") is True:
+            get_app_cfg = getattr(self.context.config, "get_app_config", None)
+            app_cfg = get_app_cfg(current_msg.chatbot_id) if callable(get_app_cfg) else None
+            if app_cfg is not None:
+                return REPLY_MARKER
+        return None
+
+    def _split_final_response(self, res: LLMResponse) -> tuple[str, str]:
+        """Apply the reply channel to a final (tool-free) response.
+
+        Replaces `res.content` with the reply (marker lines removed) when the marker is found, and records the
+        outcome on the current round record.
+
+        Returns:
+            `(pre_reply_text, state)` where state is "found", "missing" or "off".
+        """
+        marker = self._turn_reply_marker
+        if not marker:
+            return "", "off"
+        split = split_reply(res.content or "", marker)
+        state = "found" if split.found else "missing"
+        if split.found:
+            res.content = split.reply
+        if self._turn_rounds:
+            self._turn_rounds[-1]["reply_marker"] = state
+            self._turn_rounds[-1]["pre_reply_chars"] = len(split.pre)
+        if state == "missing":
+            logger.info(f"Reply channel marker missing in final response of session {self.session_id}")
+        return split.pre, state
+
+    async def _post_pre_reply_thought(self, pre_reply: str, current_msg: Message) -> None:
+        """Persist private pre-reply text as a final THOUGHT row (kept out of later turns)."""
+        if not pre_reply:
+            return
+        await self.gateway.post(
+            Message(
+                session_id=self.session_id,
+                chatbot_id=current_msg.chatbot_id,
+                channel_id=current_msg.channel_id,
+                sender="Kesoku",
+                role=MessageRole.ASSISTANT,
+                type=MessageType.THOUGHT,
+                content=pre_reply,
+                status=MessageStatus.RESPONDED,
+                parent_id=current_msg.id,
+                metadata={"final_response": True, "reclassified": "pre_reply"},
+            )
+        )
+
     def _resolve_stream_min_interval(self, chatbot_id: str) -> float:
         """Return the per-chatbot streamed preview throttle interval (default 1.5s)."""
         get_fn = getattr(self.gateway, "get_stream_min_interval", None)
@@ -864,6 +930,7 @@ class TurnExecutor:
         self._turn_stream = False
         self._turn_cache_mode = "disabled"
         self._last_round_tool_errors = 0
+        self._turn_reply_marker = None
         last_round_used_explicit_cache = False
         last_round_generate_est_tokens = 0
 
@@ -948,10 +1015,13 @@ class TurnExecutor:
                 self._turn_thinking_level = getattr(getattr(llm, "config", None), "thinking_level", None)
                 self._turn_stream = stream
                 self._turn_cache_mode = self._resolve_cache_mode(cfg, llm)
+                self._turn_reply_marker = self._resolve_reply_marker(current_msg)
 
                 # Retrieve system prompt directly from session
                 session = await self.context.db.get_session(self.session_id)
                 system_prompt = session.system_prompt if session else None
+                if self._turn_reply_marker:
+                    system_prompt = apply_reply_channel_rule(system_prompt, self._turn_reply_marker)
 
                 tools_list = self.tool_runner.tool_registry.get_tools_list()
 
@@ -1086,13 +1156,21 @@ class TurnExecutor:
                 active_publisher = publisher
                 llm_call_t0 = time.perf_counter()
                 first_stream_chunk_ms: float | None = None
+                # With the reply channel on, nothing is previewed until the marker line has been streamed.
+                reply_gate = ReplyStreamGate(self._turn_reply_marker) if self._turn_reply_marker else None
 
                 async def _on_stream_chunk_timed(delta: str, accumulated: str) -> None:
                     nonlocal first_stream_chunk_ms
                     if first_stream_chunk_ms is None and delta:
                         first_stream_chunk_ms = round((time.perf_counter() - llm_call_t0) * 1000.0, 2)
-                    if active_publisher is not None:
-                        await active_publisher.on_chunk(delta, accumulated)
+                    if active_publisher is None:
+                        return
+                    if reply_gate is not None:
+                        gated = reply_gate.feed(accumulated)
+                        if gated is None:
+                            return
+                        accumulated = gated
+                    await active_publisher.on_chunk(delta, accumulated)
 
                 gen_kwargs: dict[str, Any] = (
                     {"stream": True, "on_stream_chunk": _on_stream_chunk_timed}
@@ -1143,6 +1221,8 @@ class TurnExecutor:
                         generate_cached_content = None
                         llm_call_t0 = time.perf_counter()
                         first_stream_chunk_ms = None
+                        if reply_gate is not None:
+                            reply_gate = ReplyStreamGate(reply_gate.marker)
                         retry_kwargs: dict[str, Any] = (
                             {"stream": True, "on_stream_chunk": _on_stream_chunk_timed}
                             if publisher is not None
@@ -1204,6 +1284,10 @@ class TurnExecutor:
                     "tool_ms": 0.0,
                     "tool_count": len(res.tool_calls),
                     "tool_errors": 0,
+                    "thought_tokens": res.thoughts_tokens,
+                    "parts": list(res.part_shapes) if res.part_shapes is not None else None,
+                    "reply_marker": "off",
+                    "pre_reply_chars": 0,
                 }
                 self._turn_rounds.append(round_record)
 
@@ -2284,7 +2368,8 @@ class TurnExecutor:
         chatbot_id = current_msg.chatbot_id
         channel_id = current_msg.channel_id
 
-        thought_text = res.thought or res.content
+        # Keep both the reasoning and any visible text of a tool-call round (neither is delivered to the user).
+        thought_text = "\n\n".join(x for x in (res.thought, res.content) if x)
         if thought_text:
             thought_metadata = {}
             if res.thought_signature:
@@ -2534,8 +2619,14 @@ class TurnExecutor:
         self,
         res: LLMResponse,
         current_msg: Message,
+        pre_reply: str = "",
+        reply_state: str = "off",
     ) -> None:
-        """Persist the assistant's thought and draft text (status=RESPONDED) before a stop hook/reminder."""
+        """Persist the assistant's thought and draft text (status=RESPONDED) before a stop hook/reminder.
+
+        `pre_reply` / `reply_state` carry the reply-channel split already applied to `res.content` by
+        `_split_final_response`, so the draft is persisted exactly like a final response would be.
+        """
         chatbot_id = current_msg.chatbot_id
         channel_id = current_msg.channel_id
         if res.thought:
@@ -2556,7 +2647,11 @@ class TurnExecutor:
                     metadata=thought_metadata,
                 )
             )
+        await self._post_pre_reply_thought(pre_reply, current_msg)
         if res.content and res.content.strip():
+            draft_meta: dict[str, Any] = {}
+            if reply_state != "off":
+                draft_meta["reply_channel"] = reply_state
             await self.gateway.post(
                 Message(
                     session_id=self.session_id,
@@ -2568,6 +2663,7 @@ class TurnExecutor:
                     content=res.content,
                     status=MessageStatus.RESPONDED,
                     parent_id=current_msg.id,
+                    metadata=draft_meta,
                 )
             )
 
@@ -2752,6 +2848,9 @@ class TurnExecutor:
             )
             return False, empty_attempts
 
+        # Reply channel: split private pre-reply text off once, before hooks, drafts and empty-response handling.
+        pre_reply, reply_state = self._split_final_response(res)
+
         if res.content and res.content.strip():
             # P2-2 Stop Hooks
             if hasattr(cfg, "hooks") and cfg.hooks.stop:
@@ -2771,7 +2870,7 @@ class TurnExecutor:
                             self._hook_retries[out.name] = retries + 1
                             if publisher is not None:
                                 await publisher.discard()
-                            await self._post_draft_before_hook(res, current_msg)
+                            await self._post_draft_before_hook(res, current_msg, pre_reply, reply_state)
                             msg = Message(
                                 session_id=self.session_id,
                                 chatbot_id=chatbot_id,
@@ -2801,7 +2900,7 @@ class TurnExecutor:
                     self._stop_reminder_fired = True
                     if publisher is not None:
                         await publisher.discard()
-                    await self._post_draft_before_hook(res, current_msg)
+                    await self._post_draft_before_hook(res, current_msg, pre_reply, reply_state)
                     msg = Message(
                         session_id=self.session_id,
                         chatbot_id=chatbot_id,
@@ -2838,6 +2937,7 @@ class TurnExecutor:
                 metadata=thought_metadata,
             )
             await self.gateway.post(thought_msg)
+        await self._post_pre_reply_thought(pre_reply, current_msg)
 
         final_content = res.content
         if not final_content.strip():
@@ -2879,6 +2979,7 @@ class TurnExecutor:
                 f"LLM returned empty content {empty_attempts} times in session {self.session_id} "
                 f"(finish_reason={res.finish_reason}). Giving up on this turn."
             )
+            reply_state = "off"  # synthesized notice: not produced under the reply-channel contract
             final_content = (
                 f"\u26a0\ufe0f The model returned an empty response after {empty_attempts} attempts "
                 f"(finish_reason={res.finish_reason}). Please rephrase and try again."
@@ -2894,6 +2995,8 @@ class TurnExecutor:
             llm=llm,
         )
         final_meta: dict[str, Any] = {"turn_metrics": turn_metrics}
+        if reply_state != "off":
+            final_meta["reply_channel"] = reply_state
         cur_meta = getattr(current_msg, "metadata", None)
         if isinstance(cur_meta, dict):
             if cur_meta.get("discord_message_id"):

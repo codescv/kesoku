@@ -178,6 +178,16 @@ graph TD
 *   **自愈消息 (Nudge)**：原本在数据库中为 `role=system`，转译器会将其转译为 `role=user` 并前置提示语 `[System Notification]\n`，使得模型可以正常接收自愈警报，且不触犯厂商交替校验规则。
 *   **定时任务 / 后台警报**：一律在转译层包装为标准的 `user` 或 `tool_result` 回合提交，在用户侧完全不可见，但大模型可流畅解读。
 
+### 5.5 可选回复通道 (`reply_channel`)
+服务端开关，配置在 `[[chatbots.app.modes]]`（`reply_channel = true`）或 `[[discord.channels]]` 覆盖项上。它**不属于** `llm_override`，客户端与 `model.set` 都无法开启或关闭；App 适配器根据服务端解析出的模式在入站消息上写入 `metadata.reply_channel = true`，并丢弃客户端自带的同名键。
+
+*   **提示词**：仅主智能体回合（子智能体、压缩、记忆提取、命名器均不受影响）在输出格式规则之后追加一条规则：最终回复必须以一行恰好为 `<<<REPLY>>>`（`kesoku.constants.REPLY_MARKER`）的标记开头。
+*   **切分**（`kesoku/agent/reply_channel.py`）：首个标记行之前的文本保存为 THOUGHT 行，元数据为 `{"final_response": true, "reclassified": "pre_reply"}`（后续回合不再回放）；TEXT 行只保留回复正文，并记录 `metadata.reply_channel = "found" | "missing"`。缺少标记时按原样投递（fail-open）。Stop hook 草稿使用同一切分；标记后为空时走常规空回复重试。
+*   **流式预览**：标记行出现之前不发布任何预览。
+*   **回放**：仅 `reply_channel == "found"` 的 TEXT 行在回放时前置标记行，旧行保持不变。
+*   **遥测**：`turn_metrics.rounds[]` 每轮新增 `thought_tokens`、`parts`（响应分片形状，如 `thought:120`、`text:300`、`sig`、`fc:<name>`）、`reply_marker`（`found | missing | off`）与 `pre_reply_chars`。
+*   **修复**：`kesoku history reclassify <message_id> --prefix-chars N [--dry-run] [--yes]` 将已有助手 TEXT 行的前 N 个字符移入 `reclassified: "manual"` 的 THOUGHT 行（操作前请先备份数据库）。
+
 ---
 
 ## 6. 端到端执行轨迹示例

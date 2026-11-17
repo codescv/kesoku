@@ -355,4 +355,10 @@ async def test_llm_ttft_ms_and_turn_metrics_per_round_telemetry(tmp_path: Any) -
     assert r2["tool_count"] == 0
     assert r2["tool_errors"] == 0
     assert r2["tool_ms"] == 0.0
+    # K1/K3 structural telemetry fields are present on every round (test doubles report no part data).
+    for r in (r1, r2):
+        assert r["thought_tokens"] is None
+        assert r["parts"] is None
+        assert r["reply_marker"] == "off"
+        assert r["pre_reply_chars"] == 0
     discard_session_cache_state("s_tel")

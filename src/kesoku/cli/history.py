@@ -410,3 +410,58 @@ def history_view(
     except Exception as e:
         console.print(f"[bold red]Error rendering compression active context: {e}[/bold red]")
         sys.exit(1)
+
+
+
+@history_app.command("reclassify")
+def history_reclassify(
+    message_id: Annotated[str, typer.Argument(help="ID of the assistant text message to edit")],
+    prefix_chars: Annotated[
+        int, typer.Option("--prefix-chars", help="Number of leading characters to move into a thought row")
+    ],
+    config: Annotated[str, typer.Option("-c", "--config", help="Path to config.toml")] = "config.toml",
+    yes: Annotated[bool, typer.Option("-y", "--yes", help="Apply without the confirmation prompt")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Only preview the split; do not edit the DB")] = False,
+) -> None:
+    """Move the first N characters of an assistant text message into a private thought row.
+
+    The thought row is marked `reclassified: "manual"` so it is excluded from later turns' context, and the text
+    message keeps only the remaining characters. Edits the database: back it up first.
+    """
+    cfg = load_config(config)
+    db = DatabaseManager(cfg.workspace.db_path)
+    db.verify_db()
+
+    msg = db.get_message(message_id)
+    if msg is None:
+        console.print(f"[bold red]Error: message '{message_id}' not found.[/bold red]")
+        sys.exit(1)
+    if msg.role != MessageRole.ASSISTANT or msg.type != MessageType.TEXT:
+        console.print(f"[bold red]Error: message '{message_id}' is not an assistant text message.[/bold red]")
+        sys.exit(1)
+    content = msg.content or ""
+    if prefix_chars <= 0 or prefix_chars >= len(content):
+        console.print(
+            f"[bold red]Error: --prefix-chars must be between 1 and {max(len(content) - 1, 0)}.[/bold red]"
+        )
+        sys.exit(1)
+
+    console.print(
+        Panel(content[:prefix_chars], title="[bold yellow]Moved to thought[/bold yellow]", title_align="left")
+    )
+    console.print(
+        Panel(content[prefix_chars:].lstrip(), title="[bold green]Kept as reply[/bold green]", title_align="left")
+    )
+    if dry_run:
+        console.print("[dim]Dry run: no changes written.[/dim]")
+        return
+    if not yes and not typer.confirm("Apply this reclassification?", default=False):
+        console.print("[yellow]Aborted.[/yellow]")
+        raise typer.Exit(code=1)
+
+    try:
+        _updated, thought = db.reclassify_message_prefix(message_id, prefix_chars, reclassified="manual")
+    except ValueError as e:
+        console.print(f"[bold red]Error: {e}[/bold red]")
+        sys.exit(1)
+    console.print(f"[bold green]✓ Reclassified {prefix_chars} chars into thought message {thought.id}.[/bold green]")

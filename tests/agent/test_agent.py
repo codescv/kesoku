@@ -1609,3 +1609,48 @@ async def test_auto_session_naming(temp_db: str) -> None:
     assert rename_msgs[0].channel_id == "123456"
     assert rename_msgs[0].chatbot_id == "discord"
 
+
+
+@pytest.mark.asyncio
+async def test_reply_channel_rows_in_later_turns(temp_db: str) -> None:
+    """Reclassified THOUGHT rows are dropped from later turns; only contracted TEXT rows get the marker on replay."""
+    from kesoku.agent.llm import history_to_turns
+    from kesoku.constants import REPLY_MARKER
+
+    DatabaseManager(temp_db).init_tables()
+    gw = Gateway(context=KesokuContext(config=KesokuConfig(workspace=WorkspaceConfig(db_path=temp_db))))
+    await gw.create_session("sess_rc_hist", title="Reply channel history")
+
+    def _m(role: str, content: str, ts: float, mtype: str = "text", meta: dict | None = None,
+           parent: str | None = None) -> Message:
+        return Message(
+            session_id="sess_rc_hist", chatbot_id="cli", channel_id="ch", sender="x", role=role, type=mtype,
+            content=content, status="processed" if role == "user" else "responded", timestamp=ts,
+            metadata=meta or {}, parent_id=parent,
+        )
+
+    u1 = _m("user", "Turn one question", 10.0)
+    legacy = _m("assistant", "Legacy reply text", 11.0, parent=u1.id)
+    u2 = _m("user", "Turn two question", 20.0)
+    pre = _m("assistant", "Private planning notes", 21.0, mtype="thought",
+             meta={"final_response": True, "reclassified": "pre_reply"}, parent=u2.id)
+    contracted = _m("assistant", "Contracted reply text", 21.5, meta={"reply_channel": "found"}, parent=u2.id)
+    u3 = _m("user", "Turn three question", 30.0)
+    missing = _m("assistant", "Uncontracted reply text", 31.0, meta={"reply_channel": "missing"}, parent=u3.id)
+    u4 = _m("user", "Turn four question", 40.0)
+    for msg in (u1, legacy, u2, pre, contracted, u3, missing, u4):
+        await gw.post(msg)
+
+    history = await build_history(gateway=gw, session_id="sess_rc_hist")
+    llm_history = prepare_history_for_llm(history)
+    assert all(m.content != "Private planning notes" for m in llm_history)
+
+    turns, _ = history_to_turns(llm_history, None, None)
+    assistant_texts = [
+        b.text for t in turns if t.role == MessageRole.ASSISTANT for b in t.blocks if getattr(b, "type", "") == "text"
+    ]
+    assert assistant_texts == [
+        "Legacy reply text",
+        f"{REPLY_MARKER}\nContracted reply text",
+        "Uncontracted reply text",
+    ]

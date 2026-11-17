@@ -634,3 +634,41 @@ async def test_k4_role_inheritance_new_thread_clear_explicit_override_and_resolv
         channel_id="thread_plain",
     )
     assert sess_plain.role_name == "default"
+
+
+def test_reply_channel_config_surface_is_server_side_only() -> None:
+    """`reply_channel` is accepted on app modes and Discord channel overrides, never on `AppLlmOverride`."""
+    from kesoku.config import AppConfig, AppLlmOverride, AppModeConfig
+
+    raw = tomllib.loads(
+        """
+        [[discord.channels]]
+        channels = ["guided"]
+        reply_channel = true
+
+        [[chatbots.app]]
+        enabled = true
+        [[chatbots.app.modes]]
+        id = "chat"
+        [[chatbots.app.modes]]
+        id = "guided"
+        reply_channel = true
+        """
+    )
+    cfg = KesokuConfig(**raw)
+    assert cfg.discord.channels[0].reply_channel is True
+    app_cfg: AppConfig = cfg.chatbots.app[0]
+    assert app_cfg.get_mode("guided").reply_channel is True
+    assert app_cfg.get_mode("chat").reply_channel is False
+    assert DiscordChannelOverride(channels=["x"]).reply_channel is False
+    assert AppModeConfig(id="plain").reply_channel is False
+
+    # The client-facing override schema is unchanged: a stray key is never carried by the override, does not
+    # enable the mode's channel, and the strict per-message validator still rejects unknown keys.
+    assert "reply_channel" not in AppLlmOverride.model_fields
+    stray = AppModeConfig(id="stray", llm_override={"model_name": "m", "reply_channel": True})
+    assert "reply_channel" not in stray.llm_override.model_dump()
+    assert stray.reply_channel is False
+    from kesoku.agent.turn_executor import validate_llm_override
+
+    assert validate_llm_override({"model_name": "m", "reply_channel": True}, ["m"]) is None

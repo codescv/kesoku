@@ -584,6 +584,13 @@ class DiscordChannelOverride(BaseModel):
         description="Override streaming response mode for this channel",
     )
     auto_thread: bool | None = Field(default=None, description="Override auto_thread behavior")
+    reply_channel: bool = Field(
+        default=False,
+        description=(
+            "Server-side opt-in reply channel: the final reply must start with a marker line and any text "
+            "before it is kept private (stored as a thought, never streamed or delivered)"
+        ),
+    )
 
 
 class DiscordConfig(BaseModel):
@@ -703,6 +710,13 @@ class AppModeConfig(BaseModel):
     llm_override: AppLlmOverride | None = Field(default=None, description="Default LLM override for the mode")
     prefs_schema: dict[str, Any] = Field(
         default_factory=dict, description="Whitelist of keys accepted by mode.prefs.set (values: enum list or type)"
+    )
+    reply_channel: bool = Field(
+        default=False,
+        description=(
+            "Server-side opt-in reply channel for sessions in this mode (not part of llm_override; clients "
+            "cannot toggle it): the final reply must start with a marker line and earlier text stays private"
+        ),
     )
 
     @model_validator(mode="after")

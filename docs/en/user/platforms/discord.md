@@ -62,6 +62,7 @@ model_name = "claude-opus-5-5"          # Optional: override the specific model 
 thinking_level = "low"                  # Optional: override reasoning budget ("minimal", "low", "medium", "high", "xhigh", "max")
 stream = true                           # Optional: enable/disable live streaming response previews for this channel
 auto_thread = false                     # Disable automatic thread creation in these channels
+reply_channel = false                   # Optional: opt-in reply channel (text before the reply marker stays private)
 ```
 
 ### Options Breakdown:
@@ -70,3 +71,4 @@ auto_thread = false                     # Disable automatic thread creation in t
 *   **`thinking_level`** (string, optional): Per-channel override for the provider's thinking/reasoning level (inherited automatically by threads created inside the channel).
 *   **`stream`** (boolean, optional): Per-channel override for live token streaming (`▌` preview edited in-place into the final response).
 *   **`auto_thread`** (boolean, default: `true`): If `true`, the bot automatically isolates every new session conversation by creating a sub-thread inside the channel. If `false`, the conversation runs directly inside the channel.
+*   **`reply_channel`** (boolean, default: `false`): Opt-in reply channel. The model must open its final reply with a marker line; anything before it is stored as a private thought and never streamed or delivered. See the developer message spec (§5.5).

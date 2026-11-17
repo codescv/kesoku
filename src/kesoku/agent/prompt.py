@@ -43,6 +43,36 @@ place these syntax blocks at the most contextually relevant place in your final 
   hidden-text support show the content as plain text.
 """
 
+REPLY_CHANNEL_INSTRUCTIONS_TEMPLATE = """
+# Reply Channel
+Your final user-visible reply must start with a line containing exactly `{marker}` and nothing else,
+followed by the reply itself. Anything written before that line is private and is discarded (never shown
+to the user). Write the marker line once, only in the final reply, and never mention it.
+"""
+
+
+def build_reply_channel_rule(marker: str) -> str:
+    """Return the reply-channel system-prompt rule for `marker`."""
+    return REPLY_CHANNEL_INSTRUCTIONS_TEMPLATE.format(marker=marker).strip()
+
+
+def apply_reply_channel_rule(system_prompt: str | None, marker: str) -> str:
+    """Insert the reply-channel rule right after the output formatting rules of `system_prompt`.
+
+    Falls back to appending the rule at the end when the formatting section is not present
+    (e.g. a custom system prompt). Idempotent: a prompt that already contains the rule is returned unchanged.
+    """
+    rule = build_reply_channel_rule(marker)
+    base = system_prompt or ""
+    if rule in base:
+        return base
+    anchor = OUTPUT_FORMATTING_INSTRUCTIONS.strip()
+    idx = base.find(anchor)
+    if idx >= 0:
+        end = idx + len(anchor)
+        return f"{base[:end]}\n\n{rule}{base[end:]}"
+    return f"{base}\n\n{rule}" if base else rule
+
 
 TOOL_CALLING_INSTRUCTIONS = """
 # Tool Execution Rules

@@ -28,7 +28,7 @@ from PIL import Image
 from pydantic import BaseModel, Field
 
 from kesoku.config import ClaudeConfig, GeminiConfig, KesokuConfig, get_config, resolve_gemini_cache_ttl
-from kesoku.constants import MessageRole, MessageType
+from kesoku.constants import REPLY_MARKER, MessageRole, MessageType
 from kesoku.db import Message
 from kesoku.logger import setup_logger
 
@@ -249,6 +249,8 @@ class LLMResponse(BaseModel):
     ttft_ms: float | None = None  # Wall milliseconds to first non-thought stream chunk (or full call ms)
     finish_reason: str | None = None  # Provider finish reason (e.g. STOP, MAX_TOKENS, MALFORMED_FUNCTION_CALL)
     raw_response: str | None = None  # Raw model response representation
+    thoughts_tokens: int | None = None  # Hidden reasoning tokens reported by the provider (if any)
+    part_shapes: list[str] | None = None  # Run-length summary of the response part structure (telemetry)
 
 
 class TextBlock(BaseModel):
@@ -594,7 +596,12 @@ def history_to_turns(
                     ts = msg.metadata.get("thought_signature")
                     add_blocks(MessageRole.ASSISTANT, [ThoughtBlock(text=msg.content, thought_signature=ts)])
                 else:
-                    add_blocks(MessageRole.ASSISTANT, [TextBlock(text=msg.content)])
+                    text = msg.content
+                    # Rows produced under the reply-channel contract are replayed with the marker line
+                    # so the model keeps seeing the contract it followed. Older rows are left untouched.
+                    if (msg.metadata or {}).get("reply_channel") == "found":
+                        text = f"{REPLY_MARKER}\n{text}"
+                    add_blocks(MessageRole.ASSISTANT, [TextBlock(text=text)])
 
             elif msg.role == MessageRole.TOOL:
                 if msg.type == MessageType.TOOL_CALL:
@@ -913,6 +920,64 @@ class BaseLLM(ABC):
 
         estimated = int(total_ascii / 4 + total_non_ascii * 2.0)
         return max(1, estimated)
+
+
+def _summarize_gemini_parts(parts: Sequence[Any] | None, limit: int = 16) -> list[str]:
+    """Summarize the structure of Gemini response parts as run-length shape tokens.
+
+    Shapes (telemetry only; no text content is recorded):
+      - ``thought:<n>``: consecutive ``thought=True`` text parts totalling ``n`` chars.
+      - ``text:<n>``: consecutive plain text parts (no signature) totalling ``n`` chars.
+      - ``text+sig:<n>``: a non-empty plain text part carrying a ``thought_signature``.
+      - ``sig``: an empty text part (or bare part) carrying only a ``thought_signature``.
+      - ``fc:<name>`` / ``fc+sig:<name>``: a function call part, without / with signature.
+
+    Args:
+        parts: The response parts (streamed chunks or a non-streaming response).
+        limit: Maximum number of shape entries; overflow is folded into a ``+<k>`` tail entry.
+
+    Returns:
+        The list of shape tokens.
+    """
+    # Each run is [kind, char_count, label]; only "thought" and "text" runs merge.
+    runs: list[list[Any]] = []
+    for part in parts or []:
+        text = getattr(part, "text", None)
+        has_sig = bool(getattr(part, "thought_signature", None))
+        call = getattr(part, "function_call", None)
+        if call:
+            name = getattr(call, "name", None) or "?"
+            runs.append(["fc+sig" if has_sig else "fc", 0, name])
+            continue
+        if isinstance(text, str):
+            if bool(getattr(part, "thought", False)):
+                kind = "thought"
+            elif has_sig:
+                kind = "text+sig" if text else "sig"
+            else:
+                kind = "text"
+        elif has_sig:
+            kind = "sig"
+        else:
+            continue
+        n = len(text) if isinstance(text, str) else 0
+        if kind in ("thought", "text") and runs and runs[-1][0] == kind:
+            runs[-1][1] += n
+        else:
+            runs.append([kind, n, None])
+
+    shapes: list[str] = []
+    for kind, n, label in runs:
+        if kind in ("fc", "fc+sig"):
+            shapes.append(f"{kind}:{label}")
+        elif kind == "sig":
+            shapes.append("sig")
+        else:
+            shapes.append(f"{kind}:{n}")
+    if len(shapes) > limit:
+        overflow = len(shapes) - (limit - 1)
+        shapes = shapes[: limit - 1] + [f"+{overflow}"]
+    return shapes
 
 
 class GeminiLLM(BaseLLM):
@@ -1301,11 +1366,15 @@ class GeminiLLM(BaseLLM):
         candidates_tokens = None
         total_tokens = None
         cached_tokens = None
+        thoughts_tokens = None
         if getattr(raw_response, "usage_metadata", None):
             prompt_tokens = raw_response.usage_metadata.prompt_token_count
             candidates_tokens = raw_response.usage_metadata.candidates_token_count
             total_tokens = raw_response.usage_metadata.total_token_count
             cached_tokens = getattr(raw_response.usage_metadata, "cached_content_token_count", None)
+            thoughts_raw = getattr(raw_response.usage_metadata, "thoughts_token_count", None)
+            thoughts_tokens = thoughts_raw if isinstance(thoughts_raw, int) else None
+        part_shapes = _summarize_gemini_parts(raw_response.parts)
 
         # Extract the candidate finish reason so callers can distinguish a genuinely empty
         # answer from a blocked / truncated / malformed-function-call response.
@@ -1334,13 +1403,6 @@ class GeminiLLM(BaseLLM):
                     finish_reason = f"PROMPT_BLOCKED:{br_str}"
 
         if not text_content.strip() and not tool_calls:
-            part_shapes = []
-            for part in raw_response.parts or []:
-                part_shapes.append(
-                    f"text={'thought' if part.thought else 'text'}:{len(part.text or '')}"
-                    if part.text is not None
-                    else f"fc={bool(part.function_call)},sig={bool(part.thought_signature)}"
-                )
             logger.warning(
                 "Gemini returned no text and no tool calls: "
                 f"finish_reason={finish_reason} "
@@ -1349,7 +1411,7 @@ class GeminiLLM(BaseLLM):
                 f"safety_ratings={getattr(candidate, 'safety_ratings', None)} "
                 f"parts=[{', '.join(part_shapes)}] "
                 f"thought_chars={len(thought_content or '')} "
-                f"tokens(prompt={prompt_tokens}, candidates={candidates_tokens})"
+                f"tokens(prompt={prompt_tokens}, candidates={candidates_tokens}, thoughts={thoughts_tokens})"
             )
 
         return LLMResponse(
@@ -1362,6 +1424,8 @@ class GeminiLLM(BaseLLM):
             cached_tokens=cached_tokens,
             finish_reason=finish_reason,
             raw_response=repr(raw_response),
+            thoughts_tokens=thoughts_tokens,
+            part_shapes=part_shapes,
         )
 
     def count_tokens(

@@ -155,6 +155,7 @@ chatbot_id = "discord"
 # llm = "claude"               # Override LLM provider
 # model_name = "claude-opus-5-5" # Override LLM model identifier
 # auto_thread = false          # Disable automatic thread creation
+# reply_channel = false        # Opt-in reply channel: text before the reply marker line stays private
 
 
 [google_chat]

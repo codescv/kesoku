@@ -314,3 +314,24 @@ def test_skills_section_twelve_skills_overhead(skills_cfg: KesokuConfig, tmp_pat
     for i in range(12):
         _write_skill(tmp_path / "skills_x", f"skill-{i:02d}", "A plausible one-line description of what it does." * 2)
     assert len(build_skills_section("default", skills_cfg)) < 2500
+
+
+def test_apply_reply_channel_rule_inserts_after_formatting_rules() -> None:
+    """The reply-channel rule lands right after the output formatting rules, once, or at the end as a fallback."""
+    from kesoku.agent.prompt import TOOL_CALLING_INSTRUCTIONS, apply_reply_channel_rule, build_reply_channel_rule
+    from kesoku.constants import REPLY_MARKER
+
+    rule = build_reply_channel_rule(REPLY_MARKER)
+    assert REPLY_MARKER in rule
+
+    base = build_sys_prompt()
+    out = apply_reply_channel_rule(base, REPLY_MARKER)
+    fmt_end = out.index(OUTPUT_FORMATTING_INSTRUCTIONS.strip()) + len(OUTPUT_FORMATTING_INSTRUCTIONS.strip())
+    assert out.index(rule) == fmt_end + 2
+    assert out.index(rule) < out.index(TOOL_CALLING_INSTRUCTIONS.strip())
+    assert out.count(rule) == 1
+    assert apply_reply_channel_rule(out, REPLY_MARKER) == out  # idempotent
+    assert out.replace(f"\n\n{rule}", "", 1) == base  # nothing else changes
+
+    assert apply_reply_channel_rule("Custom prompt.", REPLY_MARKER) == f"Custom prompt.\n\n{rule}"
+    assert apply_reply_channel_rule(None, REPLY_MARKER) == rule

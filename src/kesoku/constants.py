@@ -58,3 +58,9 @@ class MessageStatus(StrEnum):
 
 
 SYSTEM_START_TIME = datetime.datetime.now()
+
+REPLY_MARKER = "<<<REPLY>>>"
+"""Line that opens the user-visible reply when the opt-in reply channel is enabled.
+
+Anything the model writes before a line equal to this marker is treated as private
+(persisted as a THOUGHT row, never streamed or delivered)."""
