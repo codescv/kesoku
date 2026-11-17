@@ -59,7 +59,8 @@ class SessionWorker:
         self.cache_expires_at: float = 0.0
         self.explicit_caches: dict[str, Any] = {}
         self._auto_naming_in_progress = False
-        self._auto_naming_done = False
+        self.namer: SessionNamer | None = None
+        self.session_staging_dir: str | None = None
 
     async def clear_explicit_caches(self) -> None:
         """Delete all explicit context caches tracked by this session worker."""
@@ -215,6 +216,7 @@ class SessionWorker:
             cfg = self.context.config
             session_staging_dir = await async_realpath(os.path.join(cfg.workspace.sessions_dir, folder_name))
             await async_makedirs(session_staging_dir)
+            self.session_staging_dir = session_staging_dir
 
             tool_runner = ToolRunner(self.context.tool_registry, tool_context)
             turn_logger = TurnLogger(self.session_id, session_staging_dir)
@@ -233,7 +235,7 @@ class SessionWorker:
             )
             # Trigger auto session naming asynchronously while worker is still running
             if self._running:
-                asyncio.create_task(self._auto_rename_session())
+                asyncio.create_task(self._auto_rename_session(session_staging_dir))
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -243,22 +245,38 @@ class SessionWorker:
             except Exception as db_err:
                 logger.error(f"Failed to update message status to ERROR: {db_err}")
 
-    async def _auto_rename_session(self) -> None:
-        if self._auto_naming_in_progress or self._auto_naming_done:
+    def _namer_llm(self) -> BaseLLM:
+        """Resolve a lightweight LLM for session naming.
+
+        Uses the active provider's `context_model_name` with minimal thinking when configured, otherwise the
+        session LLM.
+        """
+        cfg = self.context.config
+        provider = str(getattr(cfg.agent, "llm", "") or "").lower()
+        provider_cfg = getattr(cfg, provider, None) if provider else None
+        model_name = getattr(provider_cfg, "context_model_name", None)
+        if model_name:
+            # Claude has no "minimal" thinking level; "low" is its lightest setting.
+            thinking_level = "low" if provider == "claude" else "minimal"
+            try:
+                return self.context.get_llm(model_name=model_name, thinking_level=thinking_level)
+            except Exception as e:
+                logger.warning(f"Failed to resolve naming LLM '{model_name}', using session LLM: {e}")
+        return self.context.get_llm()
+
+    async def _auto_rename_session(self, staging_dir: str | None = None) -> None:
+        """Run `SessionNamer` after a turn (manual / initial-context titles are locked inside the namer)."""
+        if self._auto_naming_in_progress:
             return
         self._auto_naming_in_progress = True
         try:
-            namer = SessionNamer(
-                db=self.context.db,
-                gateway=self.gateway,
-                llm=self.context.get_llm(),
-            )
-            success = await namer.auto_rename_session(self.session_id)
-            if success:
-                self._auto_naming_done = True
+            if self.namer is None:
+                self.namer = SessionNamer(db=self.context.db, gateway=self.gateway, llm=self._namer_llm())
+            await self.namer.auto_rename_session(self.session_id, staging_dir=staging_dir or self.session_staging_dir)
+        except Exception as e:
+            logger.error(f"Auto-naming failed for session {self.session_id}: {e}", exc_info=True)
         finally:
             self._auto_naming_in_progress = False
-
 
 
 class Agent:

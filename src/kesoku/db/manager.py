@@ -126,6 +126,7 @@ class DatabaseManager(AppTablesMixin):
             updated_at=row["updated_at"],
             system_prompt=row["system_prompt"],
             role_name=row["role_name"] if "role_name" in row.keys() and row["role_name"] else "default",
+            title_source=(row["title_source"] or "") if "title_source" in row.keys() else "",
         )
 
     def _ensure_migrations(self, conn: sqlite3.Connection) -> None:
@@ -147,6 +148,15 @@ class DatabaseManager(AppTablesMixin):
                 sess_columns = [row["name"] for row in cursor.fetchall()]
                 if "role_name" not in sess_columns:
                     conn.execute("ALTER TABLE sessions ADD COLUMN role_name TEXT")
+                if "title_source" not in sess_columns:
+                    conn.execute("ALTER TABLE sessions ADD COLUMN title_source TEXT NOT NULL DEFAULT ''")
+                    # Pre-existing sessions that already had turns went through the legacy one-shot auto-namer (or
+                    # were renamed by hand); mark them `auto` so the LLM namer never overwrites those titles.
+                    conn.execute(
+                        "UPDATE sessions SET title_source = 'auto' WHERE id IN "
+                        "(SELECT DISTINCT session_id FROM messages WHERE role = ?)",
+                        (MessageRole.USER.value,),
+                    )
                 # Clean up redundant single-column session index since idx_messages_session_timestamp supersedes it
                 conn.execute("DROP INDEX IF EXISTS idx_messages_session")
                 conn.execute("DROP TABLE IF EXISTS message_chunks;")
@@ -542,7 +552,8 @@ class DatabaseManager(AppTablesMixin):
                             created_at REAL NOT NULL,
                             updated_at REAL NOT NULL,
                             system_prompt TEXT NOT NULL DEFAULT '',
-                            role_name TEXT
+                            role_name TEXT,
+                            title_source TEXT NOT NULL DEFAULT ''
                         );
                         """
                     )
@@ -607,8 +618,8 @@ class DatabaseManager(AppTablesMixin):
                 conn.execute(
                     """
                     INSERT INTO sessions
-                    (id, title, created_at, updated_at, system_prompt, role_name)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    (id, title, created_at, updated_at, system_prompt, role_name, title_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         session.id,
@@ -617,6 +628,7 @@ class DatabaseManager(AppTablesMixin):
                         session.updated_at,
                         session.system_prompt,
                         session.role_name,
+                        session.title_source or "",
                     ),
                 )
 
@@ -678,20 +690,28 @@ class DatabaseManager(AppTablesMixin):
         except Exception as e:
             logger.warning(f"Failed updating session_digests_fts for session '{session_id}': {e}")
 
-    def update_session_title(self, session_id: str, title: str) -> None:
+    def update_session_title(self, session_id: str, title: str, title_source: str | None = None) -> None:
         """Update the title of a session, keeping `session_digests` and `session_digests_fts` synchronized.
 
         Args:
             session_id: Session ID to update.
             title: New title.
+            title_source: Optional title origin ('provisional' | 'auto' | 'context' | 'manual');
+                when None only the title is updated and the stored source is left untouched.
         """
         now = time.time()
         with self.connection_provider.connection() as conn:
             with conn:
-                conn.execute(
-                    "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
-                    (title, now, session_id),
-                )
+                if title_source is None:
+                    conn.execute(
+                        "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
+                        (title, now, session_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE sessions SET title = ?, title_source = ?, updated_at = ? WHERE id = ?",
+                        (title, title_source, now, session_id),
+                    )
                 if self.digests_available:
                     try:
                         cursor = conn.execute(
@@ -2671,14 +2691,18 @@ class AsyncDatabaseManager:
         """
         await asyncio.to_thread(self.sync_db.update_session_updated_at, session_id, updated_at)
 
-    async def update_session_title(self, session_id: str, title: str) -> None:
+    async def update_session_title(self, session_id: str, title: str, title_source: str | None = None) -> None:
         """Update the title of a session.
 
         Args:
             session_id: The ID of the session.
             title: The new title.
+            title_source: Optional title origin; None leaves the stored source untouched.
         """
-        await asyncio.to_thread(self.sync_db.update_session_title, session_id, title)
+        if title_source is None:
+            await asyncio.to_thread(self.sync_db.update_session_title, session_id, title)
+        else:
+            await asyncio.to_thread(self.sync_db.update_session_title, session_id, title, title_source)
 
 
     async def list_sessions_by_chatbots(

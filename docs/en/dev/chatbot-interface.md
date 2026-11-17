@@ -96,7 +96,9 @@ Using `parse_message_content()`, the template splits the content into segment bl
 *   `{"type": "question", "question": "...", "choices": [...], "multi": bool, "max": int}`: from the first fenced
     ```` ```ui ```` YAML block (`type: select|multiselect`, `prompt`, `options`, optional `max`) or the legacy
     `[question: stem || a | b]` tag (`multi=false`). Only the first ```` ```ui ```` block is interactive; further or
-    invalid blocks stay text (a warning is logged). Parsing helpers live in `kesoku.utils.ui_markup`.
+    invalid blocks stay text (a warning is logged). Parsing helpers live in `kesoku.utils.ui_markup`. Options may
+    also be mappings `{value?, name?, label?, subtitle?, desc?, avatar?}` (choices stay plain strings); with
+    `rich_blocks=True` the segment additionally carries optional `layout` (`cards`/`list`) and `option_items`.
 *   `{"type": "details", "title": "...", "body": "..."}`: from `<details><summary>TITLE</summary>BODY</details>`.
     The default `send_details_segment` sends `**TITLE**` + BODY as text; Discord overrides it with a toggle button.
 

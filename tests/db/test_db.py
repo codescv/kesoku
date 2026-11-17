@@ -1,6 +1,7 @@
 """Unit tests for DatabaseManager and models in kesoku.db."""
 
 import os
+import sqlite3
 import time
 
 import pytest
@@ -751,3 +752,54 @@ async def test_get_session_history_active_only_and_limit(db_manager: DatabaseMan
 
 
 
+
+
+def test_session_title_source_migration_and_updates(temp_db_path):
+    """`title_source` is added idempotently to legacy `sessions` tables and updated only when given."""
+    manager = DatabaseManager(temp_db_path)
+    manager.init_tables()
+    manager.create_session(Session(id="used", title="Legacy Named"))
+    manager.save_message(
+        Message(session_id="used", chatbot_id="cli", channel_id="c", sender="u", role=MessageRole.USER, content="hi")
+    )
+    # Simulate a legacy database: rebuild `sessions` without the `title_source` column.
+    with sqlite3.connect(temp_db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("DROP TABLE sessions")
+        conn.execute(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at REAL NOT NULL, "
+            "updated_at REAL NOT NULL, system_prompt TEXT NOT NULL DEFAULT '', role_name TEXT)"
+        )
+        conn.execute("INSERT INTO sessions (id, title, created_at, updated_at) VALUES ('old', 'Legacy', 1, 1)")
+        conn.execute("INSERT INTO sessions (id, title, created_at, updated_at) VALUES ('used', 'Legacy Named', 1, 1)")
+
+    migrated = DatabaseManager(temp_db_path)
+    migrated.verify_db()
+    migrated.verify_db()  # idempotent
+    with sqlite3.connect(temp_db_path) as conn:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(sessions)")]
+    assert cols.count("title_source") == 1
+    legacy = migrated.get_session("old")
+    assert legacy is not None and legacy.title_source == ""
+    # Legacy sessions that already had user turns are protected from re-naming.
+    assert migrated.get_session("used").title_source == "auto"
+
+    migrated.create_session(Session(id="s1", title="New Session"))
+    assert migrated.get_session("s1").title_source == ""
+    migrated.update_session_title("s1", "Topic", title_source="auto")
+    assert (migrated.get_session("s1").title, migrated.get_session("s1").title_source) == ("Topic", "auto")
+    migrated.update_session_title("s1", "Renamed")  # legacy call keeps the source
+    assert (migrated.get_session("s1").title, migrated.get_session("s1").title_source) == ("Renamed", "auto")
+    assert {s.id: s.title_source for s in migrated.list_sessions()} == {"old": "", "used": "auto", "s1": "auto"}
+
+
+@pytest.mark.asyncio
+async def test_async_update_session_title_source(db_manager, temp_db_path):
+    """The async wrapper forwards `title_source` only when provided."""
+    adb = AsyncDatabaseManager(db_manager)
+    db_manager.create_session(Session(id="s2", title="New Session"))
+    await adb.update_session_title("s2", "Mine", title_source="manual")
+    assert (await adb.get_session("s2")).title_source == "manual"
+    await adb.update_session_title("s2", "Mine 2")
+    sess = await adb.get_session("s2")
+    assert (sess.title, sess.title_source) == ("Mine 2", "manual")

@@ -241,6 +241,7 @@ class AppTablesMixin:
         params.append(max(1, min(int(limit), 500)))
         sql = (
             "SELECT s.id, s.title, s.created_at, s.updated_at, COALESCE(s.role_name, 'default') AS role_name, "
+            "COALESCE(s.title_source, '') AS title_source, "
             "(SELECT GROUP_CONCAT(chatbot_id, ',') FROM channel_sessions cs WHERE cs.session_id = s.id) "
             "AS bindings FROM sessions s WHERE "
             + " AND ".join(clauses)
@@ -258,6 +259,7 @@ class AppTablesMixin:
                     "created_at": float(r["created_at"]),
                     "updated_at": float(r["updated_at"]),
                     "role": r["role_name"],
+                    "title_source": r["title_source"] or "",
                     "chatbot_ids": bindings,
                 }
             )

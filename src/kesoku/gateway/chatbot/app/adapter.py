@@ -122,6 +122,8 @@ class AppChatbot(Chatbot):
         if self.proposals.on_staged not in listeners:
             listeners.append(self.proposals.on_staged)
         self.persona = PersonaService(self)
+        # `media.hydrate` upload reuse (see `RequestHandlers._hydrate_upload`).
+        self.hydrate_upload_cache: OrderedDict[tuple[str, int, int], tuple[str, float]] = OrderedDict()
         self.requests = RequestHandlers(self)
         self.attachment_manager = AttachmentManager(sessions_dir=self.sessions_dir)
 
@@ -1041,7 +1043,7 @@ class AppChatbot(Chatbot):
 
     async def _deliver_final(self, message: Message) -> None:
         segments = parse_message_content(message.content or "", rich_blocks=True)
-        wire, jobs = to_wire_segments(segments, message_id=message.id, live=True)
+        wire, jobs = to_wire_segments(segments, message_id=message.id, live=True, workspace_dir=str(self.awd))
         turn_id = str(message.parent_id or message.id)
         session = await self.gateway.db.get_session(message.session_id)
         role_id = (session.role_name if session else None) or self.app_config.default_role

@@ -8,12 +8,15 @@ import pytest
 from kesoku.agent import context_dir
 from kesoku.agent.context_dir import (
     CONTEXT_FILE_MAX_CHARS,
+    SESSION_TITLE_MAX_CHARS,
     TRUNCATED_MARKER,
     ContextEntry,
     apply_total_budget,
     build_context_prefix,
     collect_context_entries,
     context_block_name,
+    extract_context_session_title,
+    extract_context_session_title_sync,
     insert_extra_entries,
     render_context_blocks,
     truncate_context_content,
@@ -213,3 +216,37 @@ def test_insert_extra_entries() -> None:
     assert [e.name for e in entries] == ["notes", "a"]
     assert [e.name for e in insert_extra_entries([ContextEntry("a", "a")], [ContextEntry("x", "x")])] == ["x", "a"]
     assert insert_extra_entries(entries, ()) == entries
+
+
+@pytest.mark.asyncio
+async def test_extract_context_session_title(tmp_path: Path) -> None:
+    """The first sorted context file declaring `session_title` wins; values are single-line and capped."""
+    assert await extract_context_session_title(str(tmp_path)) is None
+    assert extract_context_session_title_sync(str(tmp_path)) is None
+    assert await extract_context_session_title("") is None
+    assert extract_context_session_title_sync("") is None
+    ctx = tmp_path / "context"
+    ctx.mkdir()
+    (ctx / "05-plain.md").write_text("no frontmatter here")
+    (ctx / "10-empty-title.md").write_text("---\nsession_title: \"  \"\n---\nbody")
+    (ctx / "30-later.md").write_text("---\nsession_title: Later Theme\n---\nbody")
+    (ctx / "20-scene.md").write_text("---\nmemory_policy: full\nsession_title: 'Harbor Mystery'\n---\nScene body")
+    assert await extract_context_session_title(str(tmp_path)) == "Harbor Mystery"
+    assert extract_context_session_title_sync(str(tmp_path)) == "Harbor Mystery"
+
+    (ctx / "01-long.md").write_text("---\nsession_title: " + "长" * 60 + "\n---\nbody")
+    long_title = await extract_context_session_title(str(tmp_path))
+    assert long_title == "长" * SESSION_TITLE_MAX_CHARS
+    assert extract_context_session_title_sync(str(tmp_path)) == long_title
+
+
+@pytest.mark.asyncio
+async def test_session_title_frontmatter_never_leaks_into_context_blocks(tmp_path: Path) -> None:
+    """`session_title` frontmatter is stripped from the rendered `<context>` blocks."""
+    ctx = tmp_path / "context"
+    ctx.mkdir()
+    (ctx / "20-scene.md").write_text("---\nsession_title: Hidden Title\n---\nScene body")
+    entries = await collect_context_entries(str(tmp_path))
+    assert [(e.name, e.content) for e in entries] == [("scene", "Scene body")]
+    assert "Hidden Title" not in await build_context_prefix(str(tmp_path))
+    assert all("Hidden Title" not in e.content for e in context_dir.collect_context_entries_sync(str(tmp_path)))

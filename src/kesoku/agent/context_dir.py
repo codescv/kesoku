@@ -26,6 +26,9 @@ RESERVED_NAME_RENAME = "notes-1"
 CONTEXT_FILE_MAX_CHARS = 6000
 DEFAULT_CONTEXT_TOTAL_MAX_CHARS = 20000
 TRUNCATED_MARKER = "[truncated]"
+# Frontmatter key a mode/skill may set in `context/*.md` to name the session, and its maximum length.
+SESSION_TITLE_KEY = "session_title"
+SESSION_TITLE_MAX_CHARS = 40
 
 # Structural parsing of filenames: optional leading numeric ordering prefix such as "20-" or "05_".
 _NUMERIC_PREFIX_RE = re.compile(r"^\d+[-_]")
@@ -318,3 +321,65 @@ async def build_context_prefix(
     """
     entries = insert_extra_entries(await collect_context_entries(staging_dir), extra_entries)
     return render_context_blocks(apply_total_budget(entries, max_total_chars))
+
+
+def _normalize_session_title(raw: str) -> str:
+    """Return the first non-empty line of `raw`, stripped and capped at `SESSION_TITLE_MAX_CHARS`."""
+    for line in raw.splitlines():
+        line = line.strip()
+        if line:
+            return line[:SESSION_TITLE_MAX_CHARS].strip()
+    return ""
+
+
+def _session_title_from_text(raw_content: str) -> str:
+    """Extract a normalized `session_title` from the frontmatter of one context file ("" when absent)."""
+    if not raw_content:
+        return ""
+    fm, _ = parse_context_frontmatter(raw_content)
+    return _normalize_session_title(fm.get(SESSION_TITLE_KEY, "").strip())
+
+
+def extract_context_session_title_sync(staging_dir: str) -> str | None:
+    """Return the first non-empty `session_title` frontmatter value across sorted `context/*.md` files.
+
+    Args:
+        staging_dir: Session staging directory.
+
+    Returns:
+        The single-line title (capped at `SESSION_TITLE_MAX_CHARS`), or None when no file declares one.
+    """
+    if not staging_dir:
+        return None
+    context_dir = os.path.join(staging_dir, CONTEXT_DIR_NAME)
+    if not os.path.isdir(context_dir):
+        return None
+    try:
+        filenames = _list_context_files(context_dir)
+    except Exception as e:
+        logger.warning(f"Failed to list context directory '{context_dir}': {e}")
+        return None
+    for filename in filenames:
+        title = _session_title_from_text(_read_stripped_sync(os.path.join(context_dir, filename)))
+        if title:
+            return title
+    return None
+
+
+async def extract_context_session_title(staging_dir: str) -> str | None:
+    """Async variant of `extract_context_session_title_sync` (file IO runs off the event loop)."""
+    if not staging_dir:
+        return None
+    context_dir = os.path.join(staging_dir, CONTEXT_DIR_NAME)
+    if not await async_isdir(context_dir):
+        return None
+    try:
+        filenames = await asyncio.to_thread(_list_context_files, context_dir)
+    except Exception as e:
+        logger.warning(f"Failed to list context directory '{context_dir}': {e}")
+        return None
+    for filename in filenames:
+        title = _session_title_from_text(await _read_stripped(os.path.join(context_dir, filename)))
+        if title:
+            return title
+    return None

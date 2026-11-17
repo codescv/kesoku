@@ -11,7 +11,12 @@ Supported markup (platform-neutral; adapters decide how to render it):
         - First
         - Second [note]
       max: 2                # multiselect only, defaults to len(options)
+      layout: cards         # optional presentation hint for rich clients: cards | list
       ```
+
+  Options may also be mappings `{value?, name?, label?, subtitle?, desc?, avatar?}`; the canonical answer
+  string is `value`, else `name（subtitle）`, else `name`/`label`. Their metadata is exposed as
+  `UiQuestion.option_items` for rich clients while `options` stays a plain `list[str]`.
 
 * `<details><summary>TITLE</summary>BODY</details>` collapsible sections.
 
@@ -31,6 +36,9 @@ logger = setup_logger(__name__)
 UI_TYPE_SELECT = "select"
 UI_TYPE_MULTISELECT = "multiselect"
 UI_TYPES = (UI_TYPE_SELECT, UI_TYPE_MULTISELECT)
+UI_LAYOUTS = ("cards", "list")
+# Recognized keys of a structured option mapping (any other key means an accidental YAML mapping).
+_OPTION_ITEM_KEYS = frozenset({"value", "name", "label", "subtitle", "desc", "avatar"})
 
 MULTI_SELECT_PREFIX = "选择："
 MULTI_SELECT_SEPARATOR = "；"
@@ -45,6 +53,7 @@ DETAILS_RE = re.compile(
 
 # Lenient fallback parsing of a YAML-ish body: top-level `key: value` lines and `- item` list lines.
 _TOP_KEY_RE = re.compile(r"^(?P<key>[A-Za-z_]+)\s*:\s*(?P<value>.*)$")
+_FILE_WRAPPER_RE = re.compile(r"^\[file:\s*(.+?)\s*\]$")
 _LIST_ITEM_RE = re.compile(r"^\s+-\s*(?P<item>.*)$|^-\s+(?P<item0>.*)$")
 
 
@@ -56,16 +65,30 @@ class UiQuestion:
     options: list[str]
     multi: bool
     max: int
+    # Optional presentation hint (`"cards"` | `"list"`) for rich clients; plain adapters ignore it.
+    layout: str | None = None
+    # Optional per-option metadata `{value, name?, subtitle?, avatar?}` aligned with `options` (rich clients only).
+    option_items: tuple[dict[str, str], ...] = ()
 
-    def to_segment(self) -> dict[str, Any]:
-        """Convert to the gateway question segment shape."""
-        return {
+    def to_segment(self, rich: bool = False) -> dict[str, Any]:
+        """Convert to the gateway question segment shape.
+
+        Args:
+            rich: When True, also include the optional `layout` / `option_items` presentation metadata.
+        """
+        seg: dict[str, Any] = {
             "type": "question",
             "question": self.prompt,
             "choices": list(self.options),
             "multi": self.multi,
             "max": self.max,
         }
+        if rich:
+            if self.layout:
+                seg["layout"] = self.layout
+            if self.option_items:
+                seg["option_items"] = [dict(item) for item in self.option_items]
+        return seg
 
 
 def _strip_quotes(value: str) -> str:
@@ -118,11 +141,88 @@ def _strict_parse(body: str) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         return None
     options = data.get("options")
-    if not isinstance(options, list) or not all(isinstance(o, str) for o in options):
+    if not isinstance(options, list):
+        return None
+    if any(isinstance(o, dict) for o in options):
+        # Structured option items: accept dicts mixed with plain scalars (numbers are stringified). A dict with
+        # unknown keys is an accidental YAML mapping (e.g. `- Beta [file: x]`), so fall back to lenient parsing.
+        for o in options:
+            if isinstance(o, dict):
+                keys = {str(k).lower() for k in o}
+                if not keys or not keys <= _OPTION_ITEM_KEYS:
+                    return None
+            elif not isinstance(o, (str, int, float)) or isinstance(o, bool):
+                return None
+    elif not all(isinstance(o, str) for o in options):
         return None
     if not isinstance(data.get("prompt"), str):
         return None
     return {str(k).lower(): v for k, v in data.items()}
+
+
+def _strip_file_wrapper(value: str) -> str:
+    """Strip an optional `[file: ...]` wrapper from a media reference."""
+    value = value.strip()
+    match = _FILE_WRAPPER_RE.match(value)
+    return match.group(1).strip() if match else value
+
+
+def _normalize_option_dict(item: dict[Any, Any]) -> dict[str, str] | None:
+    """Normalize a structured option `{value?, name?, label?, subtitle?, desc?, avatar?}`.
+
+    Returns `{value, name?, subtitle?, avatar?}` where `value` is the canonical answer string posted back
+    when the option is picked, or None when no usable value can be derived.
+    """
+    lowered = {str(k).lower(): v for k, v in item.items()}
+
+    def _field(*keys: str) -> str:
+        for key in keys:
+            raw = lowered.get(key)
+            if isinstance(raw, (str, int, float)) and not isinstance(raw, bool) and str(raw).strip():
+                return str(raw).strip()
+        return ""
+
+    value = _field("value")
+    name = _field("name", "label")
+    subtitle = _field("subtitle", "desc")
+    avatar = _strip_file_wrapper(_field("avatar"))
+    if not value:
+        value = f"{name}（{subtitle}）" if name and subtitle else name
+    if not value:
+        return None
+    out: dict[str, str] = {"value": value}
+    if name:
+        out["name"] = name
+    if subtitle:
+        out["subtitle"] = subtitle
+    if avatar:
+        out["avatar"] = avatar
+    return out
+
+
+def _normalize_options(raw_options: list[Any]) -> tuple[list[str], tuple[dict[str, str], ...]]:
+    """Split raw options into canonical answer strings and (when any option is structured) aligned metadata.
+
+    Plain scalar options produce `{value}` metadata entries only when at least one structured option is
+    present, so `option_items` is either empty or aligned 1:1 with the returned options.
+    """
+    options: list[str] = []
+    items: list[dict[str, str]] = []
+    structured = False
+    for raw in raw_options:
+        if isinstance(raw, dict):
+            norm = _normalize_option_dict(raw)
+            if norm is None:
+                continue
+            structured = True
+            options.append(norm["value"])
+            items.append(norm)
+        elif isinstance(raw, (str, int, float)) and not isinstance(raw, bool):
+            text = str(raw).strip()
+            if text:
+                options.append(text)
+                items.append({"value": text})
+    return options, (tuple(items) if structured else ())
 
 
 def _validate(data: dict[str, Any]) -> UiQuestion | None:
@@ -139,9 +239,12 @@ def _validate(data: dict[str, Any]) -> UiQuestion | None:
     raw_options = data.get("options")
     if not isinstance(raw_options, list):
         return None
-    options = [o.strip() for o in raw_options if isinstance(o, str) and o.strip()]
+    options, option_items = _normalize_options(raw_options)
     if not options:
         return None
+    raw_layout = data.get("layout")
+    layout = str(raw_layout).strip().lower() if isinstance(raw_layout, str) else ""
+    layout_value = layout if layout in UI_LAYOUTS else None
     multi = ui_type == UI_TYPE_MULTISELECT
     max_choices = 1
     if multi:
@@ -153,7 +256,14 @@ def _validate(data: dict[str, Any]) -> UiQuestion | None:
             except ValueError:
                 return None
             max_choices = max(1, min(max_choices, len(options)))
-    return UiQuestion(prompt=prompt.strip(), options=options, multi=multi, max=max_choices)
+    return UiQuestion(
+        prompt=prompt.strip(),
+        options=options,
+        multi=multi,
+        max=max_choices,
+        layout=layout_value,
+        option_items=option_items,
+    )
 
 
 def parse_ui_block_body(body: str) -> UiQuestion | None:

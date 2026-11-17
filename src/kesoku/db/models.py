@@ -46,6 +46,10 @@ class Session(BaseModel):
     updated_at: float = Field(default_factory=time.time, description="Last updated unix timestamp")
     system_prompt: str = Field(default="", description="The main system prompt instructions for the session")
     role_name: str | None = Field(default="default", description="The persona role name associated with this session")
+    title_source: str = Field(
+        default="",
+        description="Origin of the title: '' | 'provisional' | 'auto' | 'context' | 'manual'",
+    )
 
     @property
     def workspace_name(self) -> str:

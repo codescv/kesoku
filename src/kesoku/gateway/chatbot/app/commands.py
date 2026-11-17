@@ -39,7 +39,7 @@ from kesoku.agent.memory_writer import (
 from kesoku.agent.turn_executor import validate_llm_override
 from kesoku.constants import MessageRole
 from kesoku.gateway.chatbot.app.host import Reply, RequestContext, realpath_within
-from kesoku.gateway.chatbot.app.media import probe_audio_duration_ms
+from kesoku.gateway.chatbot.app.media import guess_mime, probe_audio_duration_ms
 from kesoku.gateway.chatbot.app.proposals import proposal_for_wire
 from kesoku.gateway.chatbot.app.protocol import (
     AVATAR_REF_RE,
@@ -63,6 +63,12 @@ logger = setup_logger(__name__)
 MEMORY_FILE_MAX_BYTES = 64 * 1024
 MEMORY_LIST_MAX_FILES = 500
 TITLE_MAX_CHARS = 120
+# Placeholder titles that do not count as a user-chosen (manual) session title.
+DEFAULT_SESSION_TITLES = ("", "新对话", "New Chat", "New Session")
+# `media.hydrate` upload reuse: (realpath, st_mtime_ns, st_size) -> (object_name, uploaded_at). The TTL stays well
+# below the relay bucket's 7-day object lifecycle so a cached object is always still present when re-signed.
+HYDRATE_UPLOAD_CACHE_MAX = 512
+HYDRATE_UPLOAD_CACHE_TTL_SECONDS = 24 * 3600.0
 LEXICAL_TEXT_MAX_CHARS = 2000
 LEXICAL_TOKEN_MAX_CHARS = 64
 LEXICAL_CACHE_MAX = 512
@@ -254,7 +260,14 @@ class RequestHandlers:
         msgs = await asyncio.to_thread(self.db.get_messages_page, session_id, None, 50, True)
         role_id, role_name = await self._session_persona(session_id)
         records = [
-            message_to_record(m, self.app.chatbot_id, role_id=role_id, role_display_name=role_name) for m in msgs
+            message_to_record(
+                m,
+                self.app.chatbot_id,
+                role_id=role_id,
+                role_display_name=role_name,
+                workspace_dir=str(self.app.awd),
+            )
+            for m in msgs
         ]
         files, staging_rev = await self.app.state_watcher.snapshot(session_id)
         prefs = await asyncio.to_thread(self.db.get_app_session_prefs, session_id)
@@ -348,7 +361,10 @@ class RequestHandlers:
         """`session.create{role?, title?, mode?, prefs?}` -> `session.snapshot` (optionally starting a mode)."""
         role_raw = payload.get("role")
         role = self._validate_role(role_raw) if role_raw else self.app.app_config.default_role
-        title = optional_str(payload, "title", max_len=TITLE_MAX_CHARS) or "New Session"
+        raw_title = optional_str(payload, "title", max_len=TITLE_MAX_CHARS)
+        title = raw_title or "New Session"
+        # A client-supplied custom title is a manual choice that auto-naming must never overwrite.
+        manual_title = (raw_title or "").strip() not in DEFAULT_SESSION_TITLES
         mode_id = optional_str(payload, "mode", max_len=40)
         if mode_id is not None and self.app.app_config.get_mode(mode_id) is None:
             raise ProtocolError("BAD_REQUEST", "unknown mode")
@@ -367,6 +383,8 @@ class RequestHandlers:
             channel_id=channel_id,
             role=role,
         )
+        if manual_title:
+            await self.app.gateway.db.update_session_title(session_id, title.strip(), title_source="manual")
         await asyncio.to_thread(
             self.db.upsert_app_session_prefs,
             session_id,
@@ -397,7 +415,7 @@ class RequestHandlers:
         session_id = require_session_id(payload)
         title = require_str(payload, "title", max_len=TITLE_MAX_CHARS).strip()
         await self._get_session(session_id)
-        await self.app.gateway.db.update_session_title(session_id, title)
+        await self.app.gateway.db.update_session_title(session_id, title, title_source="manual")
         now = time.time()
         await self.app.emit_session_event(
             session_id, "session.updated", {"session_id": session_id, "title": title, "updated_at": now}
@@ -563,7 +581,13 @@ class RequestHandlers:
         return {
             "session_id": session_id,
             "messages": [
-                message_to_record(m, self.app.chatbot_id, role_id=role_id, role_display_name=role_name)
+                message_to_record(
+                    m,
+                    self.app.chatbot_id,
+                    role_id=role_id,
+                    role_display_name=role_name,
+                    workspace_dir=str(self.app.awd),
+                )
                 for m in msgs
             ],
             "has_more": len(msgs) >= limit,
@@ -1080,6 +1104,48 @@ class RequestHandlers:
                 pass
         return None
 
+    async def _hydrate_upload(self, path: str, session_id: str | None) -> dict[str, Any]:
+        """Upload `path` for `media.hydrate`, reusing a recent upload of the same unchanged file.
+
+        The cache is keyed by `(realpath, st_mtime_ns, st_size)` (independent of the session), so repeatedly
+        hydrated shared files such as character avatars are uploaded once and only re-signed afterwards.
+        """
+        cache = getattr(self.app, "hydrate_upload_cache", None)
+        key: tuple[str, int, int] | None = None
+        if isinstance(cache, OrderedDict):
+            try:
+                real = await asyncio.to_thread(os.path.realpath, path)
+                st = await asyncio.to_thread(os.stat, real)
+                key = (real, int(st.st_mtime_ns), int(st.st_size))
+            except OSError:
+                key = None
+            hit = cache.get(key) if key is not None else None
+            if hit is not None:
+                object_name, uploaded_at = hit
+                if time.time() - uploaded_at < HYDRATE_UPLOAD_CACHE_TTL_SECONDS:
+                    try:
+                        signed = await self.app.media.sign(object_name)
+                        cache.move_to_end(key)
+                        return {
+                            "object": object_name,
+                            "url": signed["url"],
+                            "expires_at": signed.get("expires_at"),
+                            "mime": guess_mime(key[0]),
+                            "bytes": key[2],
+                        }
+                    except Exception as e:
+                        logger.debug(f"Re-sign of cached hydrate object failed, re-uploading: {e}")
+                cache.pop(key, None)
+        uploaded = await self.app.media.upload_file(
+            path, purpose="message" if session_id else "asset", session_id=session_id
+        )
+        if isinstance(cache, OrderedDict) and key is not None and uploaded.get("object"):
+            cache[key] = (str(uploaded["object"]), time.time())
+            cache.move_to_end(key)
+            while len(cache) > HYDRATE_UPLOAD_CACHE_MAX:
+                cache.popitem(last=False)
+        return uploaded
+
     async def handle_media_hydrate(self, ctx: RequestContext, payload: dict[str, Any]) -> Reply:
         """`media.hydrate{session_id?, message_id?, ref}` -> `media.ready` (realpath-jailed lazy upload)."""
         ref = require_str(payload, "ref", max_len=1024).strip()
@@ -1103,9 +1169,7 @@ class RequestHandlers:
         size = await asyncio.to_thread(os.path.getsize, path)
         if size > LIMITS["MESSAGE_MEDIA_MAX_BYTES"]:
             raise ProtocolError("BAD_REQUEST", "media too large")
-        uploaded = await self.app.media.upload_file(
-            path, purpose="message" if session_id else "asset", session_id=session_id
-        )
+        uploaded = await self._hydrate_upload(path, session_id)
         kind = "voice" if str(uploaded.get("mime") or "").startswith("audio/") else "file"
         out: dict[str, Any] = {
             "message_id": message_id,

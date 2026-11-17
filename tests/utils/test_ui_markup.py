@@ -213,3 +213,60 @@ def test_inline_bilingual_single_line_behaviour_unchanged() -> None:
     segs = parse_message_content("> ハナ：おはよう！\n<spoiler>花：早上好！</spoiler>", rich_blocks=True)
     assert segs[0]["type"] == "bilingual"
     assert segs[0]["speaker"] == "花" and segs[0]["ja_plain"] == "おはよう！" and segs[0]["zh"] == "早上好！"
+
+
+def test_parse_structured_option_items_and_layout() -> None:
+    """Dict options derive canonical string values while metadata goes to `option_items`."""
+    body = (
+        "type: select\n"
+        "prompt: Pick a partner\n"
+        "layout: Cards\n"
+        "options:\n"
+        "  - {name: Alpha, subtitle: Lead, avatar: '[file: chars/alpha.png]'}\n"
+        "  - {label: Beta}\n"
+        "  - {value: gamma-id, name: Gamma, desc: Support}\n"
+        "  - Plain option\n"
+        "  - {subtitle: no name}\n"
+    )
+    q = parse_ui_block_body(body)
+    assert q is not None
+    assert q.options == ["Alpha（Lead）", "Beta", "gamma-id", "Plain option"]
+    assert all(isinstance(o, str) for o in q.options)
+    assert q.layout == "cards"
+    assert q.option_items == (
+        {"value": "Alpha（Lead）", "name": "Alpha", "subtitle": "Lead", "avatar": "chars/alpha.png"},
+        {"value": "Beta", "name": "Beta"},
+        {"value": "gamma-id", "name": "Gamma", "subtitle": "Support"},
+        {"value": "Plain option"},
+    )
+    seg = q.to_segment(rich=True)
+    assert seg["layout"] == "cards" and seg["option_items"][0]["avatar"] == "chars/alpha.png"
+    plain = q.to_segment()
+    assert "layout" not in plain and "option_items" not in plain
+    assert plain["choices"] == q.options
+
+
+def test_plain_options_keep_legacy_shape() -> None:
+    """Without dict options `option_items` stays empty; unknown layouts are dropped; numbers stay verbatim."""
+    q = parse_ui_block_body("prompt: P\nlayout: grid\noptions:\n  - 1.10\n  - b\n")
+    assert q is not None and q.options == ["1.10", "b"]
+    assert q.layout is None and q.option_items == ()
+    assert q.to_segment(rich=True) == q.to_segment()
+    listed = parse_ui_block_body("prompt: P\nlayout: list\noptions: [a, b]\n")
+    assert listed is not None and listed.layout == "list" and listed.to_segment(rich=True)["layout"] == "list"
+
+
+def test_structured_options_stay_compatible_with_plain_helpers() -> None:
+    """`extract_ui_options` / `collapse_ui_blocks` keep working with dict options."""
+    text = "Intro\n```ui\nprompt: Who?\noptions:\n  - {name: Alpha, subtitle: Lead}\n  - Other\n```\n"
+    assert extract_ui_options(text) == (["Alpha（Lead）", "Other"], False)
+    assert collapse_ui_blocks(text).strip() == "Intro\nWho?"
+
+
+def test_accidental_yaml_mapping_options_stay_verbatim() -> None:
+    """`- Beta [file: x]` (a YAML mapping by accident) and unknown-key dicts keep the legacy verbatim parsing."""
+    q = parse_ui_block_body("prompt: P\noptions:\n  - Alpha\n  - Beta [file: /tmp/x.png]\n  - 'Note: later'\n")
+    assert q is not None and q.options == ["Alpha", "Beta [file: /tmp/x.png]", "Note: later"]
+    assert q.option_items == ()
+    mixed = parse_ui_block_body("prompt: P\noptions:\n  - {Name: Alpha, Avatar: a.png}\n  - Other\n")
+    assert mixed is not None and mixed.option_items[0] == {"value": "Alpha", "name": "Alpha", "avatar": "a.png"}

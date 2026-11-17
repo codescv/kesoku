@@ -96,7 +96,9 @@ async for msg in self.gateway.listen(
 *   `{"type": "question", "question": "...", "choices": [...], "multi": bool, "max": int}`：来自第一个
     ```` ```ui ```` YAML 代码块（`type: select|multiselect`、`prompt`、`options`、可选 `max`），或旧的
     `[question: 题干 || a | b]`（`multi=false`）。只有第一个 ```` ```ui ```` 块可交互；其余或无效的块保留为文本
-    （记录 warning）。解析工具位于 `kesoku.utils.ui_markup`。
+    （记录 warning）。解析工具位于 `kesoku.utils.ui_markup`。选项也可以是映射
+    `{value?, name?, label?, subtitle?, desc?, avatar?}`（`choices` 仍为纯字符串）；`rich_blocks=True` 时该 segment
+    还会附带可选的 `layout`（`cards`/`list`）与 `option_items`。
 *   `{"type": "details", "title": "...", "body": "..."}`：来自 `<details><summary>标题</summary>正文</details>`。
     默认的 `send_details_segment` 以文本发送 `**标题**` + 正文；Discord 覆盖为带展开按钮的消息。
 

@@ -120,6 +120,38 @@ For detailed user and developer guides, see [`docs/en/dev/architecture.md`](en/d
    `memory_proposals` without touching `$MEMORY_DIR`. Only `ProposalStore.confirm` calls `MemoryWriter.apply_ops`;
    `dismiss` blocklists the fact fingerprints; pending proposals expire after 7 days.
 
+### 2.6 Hybrid Session Naming & Character Picker Cards (v0.3.14)
+
+1. **`Session.title_source` (`db/models.py`, `db/manager.py`)**: `"" | provisional | auto | context | manual`, stored in
+   `sessions.title_source` (idempotent `ALTER TABLE` migration; legacy sessions that already had user turns are
+   backfilled as `auto` so their existing titles are never re-generated). `update_session_title(id, title, title_source=None)`
+   only touches the source when one is given, so legacy callers keep working.
+2. **Two-stage `SessionNamer` (`agent/namer.py`)**, run after every turn by `SessionWorker` with the provider's
+   `context_model_name` (minimal thinking) when configured:
+   - `manual` (app `session.rename`, or a custom `session.create` title) and `context` titles are locked.
+   - Context priority: the first non-empty `session_title` frontmatter across sorted `$STAGING_DIR/context/*.md`
+     (`extract_context_session_title`, single line, ≤ 40 chars) renames the session once with source `context`; later
+     chapter/scene changes never overwrite this initial theme. The key is stripped with the rest of the frontmatter,
+     so it never reaches `<context>` blocks.
+   - LLM fallback (turns 1–6, source `""`/`provisional`): up to 6 non-scaffold user/assistant messages (≤ 350 chars,
+     spoilers removed) produce `{"title", "provisional"}` JSON (plain text is accepted as a final title).
+     `provisional` titles (user still in a menu/setup step) are refined on later turns; `auto` titles are final unless
+     a context title appears.
+3. **Structured ```` ```ui ```` options (`utils/ui_markup.py`)**: options may be mappings
+   `{value?, name?, label?, subtitle?, desc?, avatar?}` plus an optional `layout: cards|list`. `UiQuestion.options`
+   stays `list[str]` (canonical `value`, else `name（subtitle）`, else `name`) so every platform is unaffected; metadata
+   lives in `UiQuestion.option_items` and is only emitted on rich (`rich_blocks=True`) question segments.
+4. **Character picker cards (`gateway/chatbot/app/segments.py`)**: wire `question` segments (live `message.final` and
+   history) gain `layout: "cards"` + `choice_items: [{value, name, subtitle?, avatar?}]` for explicit cards/avatars, or
+   when options are auto-detected as character candidates from the generic `$AWD/characters/*/characters.json`
+   registry (mtime-cached; `name` + CJK aliases; first folder alphabetically wins duplicate keys; non-draftable
+   entries are excluded from auto-detection). Detection requires each option to *start* with a registered name
+   followed by a delimiter/end (short pre-parenthesis prefix), ≥ 2 avatar matches (1 for a single option) covering
+   ≥ 50% of non-reroll options, so free-form action sentences never become cards.
+5. **`media.hydrate` upload reuse (`gateway/chatbot/app/commands.py`)**: `AppChatbot.hydrate_upload_cache` (LRU, 512
+   entries, 24 h TTL < the bucket's 7-day lifecycle) maps `(realpath, st_mtime_ns, st_size)` to the uploaded object, so
+   repeatedly hydrated shared files (e.g. avatars) are re-signed instead of re-uploaded, across sessions.
+
 ---
 
 ## 3. Evaluation Benchmark & Headless Testing (`src/kesoku/testing/`, `benchmarks/kesoku_bench/`)

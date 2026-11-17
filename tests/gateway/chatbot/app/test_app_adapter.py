@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 import kesoku.config
+import kesoku.gateway.chatbot.app.commands as commands_mod
 from kesoku.agent.turn_executor import TurnExecutor
 from kesoku.config import AppConfig, AppModeConfig, KesokuConfig, WorkspaceConfig
 from kesoku.constants import MessageRole, MessageStatus, MessageType
@@ -2025,3 +2026,106 @@ async def test_translator_pure_audio_inbound_prompt_preserves_clean_user_bubble(
     )
     assert posted[-1].content.startswith("Attachments:\n")
     assert TRANSLATOR_PURE_AUDIO_PROMPT not in posted[-1].content
+
+
+# ---------------------------------------------------------------------------------------------- v0.3.14
+
+
+async def test_session_create_and_rename_lock_manual_titles(env) -> None:
+    """Custom create titles and renames are stored with `title_source = "manual"`; defaults stay unlocked."""
+    db = env["gw"].db
+    default_sid = await create_session(env)
+    assert (await db.get_session(default_sid)).title_source == ""
+    placeholder_sid = await create_session(env, title="新对话")
+    assert (await db.get_session(placeholder_sid)).title_source == ""
+    custom_sid = await create_session(env, title="  My Trip  ")
+    sess = await db.get_session(custom_sid)
+    assert (sess.title, sess.title_source) == ("My Trip", "manual")
+
+    reply = await rpc(env, "session.rename", {"session_id": default_sid, "title": "Renamed"})
+    assert reply["payload"]["title"] == "Renamed"
+    sess = await db.get_session(default_sid)
+    assert (sess.title, sess.title_source) == ("Renamed", "manual")
+
+
+async def test_media_hydrate_reuses_uploads_across_sessions(env, monkeypatch) -> None:
+    """Repeated hydration of an unchanged file re-signs the cached object instead of re-uploading bytes."""
+    link: FakeLink = env["link"]
+    sid1 = await create_session(env)
+    sid2 = await create_session(env)
+    avatar = env["tmp"] / "characters" / "roster" / "images" / "a.png"
+    avatar.parent.mkdir(parents=True)
+    avatar.write_bytes(b"\x89PNG avatar")
+    ref = "characters/roster/images/a.png"
+
+    first = (await rpc(env, "media.hydrate", {"session_id": sid1, "ref": ref}))["payload"]
+    assert len(link.objects) == 1
+    second = (await rpc(env, "media.hydrate", {"session_id": sid2, "ref": ref, "placeholder_id": "ph1"}))["payload"]
+    assert len(link.objects) == 1
+    assert second["object"] == first["object"] and second["url"].endswith("?sig=1")
+    assert second["mime"] == "image/png" and second["bytes"] == len(b"\x89PNG avatar")
+    assert second["session_id"] == sid2 and second["placeholder_id"] == "ph1"
+
+    # A changed file (new size/mtime) is uploaded again.
+    avatar.write_bytes(b"\x89PNG avatar v2!")
+    third = (await rpc(env, "media.hydrate", {"session_id": sid1, "ref": ref}))["payload"]
+    assert third["object"] != first["object"] and len(link.objects) == 2
+
+    # Expired entries and objects that can no longer be signed fall back to a fresh upload.
+    cache = env["bot"].hydrate_upload_cache
+    key = list(cache)[-1]  # most recently used = the current file version
+    cache[key] = (cache[key][0], time.time() - commands_mod.HYDRATE_UPLOAD_CACHE_TTL_SECONDS - 1)
+    await rpc(env, "media.hydrate", {"session_id": sid2, "ref": ref})
+    assert len(link.objects) == 3
+    link.objects.clear()
+    healed = (await rpc(env, "media.hydrate", {"session_id": sid2, "ref": ref}))["payload"]
+    assert healed["object"] in link.objects and cache[key][0] == healed["object"]
+
+    # The cache is a bounded LRU.
+    monkeypatch.setattr(commands_mod, "HYDRATE_UPLOAD_CACHE_MAX", 2)
+    staging = env["tmp"] / "sessions" / sid1
+    staging.mkdir(parents=True, exist_ok=True)
+    for i in range(3):
+        (staging / f"f{i}.png").write_bytes(b"x" * (i + 1))
+        await rpc(env, "media.hydrate", {"session_id": sid1, "ref": f"f{i}.png"})
+    assert len(cache) == 2 and all(k[0].endswith(("f1.png", "f2.png")) for k in cache)
+
+
+async def test_history_question_choice_items_from_workspace_registry(env) -> None:
+    """Session history enriches character-candidate questions with avatar cards from `$AWD/characters`."""
+    tmp = env["tmp"]
+    reg = tmp / "characters" / "roster"
+    (reg / "images").mkdir(parents=True)
+    (reg / "images" / "a.jpg").write_bytes(b"a")
+    (reg / "images" / "b.jpg").write_bytes(b"b")
+    (reg / "characters.json").write_text(
+        json.dumps(
+            [
+                {"name": "Alpha One", "aliases": ["阿尔法"], "image": "characters/roster/images/a.jpg"},
+                {"name": "Beta Two", "aliases": ["贝塔"], "image": "characters/roster/images/b.jpg"},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    sid = await create_session(env)
+    gw = env["gw"]
+    await gw.db.save_message(
+        Message(
+            session_id=sid,
+            chatbot_id="app",
+            channel_id=f"app:{sid}",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            content=(
+                "```ui\ntype: select\nprompt: 选谁？\noptions:\n"
+                "  - 阿尔法（队长）\n  - 贝塔（副手）\n  - 换一批\n```"
+            ),
+            status=MessageStatus.DELIVERED,
+        )
+    )
+    hist = (await rpc(env, "history.page", {"session_id": sid}))["payload"]["messages"]
+    q = next(s for m in hist if m["role"] == "assistant" for s in m["segments"] if s["type"] == "question")
+    assert q["layout"] == "cards"
+    assert q["choice_items"][0]["avatar"] == "characters/roster/images/a.jpg"
+    assert q["choice_items"][2] == {"value": "换一批", "name": "换一批"}

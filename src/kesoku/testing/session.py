@@ -192,7 +192,7 @@ class _Patches:
             setattr(obj, name, value)
 
 
-async def _noop_rename(self: SessionWorker) -> None:
+async def _noop_rename(self: SessionWorker, staging_dir: str | None = None) -> None:
     """Replacement for `SessionWorker._auto_rename_session` (avoids extra LLM calls in headless runs)."""
     return None
 

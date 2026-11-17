@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import mimetypes
 import os
 import re
+import threading
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -12,7 +14,10 @@ from typing import Any
 from kesoku.constants import MessageRole
 from kesoku.db.models import Message
 from kesoku.gateway.chatbot.base import parse_message_content
+from kesoku.logger import setup_logger
 from kesoku.utils.ui_markup import card_media_refs
+
+logger = setup_logger(__name__)
 
 _ATTACHMENTS_SUFFIX_RE = re.compile(r"\n*\s*Attachments:\n(?:\[Attachment: [^\n]*\]\n?)+\s*$")
 # One `[Attachment: <filename> (<mime>) saved at <path>[ — note]]` line of the injected listing.
@@ -43,11 +48,281 @@ def _mime_for(ref: str) -> str | None:
     return {".webp": "image/webp", ".opus": "audio/ogg"}.get(os.path.splitext(ref)[1].lower())
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# Character-picker enrichment: question options that name registered characters render as avatar cards.
+# The registry is generic: `<workspace_dir>/characters/*/characters.json` lists `{name, aliases?, image|avatar?,
+# draftable?}` entries; nothing here knows about any particular game or roster.
+
+# Options asking for a fresh batch of candidates do not count towards the "mostly characters" ratio.
+_REROLL_RE = re.compile(r"再帮我想|换一批|更多|刷新")
+# Optional leading list index (`1. `, `2、`, `3) `) or bullet.
+_LEADING_INDEX_RE = re.compile(r"^\s*(?:\d{1,3}\s*[.、)）]\s*|[-*•]\s+)")
+# Optional single leading emoji (with variation selector / keycap) followed by whitespace.
+_LEADING_EMOJI_RE = re.compile(
+    "^[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\u3297\u3299][\uFE0F\u20E3]?\\s*"
+)
+# Characters allowed right after a character name at the start of an option.
+_NAME_DELIMITERS = frozenset("（(·｜|：:—-/")
+# Hiragana, katakana and CJK ideographs: aliases must contain one of these to be used for detection.
+_CJK_RE = re.compile(r"[\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]")
+# The part of an option before its first parenthesis must stay short to count as "name (subtitle)".
+_MAX_NAME_PREFIX_CHARS = 14
+_PAREN_PAIRS = {"（": "）", "(": ")"}
+
+
+@dataclass(frozen=True)
+class _CharacterRef:
+    """A lookup key in the character registry."""
+
+    name: str  # canonical `name` of the first registered entry for this key
+    avatar: str  # workspace-relative avatar path ("" when no existing file)
+    draftable: bool  # True when any entry registered under this key is draftable (eligible for auto cards)
+
+
+_registry_lock = threading.Lock()
+# realpath(workspace_dir) -> (signature, keys sorted longest-first, {lowercased key: ref})
+_registry_cache: dict[str, tuple[tuple[Any, ...], list[str], dict[str, _CharacterRef]]] = {}
+
+
+def _registry_files(workspace_dir: str) -> list[str]:
+    """Return sorted `characters/*/characters.json` paths under `workspace_dir`."""
+    root = os.path.join(workspace_dir, "characters")
+    try:
+        subs = sorted(os.listdir(root))
+    except OSError:
+        return []
+    out: list[str] = []
+    for sub in subs:
+        path = os.path.join(root, sub, "characters.json")
+        if os.path.isfile(path):
+            out.append(path)
+    return out
+
+
+def _resolve_avatar(workspace_dir: str, folder: str, raw: str) -> str:
+    """Return the workspace-relative path of an existing avatar file, or "" when it cannot be found.
+
+    Paths are tried relative to the workspace first, then relative to the entry's character folder; the
+    result must stay inside the workspace.
+    """
+    raw = raw.strip()
+    if not raw or os.path.isabs(raw):
+        return ""
+    ws_real = os.path.realpath(workspace_dir)
+    for base in (workspace_dir, folder):
+        cand = os.path.realpath(os.path.join(base, raw))
+        if (cand == ws_real or cand.startswith(ws_real + os.sep)) and os.path.isfile(cand):
+            return os.path.relpath(cand, ws_real).replace(os.sep, "/")
+    return ""
+
+
+def _build_registry(workspace_dir: str, files: list[str]) -> dict[str, _CharacterRef]:
+    """Build the `{lowercased key: _CharacterRef}` lookup from registry files (first folder wins duplicates)."""
+    refs: dict[str, _CharacterRef] = {}
+    for path in files:
+        try:
+            with open(path, encoding="utf-8") as f:
+                entries = json.load(f)
+        except (OSError, ValueError) as e:
+            logger.debug(f"Skipping unreadable character registry {path}: {e}")
+            continue
+        if not isinstance(entries, list):
+            continue
+        folder = os.path.dirname(path)
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip()
+            if not name:
+                continue
+            avatar = _resolve_avatar(workspace_dir, folder, str(entry.get("avatar") or entry.get("image") or ""))
+            draftable = entry.get("draftable") is not False
+            keys = [name]
+            aliases = entry.get("aliases")
+            if isinstance(aliases, list):
+                keys.extend(
+                    a.strip() for a in aliases if isinstance(a, str) and len(a.strip()) >= 2 and _CJK_RE.search(a)
+                )
+            for key in keys:
+                low = key.lower()
+                prev = refs.get(low)
+                if prev is None:
+                    refs[low] = _CharacterRef(name=name, avatar=avatar, draftable=draftable)
+                elif draftable and not prev.draftable:
+                    # Keep the first folder's identity/avatar but remember a draftable entry shares the key.
+                    refs[low] = _CharacterRef(name=prev.name, avatar=prev.avatar or avatar, draftable=True)
+                elif not prev.avatar and avatar:
+                    refs[low] = _CharacterRef(name=prev.name, avatar=avatar, draftable=prev.draftable)
+    return refs
+
+
+def load_character_registry(workspace_dir: str | None = None) -> tuple[list[str], dict[str, _CharacterRef]]:
+    """Return `(keys longest-first, {lowercased key: ref})` for `workspace_dir`, cached by registry file mtimes.
+
+    Args:
+        workspace_dir: Agent working directory (defaults to the current working directory).
+
+    Returns:
+        Lookup keys (lowercased, longest first) and the key -> character reference map.
+    """
+    ws = os.path.realpath(workspace_dir or os.getcwd())
+    files = _registry_files(ws)
+    signature: list[Any] = []
+    for path in files:
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        signature.append((path, st.st_mtime_ns, st.st_size))
+    sig = tuple(signature)
+    with _registry_lock:
+        cached = _registry_cache.get(ws)
+        if cached is not None and cached[0] == sig:
+            return cached[1], cached[2]
+    refs = _build_registry(ws, files) if files else {}
+    keys = sorted(refs, key=len, reverse=True)
+    with _registry_lock:
+        _registry_cache[ws] = (sig, keys, refs)
+    return keys, refs
+
+
+def _strip_option_prefix(option: str) -> str:
+    """Strip an optional leading list index / bullet and a single leading emoji from an option."""
+    text = _LEADING_INDEX_RE.sub("", option, count=1)
+    text = _LEADING_EMOJI_RE.sub("", text, count=1)
+    return text.strip()
+
+
+def match_character_option(
+    option: str,
+    keys: list[str],
+    refs: dict[str, _CharacterRef],
+    *,
+    draftable_only: bool,
+) -> dict[str, str] | None:
+    """Match an option that starts with a registered character name, returning `{name, subtitle?, avatar?}`.
+
+    The name must be followed by end-of-string, whitespace or a delimiter (`（ ( · ｜ | ： : — - /`), and the
+    text before the first parenthesis must be at most `_MAX_NAME_PREFIX_CHARS` characters, so that free-form
+    action sentences mentioning a character are never treated as picker options.
+    """
+    text = _strip_option_prefix(option)
+    if not text:
+        return None
+    paren_idx = min((i for i in (text.find("（"), text.find("(")) if i >= 0), default=len(text))
+    if len(text[:paren_idx].rstrip()) > _MAX_NAME_PREFIX_CHARS:
+        return None
+    low = text.lower()
+    for key in keys:
+        if not low.startswith(key):
+            continue
+        rest = text[len(key) :]
+        if rest and not (rest[0].isspace() or rest[0] in _NAME_DELIMITERS):
+            continue
+        ref = refs[key]
+        if draftable_only and not ref.draftable:
+            continue
+        rest = rest.strip()
+        closing = _PAREN_PAIRS.get(rest[:1])
+        if closing and rest.endswith(closing):
+            subtitle = rest[1:-1].strip()
+        else:
+            subtitle = rest.lstrip("".join(_NAME_DELIMITERS) + " ").strip()
+        out = {"name": text[: len(key)]}
+        if subtitle:
+            out["subtitle"] = subtitle
+        if ref.avatar:
+            out["avatar"] = ref.avatar
+        return out
+    return None
+
+
+def _explicit_choice_items(
+    choices: list[str],
+    option_items: list[dict[str, Any]],
+    keys: list[str],
+    refs: dict[str, _CharacterRef],
+) -> list[dict[str, Any]]:
+    """Build `choice_items` for an explicitly card-laid-out question, filling missing avatars from the registry."""
+    by_value = {str(i.get("value")): i for i in option_items if isinstance(i, dict) and i.get("value")}
+    out: list[dict[str, Any]] = []
+    for choice in choices:
+        meta = by_value.get(choice) or {}
+        item: dict[str, Any] = {"value": choice}
+        for field in ("name", "subtitle", "avatar"):
+            if meta.get(field):
+                item[field] = str(meta[field])
+        if "avatar" not in item:
+            probe = item.get("name") or choice
+            matched = match_character_option(str(probe), keys, refs, draftable_only=False)
+            if matched is None and probe != choice:
+                matched = match_character_option(choice, keys, refs, draftable_only=False)
+            if matched:
+                for field, value in matched.items():
+                    item.setdefault(field, value)
+        item.setdefault("name", choice)
+        out.append(item)
+    return out
+
+
+def _auto_choice_items(
+    choices: list[str], keys: list[str], refs: dict[str, _CharacterRef]
+) -> list[dict[str, Any]] | None:
+    """Return `choice_items` when the options are mostly registered (draftable) characters with avatars."""
+    non_reroll = [c for c in choices if not _REROLL_RE.search(c)]
+    if not non_reroll:
+        return None
+    matches: dict[str, dict[str, str]] = {}
+    for choice in non_reroll:
+        matched = match_character_option(choice, keys, refs, draftable_only=True)
+        if matched:
+            matches[choice] = matched
+    with_avatar = sum(1 for m in matches.values() if m.get("avatar"))
+    needed = 1 if len(non_reroll) == 1 else 2
+    if with_avatar < needed or with_avatar * 2 < len(non_reroll):
+        return None
+    return [{"value": c, **matches[c]} if c in matches else {"value": c, "name": c} for c in choices]
+
+
+def enrich_question_segment(item: dict[str, Any], seg: dict[str, Any], workspace_dir: str | None) -> None:
+    """Add `layout` / `choice_items` to a wire question `item` built from internal segment `seg` (in place).
+
+    Cards are emitted for explicit `layout: cards` / explicit option avatars, or when the plain options are
+    auto-detected as a character picker (see `_auto_choice_items`). An explicit `layout: list` disables
+    auto-detection.
+    """
+    choices = [str(c) for c in item.get("choices") or []]
+    if not choices:
+        return
+    layout = seg.get("layout")
+    option_items = [i for i in seg.get("option_items") or [] if isinstance(i, dict)]
+    explicit_cards = layout == "cards" or any(i.get("avatar") for i in option_items)
+    if layout == "list" and not explicit_cards:
+        item["layout"] = "list"
+        return
+    try:
+        keys, refs = load_character_registry(workspace_dir)
+    except Exception as e:  # registry problems must never break message delivery
+        logger.warning(f"Character registry unavailable for question enrichment: {e}")
+        keys, refs = [], {}
+    if explicit_cards:
+        item["layout"] = "cards"
+        item["choice_items"] = _explicit_choice_items(choices, option_items, keys, refs)
+        return
+    if not refs:
+        return
+    auto = _auto_choice_items(choices, keys, refs)
+    if auto is not None:
+        item["layout"] = "cards"
+        item["choice_items"] = auto
+
+
 def to_wire_segments(
     segments: list[dict[str, Any]],
     *,
     message_id: str,
     live: bool,
+    workspace_dir: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[MediaJob]]:
     """Convert internal `parse_message_content(..., rich_blocks=True)` segments to wire segments.
 
@@ -55,6 +330,8 @@ def to_wire_segments(
         segments: Internal segments.
         message_id: Source assistant message id (used for questions).
         live: When True, every media reference gets a `placeholder_id` and a `MediaJob` is returned for it.
+        workspace_dir: Agent working directory holding the `characters/` registry used to enrich question
+            options with avatar cards (defaults to the current working directory).
 
     Returns:
         `(wire_segments, media_jobs)`.
@@ -77,16 +354,16 @@ def to_wire_segments(
             if text.strip():
                 wire.append({"type": "text", "markdown": text})
         elif stype == "question":
-            wire.append(
-                {
-                    "type": "question",
-                    "prompt": str(seg.get("question") or ""),
-                    "choices": list(seg.get("choices") or []),
-                    "multi": bool(seg.get("multi", False)),
-                    "max": int(seg.get("max", 1) or 1),
-                    "question_message_id": message_id,
-                }
-            )
+            question: dict[str, Any] = {
+                "type": "question",
+                "prompt": str(seg.get("question") or ""),
+                "choices": list(seg.get("choices") or []),
+                "multi": bool(seg.get("multi", False)),
+                "max": int(seg.get("max", 1) or 1),
+                "question_message_id": message_id,
+            }
+            enrich_question_segment(question, seg, workspace_dir)
+            wire.append(question)
         elif stype == "details":
             wire.append(
                 {"type": "details", "title": str(seg.get("title") or ""), "body_markdown": str(seg.get("body") or "")}
@@ -176,11 +453,13 @@ def message_to_record(
     *,
     role_id: str | None = None,
     role_display_name: str | None = None,
+    workspace_dir: str | None = None,
 ) -> dict[str, Any]:
     """Convert a stored user / assistant text message to a `MessageRecord` (media as refs only).
 
     `role_id` / `role_display_name` (the session persona) are attached to assistant senders, except
-    notifications, so clients can show the persona name instead of the bot name.
+    notifications, so clients can show the persona name instead of the bot name. `workspace_dir` locates the
+    character registry used to enrich question options (see `to_wire_segments`).
     """
     meta = msg.metadata or {}
     if msg.role == MessageRole.USER:
@@ -204,8 +483,12 @@ def message_to_record(
         if isinstance(meta.get("app_seq"), int):
             record["seq"] = meta["app_seq"]
         return record
-    segments, _ = to_wire_segments(parse_message_content(msg.content or "", rich_blocks=True), message_id=msg.id,
-                                   live=False)
+    segments, _ = to_wire_segments(
+        parse_message_content(msg.content or "", rich_blocks=True),
+        message_id=msg.id,
+        live=False,
+        workspace_dir=workspace_dir,
+    )
     record = {
         "message_id": msg.id,
         "role": "assistant" if msg.role == MessageRole.ASSISTANT else "system",

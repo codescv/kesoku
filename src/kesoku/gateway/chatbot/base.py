@@ -108,7 +108,8 @@ def parse_message_content(content: str, rich_blocks: bool = False) -> list[dict[
     Returns:
         A list of segment dictionaries:
         {"type": "text", "content": "..."}, {"type": "file", "path": "..."}, {"type": "voice", "path": "..."},
-        {"type": "question", "question": "...", "choices": [...], "multi": bool, "max": int},
+        {"type": "question", "question": "...", "choices": [...], "multi": bool, "max": int} (rich mode adds
+        optional `layout` / `option_items` when the ```ui block declares them),
         {"type": "details", "title": "...", "body": "..."} and (rich mode only)
         {"type": "bilingual", ...} / {"type": "card", "kind": "...", "data": {...}}.
     """
@@ -131,7 +132,7 @@ def parse_message_content(content: str, rich_blocks: bool = False) -> list[dict[
     ui_match, ui_question = find_first_ui_block(content)
     if ui_match is not None:
         if ui_question is not None:
-            candidates.append((ui_match.start(), ui_match.end(), ui_question.to_segment()))
+            candidates.append((ui_match.start(), ui_match.end(), ui_question.to_segment(rich=rich_blocks)))
         else:
             logger.warning("Invalid ```ui block (bad YAML or missing type/prompt/options); rendering as text")
 
