@@ -37,6 +37,7 @@ from kesoku.utils.async_fs import (
 )
 from kesoku.utils.table import parse_markdown_tables
 from kesoku.utils.text import clean_latex, format_text, render_spoilers
+from kesoku.utils.ui_markup import find_first_ui_block
 
 from .command import setup_discord_commands
 from .persistent_ui import (
@@ -1986,6 +1987,7 @@ class DiscordChatbot(Chatbot):
         message: Message,
         multi: bool = False,
         max_choices: int = 1,
+        option_items: list[dict[str, Any]] | None = None,
     ) -> None:
         """Deliver a question as an embed with restart-persistent components.
 
@@ -1997,7 +1999,11 @@ class DiscordChatbot(Chatbot):
             return
 
         try:
-            spec = build_question_spec(question, choices, multi, max_choices)
+            if option_items is None and isinstance(message.content, str):
+                _, ui_q = find_first_ui_block(message.content)
+                if ui_q is not None and ui_q.option_items and ui_q.options == choices:
+                    option_items = [dict(i) for i in ui_q.option_items]
+            spec = build_question_spec(question, choices, multi, max_choices, option_items=option_items)
             view: discord.ui.View
             if ids_fit(message.session_id, message.id):
                 await self.gateway.db.save_ui_prompt(message.session_id, message.id, spec)

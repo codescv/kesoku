@@ -378,3 +378,113 @@ def test_legacy_answered_spec_without_closed_stays_locked() -> None:
     assert all(c.item.disabled for c in pui.build_question_view("s", "m", spec).children)
     spec["closed"] = False
     assert [c.item.disabled for c in pui.build_question_view("s", "m", spec).children] == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_multiselect_group_mutex_rejects_same_group_and_accepts_distinct_groups(
+    registered: tuple[object, _MemoryDB, MagicMock],
+) -> None:
+    """Selecting two options in the same group replies ephemerally and leaves the prompt open."""
+    client, db, chatbot = registered
+    option_items = [
+        {"value": "A1", "name": "A1", "group": "Alice"},
+        {"value": "A2", "name": "A2", "group": "Alice"},
+        {"value": "B1", "name": "B1", "group": "Bob"},
+        {"value": "Free", "name": "Free"},
+    ]
+    spec = pui.build_question_spec("Upgrades", ["A1", "A2", "B1", "Free"], True, 4, option_items=option_items)
+    assert spec["groups"] == {"A1": "Alice", "A2": "Alice", "B1": "Bob"}
+    # Dropdown option descriptions carry group names when present.
+    (select,) = [c.item for c in pui.build_question_view("s", "m", spec).children]
+    assert [o.description for o in select.options] == ["Alice", "Alice", "Bob", None]
+
+    await db.save_ui_prompt("s", "m", spec)
+    # Conflict: A1 and A2 share group "Alice"
+    bad = _interaction(client, values=["0", "1", "2"])
+    await pui.QuestionSelect("s", "m").callback(bad)
+    bad.followup.send.assert_awaited_once()
+    msg_text = bad.followup.send.call_args.args[0]
+    assert "Alice" in msg_text
+    assert bad.followup.send.call_args.kwargs == {"ephemeral": True}
+    chatbot.gateway.post.assert_not_awaited()
+    assert not pui.is_closed(db.rows[("s", "m")])
+
+    # Valid: one from Alice, one from Bob, plus ungrouped Free
+    good = _interaction(client, values=["1", "2", "3"])
+    await pui.QuestionSelect("s", "m").callback(good)
+    chatbot.gateway.post.assert_awaited_once()
+    assert chatbot.gateway.post.call_args.args[0].content == "选择：A2；B1；Free"
+    assert db.rows[("s", "m")]["closed"] is True
+
+
+@pytest.mark.asyncio
+async def test_multiselect_group_mutex_handles_duplicate_labels_across_groups(
+    registered: tuple[object, _MemoryDB, MagicMock],
+) -> None:
+    """Duplicate labels in different groups (e.g. 'Keep') still enforce per-group mutex by index."""
+    client, db, chatbot = registered
+    option_items = [
+        {"value": "New A", "group": "Alice"},
+        {"value": "Keep", "group": "Alice"},
+        {"value": "New B", "group": "Bob"},
+        {"value": "Keep", "group": "Bob"},
+    ]
+    spec = pui.build_question_spec("Upgrades", ["New A", "Keep", "New B", "Keep"], True, 4, option_items=option_items)
+    (select,) = [c.item for c in pui.build_question_view("s", "m", spec).children]
+    assert [o.description for o in select.options] == ["Alice", "Alice", "Bob", "Bob"]
+
+    await db.save_ui_prompt("s", "m", spec)
+    # Conflict: indices 0 & 1 are both in Alice
+    bad = _interaction(client, values=["0", "1"])
+    await pui.QuestionSelect("s", "m").callback(bad)
+    assert "Alice" in bad.followup.send.call_args.args[0]
+    chatbot.gateway.post.assert_not_awaited()
+
+    # Valid: index 1 (Alice's Keep) + index 3 (Bob's Keep)
+    good = _interaction(client, values=["1", "3"])
+    await pui.QuestionSelect("s", "m").callback(good)
+    chatbot.gateway.post.assert_awaited_once()
+    assert chatbot.gateway.post.call_args.args[0].content == "选择：Keep；Keep"
+
+
+@pytest.mark.asyncio
+async def test_discord_adapter_persists_option_groups_from_ui_block(tmp_path: Any) -> None:
+    """DiscordChatbot.handle_message extracts `group` metadata from ```ui blocks into `ui_prompts`."""
+    from kesoku.constants import MessageType
+    from kesoku.db import Message
+
+    cfg = KesokuConfig()
+    cfg.workspace.sessions_dir = str(tmp_path)
+    cfg.discord = DiscordConfig(enabled=True, bot_token="t", chatbot_id="bot")
+    gw = MagicMock(spec=Gateway)
+    gw.db = AsyncMock()
+    gw.db.get_session = AsyncMock(return_value=None)
+    gw.agent = None
+    with patch("kesoku.gateway.chatbot.discord.adapter.get_config", return_value=cfg):
+        with patch.object(discord.Client, "user", new_callable=PropertyMock, return_value=MagicMock(id=1)):
+            bot = DiscordChatbot(chatbot_id="bot", gateway=gw)
+            channel = AsyncMock(spec=discord.Thread)
+            bot.bot.get_channel = MagicMock(return_value=channel)
+            msg = Message(
+                id="m1",
+                session_id="s1",
+                chatbot_id="bot",
+                channel_id="123",
+                sender="Kesoku",
+                role=MessageRole.ASSISTANT,
+                type=MessageType.TEXT,
+                content=(
+                    "```ui\ntype: multiselect\nprompt: Pick\noptions:\n"
+                    "  - {name: Move A, group: Member 1}\n"
+                    "  - {name: Move B, group: Member 1}\n"
+                    "  - {name: Move C, group: Member 2}\n```"
+                ),
+            )
+            await bot.handle_message(msg)
+            gw.db.save_ui_prompt.assert_awaited_once()
+            saved_spec = gw.db.save_ui_prompt.call_args.args[2]
+            assert saved_spec["groups"] == {
+                "Move A": "Member 1",
+                "Move B": "Member 1",
+                "Move C": "Member 2",
+            }

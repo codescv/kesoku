@@ -237,6 +237,18 @@ def match_character_option(
     return None
 
 
+def _meta_for_choice(
+    idx: int,
+    choice: str,
+    option_items: list[dict[str, Any]],
+    by_value: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Return the `option_items` entry for `(idx, choice)`, preferring positional alignment when it matches."""
+    if idx < len(option_items) and str(option_items[idx].get("value") or "") == choice:
+        return option_items[idx]
+    return by_value.get(choice) or {}
+
+
 def _explicit_choice_items(
     choices: list[str],
     option_items: list[dict[str, Any]],
@@ -246,10 +258,10 @@ def _explicit_choice_items(
     """Build `choice_items` for an explicitly card-laid-out question, filling missing avatars from the registry."""
     by_value = {str(i.get("value")): i for i in option_items if isinstance(i, dict) and i.get("value")}
     out: list[dict[str, Any]] = []
-    for choice in choices:
-        meta = by_value.get(choice) or {}
+    for idx, choice in enumerate(choices):
+        meta = _meta_for_choice(idx, choice, option_items, by_value)
         item: dict[str, Any] = {"value": choice}
-        for field in ("name", "subtitle", "avatar"):
+        for field in ("name", "subtitle", "avatar", "group"):
             if meta.get(field):
                 item[field] = str(meta[field])
         if "avatar" not in item:
@@ -262,6 +274,23 @@ def _explicit_choice_items(
                     item.setdefault(field, value)
         item.setdefault("name", choice)
         out.append(item)
+    return out
+
+
+def _metadata_choice_items(
+    choices: list[str],
+    option_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build `choice_items` from structured `option_items` (`value`, `name?`, `subtitle?`, `group?`)."""
+    by_value = {str(i.get("value")): i for i in option_items if isinstance(i, dict) and i.get("value")}
+    out: list[dict[str, Any]] = []
+    for idx, choice in enumerate(choices):
+        meta = _meta_for_choice(idx, choice, option_items, by_value)
+        entry: dict[str, Any] = {"value": choice}
+        for field in ("name", "subtitle", "group"):
+            if meta.get(field):
+                entry[field] = str(meta[field])
+        out.append(entry)
     return out
 
 
@@ -289,7 +318,8 @@ def enrich_question_segment(item: dict[str, Any], seg: dict[str, Any], workspace
 
     Cards are emitted for explicit `layout: cards` / explicit option avatars, or when the plain options are
     auto-detected as a character picker (see `_auto_choice_items`). An explicit `layout: list` disables
-    auto-detection.
+    auto-detection. When structured `option_items` carry rich metadata (`subtitle`, `group`, or a distinct
+    `name`) without `layout: cards` / avatars, `choice_items` is still populated without forcing `cards`.
     """
     choices = [str(c) for c in item.get("choices") or []]
     if not choices:
@@ -297,8 +327,14 @@ def enrich_question_segment(item: dict[str, Any], seg: dict[str, Any], workspace
     layout = seg.get("layout")
     option_items = [i for i in seg.get("option_items") or [] if isinstance(i, dict)]
     explicit_cards = layout == "cards" or any(i.get("avatar") for i in option_items)
+    has_rich_meta = any(
+        i.get("subtitle") or i.get("group") or (i.get("name") and i.get("name") != i.get("value"))
+        for i in option_items
+    )
     if layout == "list" and not explicit_cards:
         item["layout"] = "list"
+        if has_rich_meta:
+            item["choice_items"] = _metadata_choice_items(choices, option_items)
         return
     try:
         keys, refs = load_character_registry(workspace_dir)
@@ -309,12 +345,20 @@ def enrich_question_segment(item: dict[str, Any], seg: dict[str, Any], workspace
         item["layout"] = "cards"
         item["choice_items"] = _explicit_choice_items(choices, option_items, keys, refs)
         return
-    if not refs:
-        return
-    auto = _auto_choice_items(choices, keys, refs)
-    if auto is not None:
-        item["layout"] = "cards"
-        item["choice_items"] = auto
+    if refs:
+        auto = _auto_choice_items(choices, keys, refs)
+        if auto is not None:
+            if option_items:
+                by_value = {str(i.get("value")): i for i in option_items if i.get("value")}
+                for idx, entry in enumerate(auto):
+                    meta = _meta_for_choice(idx, entry["value"], option_items, by_value)
+                    if meta.get("group"):
+                        entry["group"] = str(meta["group"])
+            item["layout"] = "cards"
+            item["choice_items"] = auto
+            return
+    if has_rich_meta:
+        item["choice_items"] = _metadata_choice_items(choices, option_items)
 
 
 def to_wire_segments(

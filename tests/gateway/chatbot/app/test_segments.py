@@ -214,3 +214,71 @@ def test_history_record_enrichment(workspace: Path) -> None:
     rec = message_to_record(msg, "app", workspace_dir=str(workspace))
     q = next(s for s in rec["segments"] if s["type"] == "question")
     assert q["layout"] == "cards" and q["choice_items"][1]["avatar"] == "characters/z_roster/images/mei.jpg"
+
+
+def test_structured_group_and_subtitle_emit_choice_items_without_forcing_cards(tmp_path: Path) -> None:
+    """Options with `group`/`subtitle` emit `choice_items` even without avatars, registry, or `layout: cards`."""
+    seg_mod._registry_cache.clear()
+    content = (
+        "```ui\n"
+        "type: multiselect\n"
+        "prompt: Skill upgrades\n"
+        "options:\n"
+        "  - {name: 烈风斩, subtitle: 替换普通斩击, group: 成员甲}\n"
+        "  - {name: 保持现有招式, group: 成员甲}\n"
+        "  - {name: 冰霜新星, subtitle: 群体减速, group: 成员乙}\n"
+        "  - 额外补给\n"
+        "```"
+    )
+    segs = parse_message_content(content, rich_blocks=True)
+    q = next(s for s in segs if s["type"] == "question")
+    item = _wire(q, tmp_path)
+    assert "layout" not in item
+    assert item["choice_items"] == [
+        {"value": "烈风斩（替换普通斩击）", "name": "烈风斩", "subtitle": "替换普通斩击", "group": "成员甲"},
+        {"value": "保持现有招式", "name": "保持现有招式", "group": "成员甲"},
+        {"value": "冰霜新星（群体减速）", "name": "冰霜新星", "subtitle": "群体减速", "group": "成员乙"},
+        {"value": "额外补给"},
+    ]
+
+
+def test_list_layout_and_cards_layout_both_preserve_group_metadata(workspace: Path) -> None:
+    """`layout: list` keeps list layout with `choice_items`; `layout: cards` keeps cards with `group`."""
+    list_content = (
+        "```ui\ntype: multiselect\nprompt: Pick\nlayout: list\noptions:\n"
+        "  - {name: 星野凛, subtitle: 主唱, group: Slot 1}\n"
+        "  - {name: 青木芽衣, subtitle: 吉他, group: Slot 1}\n```"
+    )
+    list_q = next(s for s in parse_message_content(list_content, rich_blocks=True) if s["type"] == "question")
+    list_wire = _wire(list_q, workspace)
+    assert list_wire["layout"] == "list"
+    assert list_wire["choice_items"] == [
+        {"value": "星野凛（主唱）", "name": "星野凛", "subtitle": "主唱", "group": "Slot 1"},
+        {"value": "青木芽衣（吉他）", "name": "青木芽衣", "subtitle": "吉他", "group": "Slot 1"},
+    ]
+
+    cards_content = (
+        "```ui\ntype: multiselect\nprompt: Pick\nlayout: cards\noptions:\n"
+        "  - {name: 星野凛, subtitle: 主唱, group: Slot 1}\n"
+        "  - {name: 青木芽衣, subtitle: 吉他, group: Slot 1}\n```"
+    )
+    cards_q = next(s for s in parse_message_content(cards_content, rich_blocks=True) if s["type"] == "question")
+    cards_wire = _wire(cards_q, workspace)
+    assert cards_wire["layout"] == "cards"
+    assert cards_wire["choice_items"][0]["group"] == "Slot 1"
+    assert cards_wire["choice_items"][0]["avatar"] == "characters/a_solo/images/rin_solo.jpg"
+
+
+def test_duplicate_option_labels_across_groups_keep_positional_groups(tmp_path: Path) -> None:
+    """Identical option labels in different groups (e.g. 'Keep current') retain their per-position group."""
+    seg_mod._registry_cache.clear()
+    content = (
+        "```ui\ntype: multiselect\nprompt: Level up\noptions:\n"
+        "  - {name: New Move A, group: Alice}\n"
+        "  - {name: Keep current, group: Alice}\n"
+        "  - {name: New Move B, group: Bob}\n"
+        "  - {name: Keep current, group: Bob}\n```"
+    )
+    q = next(s for s in parse_message_content(content, rich_blocks=True) if s["type"] == "question")
+    wire = _wire(q, tmp_path)
+    assert [c["group"] for c in wire["choice_items"]] == ["Alice", "Alice", "Bob", "Bob"]

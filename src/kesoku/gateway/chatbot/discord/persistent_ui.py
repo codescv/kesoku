@@ -81,14 +81,78 @@ def ids_fit(session_id: str, message_id: str) -> bool:
     return len(question_button_id(session_id, message_id, MAX_SELECT_OPTIONS)) <= CUSTOM_ID_MAX_LEN
 
 
-def build_question_spec(question: str, choices: list[str], multi: bool, max_choices: int) -> dict[str, Any]:
+def build_question_spec(
+    question: str,
+    choices: list[str],
+    multi: bool,
+    max_choices: int,
+    option_items: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+) -> dict[str, Any]:
     """Build the JSON spec stored in `ui_prompts` for a question."""
     options = list(choices)
     if len(options) > MAX_SELECT_OPTIONS:
         logger.warning(f"Question has {len(options)} options; Discord shows at most {MAX_SELECT_OPTIONS}")
         options = options[:MAX_SELECT_OPTIONS]
     max_choices = max(1, min(max_choices, len(options))) if multi else 1
-    return {"type": "question", "prompt": question, "options": options, "multi": multi, "max": max_choices}
+    spec: dict[str, Any] = {
+        "type": "question",
+        "prompt": question,
+        "options": options,
+        "multi": multi,
+        "max": max_choices,
+    }
+    if option_items:
+        opt_set = set(options)
+        groups: dict[str, str] = {}
+        aligned = len(option_items) >= len(options) and all(
+            isinstance(option_items[i], dict) and str(option_items[i].get("value") or "").strip() == options[i]
+            for i in range(len(options))
+        )
+        per_index: list[str | None] = []
+        has_dup_group_conflict = False
+        for idx, item in enumerate(option_items):
+            if not isinstance(item, dict):
+                continue
+            val = str(item.get("value") or "").strip()
+            grp = str(item.get("group") or "").strip()
+            if aligned and idx < len(options):
+                per_index.append(grp or None)
+            if val and grp and val in opt_set:
+                if val in groups and groups[val] != grp:
+                    has_dup_group_conflict = True
+                groups[val] = grp
+        if groups:
+            spec["groups"] = groups
+            if aligned and has_dup_group_conflict:
+                spec["option_groups"] = per_index
+    return spec
+
+
+def _spec_groups(spec: dict[str, Any]) -> dict[str, str]:
+    """Extract `{option_value: group_name}` from a stored question spec."""
+    raw = spec.get("groups")
+    if isinstance(raw, dict):
+        return {str(k): str(v) for k, v in raw.items() if str(k).strip() and str(v).strip()}
+    items = spec.get("option_items")
+    if isinstance(items, list):
+        out: dict[str, str] = {}
+        for item in items:
+            if isinstance(item, dict):
+                val = str(item.get("value") or "").strip()
+                grp = str(item.get("group") or "").strip()
+                if val and grp:
+                    out[val] = grp
+        return out
+    return {}
+
+
+def _spec_option_groups(spec: dict[str, Any], options: list[str]) -> list[str | None]:
+    """Return per-option group names aligned with `options` (None for ungrouped options)."""
+    raw_list = spec.get("option_groups")
+    if isinstance(raw_list, list) and len(raw_list) == len(options):
+        return [str(g).strip() or None if g is not None else None for g in raw_list]
+    groups = _spec_groups(spec)
+    return [groups.get(opt) for opt in options]
 
 
 def uses_select(spec: dict[str, Any]) -> bool:
@@ -196,17 +260,28 @@ class QuestionSelect(
         max_choices: int = 1,
         disabled: bool = False,
         chosen: list[int] | None = None,
+        groups: dict[str, str] | list[str | None] | None = None,
     ) -> None:
         """Create the select menu (row 1, after any buttons on row 0)."""
         chosen_set = set(chosen or [])
+        opts_list = list(options or [])
+
+        def _group_at(idx: int, opt: str) -> str | None:
+            if isinstance(groups, list):
+                return groups[idx] if idx < len(groups) else None
+            if isinstance(groups, dict):
+                return groups.get(opt)
+            return None
+
         select_options = [
             discord.SelectOption(
                 label=_truncate(f"{chr(ord('A') + idx)}. {opt}" if len(opt) > MAX_SELECT_LABEL_LEN else opt,
                                 MAX_SELECT_LABEL_LEN),
                 value=str(idx),
+                description=_truncate(grp, MAX_SELECT_LABEL_LEN) if (grp := _group_at(idx, opt)) else None,
                 default=idx in chosen_set,
             )
-            for idx, opt in enumerate(options or [])
+            for idx, opt in enumerate(opts_list)
         ] or [discord.SelectOption(label="-", value="0")]
         max_values = max(1, min(max_choices, len(select_options))) if multi else 1
         select = discord.ui.Select(
@@ -265,6 +340,7 @@ def build_question_view(
     options: list[str] = list(spec.get("options", []))
     chosen_list = list(chosen if chosen is not None else spec.get("chosen", []))
     if uses_select(spec):
+        opt_groups = _spec_option_groups(spec, options)
         view.add_item(
             QuestionSelect(
                 session_id,
@@ -274,6 +350,7 @@ def build_question_view(
                 max_choices=int(spec.get("max", 1)),
                 disabled=disabled,
                 chosen=chosen_list,
+                groups=opt_groups if any(opt_groups) else None,
             )
         )
         return view
@@ -350,6 +427,27 @@ async def handle_question_answer(
         previously = [i for i in spec.get("chosen", []) if isinstance(i, int) and 0 <= i < len(options)]
         if spec.get("multi"):
             valid = sorted(valid)[: int(spec.get("max", len(options)))]
+            opt_groups = _spec_option_groups(spec, options)
+            if any(opt_groups):
+                seen_groups: dict[str, int] = {}
+                conflicts: list[str] = []
+                for i in valid:
+                    grp = opt_groups[i]
+                    if not grp:
+                        continue
+                    if grp in seen_groups:
+                        if grp not in conflicts:
+                            conflicts.append(grp)
+                    else:
+                        seen_groups[grp] = i
+                if conflicts:
+                    conflict_list = "、".join(conflicts)
+                    await _notify(
+                        interaction,
+                        acked,
+                        f"⚠️ 同一分组只能选择一项（冲突分组：{conflict_list}），请重新选择。",
+                    )
+                    return
             content = format_multi_selection([options[i] for i in valid])
             chosen, answered, closed = valid, content, True
         elif uses_select(spec):

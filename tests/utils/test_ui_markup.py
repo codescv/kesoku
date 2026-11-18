@@ -270,3 +270,58 @@ def test_accidental_yaml_mapping_options_stay_verbatim() -> None:
     assert q.option_items == ()
     mixed = parse_ui_block_body("prompt: P\noptions:\n  - {Name: Alpha, Avatar: a.png}\n  - Other\n")
     assert mixed is not None and mixed.option_items[0] == {"value": "Alpha", "name": "Alpha", "avatar": "a.png"}
+
+
+def test_parse_multiselect_option_groups_and_subtitles() -> None:
+    """Structured options preserve `group` and `subtitle` in `option_items` and `to_segment(rich=True)`."""
+    body = (
+        "type: multiselect\n"
+        "prompt: Choose upgrades\n"
+        "options:\n"
+        "  - {name: Slash, subtitle: 'Replace Strike (+2 dmg)', group: Alice}\n"
+        "  - {name: Guard, desc: 'Keep current kit', Group: Alice}\n"
+        "  - {name: Fireball, subtitle: 'AoE', group: Bob}\n"
+        "  - {name: Extra Potion, group: '   '}\n"
+        "  - Plain bonus\n"
+    )
+    q = parse_ui_block_body(body)
+    assert q is not None
+    assert q.multi is True
+    assert q.max == 5
+    assert q.layout is None
+    assert q.options == [
+        "Slash（Replace Strike (+2 dmg)）",
+        "Guard（Keep current kit）",
+        "Fireball（AoE）",
+        "Extra Potion",
+        "Plain bonus",
+    ]
+    assert q.option_items == (
+        {
+            "value": "Slash（Replace Strike (+2 dmg)）",
+            "name": "Slash",
+            "subtitle": "Replace Strike (+2 dmg)",
+            "group": "Alice",
+        },
+        {
+            "value": "Guard（Keep current kit）",
+            "name": "Guard",
+            "subtitle": "Keep current kit",
+            "group": "Alice",
+        },
+        {
+            "value": "Fireball（AoE）",
+            "name": "Fireball",
+            "subtitle": "AoE",
+            "group": "Bob",
+        },
+        {"value": "Extra Potion", "name": "Extra Potion"},
+        {"value": "Plain bonus"},
+    )
+    rich_seg = q.to_segment(rich=True)
+    assert "layout" not in rich_seg
+    assert rich_seg["option_items"][0]["group"] == "Alice"
+    assert rich_seg["option_items"][2]["group"] == "Bob"
+    assert "group" not in rich_seg["option_items"][3]
+    plain_seg = q.to_segment()
+    assert "option_items" not in plain_seg

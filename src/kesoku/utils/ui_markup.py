@@ -14,7 +14,7 @@ Supported markup (platform-neutral; adapters decide how to render it):
       layout: cards         # optional presentation hint for rich clients: cards | list
       ```
 
-  Options may also be mappings `{value?, name?, label?, subtitle?, desc?, avatar?}`; the canonical answer
+  Options may also be mappings `{value?, name?, label?, subtitle?, desc?, avatar?, group?}`; the canonical answer
   string is `value`, else `name（subtitle）`, else `name`/`label`. Their metadata is exposed as
   `UiQuestion.option_items` for rich clients while `options` stays a plain `list[str]`.
 
@@ -38,7 +38,7 @@ UI_TYPE_MULTISELECT = "multiselect"
 UI_TYPES = (UI_TYPE_SELECT, UI_TYPE_MULTISELECT)
 UI_LAYOUTS = ("cards", "list")
 # Recognized keys of a structured option mapping (any other key means an accidental YAML mapping).
-_OPTION_ITEM_KEYS = frozenset({"value", "name", "label", "subtitle", "desc", "avatar"})
+_OPTION_ITEM_KEYS = frozenset({"value", "name", "label", "subtitle", "desc", "avatar", "group"})
 
 MULTI_SELECT_PREFIX = "选择："
 MULTI_SELECT_SEPARATOR = "；"
@@ -67,7 +67,7 @@ class UiQuestion:
     max: int
     # Optional presentation hint (`"cards"` | `"list"`) for rich clients; plain adapters ignore it.
     layout: str | None = None
-    # Optional per-option metadata `{value, name?, subtitle?, avatar?}` aligned with `options` (rich clients only).
+    # Optional per-option metadata `{value, name?, subtitle?, avatar?, group?}` aligned with `options` (rich clients only).
     option_items: tuple[dict[str, str], ...] = ()
 
     def to_segment(self, rich: bool = False) -> dict[str, Any]:
@@ -168,9 +168,9 @@ def _strip_file_wrapper(value: str) -> str:
 
 
 def _normalize_option_dict(item: dict[Any, Any]) -> dict[str, str] | None:
-    """Normalize a structured option `{value?, name?, label?, subtitle?, desc?, avatar?}`.
+    """Normalize a structured option `{value?, name?, label?, subtitle?, desc?, avatar?, group?}`.
 
-    Returns `{value, name?, subtitle?, avatar?}` where `value` is the canonical answer string posted back
+    Returns `{value, name?, subtitle?, avatar?, group?}` where `value` is the canonical answer string posted back
     when the option is picked, or None when no usable value can be derived.
     """
     lowered = {str(k).lower(): v for k, v in item.items()}
@@ -186,6 +186,7 @@ def _normalize_option_dict(item: dict[Any, Any]) -> dict[str, str] | None:
     name = _field("name", "label")
     subtitle = _field("subtitle", "desc")
     avatar = _strip_file_wrapper(_field("avatar"))
+    group = _field("group")
     if not value:
         value = f"{name}（{subtitle}）" if name and subtitle else name
     if not value:
@@ -197,6 +198,8 @@ def _normalize_option_dict(item: dict[Any, Any]) -> dict[str, str] | None:
         out["subtitle"] = subtitle
     if avatar:
         out["avatar"] = avatar
+    if group:
+        out["group"] = group
     return out
 
 
