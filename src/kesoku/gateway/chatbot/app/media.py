@@ -13,6 +13,7 @@ import mimetypes
 import os
 import time
 import wave
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
@@ -85,11 +86,14 @@ class MediaManager:
         self._http_put_takes_headers = _accepts_extra_headers(self._http_put)
         self._http_get = http_get or self._default_get
         self._clock = clock
-        self._upload_cache: dict[tuple[str, int, int, str], dict[str, Any]] = {}
+        # Single bounded LRU of uploaded objects: (realpath, st_mtime_ns, st_size, scope) -> {object, uploaded_at}.
+        # `scope` is `purpose:session:index` for regular uploads, or a caller-chosen session-independent scope
+        # (e.g. `hydrate`) for shared files that may be re-signed across sessions.
+        self._upload_cache: OrderedDict[tuple[str, int, int, str], dict[str, Any]] = OrderedDict()
 
     def _requester(self) -> RelayRequester:
         req = self._requester_getter()
-        if req is None:
+        if req is None or not getattr(req, "connected", True):
             raise ProtocolError("ENGINE_OFFLINE", "relay link is not connected")
         return req
 
@@ -129,37 +133,64 @@ class MediaManager:
         session_id: str | None = None,
         mime: str | None = None,
         index: int | None = None,
+        cache_scope: str | None = None,
+        cache_ttl: float | None = None,
     ) -> dict[str, Any]:
         """Upload a local file and return `{object, url, expires_at, mime, bytes}`.
 
         Re-uploads of an unchanged file reuse the existing object (re-signed) while it is younger than the
         storage lifecycle.
+
+        Args:
+            path: Local file to upload.
+            purpose: One of `MEDIA_PURPOSES`.
+            session_id: Owning session for `message` uploads.
+            mime: MIME override (guessed from the filename otherwise).
+            index: Optional asset index forwarded to the relay.
+            cache_scope: Reuse scope of the upload cache; defaults to `purpose:session:index`. Callers whose
+                objects may be shared across sessions (e.g. `media.hydrate`) pass a session-independent scope.
+            cache_ttl: Max age of a reusable cached object (defaults to `UPLOAD_CACHE_TTL_SECONDS`).
+
+        Raises:
+            ProtocolError: `ENGINE_OFFLINE` when the relay link is down (checked before reading the file).
         """
         if purpose not in MEDIA_PURPOSES:
             raise ValueError(f"Unknown media purpose '{purpose}'")
+        self._requester()  # fail fast while offline, before touching the disk
         real = await asyncio.to_thread(os.path.realpath, path)
         st = await asyncio.to_thread(os.stat, real)
         if not await asyncio.to_thread(os.path.isfile, real):
             raise FileNotFoundError(path)
         eff_mime = mime or guess_mime(real)
-        cache_key = (real, int(st.st_mtime_ns), int(st.st_size), f"{purpose}:{session_id or ''}:{index}")
+        scope = cache_scope if cache_scope is not None else f"{purpose}:{session_id or ''}:{index}"
+        cache_key = (real, int(st.st_mtime_ns), int(st.st_size), scope)
+        ttl = UPLOAD_CACHE_TTL_SECONDS if cache_ttl is None else min(float(cache_ttl), UPLOAD_CACHE_TTL_SECONDS)
         cached = self._upload_cache.get(cache_key)
-        if cached is not None and self._clock() - cached["uploaded_at"] < UPLOAD_CACHE_TTL_SECONDS:
-            try:
-                signed = await self.sign(cached["object"])
-                return {
-                    "object": cached["object"],
-                    "url": signed["url"],
-                    "expires_at": signed.get("expires_at"),
-                    "mime": eff_mime,
-                    "bytes": int(st.st_size),
-                }
-            except Exception as e:
-                logger.debug(f"Re-sign of cached media object failed, re-uploading: {e}")
+        if cached is not None:
+            if self._clock() - cached["uploaded_at"] < ttl:
+                try:
+                    signed = await self.sign(cached["object"])
+                    if cache_key in self._upload_cache:
+                        self._upload_cache.move_to_end(cache_key)
+                    return {
+                        "object": cached["object"],
+                        "url": signed["url"],
+                        "expires_at": signed.get("expires_at"),
+                        "mime": eff_mime,
+                        "bytes": int(st.st_size),
+                    }
+                except ProtocolError as e:
+                    if e.code == "ENGINE_OFFLINE":
+                        raise
+                    logger.debug(f"Re-sign of cached media object failed, re-uploading: {e}")
+                except Exception as e:
+                    logger.debug(f"Re-sign of cached media object failed, re-uploading: {e}")
+            if self._upload_cache.get(cache_key) is cached:
+                self._upload_cache.pop(cache_key, None)
 
+        requester = self._requester()
         data = await asyncio.to_thread(_read_bytes, real)
         filename = os.path.basename(real)
-        requester = self._requester()
         if len(data) <= BINARY_UPLOAD_MAX_BYTES:
             req_id = new_id("req")
             header: dict[str, Any] = {
@@ -225,10 +256,11 @@ class MediaManager:
         return result
 
     def _remember(self, key: tuple[str, int, int, str], object_name: str) -> None:
-        if len(self._upload_cache) >= UPLOAD_CACHE_MAX_ENTRIES:
-            oldest = min(self._upload_cache, key=lambda k: self._upload_cache[k]["uploaded_at"])
-            self._upload_cache.pop(oldest, None)
+        """Insert `key` as most recently used and evict least recently used entries beyond the bound (O(1))."""
         self._upload_cache[key] = {"object": object_name, "uploaded_at": self._clock()}
+        self._upload_cache.move_to_end(key)
+        while len(self._upload_cache) > max(1, UPLOAD_CACHE_MAX_ENTRIES):
+            self._upload_cache.popitem(last=False)
 
     async def sign(self, object_name: str) -> dict[str, Any]:
         """Return `{object, url, expires_at, issued_device_id?, issued_at?}` for an existing object."""

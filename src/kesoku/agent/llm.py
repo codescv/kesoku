@@ -5,9 +5,11 @@ Provides an abstract base class BaseLLM and a concrete GeminiLLM implementation.
 
 import asyncio
 import base64
+import hashlib
 import inspect
 import io
 import json
+import logging
 import os
 import re
 import threading
@@ -59,10 +61,51 @@ def _mark_explicit_cache_unsupported_model(model_name: str) -> bool:
         return True
 
 
+_EXPLICIT_CACHE_UNSUPPORTED_PHRASES: tuple[str, ...] = (
+    "does not support explicit context caching",
+    "explicit context caching is not supported",
+    "explicit context caching not supported",
+)
+
+
 def _is_explicit_cache_unsupported_error(err: BaseException | str) -> bool:
-    """Return True when an exception message indicates the model does not support explicit context caching."""
+    """Return True only when an exception explicitly states the model does not support explicit context caching.
+
+    The match is deliberately narrow: marking a model unsupported disables explicit caching process-wide until
+    restart, so transient/quota/argument errors that merely mention "explicit context caching" must not match.
+    """
     err_lower = str(err).lower()
-    return "does not support explicit context caching" in err_lower or "explicit context caching" in err_lower
+    return any(phrase in err_lower for phrase in _EXPLICIT_CACHE_UNSUPPORTED_PHRASES)
+
+
+def summarize_request_config(config: Any) -> str:
+    """Return a compact, privacy-preserving one-line summary of a provider request config for INFO logs.
+
+    Logs sizes and short hashes instead of the full system instruction / tool schemas (which can be tens of KB and
+    contain private persona prompts).
+    """
+    parts: list[str] = []
+    system_instruction = getattr(config, "system_instruction", None)
+    if system_instruction is not None:
+        sys_text = system_instruction if isinstance(system_instruction, str) else str(system_instruction)
+        digest = hashlib.sha1(sys_text.encode("utf-8", errors="replace")).hexdigest()[:8]
+        parts.append(f"sys_len={len(sys_text)} sys_sha1={digest}")
+    tools = getattr(config, "tools", None)
+    if tools:
+        n_decls = 0
+        for tool in tools:
+            decls = getattr(tool, "function_declarations", None)
+            n_decls += len(decls) if decls else 1
+        parts.append(f"tools={n_decls}")
+    thinking = getattr(config, "thinking_config", None)
+    if thinking is not None:
+        level = getattr(thinking, "thinking_level", None)
+        budget = getattr(thinking, "thinking_budget", None)
+        parts.append(f"thinking={level if level is not None else budget}")
+    cached_content = getattr(config, "cached_content", None)
+    if cached_content:
+        parts.append(f"cached_content={str(cached_content).rsplit('/', 1)[-1]}")
+    return " ".join(parts) or "(empty config)"
 
 
 def _resolve_gemini_thinking_level(level: str) -> Any:
@@ -202,9 +245,30 @@ async def _drain_blocking_stream(
         stop_event.set()
         if finished_pump:
             await pump_task
+        elif not pump_task.done():
+            # Timed out or cancelled while the worker thread may still be blocked in a socket read: it cannot be
+            # interrupted, but `stop_event` makes it exit after its next item. Keep a strong reference until it
+            # finishes and consume its outcome so nothing surfaces as "Task exception was never retrieved".
+            _ORPHANED_PUMP_TASKS.add(pump_task)
+            pump_task.add_done_callback(_discard_orphaned_pump_task)
+        else:
+            _discard_orphaned_pump_task(pump_task)
 
     if stream_error is not None:
         raise stream_error
+
+
+_ORPHANED_PUMP_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _discard_orphaned_pump_task(task: asyncio.Task[Any]) -> None:
+    """Drop the strong reference to an abandoned stream pump task and consume its result/exception."""
+    _ORPHANED_PUMP_TASKS.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.debug(f"Abandoned LLM stream pump finished with error: {exc!r}")
 
 
 class ToolCallRequest(BaseModel):
@@ -1106,9 +1170,17 @@ class GeminiLLM(BaseLLM):
 
         return {"contents": contents, "config": config}
 
+    def _log_request_config(self, native_input: dict[str, Any], streaming: bool) -> None:
+        """Log a compact request summary at INFO; the full config (persona prompt, tool schemas) only at DEBUG."""
+        kind = "streaming request" if streaming else "request"
+        config = native_input.get("config")
+        logger.info(f"GeminiLLM {kind} model={self.model_name} {summarize_request_config(config)}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"GeminiLLM raw {kind} config: {config}")
+
     async def _call_llm(self, native_input: dict[str, Any]) -> Any:
         def _call() -> Any:
-            logger.info(f"GeminiLLM raw request config: {native_input['config']}")
+            self._log_request_config(native_input, streaming=False)
             return self.client.models.generate_content(
                 model=self.model_name,
                 contents=native_input["contents"],
@@ -1138,7 +1210,7 @@ class GeminiLLM(BaseLLM):
         last_prompt_feedback: Any = None
 
         def _open_stream() -> Iterator[Any]:
-            logger.info(f"GeminiLLM raw streaming request config: {native_input['config']}")
+            self._log_request_config(native_input, streaming=True)
             return self.client.models.generate_content_stream(
                 model=self.model_name,
                 contents=native_input["contents"],
@@ -1279,6 +1351,7 @@ class GeminiLLM(BaseLLM):
                         f"Model '{self.model_name}' does not support explicit context caching; "
                         "falling back to implicit caching."
                     )
+                    logger.info(f"Explicit cache creation error for '{self.model_name}': {e}")
                 return None
             err_lower = str(e).lower()
             if ("invalid_argument" in err_lower or "400" in err_lower) and any(

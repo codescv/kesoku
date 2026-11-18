@@ -1,5 +1,6 @@
 """Tests for app media uploads (`app/media.py`) and assistant sender records (`app/segments.py`)."""
 
+import os
 import time
 import wave
 from typing import Any
@@ -192,3 +193,96 @@ def test_message_to_record_attaches_persona_to_assistant_sender() -> None:
     assert "display_name" not in note["sender"] and "role_id" not in note["sender"]
     user = message_to_record(_msg(MessageRole.USER, "dev-1"), "app", role_id="hana", role_display_name="Hana Example")
     assert user["sender"]["kind"] == "user" and "display_name" not in user["sender"]
+
+
+class SmallRelay:
+    """Relay stub for small (binary-frame) uploads plus `media.sign`."""
+
+    def __init__(self, connected: bool = True) -> None:
+        self.connected = connected
+        self.objects: dict[str, bytes] = {}
+        self.puts = 0
+        self.signs = 0
+
+    async def request(self, envelope: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:
+        assert envelope["type"] == "media.sign"
+        self.signs += 1
+        obj = envelope["payload"]["object"]
+        if obj not in self.objects:
+            raise media_mod.ProtocolError("NOT_FOUND", "gone")
+        return {"type": "media.signed", "payload": {"object": obj, "url": f"https://store.invalid/{obj}?sig=1"}}
+
+    async def request_binary(self, frame: bytes, request_id: str, timeout: float | None = None) -> dict[str, Any]:
+        self.puts += 1
+        obj = f"media/asset/{self.puts}"
+        self.objects[obj] = frame
+        return {"type": "media.put.ok", "payload": {"object": obj, "url": f"https://store.invalid/{obj}"}}
+
+
+async def test_offline_requester_fails_before_disk_read(tmp_path, monkeypatch) -> None:
+    """`connected=False` (or no requester) raises ENGINE_OFFLINE before any file access."""
+
+    def no_read(path: str) -> bytes:
+        raise AssertionError("must not read the file while offline")
+
+    monkeypatch.setattr(media_mod, "_read_bytes", no_read)
+    f = tmp_path / "a.png"
+    f.write_bytes(b"a")
+    for getter in (lambda: SmallRelay(connected=False), lambda: None):
+        mgr = MediaManager(getter)
+        with pytest.raises(media_mod.ProtocolError) as ei:
+            await mgr.upload_file(str(f), purpose="asset")
+        assert ei.value.code == "ENGINE_OFFLINE"
+        # Even a missing file reports the link state first (no stat / read of the disk).
+        with pytest.raises(media_mod.ProtocolError) as ei:
+            await mgr.upload_file(str(tmp_path / "missing.png"), purpose="asset")
+        assert ei.value.code == "ENGINE_OFFLINE"
+    # Requesters without a `connected` attribute are treated as connected.
+    relay = SmallRelay()
+    del relay.connected
+    monkeypatch.undo()
+    assert (await MediaManager(lambda: relay).upload_file(str(f), purpose="asset"))["object"] == "media/asset/1"
+
+
+async def test_upload_cache_is_bounded_lru(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(media_mod, "UPLOAD_CACHE_MAX_ENTRIES", 2)
+    relay = SmallRelay()
+    mgr = MediaManager(lambda: relay)
+    files = []
+    for name in ("a", "b", "c"):
+        p = tmp_path / f"{name}.png"
+        p.write_bytes(name.encode() * 3)
+        files.append(str(p))
+    a, b, c = files
+    await mgr.upload_file(a, purpose="asset")
+    await mgr.upload_file(b, purpose="asset")
+    assert relay.puts == 2
+    await mgr.upload_file(a, purpose="asset")  # hit: re-signed, becomes most recently used
+    assert relay.puts == 2 and relay.signs == 1
+    await mgr.upload_file(c, purpose="asset")  # evicts b (least recently used), not a
+    assert relay.puts == 3
+    assert [k[0] for k in mgr._upload_cache] == [os.path.realpath(a), os.path.realpath(c)]
+    await mgr.upload_file(a, purpose="asset")
+    assert relay.puts == 3
+    await mgr.upload_file(b, purpose="asset")
+    assert relay.puts == 4 and len(mgr._upload_cache) == 2
+
+
+async def test_upload_cache_scope_and_ttl(tmp_path) -> None:
+    """A shared `cache_scope` reuses objects across sessions; `cache_ttl` caps reuse age; stale objects re-upload."""
+    now = [1000.0]
+    relay = SmallRelay()
+    mgr = MediaManager(lambda: relay, clock=lambda: now[0])
+    f = tmp_path / "s.png"
+    f.write_bytes(b"s")
+    r1 = await mgr.upload_file(str(f), purpose="message", session_id="s1", cache_scope="hydrate", cache_ttl=60)
+    r2 = await mgr.upload_file(str(f), purpose="message", session_id="s2", cache_scope="hydrate", cache_ttl=60)
+    assert r1["object"] == r2["object"] and relay.puts == 1
+    await mgr.upload_file(str(f), purpose="message", session_id="s2")  # default scope is per session
+    assert relay.puts == 2
+    now[0] += 61
+    await mgr.upload_file(str(f), purpose="message", session_id="s3", cache_scope="hydrate", cache_ttl=60)
+    assert relay.puts == 3
+    relay.objects.clear()  # objects vanished from storage -> re-sign fails -> fresh upload replaces the entry
+    r4 = await mgr.upload_file(str(f), purpose="message", session_id="s3", cache_scope="hydrate", cache_ttl=60)
+    assert relay.puts == 4 and r4["object"] in relay.objects

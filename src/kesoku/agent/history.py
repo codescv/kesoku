@@ -84,6 +84,23 @@ def _hist_filename(kind: str, tool_name: str, msg: Message) -> str:
     return f"hist_{kind}_{safe_tool}_{safe_id}.txt"
 
 
+HIST_ARCHIVE_DIRNAME = ".kesoku_logs"
+
+
+def _hist_archive_path(target_dir: str, kind: str, tool_name: str, msg: Message) -> tuple[str, bool]:
+    """Return `(path, exists)` for the deterministic archive of a truncated historical tool output.
+
+    New archives live in `$STAGING_DIR/.kesoku_logs/`; an archive already present in the staging root (written by
+    older versions) keeps being referenced so the preview text of existing messages stays byte-identical.
+    """
+    name = _hist_filename(kind, tool_name, msg)
+    legacy = os.path.join(target_dir, name)
+    if os.path.exists(legacy):
+        return legacy, True
+    path = os.path.join(target_dir, HIST_ARCHIVE_DIRNAME, name)
+    return path, os.path.exists(path)
+
+
 def truncate_tool_call_arguments(tool_name: str | None, args: dict) -> dict:
     """Truncate long string arguments of historical file/notes tool calls.
 
@@ -285,20 +302,19 @@ def prepare_history_for_llm(
 
                     if tool_error and len(tool_error) > max_historical_tool_chars:
                         file_match = re.search(r"saved to(?: session workspace file)?: `([^`]+)`", tool_error)
-                        if file_match and os.path.exists(file_match.group(1)):
+                        # Deterministic name (per message) keeps the truncated preview text byte-identical across
+                        # calls, which implicit prefix caching depends on. An existing archive always wins so the
+                        # referenced path never flips; tool output for a message ID is immutable, so never rewrite.
+                        err_filepath, archived = _hist_archive_path(target_dir, "err", tool_name, m)
+                        if not archived and file_match and os.path.exists(file_match.group(1)):
                             err_filepath = file_match.group(1)
-                        else:
-                            # Deterministic name (per message) keeps the truncated preview text byte-identical
-                            # across calls, which implicit prefix caching depends on. Since tool output for a
-                            # given message ID is immutable, skip rewriting if already archived on disk.
-                            err_filepath = os.path.join(target_dir, _hist_filename("err", tool_name, m))
-                            if not os.path.exists(err_filepath):
-                                try:
-                                    os.makedirs(target_dir, exist_ok=True)
-                                    with open(err_filepath, "w", encoding="utf-8") as f:
-                                        f.write(tool_error)
-                                except Exception as ex:
-                                    logger.warning(f"Failed to write historical tool error to {err_filepath}: {ex}")
+                        elif not archived:
+                            try:
+                                os.makedirs(os.path.dirname(err_filepath), exist_ok=True)
+                                with open(err_filepath, "w", encoding="utf-8") as f:
+                                    f.write(tool_error)
+                            except Exception as ex:
+                                logger.warning(f"Failed to write historical tool error to {err_filepath}: {ex}")
 
                         err_preview = history_preview(tool_error, max_historical_tool_chars)
                         truncated_err = (
@@ -314,20 +330,16 @@ def prepare_history_for_llm(
 
                     elif not tool_error and len(raw_res) > max_historical_tool_chars:
                         file_match = re.search(r"saved to(?: session workspace file)?: `([^`]+)`", raw_res)
-                        if file_match and os.path.exists(file_match.group(1)):
+                        filepath, archived = _hist_archive_path(target_dir, "tool", tool_name, m)
+                        if not archived and file_match and os.path.exists(file_match.group(1)):
                             filepath = file_match.group(1)
-                        else:
-                            # Deterministic name (per message) keeps the truncated preview text byte-identical
-                            # across calls, which implicit prefix caching depends on. Since tool output for a
-                            # given message ID is immutable, skip rewriting if already archived on disk.
-                            filepath = os.path.join(target_dir, _hist_filename("tool", tool_name, m))
-                            if not os.path.exists(filepath):
-                                try:
-                                    os.makedirs(target_dir, exist_ok=True)
-                                    with open(filepath, "w", encoding="utf-8") as f:
-                                        f.write(raw_res)
-                                except Exception as ex:
-                                    logger.warning(f"Failed to write historical tool output to {filepath}: {ex}")
+                        elif not archived:
+                            try:
+                                os.makedirs(os.path.dirname(filepath), exist_ok=True)
+                                with open(filepath, "w", encoding="utf-8") as f:
+                                    f.write(raw_res)
+                            except Exception as ex:
+                                logger.warning(f"Failed to write historical tool output to {filepath}: {ex}")
 
                         preview = history_preview(raw_res, max_historical_tool_chars)
                         truncated_res = (

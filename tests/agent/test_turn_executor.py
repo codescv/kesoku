@@ -113,7 +113,7 @@ async def test_turn_executor_successful_turn(temp_db: str) -> None:
     assert assistant_msgs[0].metadata["turn_metrics"]["turn_tokens"] == 10
 
     # Verify turn logging was invoked
-    turn_logger.log_llm_turn.assert_called_once()
+    turn_logger.alog_llm_turn.assert_called_once()
 
 
 @pytest.mark.asyncio

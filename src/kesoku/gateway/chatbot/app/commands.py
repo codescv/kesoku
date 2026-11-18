@@ -39,7 +39,7 @@ from kesoku.agent.memory_writer import (
 from kesoku.agent.turn_executor import validate_llm_override
 from kesoku.constants import MessageRole
 from kesoku.gateway.chatbot.app.host import Reply, RequestContext, realpath_within
-from kesoku.gateway.chatbot.app.media import guess_mime, probe_audio_duration_ms
+from kesoku.gateway.chatbot.app.media import probe_audio_duration_ms
 from kesoku.gateway.chatbot.app.proposals import proposal_for_wire
 from kesoku.gateway.chatbot.app.protocol import (
     AVATAR_REF_RE,
@@ -65,10 +65,13 @@ MEMORY_LIST_MAX_FILES = 500
 TITLE_MAX_CHARS = 120
 # Placeholder titles that do not count as a user-chosen (manual) session title.
 DEFAULT_SESSION_TITLES = ("", "新对话", "New Chat", "New Session")
-# `media.hydrate` upload reuse: (realpath, st_mtime_ns, st_size) -> (object_name, uploaded_at). The TTL stays well
+# `media.hydrate` upload reuse lives in `MediaManager`'s single LRU under the session-independent scope below, so
+# shared files (character avatars, artwork) are uploaded once and only re-signed afterwards. The TTL stays well
 # below the relay bucket's 7-day object lifecycle so a cached object is always still present when re-signed.
-HYDRATE_UPLOAD_CACHE_MAX = 512
+HYDRATE_CACHE_SCOPE = "hydrate"
 HYDRATE_UPLOAD_CACHE_TTL_SECONDS = 24 * 3600.0
+# Upper bound on concurrent `media.hydrate` uploads (cache misses read + transfer whole files through the relay).
+HYDRATE_MAX_CONCURRENCY = 4
 LEXICAL_TEXT_MAX_CHARS = 2000
 LEXICAL_TOKEN_MAX_CHARS = 64
 LEXICAL_CACHE_MAX = 512
@@ -153,6 +156,9 @@ class RequestHandlers:
         self._lexical_cache: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
         self._sentence_lexical_cache: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
         self._sentence_inflight: dict[str, asyncio.Future[list[dict[str, Any]]]] = {}
+        # `media.hydrate`: bounded concurrency + single-flight per (realpath, st_mtime_ns, st_size).
+        self._hydrate_semaphore = asyncio.Semaphore(HYDRATE_MAX_CONCURRENCY)
+        self._hydrate_inflight: dict[tuple[str, int, int], asyncio.Task[dict[str, Any]]] = {}
 
     # ------------------------------------------------------------------ helpers
     @property
@@ -1107,44 +1113,42 @@ class RequestHandlers:
     async def _hydrate_upload(self, path: str, session_id: str | None) -> dict[str, Any]:
         """Upload `path` for `media.hydrate`, reusing a recent upload of the same unchanged file.
 
-        The cache is keyed by `(realpath, st_mtime_ns, st_size)` (independent of the session), so repeatedly
-        hydrated shared files such as character avatars are uploaded once and only re-signed afterwards.
+        Reuse is keyed by `(realpath, st_mtime_ns, st_size)` (independent of the session) in `MediaManager`'s
+        upload LRU, so repeatedly hydrated shared files such as character avatars are uploaded once and only
+        re-signed afterwards. Concurrent hydrates of the same file version share one in-flight upload, and at most
+        `HYDRATE_MAX_CONCURRENCY` hydrate uploads run at once.
         """
-        cache = getattr(self.app, "hydrate_upload_cache", None)
-        key: tuple[str, int, int] | None = None
-        if isinstance(cache, OrderedDict):
-            try:
-                real = await asyncio.to_thread(os.path.realpath, path)
-                st = await asyncio.to_thread(os.stat, real)
-                key = (real, int(st.st_mtime_ns), int(st.st_size))
-            except OSError:
-                key = None
-            hit = cache.get(key) if key is not None else None
-            if hit is not None:
-                object_name, uploaded_at = hit
-                if time.time() - uploaded_at < HYDRATE_UPLOAD_CACHE_TTL_SECONDS:
-                    try:
-                        signed = await self.app.media.sign(object_name)
-                        cache.move_to_end(key)
-                        return {
-                            "object": object_name,
-                            "url": signed["url"],
-                            "expires_at": signed.get("expires_at"),
-                            "mime": guess_mime(key[0]),
-                            "bytes": key[2],
-                        }
-                    except Exception as e:
-                        logger.debug(f"Re-sign of cached hydrate object failed, re-uploading: {e}")
-                cache.pop(key, None)
-        uploaded = await self.app.media.upload_file(
-            path, purpose="message" if session_id else "asset", session_id=session_id
-        )
-        if isinstance(cache, OrderedDict) and key is not None and uploaded.get("object"):
-            cache[key] = (str(uploaded["object"]), time.time())
-            cache.move_to_end(key)
-            while len(cache) > HYDRATE_UPLOAD_CACHE_MAX:
-                cache.popitem(last=False)
-        return uploaded
+        try:
+            real = await asyncio.to_thread(os.path.realpath, path)
+            st = await asyncio.to_thread(os.stat, real)
+            key: tuple[str, int, int] | None = (real, int(st.st_mtime_ns), int(st.st_size))
+        except OSError:
+            key = None
+        if key is None:
+            return await self._hydrate_upload_bounded(path, session_id)
+        task = self._hydrate_inflight.get(key)
+        if task is None:
+            task = asyncio.ensure_future(self._hydrate_upload_bounded(path, session_id))
+            self._hydrate_inflight[key] = task
+            task.add_done_callback(lambda t, k=key: self._hydrate_flight_done(k, t))
+        # Shield: one cancelled waiter must not cancel the upload the other waiters share.
+        return dict(await asyncio.shield(task))
+
+    def _hydrate_flight_done(self, key: tuple[str, int, int], task: asyncio.Task[dict[str, Any]]) -> None:
+        if self._hydrate_inflight.get(key) is task:
+            del self._hydrate_inflight[key]
+        if not task.cancelled():
+            task.exception()  # mark retrieved even when every waiter was cancelled
+
+    async def _hydrate_upload_bounded(self, path: str, session_id: str | None) -> dict[str, Any]:
+        async with self._hydrate_semaphore:
+            return await self.app.media.upload_file(
+                path,
+                purpose="message" if session_id else "asset",
+                session_id=session_id,
+                cache_scope=HYDRATE_CACHE_SCOPE,
+                cache_ttl=HYDRATE_UPLOAD_CACHE_TTL_SECONDS,
+            )
 
     async def handle_media_hydrate(self, ctx: RequestContext, payload: dict[str, Any]) -> Reply:
         """`media.hydrate{session_id?, message_id?, ref}` -> `media.ready` (realpath-jailed lazy upload)."""

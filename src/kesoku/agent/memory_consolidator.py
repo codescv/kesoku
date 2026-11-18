@@ -58,6 +58,7 @@ from kesoku.cron import cron_matches
 from kesoku.db.manager import DatabaseManager
 from kesoku.db.models import Message
 from kesoku.utils import embedding as embedding_utils
+from kesoku.utils.tasks import spawn_background
 from kesoku.utils.text import strip_injected_blocks
 
 logger = logging.getLogger(__name__)
@@ -776,7 +777,7 @@ class MemoryConsolidator:
         self._running = True
         if self._prewarm_embeddings and not os.environ.get("PYTEST_CURRENT_TEST"):
             # Pre-warm and index existing disk memories asynchronously without blocking Agent boot.
-            asyncio.create_task(self._safe_prewarm())
+            spawn_background(self._safe_prewarm(), name="memory_consolidator.prewarm")
         if self._enable_timers:
             self._timer_tasks = [
                 asyncio.create_task(self._rescan_loop()),
@@ -941,6 +942,7 @@ class MemoryConsolidator:
         if not confirm_only and not clicked_option and len(cleaned_user.strip()) >= MIN_MEANINGFUL_USER_CHARS:
             debounce_s = float(cfg.agent.memory_extraction_debounce_seconds)
             now = time.monotonic()
+            self._prune_stale_debounce_ts(now, debounce_s)
             last_ts = self._debounce_last_ts.get(session_id)
             if last_ts is None or (now - last_ts) >= debounce_s:
                 self._debounce_last_ts[session_id] = now
@@ -987,6 +989,66 @@ class MemoryConsolidator:
         except Exception as e:
             logger.debug(f"confirm_only policy lookup failed for session '{session_id}': {e}")
             return False
+
+    def _prune_stale_debounce_ts(self, now: float, debounce_s: float) -> None:
+        """Drop `_debounce_last_ts` entries older than the debounce window (NEW-3: unbounded growth).
+
+        An entry older than `debounce_s` behaves exactly like a missing one (the next signal fires
+        immediately), so pruning keeps the map bounded to recently active sessions without changing behavior.
+        """
+        stale = [
+            sid
+            for sid, ts in self._debounce_last_ts.items()
+            if (now - ts) >= debounce_s and sid not in self._debounce_timers
+        ]
+        for sid in stale:
+            self._debounce_last_ts.pop(sid, None)
+
+    def cancel_session(self, session_id: str) -> int:
+        """Forget all pending memory work for a session that is being deleted.
+
+        Cancels its debounce timer, drops its queued (not yet running) `EpisodeExtract` jobs, and clears its
+        per-session bookkeeping (`_debounce_last_ts`, compaction hints). A job that is already executing is
+        left alone; `run_episode_extract` bails out with `session_deleted` once the session row is gone.
+
+        Args:
+            session_id: Session being deleted.
+
+        Returns:
+            Number of queued jobs dropped.
+        """
+        if not session_id:
+            return 0
+        timer = self._debounce_timers.pop(session_id, None)
+        if timer is not None and not timer.done():
+            timer.cancel()
+        self._debounce_last_ts.pop(session_id, None)
+        self._compaction_hints.pop(session_id, None)
+
+        dropped = 0
+        for role, queue in self._role_queues.items():
+            taken: list[ConsolidatorJob] = []
+            while True:
+                try:
+                    taken.append(queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            kept = [j for j in taken if not (isinstance(j, EpisodeExtract) and j.session_id == session_id)]
+            # Re-put survivors (preserving order) *before* balancing the gets with task_done, so the unfinished
+            # counter never transiently hits zero and wakes `drain()` while work is still queued.
+            for job in kept:
+                queue.put_nowait(job)
+            for _ in taken:
+                queue.task_done()
+            removed = len(taken) - len(kept)
+            if removed:
+                dropped += removed
+                for job in taken:
+                    if isinstance(job, EpisodeExtract) and job.session_id == session_id:
+                        self._queued_keys.discard(self._job_key(job))
+                self._queued_keys.discard(("extract_bypass", role, session_id))
+                logger.debug(f"Dropped queued memory jobs for deleted session '{session_id}' (role '{role}').")
+        return dropped
 
     async def _delayed_signal_enqueue(self, role: str, session_id: str, delay: float) -> None:
         try:
@@ -1274,10 +1336,14 @@ class MemoryConsolidator:
         sess_obj, all_tool_calls = await self._run_on_worker(
             lambda: (self.sync_db.get_session(session_id), self.sync_db.get_session_tool_calls(session_id))
         )
+        if sess_obj is None:
+            # The session was deleted (e.g. a close-triggered job racing `delete_session`): skip the LLM call
+            # instead of spending tokens and then failing the `session_digests` FK on write.
+            return ExtractionOutcome(status="session_deleted")
         sessions_dir = cfg.workspace.sessions_dir
         if not os.path.isabs(sessions_dir) and cfg.agent_working_dir:
             sessions_dir = os.path.join(cfg.agent_working_dir, sessions_dir)
-        ws_name = sess_obj.workspace_name if sess_obj is not None else session_id
+        ws_name = sess_obj.workspace_name
         staging_dir = os.path.join(sessions_dir, ws_name)
 
         first_key = (float(msgs[0].timestamp), msgs[0].id)
@@ -1458,7 +1524,11 @@ class MemoryConsolidator:
                     logger.warning(f"memory_mode_provider failed for session '{session_id}': {mode_err}")
             proposal_store = self._get_proposal_store()
 
-            def _apply_and_persist() -> tuple[MemoryWriteResult, dict[str, Any] | None]:
+            def _apply_and_persist() -> tuple[MemoryWriteResult, dict[str, Any] | None] | None:
+                # The session may have been deleted while the extraction LLM call was in flight: write nothing
+                # (memory files, proposals, digest FK rows) for a session that no longer exists.
+                if self.sync_db.get_session(session_id) is None:
+                    return None
                 wr = (
                     MemoryWriter.apply_ops(
                         auto_ops,
@@ -1512,7 +1582,11 @@ class MemoryConsolidator:
                     )
                 return wr, staged
 
-            write_res, staged_proposal = await self._run_on_worker(_apply_and_persist)
+            persisted = await self._run_on_worker(_apply_and_persist)
+            if persisted is None:
+                logger.info(f"EpisodeExtract: session '{session_id}' was deleted mid-extraction; discarding results.")
+                return ExtractionOutcome(status="session_deleted", input_tokens=in_tok, output_tokens=out_tok)
+            write_res, staged_proposal = persisted
             self._compaction_hints.pop(session_id, None)
             if staged_proposal is not None:
                 await proposal_store.notify(staged_proposal)

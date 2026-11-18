@@ -816,7 +816,12 @@ class Chatbot(ABC):
 
         compressor = HistoryCompressor(self.gateway.db)
         cfg = self.gateway.context.config
-        llm = get_llm(provider=cfg.agent.context_llm or cfg.agent.llm, config=cfg, use_context_compression=True)
+        # Prefer the context's cached LLM instances (same as TurnExecutor) instead of building a new client per call.
+        context_get_llm = getattr(self.gateway.context, "get_llm", None)
+        if callable(context_get_llm):
+            llm = context_get_llm(use_context_compression=True)
+        else:
+            llm = get_llm(provider=cfg.agent.context_llm or cfg.agent.llm, config=cfg, use_context_compression=True)
         staging_dir = self.get_session_staging_dir(session.workspace_name)
 
         stripped = instructions.strip()

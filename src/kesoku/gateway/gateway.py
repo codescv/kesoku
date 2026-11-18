@@ -373,9 +373,18 @@ class Gateway:
 
         if self.agent:
             try:
-                await self.agent.stop_session_worker(session_id, immediate=True)
+                # Skip the close-triggered memory extraction: the session rows are about to be deleted.
+                await self.agent.stop_session_worker(session_id, immediate=True, skip_memory_close=True)
             except Exception as e:
                 logger.warning(f"Failed to stop session worker in delete_session: {e}")
+
+        consolidator = getattr(self.context, "memory_consolidator", None)
+        cancel_session = getattr(consolidator, "cancel_session", None)
+        if callable(cancel_session):
+            try:
+                cancel_session(session_id)
+            except Exception as e:
+                logger.warning(f"Failed to cancel pending memory jobs in delete_session: {e}")
 
         try:
             from kesoku.agent.turn_executor import discard_session_cache_state

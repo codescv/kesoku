@@ -104,7 +104,7 @@ def test_log_llm_turn_serialization(temp_staging_dir: str) -> None:
     )
 
     # Verify file creation
-    log_path = os.path.join(temp_staging_dir, "llm-turn-1.log.yaml")
+    log_path = os.path.join(temp_staging_dir, ".kesoku_logs", "llm-turn-1.log.yaml")
     assert os.path.exists(log_path)
 
     # Verify file content

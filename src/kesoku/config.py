@@ -17,6 +17,7 @@ import tomli_w
 from pydantic import BaseModel, Field, model_validator
 
 from kesoku.logger import setup_logger
+from kesoku.utils.permissions import secure_file_permissions
 
 logger = setup_logger(__name__)
 
@@ -1054,6 +1055,8 @@ def save_config(cfg: KesokuConfig, config_path: str) -> None:
     try:
         with open(config_path, "wb") as f:
             tomli_w.dump(data, f)
+        # config.toml carries bot tokens / API keys: keep it owner-only (best effort).
+        secure_file_permissions(config_path)
         logger.info(f"Configuration saved successfully to {config_path}")
     except Exception as e:
         logger.error(f"Failed to save configuration to {config_path}: {e}")
@@ -1076,6 +1079,7 @@ def init_config(config_path: str, overwrite: bool = False) -> None:
             return
         backup_path = f"{config_path}.bak.{int(time.time())}"
         shutil.copy(config_path, backup_path)
+        secure_file_permissions(backup_path)
         logger.info(f"Created backup of existing configuration at {backup_path}")
 
     base_dir = os.path.dirname(os.path.abspath(config_path))
@@ -1087,6 +1091,7 @@ def init_config(config_path: str, overwrite: bool = False) -> None:
         template_bytes = ref.read_bytes()
         with open(config_path, "wb") as f:
             f.write(template_bytes)
+        secure_file_permissions(config_path)
         logger.info(f"Configuration template copied successfully to {config_path}")
     except Exception as e:
         logger.error(f"Failed to copy configuration template to {config_path}: {e}")

@@ -1,6 +1,7 @@
 """Turn execution logic for the Kesoku Agent."""
 
 import asyncio
+import dataclasses
 import datetime
 import fnmatch
 import inspect
@@ -10,7 +11,7 @@ import re
 import time
 import traceback
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import tzlocal
@@ -68,14 +69,16 @@ from kesoku.constants import REPLY_MARKER, MessageRole, MessageStatus, MessageTy
 from kesoku.db import Message
 from kesoku.gateway.gateway import Gateway
 from kesoku.logger import setup_logger
+from kesoku.utils.tasks import spawn_background, track_task
 
 logger = setup_logger(__name__)
 MAX_CHATBOT_ERROR_MESSAGE_LENGTH = 500
 _REFERENTIAL_QUERY_RE = re.compile(r"刚才|之前|上次|那个|另一个|继续|下一")
 # Number of silent re-generations attempted when the model returns no content at all
-# (e.g. Vertex safety filtering yields finish_reason=SAFETY with zero parts) before
-# falling back to nudging the model with an explicit system message.
-EMPTY_RESPONSE_RETRIES = 2
+# (e.g. Vertex safety filtering yields finish_reason=SAFETY or MALFORMED_RESPONSE with zero parts) before
+# falling back to nudging the model with an explicit system message. Each attempt re-sends the full (mostly
+# uncached) prompt, so keep this small: 1 retry + 1 nudge = at most 3 calls.
+EMPTY_RESPONSE_RETRIES = 1
 # Max characters kept per Agent line inside auto-retrieved historical dialogue snippets.
 MAX_RAG_AGENT_LINE_CHARS = 400
 # Context block name used to inject opaque per-message client preferences (`metadata.mode_prefs`).
@@ -280,10 +283,22 @@ class ExplicitCacheEntry:
 
 
 _session_cache_locks: dict[str, asyncio.Lock] = {}
+# Soft cap on tracked per-session locks; idle (unlocked) locks of other sessions are evicted beyond it.
+_SESSION_CACHE_LOCKS_MAX = 256
+
+
+def _prune_session_cache_locks(keep_session_id: str) -> None:
+    """Evict idle locks of other sessions once the registry exceeds `_SESSION_CACHE_LOCKS_MAX` entries."""
+    if len(_session_cache_locks) <= _SESSION_CACHE_LOCKS_MAX:
+        return
+    for sid, lk in list(_session_cache_locks.items()):
+        if sid != keep_session_id and not lk.locked():
+            _session_cache_locks.pop(sid, None)
 
 
 def _get_session_cache_lock(session_id: str) -> asyncio.Lock:
     """Return a per-session asyncio.Lock serializing explicit cache state reads and mutations."""
+    _prune_session_cache_locks(session_id)
     lock = _session_cache_locks.get(session_id)
     if lock is not None and not lock.locked():
         bound_loop = getattr(lock, "_loop", None)
@@ -539,6 +554,45 @@ class _StreamPreviewPublisher:
             await self._publish(None)
 
 
+@dataclass
+class _TurnState:
+    """Single source of truth for TurnExecutor's per-turn mutable fields and their defaults.
+
+    `TurnExecutor._reset_turn_state()` applies these defaults as attributes (same names) at turn start and when the
+    turn pivots to a newer user message, so a new per-turn field only needs to be declared here to be reset at both
+    places.
+    """
+
+    _turn_tools_used: set[str] = field(default_factory=set)
+    _turn_writes: bool = False
+    _stop_reminder_fired: bool = False
+    _hook_retries: dict[str, int] = field(default_factory=dict)
+    _subagent_calls: int = 0
+    _subagent_tokens: int = 0
+    # Per-turn frozen state snapshot (running_jobs / staging_artifacts context blocks). It must be byte-identical
+    # across all LLM calls of a turn so the implicit prefix cache keeps hitting.
+    _snapshot_cache: list[ContextEntry] | None = None
+    # Per-turn frozen cross-session memory blocks: (pinned_block, recent_sessions_block, ambient_block).
+    # Reused across R1..RN (never reset on mid-turn memory writes).
+    _memory_snapshot: tuple[str, str, str] | None = None
+    _memory_pre_turn_ms: float = 0.0
+    _pinned_chars: int = 0
+    _recent_sessions_chars: int = 0
+    _recent_sessions_rendered: bool = False
+    _last_turn_prompt_blocked: bool = False
+    _turn_rounds: list[dict[str, Any]] = field(default_factory=list)
+    _turn_used_explicit_cache: bool = False
+    _turn_model_name: str = ""
+    _turn_thinking_level: str | None = None
+    _turn_stream: bool = False
+    _turn_cache_mode: str = "disabled"
+    _last_round_tool_errors: int = 0
+    # Opt-in reply channel marker for the current turn's main-agent final rounds (None = off).
+    _turn_reply_marker: str | None = None
+    # User-message count of the session, queried once per turn (not per round / metrics build).
+    _turn_count_cache: int | None = None
+
+
 class TurnExecutor:
     """Orchestrates conversational turn execution, including LLM inference, thought logging, and tool calling."""
 
@@ -564,23 +618,31 @@ class TurnExecutor:
         self.tool_runner = tool_runner
         self.turn_logger = turn_logger
         self.context = context or getattr(gateway, "context", None) or KesokuContext()
-        self._turn_tools_used: set[str] = set()
-        self._turn_writes = False
-        self._stop_reminder_fired = False
-        self._hook_retries: dict[str, int] = {}
-        self._subagent_calls = 0
-        self._subagent_tokens = 0
+        # Per-turn mutable state (declared once in `_TurnState`, reset at turn start and on pivot).
+        self._turn_tools_used: set[str]
+        self._turn_writes: bool
+        self._stop_reminder_fired: bool
+        self._hook_retries: dict[str, int]
+        self._subagent_calls: int
+        self._subagent_tokens: int
+        self._snapshot_cache: list[ContextEntry] | None
+        self._memory_snapshot: tuple[str, str, str] | None
+        self._memory_pre_turn_ms: float
+        self._pinned_chars: int
+        self._recent_sessions_chars: int
+        self._recent_sessions_rendered: bool
+        self._last_turn_prompt_blocked: bool
+        self._turn_rounds: list[dict[str, Any]]
+        self._turn_used_explicit_cache: bool
+        self._turn_model_name: str
+        self._turn_thinking_level: str | None
+        self._turn_stream: bool
+        self._turn_cache_mode: str
+        self._last_round_tool_errors: int
+        self._turn_reply_marker: str | None
+        self._turn_count_cache: int | None
+        self._reset_turn_state()
         self._repo_rules_manager: RepoRulesManager | None = None
-        # Per-turn frozen state snapshot (running_jobs / staging_artifacts context blocks). It must be byte-identical
-        # across all LLM calls of a turn so the implicit prefix cache keeps hitting; reset on pivot.
-        self._snapshot_cache: list[ContextEntry] | None = None
-        # Per-turn frozen cross-session memory blocks: (pinned_block, recent_sessions_block, ambient_block).
-        # Reused across R1..RN (never reset on mid-turn memory writes); reset only on pivot (H1-dev).
-        self._memory_snapshot: tuple[str, str, str] | None = None
-        self._memory_pre_turn_ms: float = 0.0
-        self._pinned_chars: int = 0
-        self._recent_sessions_chars: int = 0
-        self._recent_sessions_rendered: bool = False
         self._turn_context_policy: str = "full"
         self._turn_context_policy_msg_id: str | None = None
         # Authoritative override resolved once per turn (keyed by the turn's user message id).
@@ -591,17 +653,27 @@ class TurnExecutor:
         self._turn_start_digest_task: asyncio.Task[None] | None = None
         self._has_summaries: bool | None = None
         self._compaction_pending: bool = False
-        self._last_turn_prompt_blocked: bool = False
         self._bg_compaction_tasks: set[asyncio.Task[Any]] = set()
-        self._turn_rounds: list[dict[str, Any]] = []
-        self._turn_used_explicit_cache: bool = False
-        self._turn_model_name: str = ""
-        self._turn_thinking_level: str | None = None
-        self._turn_stream: bool = False
-        self._turn_cache_mode: str = "disabled"
-        self._last_round_tool_errors: int = 0
-        # Opt-in reply channel marker for the current turn's main-agent final rounds (None = off).
-        self._turn_reply_marker: str | None = None
+
+    def _schedule_thought_signature_prune(self, current_msg: Message) -> None:
+        """Drop persisted thought signatures of completed turns in the background (storage-only optimization).
+
+        `prepare_history_for_llm` already strips signatures from every turn except the latest one, so rows older than
+        the message starting this turn never need them again; they made up ~70 MB of `messages.metadata`.
+        """
+        clear_fn = getattr(self.context.db, "clear_thought_signatures_before", None)
+        if not inspect.iscoroutinefunction(clear_fn):
+            return
+        before_ts = float(getattr(current_msg, "timestamp", 0.0) or 0.0)
+        if before_ts <= 0:
+            return
+        spawn_background(clear_fn(self.session_id, before_ts), name=f"prune_thought_signatures:{self.session_id}")
+
+    def _reset_turn_state(self) -> None:
+        """Reset every per-turn field declared in `_TurnState` to its default (turn start and pivot)."""
+        for f in dataclasses.fields(_TurnState):
+            value = f.default_factory() if f.default_factory is not dataclasses.MISSING else f.default
+            setattr(self, f.name, value)
 
     @staticmethod
     def _resolve_cache_mode(cfg: KesokuConfig, llm: BaseLLM) -> str:
@@ -680,12 +752,17 @@ class TurnExecutor:
             pass
 
     async def _get_session_turns_count(self) -> int:
-        """Retrieve the count of user turns in the current session.
+        """Retrieve the count of user turns in the current session (queried once per turn, then cached).
+
+        The cache lives in `_TurnState` and is cleared at turn start and on pivot, so the COUNT(*) query runs once
+        per turn instead of at turn start, on every round (`_is_bootstrap_turn`) and in `_build_turn_metrics`.
 
         Returns:
             The count of user messages.
         """
-        return await self.context.db.get_session_turns_count(self.session_id)
+        if self._turn_count_cache is None:
+            self._turn_count_cache = await self.context.db.get_session_turns_count(self.session_id)
+        return self._turn_count_cache
 
     async def _is_bootstrap_turn(self, history: list[Message], current_msg: Message) -> bool:
         """Determine if this is a Bootstrap Turn (first turn of session or idle > 30 mins)."""
@@ -939,21 +1016,13 @@ class TurnExecutor:
         last_context_tokens = 0
         last_cached_tokens = 0
 
-        self._turn_rounds = []
-        self._turn_used_explicit_cache = False
-        self._turn_model_name = ""
-        self._turn_thinking_level = None
-        self._turn_stream = False
-        self._turn_cache_mode = "disabled"
-        self._last_round_tool_errors = 0
-        self._turn_reply_marker = None
+        self._reset_turn_state()
         last_round_used_explicit_cache = False
         last_round_generate_est_tokens = 0
 
         empty_attempts = 0
         active_publisher: _StreamPreviewPublisher | None = None
         completed_final_response = False
-        self._last_turn_prompt_blocked = False
         last_raw_history: list[Message] | None = None
         last_system_prompt: str | None = None
         last_tools_list: list[Any] = []
@@ -965,17 +1034,25 @@ class TurnExecutor:
             if not isinstance(sync_db, DatabaseManager) or is_excluded_from_memory(msg):
                 return
 
+            prev_task = self._turn_start_digest_task
+
             async def _touch() -> None:
+                # On pivot, serialize behind the superseded message's touch so an older write can never land last.
+                if prev_task is not None and not prev_task.done():
+                    await asyncio.gather(prev_task, return_exceptions=True)
                 sess_obj = await self.context.db.get_session(self.session_id)
                 role_str = await self._resolve_active_role(msg)
                 await DigestUpdater.touch_at_turn_start(self.context.db, sess_obj, role_str, msg)
 
-            self._turn_start_digest_task = asyncio.create_task(_touch())
+            self._turn_start_digest_task = track_task(
+                asyncio.create_task(_touch(), name=f"turn_start_digest:{self.session_id}")
+            )
 
         try:
             self.tool_runner.tool_context.user_turn = await self._get_session_turns_count()
             self.tool_runner.tool_context.supports_deferred_media = self._resolve_supports_deferred_media(chatbot_id)
             _schedule_turn_start_digest(current_msg)
+            self._schedule_thought_signature_prune(current_msg)
             while worker.running:
                 # Check-in before atomic action (Thought Interruption)
                 prev_msg_id = current_msg.id
@@ -987,35 +1064,22 @@ class TurnExecutor:
                     )
                     chatbot_id = current_msg.chatbot_id
                     channel_id = current_msg.channel_id
+                    # All `_TurnState` fields (snapshots, memory blocks, tool/hook trackers, round telemetry,
+                    # cached turn count) are reset in one place.
+                    self._reset_turn_state()
                     self.tool_runner.tool_context.original_msg_id = current_msg.id
                     self.tool_runner.tool_context.user_turn = await self._get_session_turns_count()
                     self.tool_runner.tool_context.supports_deferred_media = self._resolve_supports_deferred_media(
                         chatbot_id
                     )
-                    self._snapshot_cache = None
-                    self._memory_snapshot = None
-                    self._memory_pre_turn_ms = 0.0
-                    self._pinned_chars = 0
-                    self._recent_sessions_chars = 0
-                    self._recent_sessions_rendered = False
                     _schedule_turn_start_digest(current_msg)
-                    self._turn_tools_used.clear()
-                    self._turn_writes = False
-                    self._stop_reminder_fired = False
-                    self._hook_retries.clear()
-                    self._subagent_calls = 0
-                    self._subagent_tokens = 0
                     self.tool_runner.tool_context.subagent_llm_calls = 0
                     self.tool_runner.tool_context.subagent_tokens = 0
                     empty_attempts = 0
-                    self._last_turn_prompt_blocked = False
                     turn_tool_calls = 0
                     turn_tokens = 0
                     last_context_tokens = 0
                     last_cached_tokens = 0
-                    self._turn_rounds.clear()
-                    self._turn_used_explicit_cache = False
-                    self._last_round_tool_errors = 0
                     last_round_used_explicit_cache = False
                     last_round_generate_est_tokens = 0
                     start_time = time.time()
@@ -1139,7 +1203,7 @@ class TurnExecutor:
                                 cached_messages_len = entry.cached_messages_len
 
                 # Partition history if using an active explicit context cache for this model
-                logger.info(
+                logger.debug(
                     f"Context caching debug: model={model_key}, active_cache_name={active_cache_name}, "
                     f"llm_history_len={len(llm_history)}, cached_messages_len={cached_messages_len}"
                 )
@@ -1266,10 +1330,10 @@ class TurnExecutor:
                 last_round_used_explicit_cache = used_round_explicit_cache
                 last_round_generate_est_tokens = estimate_messages_tokens_local(generate_history)
 
-                # Log the raw LLM turn using TurnLogger if enabled
+                # Log the raw LLM turn using TurnLogger if enabled (payload snapshotted here, written off-loop)
                 if cfg.agent.raw_llm_logs and self.turn_logger:
                     try:
-                        self.turn_logger.log_llm_turn(
+                        await self.turn_logger.alog_llm_turn(
                             llm_provider=llm.__class__.__name__,
                             history=generate_history,
                             tools=tools_list,
@@ -1283,7 +1347,7 @@ class TurnExecutor:
                             },
                         )
                     except Exception as le:
-                        logger.error(f"Failed to log LLM turn: {le}", exc_info=True)
+                        logger.error(f"Failed to log LLM turn: {le!r}")
 
                 # Accumulate token & per-round metrics
                 last_context_tokens = res.prompt_tokens or 0
@@ -2627,7 +2691,10 @@ class TurnExecutor:
 
             # Schedule worker stop task in the background so the current execution exits cleanly first
             if self.gateway.agent:
-                asyncio.create_task(self.gateway.agent.stop_session_worker(self.session_id, immediate=True))
+                spawn_background(
+                    self.gateway.agent.stop_session_worker(self.session_id, immediate=True),
+                    name=f"stop_worker:{self.session_id}",
+                )
             return False
 
         return True

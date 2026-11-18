@@ -26,15 +26,22 @@ from kesoku.db import Message
 from kesoku.gateway.chatbot.deferred_media import safe_unlink
 from kesoku.utils.async_fs import (
     async_exists,
+    async_makedirs,
     async_read_text_file,
     async_write_text_file,
 )
 from kesoku.utils.path import PathResolver
+from kesoku.utils.tasks import spawn_background
 from kesoku.utils.text import truncate_middle
 
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_OUTPUT_LENGTH = 30000
+
+# New background-job stdout/stderr logs live in this hidden staging subdirectory so they don't flood the
+# staging root (`os.listdir` cost, artifact listings). Readers always use the paths stored in the job registry,
+# so logs of jobs started before this change (staging root) keep working.
+SHELL_LOGS_DIRNAME = ".kesoku_logs"
 
 
 def _process_group_id(pid: int) -> int:
@@ -537,8 +544,10 @@ async def run_shell_command(
     log_filename_stderr = f"background_{job_id}.stderr"
     folder_name = context.session_workspace
     session_staging_dir = PathResolver.get_session_staging_dir(folder_name)
-    log_filepath_stdout = os.path.join(session_staging_dir, log_filename_stdout)
-    log_filepath_stderr = os.path.join(session_staging_dir, log_filename_stderr)
+    logs_dir = os.path.join(session_staging_dir, SHELL_LOGS_DIRNAME)
+    await async_makedirs(logs_dir)
+    log_filepath_stdout = os.path.join(logs_dir, log_filename_stdout)
+    log_filepath_stderr = os.path.join(logs_dir, log_filename_stderr)
 
     logger.info(f"Executing shell command in '{exec_dir}': {command}")
 
@@ -634,8 +643,8 @@ async def run_shell_command(
                     stderr_filepath=log_filepath_stderr,
                 )
 
-            # Spin off background monitor task
-            asyncio.create_task(
+            # Spin off background monitor task (strongly referenced until it finishes)
+            spawn_background(
                 monitor_background_job(
                     job_id=job_id,
                     proc=proc,
@@ -645,7 +654,8 @@ async def run_shell_command(
                     original_msg_id=context.original_msg_id or "",
                     stdout_task=stdout_task,
                     stderr_task=stderr_task,
-                )
+                ),
+                name=f"monitor_background_job:{job_id}",
             )
 
             return (

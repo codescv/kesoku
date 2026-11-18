@@ -1,9 +1,18 @@
-"""Handles logging raw LLM turn inputs, outputs, and metrics to session staging directory."""
+"""Handles logging raw LLM turn inputs, outputs, and metrics to session staging directory.
 
+Logs are written as `llm-turn-<N>.log.yaml` under `$STAGING_DIR/.kesoku_logs/` (legacy logs in the staging root are
+still honoured when computing the next index). The heavy part (YAML serialization + file write) runs off the event
+loop via `alog_llm_turn`; the log payload is snapshotted on the calling thread first so later in-place mutations of
+`Message` objects can never race with the background writer.
+"""
+
+import asyncio
 import datetime
 import inspect
+import json
 import os
 import re
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -15,6 +24,43 @@ from kesoku.db import Message
 from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+# Subdirectory (inside a session staging dir) holding kesoku-internal logs, kept out of the staging root so
+# `os.listdir`-based paths (artifact listings, index scans) stay cheap and the agent's workspace stays clean.
+INTERNAL_LOGS_DIRNAME = ".kesoku_logs"
+
+_LLM_TURN_RE = re.compile(r"llm-turn-(\d+)\.log\.yaml")
+
+try:  # LibYAML-backed dumper is ~8x faster than the pure-Python SafeDumper.
+    _YamlDumper: Any = yaml.CSafeDumper
+except AttributeError:  # pragma: no cover - depends on the PyYAML build
+    _YamlDumper = yaml.SafeDumper
+
+# Process-wide next-index reservations keyed by log directory: the main worker and sub-agents each create their own
+# TurnLogger for the same session directory, so the counter must be shared to avoid index collisions.
+_NEXT_IDX: dict[str, int] = {}
+_NEXT_IDX_LOCK = threading.Lock()
+
+
+def internal_logs_dir(session_staging_dir: str) -> str:
+    """Return the kesoku-internal log directory for `session_staging_dir`."""
+    return os.path.join(session_staging_dir, INTERNAL_LOGS_DIRNAME)
+
+
+def _scan_max_llm_turn_idx(directory: str) -> int:
+    """Return the largest `llm-turn-<N>` index found directly inside `directory` (0 if none or missing)."""
+    max_idx = 0
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                match = _LLM_TURN_RE.match(entry.name)
+                if match:
+                    max_idx = max(max_idx, int(match.group(1)))
+    except FileNotFoundError:
+        return 0
+    except Exception as e:
+        logger.warning(f"Error scanning {directory} for turn logs: {e}")
+    return max_idx
 
 
 class TurnLogger:
@@ -30,28 +76,36 @@ class TurnLogger:
         self.session_id = session_id
         self.session_staging_dir = session_staging_dir
 
+    @property
+    def logs_dir(self) -> str:
+        """Directory receiving new `llm-turn-*.log.yaml` files."""
+        return internal_logs_dir(self.session_staging_dir)
+
     def _get_next_llm_turn_idx(self) -> int:
-        """Determine the next turn index by scanning the staging directory for existing log.yaml files.
+        """Determine the next turn index by scanning the staging root and the internal logs directory.
 
         Returns:
             The next turn index starting from 1.
         """
         if not os.path.exists(self.session_staging_dir):
             return 1
-        max_idx = 0
-        try:
-            # Scan directory and find the maximum existing turn index
-            for filename in os.listdir(self.session_staging_dir):
-                match = re.match(r"llm-turn-(\d+)\.log\.yaml", filename)
-                if match:
-                    idx = int(match.group(1))
-                    if idx > max_idx:
-                        max_idx = idx
-        except Exception as e:
-            logger.warning(f"Error scanning staging directory for turn logs: {e}")
-        return max_idx + 1
+        return max(_scan_max_llm_turn_idx(self.session_staging_dir), _scan_max_llm_turn_idx(self.logs_dir)) + 1
 
-    def log_llm_turn(
+    def _idx_key(self) -> str:
+        """Key of this logger's directory in the process-wide index registry."""
+        return os.path.abspath(self.session_staging_dir)
+
+    def _reserve_llm_turn_idx(self) -> int:
+        """Reserve the next turn index, scanning the filesystem only once per directory per process."""
+        key = self._idx_key()
+        with _NEXT_IDX_LOCK:
+            idx = _NEXT_IDX.get(key)
+            if idx is None:
+                idx = self._get_next_llm_turn_idx()
+            _NEXT_IDX[key] = idx + 1
+            return idx
+
+    def build_log_data(
         self,
         llm_provider: str,
         history: list[Message],
@@ -59,23 +113,9 @@ class TurnLogger:
         response: LLMResponse,
         system_prompt: str | None = None,
         extra_metrics: dict[str, Any] | None = None,
-    ) -> None:
-        """Log the raw LLM turn inputs and outputs to a YAML file in the session staging directory.
-
-        Args:
-            llm_provider: Name of the LLM provider.
-            history: Conversational history sent to the LLM.
-            tools: List of tools passed to the LLM.
-            response: LLMResponse object returned by the LLM.
-            system_prompt: Optional global system prompt.
-            extra_metrics: Optional dictionary of additional turn metrics (such as memory injection stats).
-        """
-        os.makedirs(self.session_staging_dir, exist_ok=True)
-        idx = self._get_next_llm_turn_idx()
-        log_filename = f"llm-turn-{idx}.log.yaml"
-        log_filepath = os.path.join(self.session_staging_dir, log_filename)
-
-        # Format history messages into dict representation
+        idx: int = 0,
+    ) -> dict[str, Any]:
+        """Build an independent, JSON-safe snapshot of the log payload (deep-copied via a JSON round-trip)."""
         formatted_history = []
         if system_prompt:
             formatted_history.append(
@@ -107,50 +147,40 @@ class TurnLogger:
                 }
             )
 
-        # Format tools with signature details
         formatted_tools = []
         for func in tools:
             doc = inspect.getdoc(func) or ""
             description = doc.split("\n\n")[0] if doc else ""
             sig = inspect.signature(func)
             parameters = {p_name: str(p.annotation) for p_name, p in sig.parameters.items() if p_name != "context"}
-            formatted_tools.append(
-                {
-                    "name": func.__name__,
-                    "description": description,
-                    "parameters": parameters,
-                }
-            )
+            formatted_tools.append({"name": func.__name__, "description": description, "parameters": parameters})
 
-        # Format response tool calls
-        formatted_tool_calls = []
-        for tc in response.tool_calls:
-            formatted_tool_calls.append(
-                {
-                    "name": tc.name,
-                    "arguments": tc.arguments,
-                    "thought_signature": tc.thought_signature,
-                    "tool_call_id": tc.tool_call_id,
-                }
-            )
+        formatted_tool_calls = [
+            {
+                "name": tc.name,
+                "arguments": tc.arguments,
+                "thought_signature": tc.thought_signature,
+                "tool_call_id": tc.tool_call_id,
+            }
+            for tc in response.tool_calls
+        ]
 
-        now = datetime.datetime.fromtimestamp(time.time(), datetime.UTC)
-
+        now_ts = time.time()
         log_data = {
             "metadata": {
-                "timestamp": time.time(),
-                "timestamp_iso": now.isoformat(),
+                "timestamp": now_ts,
+                "timestamp_iso": datetime.datetime.fromtimestamp(now_ts, datetime.UTC).isoformat(),
                 "session_id": self.session_id,
                 "turn_index": idx,
                 "llm_provider": llm_provider,
             },
             "history": formatted_history,
             "tools": formatted_tools,
+            # `raw_response` (a multi-KB SDK repr duplicating content/thought/usage) is intentionally not logged.
             "response": {
                 "content": response.content,
                 "thought": response.thought,
                 "tool_calls": formatted_tool_calls,
-                "raw_response": response.raw_response,
                 "metrics": {
                     "prompt_tokens": response.prompt_tokens,
                     "candidates_tokens": response.candidates_tokens,
@@ -160,9 +190,61 @@ class TurnLogger:
                 },
             },
         }
+        # C-accelerated JSON round-trip: a cheap deep copy that also coerces non-JSON values (enums, objects) to str.
+        return json.loads(json.dumps(log_data, ensure_ascii=False, default=str))
 
-        # Write to target YAML file
+    def _write_log(self, log_data: dict[str, Any], idx: int) -> str:
+        """Serialize `log_data` to `llm-turn-<idx>.log.yaml` (blocking; call from a worker thread)."""
+        logs_dir = self.logs_dir
+        os.makedirs(logs_dir, exist_ok=True)
+        log_filepath = os.path.join(logs_dir, f"llm-turn-{idx}.log.yaml")
         with open(log_filepath, "w", encoding="utf-8") as f:
-            yaml.safe_dump(log_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+            yaml.dump(
+                log_data, f, Dumper=_YamlDumper, allow_unicode=True, default_flow_style=False, sort_keys=False
+            )
+        logger.debug(f"Logged raw LLM turn {idx} to {log_filepath}")
+        return log_filepath
 
-        logger.info(f"Logged raw LLM turn {idx} to {log_filepath}")
+    def log_llm_turn(
+        self,
+        llm_provider: str,
+        history: list[Message],
+        tools: list[Callable[..., Any]],
+        response: LLMResponse,
+        system_prompt: str | None = None,
+        extra_metrics: dict[str, Any] | None = None,
+    ) -> str:
+        """Synchronously log the raw LLM turn inputs and outputs to a YAML file (blocking).
+
+        Prefer `alog_llm_turn` from async code so serialization and disk I/O stay off the event loop.
+
+        Returns:
+            Path of the written log file.
+        """
+        idx = self._reserve_llm_turn_idx()
+        log_data = self.build_log_data(llm_provider, history, tools, response, system_prompt, extra_metrics, idx)
+        return self._write_log(log_data, idx)
+
+    async def alog_llm_turn(
+        self,
+        llm_provider: str,
+        history: list[Message],
+        tools: list[Callable[..., Any]],
+        response: LLMResponse,
+        system_prompt: str | None = None,
+        extra_metrics: dict[str, Any] | None = None,
+    ) -> str:
+        """Log the raw LLM turn with the snapshot built on the caller's thread and the write offloaded to a thread.
+
+        Returns:
+            Path of the written log file.
+        """
+        # Snapshot first (synchronously), so no later mutation of the live messages can leak into the log.
+        log_data = self.build_log_data(llm_provider, history, tools, response, system_prompt, extra_metrics, 0)
+        if self._idx_key() in _NEXT_IDX:
+            idx = self._reserve_llm_turn_idx()
+        else:
+            # First log for this directory in this process: the index scan may list a large legacy staging dir.
+            idx = await asyncio.to_thread(self._reserve_llm_turn_idx)
+        log_data["metadata"]["turn_index"] = idx
+        return await asyncio.to_thread(self._write_log, log_data, idx)

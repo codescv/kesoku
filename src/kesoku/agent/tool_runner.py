@@ -2,6 +2,7 @@
 
 import asyncio
 import inspect
+import time
 import typing
 from collections.abc import Callable
 from typing import Any
@@ -12,6 +13,11 @@ from kesoku.db import Message
 from kesoku.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+
+def _elapsed_ms(started_at: float) -> int:
+    """Milliseconds elapsed since a `time.perf_counter()` reading."""
+    return int(round((time.perf_counter() - started_at) * 1000))
 
 
 def _admits_none(annotation: Any) -> bool:
@@ -80,6 +86,9 @@ class ToolRunner:
                 },
             )
 
+        # Per-tool wall clock around the tool function itself (NEW-2): concurrent tools in one batch would
+        # otherwise all inherit the slowest tool's batch timestamp.
+        started_at: float | None = None
         try:
             tool_func = self.tool_registry.get_tool(call.name)
             call_kwargs = dict(call.arguments)
@@ -149,12 +158,14 @@ class ToolRunner:
                 call_kwargs["context"] = self.tool_context
 
             # Atomic tool execution
+            started_at = time.perf_counter()
             if inspect.iscoroutinefunction(tool_func):
                 # a function defined with async
                 result = await tool_func(**call_kwargs)
             else:
                 # a normal function
                 result = await asyncio.to_thread(tool_func, **call_kwargs)
+            duration_ms = _elapsed_ms(started_at)
             return Message(
                 session_id=tc_msg.session_id,
                 chatbot_id=tc_msg.chatbot_id,
@@ -165,10 +176,13 @@ class ToolRunner:
                 content=f"Tool `{call.name}` returned:\n```\n{result}\n```",
                 status=MessageStatus.RESPONDED,
                 parent_id=tc_msg.id,
-                metadata={"tool_name": call.name, "tool_result": str(result)},
+                metadata={"tool_name": call.name, "tool_result": str(result), "duration_ms": duration_ms},
             )
         except Exception as te:
             logger.error(f"Error executing tool '{call.name}': {te}")
+            error_meta: dict[str, Any] = {"tool_name": call.name, "tool_error": str(te)}
+            if started_at is not None:
+                error_meta["duration_ms"] = _elapsed_ms(started_at)
             return Message(
                 session_id=tc_msg.session_id,
                 chatbot_id=tc_msg.chatbot_id,
@@ -179,5 +193,5 @@ class ToolRunner:
                 content=f"Tool `{call.name}` error:\n```\n{te}\n```",
                 status=MessageStatus.RESPONDED,
                 parent_id=tc_msg.id,
-                metadata={"tool_name": call.name, "tool_error": str(te)},
+                metadata=error_meta,
             )

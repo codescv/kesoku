@@ -1085,7 +1085,7 @@ async def test_llm_turn_logging(temp_db: str, tmp_path: Any) -> None:
         assert os.path.exists(staging_dir)
 
         # Verify that llm-turn-1.log.yaml exists
-        log_path = os.path.join(staging_dir, "llm-turn-1.log.yaml")
+        log_path = os.path.join(staging_dir, ".kesoku_logs", "llm-turn-1.log.yaml")
         assert os.path.exists(log_path)
 
         # Load and verify the contents of the log file
@@ -1172,7 +1172,7 @@ async def test_llm_turn_logging_disabled(temp_db: str, tmp_path: Any) -> None:
         staging_dir = os.path.join(cfg.workspace.sessions_dir, session.workspace_name)
 
         # The log file should NOT exist
-        log_path = os.path.join(staging_dir, "llm-turn-1.log.yaml")
+        log_path = os.path.join(staging_dir, ".kesoku_logs", "llm-turn-1.log.yaml")
         assert not os.path.exists(log_path)
 
 

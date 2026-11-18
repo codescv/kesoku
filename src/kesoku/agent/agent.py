@@ -25,6 +25,7 @@ from kesoku.utils.async_fs import (
     async_makedirs,
     async_realpath,
 )
+from kesoku.utils.tasks import spawn_background
 
 logger = setup_logger(__name__)
 
@@ -234,7 +235,9 @@ class SessionWorker:
             )
             # Trigger auto session naming asynchronously while worker is still running
             if self._running:
-                asyncio.create_task(self._auto_rename_session(session_staging_dir))
+                spawn_background(
+                    self._auto_rename_session(session_staging_dir), name=f"auto_rename:{self.session_id}"
+                )
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -361,12 +364,16 @@ class Agent:
             self._running = False
             await self.stop_all_workers(shutdown_consolidator=True)
 
-    async def stop_session_worker(self, session_id: str, immediate: bool = False) -> None:
+    async def stop_session_worker(
+        self, session_id: str, immediate: bool = False, skip_memory_close: bool = False
+    ) -> None:
         """Stop the active session worker for the given session ID.
 
         Args:
             session_id: Unique identifier for the session worker.
             immediate: Whether to stop the worker immediately.
+            skip_memory_close: Skip the T2 memory `notify_close` (episode extraction). Set when the session is
+                about to be deleted, so no extraction job races the row deletion (FK failures, wasted tokens).
         """
         try:
             await self.context.active_jobs.stop_all_for_session(session_id)
@@ -378,6 +385,8 @@ class Agent:
             await worker.stop(immediate=immediate)
             self.workers.pop(session_id, None)
 
+        if skip_memory_close:
+            return
         try:
             await self.consolidator.notify_close(session_id, reason="worker_stop")
         except Exception as e:
@@ -409,4 +418,4 @@ class Agent:
         if self._master_task and not self._master_task.done():
             self._master_task.cancel()
         else:
-            asyncio.create_task(self.stop_all_workers())
+            spawn_background(self.stop_all_workers(), name="agent.stop_all_workers")

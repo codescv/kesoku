@@ -530,6 +530,10 @@ class EngineLink:
         finally:
             if self._pending.get(req_id) is fut:
                 del self._pending[req_id]
+            # A teardown may fail `fut` while `sender()` is still awaiting (or after a timeout / cancellation);
+            # retrieve that exception so asyncio never logs "Future exception was never retrieved".
+            if fut.done() and not fut.cancelled():
+                fut.exception()
         if env.get("type") == "error":
             payload = env.get("payload") or {}
             raise ProtocolError(str(payload.get("code") or "INTERNAL"), str(payload.get("message") or ""))

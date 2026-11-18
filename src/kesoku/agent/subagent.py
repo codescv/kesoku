@@ -159,7 +159,7 @@ class SubagentRunner:
 
                 if turn_logger:
                     try:
-                        turn_logger.log_llm_turn(
+                        await turn_logger.alog_llm_turn(
                             llm_provider=f"{llm.__class__.__name__}/subagent",
                             history=list(messages),
                             tools=active_tools or [],

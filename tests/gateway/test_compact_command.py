@@ -57,7 +57,7 @@ async def test_compact_passes_focus_instructions(tmp_path: Any, monkeypatch: pyt
         return 1
 
     monkeypatch.setattr(HistoryCompressor, "force_compact_session", fake_force, raising=False)
-    monkeypatch.setattr("kesoku.agent.llm.get_llm", lambda *a, **k: object())
+    monkeypatch.setattr("kesoku.context.get_llm", lambda *a, **k: object())
     reply = await _run(bot, "/compact  keep only Subsystem Y   signatures ")
     assert seen["session_id"] == "sess_c"
     assert seen["directive"] == "keep only Subsystem Y   signatures"
@@ -78,7 +78,7 @@ async def test_bare_compact_has_no_directive_and_reports_nothing_to_do(tmp_path:
         return 0
 
     monkeypatch.setattr(HistoryCompressor, "force_compact_session", fake_force, raising=False)
-    monkeypatch.setattr("kesoku.agent.llm.get_llm", lambda *a, **k: object())
+    monkeypatch.setattr("kesoku.context.get_llm", lambda *a, **k: object())
     reply = await _run(bot, "/compact")
     assert seen["directive"] is None
     assert reply.startswith("ℹ️ Nothing to compact")

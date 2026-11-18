@@ -335,6 +335,11 @@ def start_cmd(
         asyncio.run(_service_runner())
     except KeyboardInterrupt:
         logger.info("Kesoku service stopped by user.")
+    finally:
+        # Close the per-thread cached SQLite connections (checkpoints the WAL on clean shutdown).
+        sync_db = getattr(gateway.context, "sync_db", None)
+        if sync_db is not None and hasattr(sync_db, "close"):
+            sync_db.close()
 
 
 

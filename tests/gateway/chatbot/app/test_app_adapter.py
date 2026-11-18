@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import time
 import uuid
@@ -11,6 +12,7 @@ import pytest
 
 import kesoku.config
 import kesoku.gateway.chatbot.app.commands as commands_mod
+import kesoku.gateway.chatbot.app.media as media_mod
 from kesoku.agent.turn_executor import TurnExecutor
 from kesoku.config import AppConfig, AppModeConfig, KesokuConfig, WorkspaceConfig
 from kesoku.constants import MessageRole, MessageStatus, MessageType
@@ -2072,17 +2074,19 @@ async def test_media_hydrate_reuses_uploads_across_sessions(env, monkeypatch) ->
     assert third["object"] != first["object"] and len(link.objects) == 2
 
     # Expired entries and objects that can no longer be signed fall back to a fresh upload.
-    cache = env["bot"].hydrate_upload_cache
+    # Hydrate reuse lives in the MediaManager's single LRU under a session-independent scope.
+    cache = env["bot"].media._upload_cache
+    assert all(k[3] == commands_mod.HYDRATE_CACHE_SCOPE for k in cache)
     key = list(cache)[-1]  # most recently used = the current file version
-    cache[key] = (cache[key][0], time.time() - commands_mod.HYDRATE_UPLOAD_CACHE_TTL_SECONDS - 1)
+    cache[key]["uploaded_at"] = time.time() - commands_mod.HYDRATE_UPLOAD_CACHE_TTL_SECONDS - 1
     await rpc(env, "media.hydrate", {"session_id": sid2, "ref": ref})
     assert len(link.objects) == 3
     link.objects.clear()
     healed = (await rpc(env, "media.hydrate", {"session_id": sid2, "ref": ref}))["payload"]
-    assert healed["object"] in link.objects and cache[key][0] == healed["object"]
+    assert healed["object"] in link.objects and cache[key]["object"] == healed["object"]
 
     # The cache is a bounded LRU.
-    monkeypatch.setattr(commands_mod, "HYDRATE_UPLOAD_CACHE_MAX", 2)
+    monkeypatch.setattr(media_mod, "UPLOAD_CACHE_MAX_ENTRIES", 2)
     staging = env["tmp"] / "sessions" / sid1
     staging.mkdir(parents=True, exist_ok=True)
     for i in range(3):
@@ -2186,3 +2190,160 @@ async def test_reply_channel_stamped_server_side_from_resolved_mode(env) -> None
     await rpc(env, "mode.stop", {"session_id": sid})
     assert posted[-1].metadata["mode_hint"] == "chat"
     assert "reply_channel" not in posted[-1].metadata
+
+
+# ---------------------------------------------------------------------------------------------- audit fixes
+
+
+class _RecordCollector(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@pytest.mark.parametrize(
+    ("exc", "code", "message"),
+    [
+        (TimeoutError(), "INTERNAL", "request timed out"),
+        (ConnectionError("engine link lost"), "ENGINE_OFFLINE", "relay link is not connected"),
+    ],
+)
+async def test_expected_request_failures_map_to_codes_without_traceback(env, monkeypatch, exc, code, message) -> None:
+    """Timeouts / link loss reply with an existing wire code and log one WARNING line without exc_info."""
+    bot = env["bot"]
+
+    async def failing(ctx, payload):
+        raise exc
+
+    monkeypatch.setitem(bot._handlers, "session.list", failing)
+    collector = _RecordCollector()
+    adapter_logger = logging.getLogger("kesoku.gateway.chatbot.app.adapter")
+    adapter_logger.addHandler(collector)
+    try:
+        reply = await rpc(env, "session.list", {})
+    finally:
+        adapter_logger.removeHandler(collector)
+    assert reply["type"] == "error"
+    assert reply["payload"]["code"] == code and reply["payload"]["message"] == message
+    assert [r.levelno for r in collector.records] == [logging.WARNING]
+    assert collector.records[0].exc_info is None
+
+
+async def test_unexpected_request_failure_keeps_error_traceback(env, monkeypatch) -> None:
+    bot = env["bot"]
+
+    async def failing(ctx, payload):
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(bot._handlers, "session.list", failing)
+    collector = _RecordCollector()
+    adapter_logger = logging.getLogger("kesoku.gateway.chatbot.app.adapter")
+    adapter_logger.addHandler(collector)
+    try:
+        reply = await rpc(env, "session.list", {})
+    finally:
+        adapter_logger.removeHandler(collector)
+    assert reply["payload"]["code"] == "INTERNAL" and reply["payload"]["message"] == "internal error"
+    assert [r.levelno for r in collector.records] == [logging.ERROR]
+    assert collector.records[0].exc_info is not None
+
+
+async def test_media_hydrate_single_flight_shares_one_upload(env, monkeypatch) -> None:
+    """N concurrent hydrates of the same unchanged file perform exactly one upload."""
+    link: FakeLink = env["link"]
+    sids = [await create_session(env) for _ in range(3)]
+    art = env["tmp"] / "characters" / "roster" / "images" / "shared.png"
+    art.parent.mkdir(parents=True)
+    art.write_bytes(b"\x89PNG shared")
+    gate = asyncio.Event()
+    uploads: list[str] = []
+    real_binary = link.request_binary
+
+    async def slow_binary(frame: bytes, request_id: str, timeout: float | None = None) -> dict[str, Any]:
+        uploads.append(request_id)
+        await gate.wait()
+        return await real_binary(frame, request_id, timeout)
+
+    monkeypatch.setattr(link, "request_binary", slow_binary)
+    ref = "characters/roster/images/shared.png"
+    tasks = [
+        asyncio.create_task(rpc(env, "media.hydrate", {"session_id": sids[i % 3], "ref": ref})) for i in range(6)
+    ]
+    await asyncio.sleep(0.2)
+    assert len(uploads) == 1
+    gate.set()
+    replies = await asyncio.gather(*tasks)
+    assert len(uploads) == 1 and len(link.objects) == 1
+    assert all(r["type"] == "media.ready" for r in replies)
+    assert {r["payload"]["object"] for r in replies} == set(link.objects)
+    assert env["bot"].requests._hydrate_inflight == {}
+
+
+async def test_media_hydrate_single_flight_survives_waiter_cancellation(env, monkeypatch) -> None:
+    link: FakeLink = env["link"]
+    sid = await create_session(env)
+    staging = env["tmp"] / "sessions" / sid
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "c.png").write_bytes(b"c")
+    gate = asyncio.Event()
+    real_binary = link.request_binary
+
+    async def slow_binary(frame: bytes, request_id: str, timeout: float | None = None) -> dict[str, Any]:
+        await gate.wait()
+        return await real_binary(frame, request_id, timeout)
+
+    monkeypatch.setattr(link, "request_binary", slow_binary)
+    first = asyncio.create_task(rpc(env, "media.hydrate", {"session_id": sid, "ref": "c.png"}))
+    await asyncio.sleep(0.1)
+    second = asyncio.create_task(rpc(env, "media.hydrate", {"session_id": sid, "ref": "c.png"}))
+    await asyncio.sleep(0.1)
+    first.cancel()
+    await asyncio.gather(first, return_exceptions=True)
+    gate.set()
+    reply = await second
+    assert reply["type"] == "media.ready" and len(link.objects) == 1
+
+
+async def test_media_hydrate_uploads_are_bounded(env, monkeypatch) -> None:
+    """At most `HYDRATE_MAX_CONCURRENCY` distinct hydrate uploads run concurrently."""
+    link: FakeLink = env["link"]
+    sid = await create_session(env)
+    staging = env["tmp"] / "sessions" / sid
+    staging.mkdir(parents=True, exist_ok=True)
+    for i in range(10):
+        (staging / f"b{i}.png").write_bytes(b"y" * (i + 1))
+    active = 0
+    peak = 0
+    real_binary = link.request_binary
+
+    async def tracked_binary(frame: bytes, request_id: str, timeout: float | None = None) -> dict[str, Any]:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0.05)
+            return await real_binary(frame, request_id, timeout)
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(link, "request_binary", tracked_binary)
+    replies = await asyncio.gather(
+        *(rpc(env, "media.hydrate", {"session_id": sid, "ref": f"b{i}.png"}) for i in range(10))
+    )
+    assert all(r["type"] == "media.ready" for r in replies)
+    assert len(link.objects) == 10
+    assert peak == commands_mod.HYDRATE_MAX_CONCURRENCY
+
+
+async def test_media_hydrate_offline_fails_fast(env) -> None:
+    link: FakeLink = env["link"]
+    sid = await create_session(env)
+    staging = env["tmp"] / "sessions" / sid
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "o.png").write_bytes(b"o")
+    link.connected = False
+    reply = await rpc(env, "media.hydrate", {"session_id": sid, "ref": "o.png"})
+    assert reply["type"] == "error" and reply["payload"]["code"] == "ENGINE_OFFLINE"

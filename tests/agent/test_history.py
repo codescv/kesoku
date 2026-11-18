@@ -370,7 +370,7 @@ def test_history_preview_error_variant_keeps_exit_code(tmp_path) -> None:
     assert "NEGOTIATED: codec=lz4-v2" in preview
     assert "diagnose complete (1200 packets)" in preview
     # deterministic err_* file written once per message id
-    assert (tmp_path / "hist_err_run_shell_command_r1.txt").is_file() or list(tmp_path.glob("hist_err_*"))
+    assert (tmp_path / ".kesoku_logs" / "hist_err_run_shell_command_r1.txt").is_file()
 
 
 def test_history_preview_short_outputs_untouched(tmp_path) -> None:
@@ -496,8 +496,8 @@ def test_prepare_history_skips_rewrite_when_archived_file_exists(tmp_path: Path)
 
     staging = tmp_path / "nested_staging"
     first = prepare_history_for_llm(history, staging_dir=str(staging))
-    tool_file = staging / "hist_tool_run_shell_command_r_ok.txt"
-    err_file = staging / "hist_err_run_shell_command_r_err.txt"
+    tool_file = staging / ".kesoku_logs" / "hist_tool_run_shell_command_r_ok.txt"
+    err_file = staging / ".kesoku_logs" / "hist_err_run_shell_command_r_err.txt"
     assert tool_file.read_text(encoding="utf-8") == long_out
     assert err_file.read_text(encoding="utf-8") == long_err
 

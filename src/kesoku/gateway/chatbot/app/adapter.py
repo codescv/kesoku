@@ -122,8 +122,6 @@ class AppChatbot(Chatbot):
         if self.proposals.on_staged not in listeners:
             listeners.append(self.proposals.on_staged)
         self.persona = PersonaService(self)
-        # `media.hydrate` upload reuse (see `RequestHandlers._hydrate_upload`).
-        self.hydrate_upload_cache: OrderedDict[tuple[str, int, int], tuple[str, float]] = OrderedDict()
         self.requests = RequestHandlers(self)
         self.attachment_manager = AttachmentManager(sessions_dir=self.sessions_dir)
 
@@ -469,6 +467,18 @@ class AppChatbot(Chatbot):
             result = await handler(ctx, payload)
         except ProtocolError as e:
             await self.send_raw(make_error(e.code, e.message, reply_to=req_id, device_id=device_id))
+            return
+        except TimeoutError as e:
+            # Expected under relay / engine stalls: log one line (no traceback rendering on the event loop). Only
+            # existing wire error codes are used (relay / clients validate them).
+            logger.warning(f"App request '{event_type}' timed out: {str(e) or 'no reply'}")
+            await self.send_raw(make_error("INTERNAL", "request timed out", reply_to=req_id, device_id=device_id))
+            return
+        except ConnectionError as e:
+            logger.warning(f"App request '{event_type}' failed, relay link unavailable: {str(e) or type(e).__name__}")
+            await self.send_raw(
+                make_error("ENGINE_OFFLINE", "relay link is not connected", reply_to=req_id, device_id=device_id)
+            )
             return
         except Exception as e:
             logger.error(f"App request '{event_type}' failed: {e}", exc_info=True)

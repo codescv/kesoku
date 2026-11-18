@@ -5,7 +5,9 @@ import logging
 import os
 import shutil
 import sqlite3
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Literal
 
@@ -16,6 +18,7 @@ from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db.app_tables import AppTablesMixin
 from kesoku.db.connection import ConnectionProvider
 from kesoku.db.models import Message, Session, SummaryNode
+from kesoku.utils.permissions import secure_file_permissions
 from kesoku.utils.text import fts_tokenize
 
 logger = logging.getLogger(__name__)
@@ -23,6 +26,18 @@ logger = logging.getLogger(__name__)
 # Number of candidate chunks scored per batch during semantic search. Bounds how many
 # embedding BLOBs are resident at once, keeping peak memory flat regardless of corpus size.
 SEARCH_SCORE_BATCH_SIZE = 2048
+
+# Explicit `messages` projection for bulk history reads: skips the (mostly NULL, legacy) `embedding` BLOB.
+# `_row_to_message` tolerates the missing column.
+# `clear_thought_signatures_before`: rows rewritten per short write transaction, and max sessions whose
+# high-water mark is remembered.
+_THOUGHT_SIG_CHUNK = 500
+_THOUGHT_SIG_HWM_MAX = 1024
+
+_MESSAGE_COLUMNS_NO_EMBEDDING = (
+    "id, session_id, chatbot_id, channel_id, sender, role, type, content, metadata, "
+    "timestamp, status, parent_id, summary_node_id"
+)
 
 
 def _batch_semantic_scores(
@@ -84,6 +99,9 @@ class DatabaseManager(AppTablesMixin):
         self._config: Any = None
         self.digests_available: bool = True
         self.fts_available: bool = True
+        # `clear_thought_signatures_before` per-session high-water marks (bounded LRU, see that method).
+        self._thought_sig_hwm: OrderedDict[str, float] = OrderedDict()
+        self._thought_sig_lock = threading.Lock()
 
     def _get_chatbot_default_role(self, chatbot_id: str) -> str:
         """Resolve per-chatbot default_role from bound KesokuConfig or global config."""
@@ -259,6 +277,10 @@ class DatabaseManager(AppTablesMixin):
                         "REFERENCES summary_nodes(id) ON DELETE SET NULL;"
                     )
                     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_summary_node ON messages(summary_node_id);")
+                # Covering index for per-session role filters (e.g. `get_session_turns_count`).
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_messages_session_role ON messages(session_id, role);"
+                )
         except Exception as e:
             logger.error(f"Failed to apply database schema migrations: {e}")
             raise RuntimeError(f"Database schema migration error: {e}") from e
@@ -452,6 +474,35 @@ class DatabaseManager(AppTablesMixin):
                 raise RuntimeError(
                     f"Database at '{self.db_path}' is invalid or corrupt. Please run 'kesoku init' first."
                 ) from e
+        self._secure_db_files()
+
+    def _secure_db_files(self) -> None:
+        """Best-effort restrict the DB (and its WAL/SHM sidecars) to the owner: it holds private chat history."""
+        for suffix in ("", "-wal", "-shm"):
+            secure_file_permissions(f"{self.db_path}{suffix}")
+
+    @staticmethod
+    def _enable_incremental_auto_vacuum_if_new(conn: sqlite3.Connection) -> None:
+        """Set `auto_vacuum=INCREMENTAL` on a brand-new (table-less) database.
+
+        `auto_vacuum` only takes effect on a database without tables, and once the file header has been written
+        (our connections switch to WAL first) it additionally needs a `VACUUM` — instant on an empty database.
+        Existing databases are left untouched; for those, run `PRAGMA auto_vacuum=INCREMENTAL; VACUUM;` once
+        during a maintenance window before `PRAGMA incremental_vacuum` can reclaim anything.
+        """
+        try:
+            has_tables = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone()
+            if has_tables is None and int(conn.execute("PRAGMA auto_vacuum").fetchone()[0]) != 2:
+                if conn.in_transaction:
+                    conn.commit()
+                conn.execute("PRAGMA auto_vacuum=INCREMENTAL;")
+                conn.execute("VACUUM;")
+        except sqlite3.Error as e:
+            logger.warning(f"Could not enable incremental auto_vacuum on new database: {e}")
+
+    def close(self) -> None:
+        """Close all cached SQLite connections held by this manager (safe to call repeatedly)."""
+        self.connection_provider.close_all()
 
     def init_tables(self, overwrite: bool = False) -> None:
         """Initialize SQLite database tables and indices.
@@ -461,8 +512,11 @@ class DatabaseManager(AppTablesMixin):
         """
         if overwrite and os.path.exists(self.db_path):
             backup_path = f"{self.db_path}.bak.{int(time.time())}"
+            # Cached per-thread connections would keep pointing at the deleted file.
+            self.connection_provider.close_all()
             try:
                 shutil.copy(self.db_path, backup_path)
+                secure_file_permissions(backup_path)
                 logger.info(f"Created backup of existing database at {backup_path}")
                 os.remove(self.db_path)
                 logger.info(f"Removed existing database file {self.db_path}")
@@ -472,6 +526,7 @@ class DatabaseManager(AppTablesMixin):
 
         with self.connection_provider.connection() as conn:
             try:
+                self._enable_incremental_auto_vacuum_if_new(conn)
                 with conn:
                     conn.execute(
                         """
@@ -602,6 +657,7 @@ class DatabaseManager(AppTablesMixin):
                     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_summary_node ON messages(summary_node_id);")
                 self._ensure_migrations(conn)
                 logger.info(f"Database schema initialized successfully at {self.db_path}")
+                self._secure_db_files()
             except Exception as e:
                 logger.error(f"Failed to initialize database schema: {e}")
                 raise
@@ -872,6 +928,8 @@ class DatabaseManager(AppTablesMixin):
         Args:
             session_id: The unique session identifier to delete.
         """
+        with self._thought_sig_lock:
+            self._thought_sig_hwm.pop(session_id, None)
         with self.connection_provider.connection() as conn:
             with conn:
                 if self.fts_available:
@@ -992,7 +1050,7 @@ class DatabaseManager(AppTablesMixin):
                         msg.role,
                         msg.type,
                         msg.content,
-                        json.dumps(msg.metadata),
+                        json.dumps(msg.metadata, ensure_ascii=False),
                         msg.timestamp,
                         msg.status,
                         msg.parent_id,
@@ -1040,7 +1098,80 @@ class DatabaseManager(AppTablesMixin):
         """
         with self.connection_provider.connection() as conn:
             with conn:
-                conn.execute("UPDATE messages SET metadata = ? WHERE id = ?", (json.dumps(metadata), message_id))
+                conn.execute(
+                    "UPDATE messages SET metadata = ? WHERE id = ?",
+                    (json.dumps(metadata, ensure_ascii=False), message_id),
+                )
+
+    def clear_thought_signatures_before(self, session_id: str, before_ts: float) -> int:
+        """Strip `metadata.thought_signature` from a session's messages older than `before_ts`.
+
+        Thought signatures are only replayed for the in-flight turn (history building already drops them for
+        completed turns), so once a turn finishes they are dead weight in the DB.
+
+        Called at every turn start, so it is kept cheap:
+
+        * A per-session high-water mark remembers the range already cleaned in this process; later calls only
+          scan `[hwm, before_ts)` via the `(session_id, timestamp)` index.
+        * Candidates are found with a read-only `SELECT` pre-filtered by `LIKE` (no JSON parsing of clean rows),
+          so a clean range never opens a write transaction.
+        * Matches are rewritten in chunks of `_THOUGHT_SIG_CHUNK` rows, each in its own short transaction, so a
+          first (legacy) cleanup never holds the write lock for thousands of rows at once.
+
+        Args:
+            session_id: Session whose messages are cleaned.
+            before_ts: Only messages with `timestamp < before_ts` are touched.
+
+        Returns:
+            Number of rows updated.
+        """
+        upper = float(before_ts)
+        with self._thought_sig_lock:
+            lower = self._thought_sig_hwm.get(session_id)
+        if lower is not None and lower >= upper:
+            return 0
+
+        total = 0
+        cursor_ts: float | None = lower
+        cursor_id = ""
+        with self.connection_provider.connection() as conn:
+            while True:
+                if cursor_ts is None:
+                    range_sql, range_params = "", ()
+                else:
+                    range_sql = " AND (timestamp > ? OR (timestamp = ? AND id > ?))"
+                    range_params = (cursor_ts, cursor_ts, cursor_id)
+                rows = conn.execute(
+                    "SELECT id, timestamp FROM messages "
+                    f"WHERE session_id = ? AND timestamp < ?{range_sql} "
+                    "AND metadata LIKE '%\"thought\\_signature\"%' ESCAPE '\\' "
+                    "ORDER BY timestamp, id LIMIT ?",
+                    (session_id, upper, *range_params, _THOUGHT_SIG_CHUNK),
+                ).fetchall()
+                if not rows:
+                    break
+                ids = [r["id"] for r in rows]
+                placeholders = ",".join("?" for _ in ids)
+                with conn:
+                    cur = conn.execute(
+                        "UPDATE messages SET metadata = json_remove(metadata, '$.thought_signature') "
+                        f"WHERE id IN ({placeholders}) AND json_valid(metadata) "
+                        "AND json_extract(metadata, '$.thought_signature') IS NOT NULL",
+                        ids,
+                    )
+                    total += int(cur.rowcount or 0)
+                # Keyset pagination: LIKE false positives (e.g. the key mentioned inside a nested value) are never
+                # re-selected, so the loop always terminates.
+                cursor_ts, cursor_id = float(rows[-1]["timestamp"]), str(rows[-1]["id"])
+                if len(rows) < _THOUGHT_SIG_CHUNK:
+                    break
+
+        with self._thought_sig_lock:
+            self._thought_sig_hwm[session_id] = max(upper, self._thought_sig_hwm.get(session_id, upper))
+            self._thought_sig_hwm.move_to_end(session_id)
+            while len(self._thought_sig_hwm) > _THOUGHT_SIG_HWM_MAX:
+                self._thought_sig_hwm.popitem(last=False)
+        return total
 
     def reclassify_message_prefix(
         self,
@@ -1100,7 +1231,7 @@ class DatabaseManager(AppTablesMixin):
             with conn:
                 conn.execute(
                     "UPDATE messages SET content = ?, metadata = ? WHERE id = ?",
-                    (remaining, json.dumps(new_meta), message_id),
+                    (remaining, json.dumps(new_meta, ensure_ascii=False), message_id),
                 )
                 conn.execute(
                     """
@@ -1118,7 +1249,7 @@ class DatabaseManager(AppTablesMixin):
                         thought.role,
                         thought.type,
                         thought.content,
-                        json.dumps(thought.metadata),
+                        json.dumps(thought.metadata, ensure_ascii=False),
                         thought.timestamp,
                         thought.status,
                         thought.parent_id,
@@ -1202,8 +1333,8 @@ class DatabaseManager(AppTablesMixin):
             cursor = conn.cursor()
             if active_only:
                 cursor.execute(
-                    """
-                    SELECT * FROM messages
+                    f"""
+                    SELECT {_MESSAGE_COLUMNS_NO_EMBEDDING} FROM messages
                     WHERE session_id = ? AND type != ?
                       AND (summary_node_id IS NULL OR role IN (?, ?))
                     """,
@@ -1211,8 +1342,8 @@ class DatabaseManager(AppTablesMixin):
                 )
             else:
                 cursor.execute(
-                    """
-                    SELECT * FROM messages
+                    f"""
+                    SELECT {_MESSAGE_COLUMNS_NO_EMBEDDING} FROM messages
                     WHERE session_id = ? AND type != ?
                     """,
                     (session_id, MessageType.SESSION_RENAME),
@@ -2965,6 +3096,18 @@ class AsyncDatabaseManager:
             metadata: The new metadata dict to merge/set.
         """
         await asyncio.to_thread(self.sync_db.update_message_metadata, message_id, metadata)
+
+    async def clear_thought_signatures_before(self, session_id: str, before_ts: float) -> int:
+        """Strip `metadata.thought_signature` from a session's messages older than `before_ts`.
+
+        Args:
+            session_id: Session whose messages are cleaned.
+            before_ts: Only messages with `timestamp < before_ts` are touched.
+
+        Returns:
+            Number of rows updated.
+        """
+        return await asyncio.to_thread(self.sync_db.clear_thought_signatures_before, session_id, before_ts)
 
     async def update_session_system_prompt(self, session_id: str, content: str) -> None:
         """Update the system prompt of a session.

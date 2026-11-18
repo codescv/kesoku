@@ -454,3 +454,35 @@ async def test_stop_during_backoff_returns_quickly(relay):
     assert time.monotonic() - t0 < 1.0
     assert h.connected == 0 and h.disconnected == 0
     assert link_tasks() == []
+
+
+async def test_request_teardown_during_send_retrieves_future_exception():
+    """A teardown that fails the pending future while `sender()` runs must not leak an unretrieved exception."""
+    import gc
+
+    loop = asyncio.get_running_loop()
+    contexts: list[dict] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+    link = EngineLink("ws://127.0.0.1:9/engine", TOKEN, on_frame=lambda env: asyncio.sleep(0))
+
+    async def sender() -> bool:
+        await link._teardown()  # fails every pending future with ConnectionError("engine link lost")
+        return False
+
+    try:
+        for _ in range(3):
+            try:
+                await link._request("req_teardown", sender, 1.0)
+            except ConnectionError as e:
+                assert "not connected" in str(e)
+            else:
+                raise AssertionError("expected ConnectionError")
+        assert link._pending == {}
+        gc.collect()
+        await asyncio.sleep(0)
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+    leaked = [c for c in contexts if "never retrieved" in str(c.get("message", ""))]
+    assert not leaked, leaked

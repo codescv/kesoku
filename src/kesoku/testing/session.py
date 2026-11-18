@@ -562,7 +562,7 @@ class BenchSession:
         return [n.model_dump() for n in nodes]
 
     def llm_logs(self) -> list[Path]:
-        """Return `llm-turn-*.log.yaml` files of the session in index order."""
+        """Return `llm-turn-*.log.yaml` files of the session in index order (internal logs dir + legacy root)."""
         if not self.staging_dir or not self.staging_dir.is_dir():
             return []
 
@@ -572,7 +572,9 @@ class BenchSession:
             except (IndexError, ValueError):
                 return 0
 
-        return sorted(self.staging_dir.glob("llm-turn-*.log.yaml"), key=_idx)
+        paths = list(self.staging_dir.glob("llm-turn-*.log.yaml"))
+        paths.extend((self.staging_dir / ".kesoku_logs").glob("llm-turn-*.log.yaml"))
+        return sorted(paths, key=_idx)
 
 
 def _read_optional_json_dict(candidates: list[Path]) -> dict[str, Any]:

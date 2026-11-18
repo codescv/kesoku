@@ -45,6 +45,7 @@ from kesoku.utils.image import (
 from kesoku.utils.image import (
     detect_image_mime_type as _detect_image_mime_type,
 )
+from kesoku.utils.permissions import secure_file_permissions
 
 from .client import (
     ILINK_BASE_URL,
@@ -113,6 +114,7 @@ class ContextTokenStore:
         try:
             with open(self._persist_path, "w", encoding="utf-8") as f:
                 json.dump(self._cache, f, ensure_ascii=False, indent=2)
+            secure_file_permissions(self._persist_path)
         except Exception as e:
             logger.warning("WeChat: Failed to save persistent context tokens: %s", e)
 

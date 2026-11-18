@@ -2034,7 +2034,7 @@ async def test_k1_manual_compact_guardrail_g2_and_compact_all(tmp_path: Path) ->
     )
     await gw.post(blocked_u)
 
-    with patch("kesoku.agent.llm.get_llm", return_value=SummaryLLM()):
+    with patch("kesoku.context.get_llm", return_value=SummaryLLM()):
         reply = await bot.manual_compact_session_by_channel("chan_g2", "")
 
     assert reply.startswith("🔄 Compacted 2 turn(s) into ")
@@ -2070,7 +2070,7 @@ async def test_k1_manual_compact_guardrail_g2_and_compact_all(tmp_path: Path) ->
         await gw.post(um)
         await gw.post(am)
 
-    with patch("kesoku.agent.llm.get_llm", return_value=SummaryLLM()):
+    with patch("kesoku.context.get_llm", return_value=SummaryLLM()):
         reply_all = await bot.manual_compact_session_by_channel("chan_all", "all")
     assert reply_all.startswith("🔄 Compacted 2 turn(s) into ")
     assert "including recent turns" in reply_all

@@ -783,8 +783,8 @@ async def test_run_shell_command_background_job_bookkeeping(tmp_path) -> None:
         assert len(snap.running) == 1
         job = snap.running[0]
         assert job.command == "sleep 0.5; exit 3"
-        assert job.stdout_path.endswith(f"background_{job.job_id}.stdout")
-        assert job.stderr_path.endswith(f"background_{job.job_id}.stderr")
+        assert job.stdout_path.endswith(f".kesoku_logs/background_{job.job_id}.stdout")
+        assert job.stderr_path.endswith(f".kesoku_logs/background_{job.job_id}.stderr")
 
         # Wait for the monitor task to finish and unregister the job.
         for _ in range(100):
@@ -876,8 +876,13 @@ async def test_k8_foreground_shell_unlinks_background_job_logs_and_keeps_bg(tmp_
         cfg.shell.background_threshold_seconds = 0.2
         bg_out = await run_shell_command("sleep 2", context=tctx)
         assert "transitioned to background execution" in bg_out
-        bg_files = [f for f in os.listdir(staging_dir) if f.startswith("background_job_")]
+        # New job logs live under the hidden `.kesoku_logs/` subdirectory, not the staging root.
+        assert [f for f in os.listdir(staging_dir) if f.startswith("background_job_")] == []
+        logs_dir = staging_dir / ".kesoku_logs"
+        bg_files = [f for f in os.listdir(logs_dir) if f.startswith("background_job_")]
         assert len(bg_files) == 2
+        snap = await tctx.active_jobs.snapshot(sess.id)
+        assert snap.running and os.path.dirname(snap.running[0].stdout_path) == str(logs_dir)
         await tctx.active_jobs.stop_all_for_session(sess.id)
         await asyncio.sleep(0.05)
 

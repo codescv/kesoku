@@ -17,6 +17,7 @@ from kesoku.utils.async_fs import (
     async_read_text_file,
     async_realpath,
 )
+from kesoku.utils.tasks import spawn_background
 
 logger = setup_logger(__name__)
 
@@ -301,7 +302,7 @@ class CronManager:
                     )
 
                 # Run the job asynchronously in the background
-                asyncio.create_task(self._execute_job(job, idx))
+                spawn_background(self._execute_job(job, idx), name=f"cron_job:{idx}")
 
     async def _execute_job(self, job: dict[str, Any], job_idx: int) -> None:
         """Execute a single cron job trigger.
@@ -393,7 +394,7 @@ class CronManager:
         for idx, job in enumerate(jobs):
             if job.get("tag") == tag:
                 logger.info(f"Manually triggering Job {idx} with tag '{tag}'")
-                asyncio.create_task(self._execute_job(job, idx))
+                spawn_background(self._execute_job(job, idx), name=f"cron_job:{idx}")
                 triggered_count += 1
         return triggered_count
 
@@ -418,6 +419,6 @@ class CronManager:
             if job_channel is None or str(job_channel) not in channel_ids:
                 continue
             logger.info(f"Manually triggering Job {idx} for chatbot '{chatbot_id}' channel '{job_channel}'")
-            asyncio.create_task(self._execute_job(job, idx))
+            spawn_background(self._execute_job(job, idx), name=f"cron_job:{idx}")
             triggered.append(job)
         return triggered
