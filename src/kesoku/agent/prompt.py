@@ -32,7 +32,9 @@ place these syntax blocks at the most contextually relevant place in your final 
   At most one `ui` block per reply. A clicked option comes back as a user message with the option text;
   a multiselect answer comes back as `选择：A；B`.
   For `multiselect`, each item in `options` may also be an object `{name, subtitle?, group?}`:
-  options sharing the same `group` are mutually exclusive (auto-switching within each group).
+  options sharing the same `group` are mutually exclusive (only one per group); because the answer
+  does not include `group`, make option `name` (or `value`) self-identifying across groups
+  (e.g. prefix repeated choices like `Alice: Keep`).
   Never include meaningless "manual input / I'll type it myself / other (specify in chat)" options
   (the user can always type directly in the chat box); instead, when offering candidate choices,
   include a "再帮我想 X 个不同的选项" (or "Give me X different options") option so clicking it

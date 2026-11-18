@@ -325,3 +325,41 @@ def test_parse_multiselect_option_groups_and_subtitles() -> None:
     assert "group" not in rich_seg["option_items"][3]
     plain_seg = q.to_segment()
     assert "option_items" not in plain_seg
+
+
+def test_parse_structured_options_with_colon_in_prompt() -> None:
+    """An unquoted ASCII `: ` in `prompt:` still preserves structured options (both block and flow mappings)."""
+    block_body = (
+        "type: multiselect\n"
+        "prompt: Level up: pick upgrades\n"
+        "options:\n"
+        "  - name: Slash\n"
+        "    subtitle: '+2 dmg'\n"
+        "    group: Alice\n"
+        "  - name: Alice: Keep\n"
+        "    group: Alice\n"
+    )
+    q_block = parse_ui_block_body(block_body)
+    assert q_block is not None
+    assert q_block.prompt == "Level up: pick upgrades"
+    assert q_block.options == ["Slash（+2 dmg）", "Alice: Keep"]
+    assert q_block.option_items == (
+        {"value": "Slash（+2 dmg）", "name": "Slash", "subtitle": "+2 dmg", "group": "Alice"},
+        {"value": "Alice: Keep", "name": "Alice: Keep", "group": "Alice"},
+    )
+
+    flow_body = (
+        "type: multiselect\n"
+        "prompt: Pick: style\n"
+        "options:\n"
+        "  - {name: Fast, subtitle: Quick, group: g1}\n"
+        "  - {name: Heavy, group: g1}\n"
+    )
+    q_flow = parse_ui_block_body(flow_body)
+    assert q_flow is not None
+    assert q_flow.prompt == "Pick: style"
+    assert q_flow.options == ["Fast（Quick）", "Heavy"]
+    assert q_flow.option_items == (
+        {"value": "Fast（Quick）", "name": "Fast", "subtitle": "Quick", "group": "g1"},
+        {"value": "Heavy", "name": "Heavy", "group": "g1"},
+    )

@@ -282,3 +282,19 @@ def test_duplicate_option_labels_across_groups_keep_positional_groups(tmp_path: 
     q = next(s for s in parse_message_content(content, rich_blocks=True) if s["type"] == "question")
     wire = _wire(q, tmp_path)
     assert [c["group"] for c in wire["choice_items"]] == ["Alice", "Alice", "Bob", "Bob"]
+
+
+def test_grouped_character_options_skip_auto_cards_to_preserve_mutex(workspace: Path) -> None:
+    """Grouped options matching registered characters skip auto-cards (unless `layout: cards`/avatar is explicit)."""
+    content = (
+        "```ui\ntype: multiselect\nprompt: Pick per slot\noptions:\n"
+        "  - {name: 星野凛, subtitle: 主唱, group: Slot 1}\n"
+        "  - {name: 青木芽衣, subtitle: 吉他, group: Slot 1}\n```"
+    )
+    q = next(s for s in parse_message_content(content, rich_blocks=True) if s["type"] == "question")
+    wire = _wire(q, workspace)
+    assert "layout" not in wire
+    assert wire["choice_items"] == [
+        {"value": "星野凛（主唱）", "name": "星野凛", "subtitle": "主唱", "group": "Slot 1"},
+        {"value": "青木芽衣（吉他）", "name": "青木芽衣", "subtitle": "吉他", "group": "Slot 1"},
+    ]

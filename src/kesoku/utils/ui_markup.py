@@ -23,6 +23,7 @@ Supported markup (platform-neutral; adapters decide how to render it):
 Multiselect answers are posted back as a single user message `选择：A；B；C` (see `format_multi_selection`).
 """
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -53,6 +54,11 @@ DETAILS_RE = re.compile(
 
 # Lenient fallback parsing of a YAML-ish body: top-level `key: value` lines and `- item` list lines.
 _TOP_KEY_RE = re.compile(r"^(?P<key>[A-Za-z_]+)\s*:\s*(?P<value>.*)$")
+_SCALAR_FIELD_RE = re.compile(
+    r"^(?P<prefix>[ \t]*(?:-[ \t]+)?(?P<key>prompt|value|name|label|subtitle|desc|group)[ \t]*:[ \t]*)"
+    r"(?P<value>.+?)[ \t]*$",
+    re.IGNORECASE,
+)
 _FILE_WRAPPER_RE = re.compile(r"^\[file:\s*(.+?)\s*\]$")
 _LIST_ITEM_RE = re.compile(r"^\s+-\s*(?P<item>.*)$|^-\s+(?P<item0>.*)$")
 
@@ -67,7 +73,8 @@ class UiQuestion:
     max: int
     # Optional presentation hint (`"cards"` | `"list"`) for rich clients; plain adapters ignore it.
     layout: str | None = None
-    # Optional per-option metadata `{value, name?, subtitle?, avatar?, group?}` aligned with `options` (rich clients only).
+    # Optional per-option metadata `{value, name?, subtitle?, avatar?, group?}` aligned with `options`
+    # (rich clients only).
     option_items: tuple[dict[str, str], ...] = ()
 
     def to_segment(self, rich: bool = False) -> dict[str, Any]:
@@ -269,13 +276,42 @@ def _validate(data: dict[str, Any]) -> UiQuestion | None:
     )
 
 
+def _quote_yaml_scalars(body: str) -> str | None:
+    """Quote unquoted `prompt:` and option-field values containing `: ` so strict YAML can parse them."""
+    changed = False
+    out_lines: list[str] = []
+    for line in body.splitlines(keepends=True):
+        stripped = line.rstrip("\r\n")
+        eol = line[len(stripped) :]
+        match = _SCALAR_FIELD_RE.match(stripped)
+        if match:
+            key = match.group("key").lower()
+            val = match.group("value")
+            is_top_prompt = key == "prompt" and not stripped.startswith((" ", "\t", "-"))
+            if is_top_prompt and val and val[0] not in ("'", '"', "|", ">"):
+                out_lines.append(match.group("prefix") + json.dumps(val, ensure_ascii=False) + eol)
+                changed = True
+                continue
+            if not is_top_prompt and key != "prompt" and ": " in val and val[0] not in ("'", '"', "|", ">", "{", "["):
+                out_lines.append(match.group("prefix") + json.dumps(val, ensure_ascii=False) + eol)
+                changed = True
+                continue
+        out_lines.append(line)
+    return "".join(out_lines) if changed else None
+
+
 def parse_ui_block_body(body: str) -> UiQuestion | None:
     """Parse the YAML body of a ```ui block into a UiQuestion, or None if invalid.
 
-    Strict YAML is tried first; a lenient line-based parser is used as a fallback so that option text
-    containing brackets or colons is kept verbatim.
+    Strict YAML is tried first (with one retry quoting `prompt:` and option-field scalars with `: ` so
+    colons do not discard structured option mappings); a lenient line-based parser is used as a fallback so
+    that plain option text containing brackets or colons is kept verbatim.
     """
     strict = _strict_parse(body)
+    if strict is None:
+        quoted = _quote_yaml_scalars(body)
+        if quoted is not None:
+            strict = _strict_parse(quoted)
     if strict is not None:
         question = _validate(strict)
         if question is not None:

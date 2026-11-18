@@ -327,6 +327,7 @@ def enrich_question_segment(item: dict[str, Any], seg: dict[str, Any], workspace
     layout = seg.get("layout")
     option_items = [i for i in seg.get("option_items") or [] if isinstance(i, dict)]
     explicit_cards = layout == "cards" or any(i.get("avatar") for i in option_items)
+    has_group = any(i.get("group") for i in option_items)
     has_rich_meta = any(
         i.get("subtitle") or i.get("group") or (i.get("name") and i.get("name") != i.get("value"))
         for i in option_items
@@ -345,15 +346,9 @@ def enrich_question_segment(item: dict[str, Any], seg: dict[str, Any], workspace
         item["layout"] = "cards"
         item["choice_items"] = _explicit_choice_items(choices, option_items, keys, refs)
         return
-    if refs:
+    if refs and not has_group:
         auto = _auto_choice_items(choices, keys, refs)
         if auto is not None:
-            if option_items:
-                by_value = {str(i.get("value")): i for i in option_items if i.get("value")}
-                for idx, entry in enumerate(auto):
-                    meta = _meta_for_choice(idx, entry["value"], option_items, by_value)
-                    if meta.get("group"):
-                        entry["group"] = str(meta["group"])
             item["layout"] = "cards"
             item["choice_items"] = auto
             return
