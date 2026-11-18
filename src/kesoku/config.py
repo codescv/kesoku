@@ -120,41 +120,25 @@ class AgentConfig(BaseModel):
         default=3,
         description="Number of most recent turns (including the current one) protected from compression",
     )
-    compression_strategy: Literal["chunk", "watermark"] = Field(
-        default="chunk",
-        description=(
-            "'chunk' (legacy): compress every base_node_turns/base_node_min_tokens chunk as soon as it leaves the "
-            "protected tail. 'watermark': compress only when the whole prompt exceeds context_high_watermark, "
-            "down to context_low_watermark"
-        ),
-    )
-    base_node_min_tokens: int = Field(
-        default=25000,
-        description="[chunk] Token threshold above which x buffer turns are compressed",
-    )
-    base_node_turns: int = Field(
-        default=4,
-        description="[chunk] Number of turns x grouped to form a Level-0 node",
-    )
     context_high_watermark: int = Field(
         default=64000,
-        description="[watermark] Compact when the estimated prompt (system+tools+scaffold+history) exceeds this",
+        description="Compact when the estimated prompt (system+tools+scaffold+history) exceeds this",
     )
     context_low_watermark: int = Field(
         default=24000,
-        description="[watermark] Once triggered, compress the oldest turns until the estimated prompt is below this",
+        description="Once triggered, compress the oldest turns until the estimated prompt is below this",
     )
     protect_tail_min_tokens: int = Field(
         default=12000,
-        description="[watermark] Minimum estimated tokens of the most recent uncompressed turns kept verbatim",
+        description="Minimum estimated tokens of the most recent uncompressed turns kept verbatim",
     )
     watermark_chunk_tokens: int = Field(
         default=24000,
-        description="[watermark] Target estimated source tokens per Level-0 summary chunk",
+        description="Target estimated source tokens per Level-0 summary chunk",
     )
     watermark_chunk_min_turns: int = Field(
         default=2,
-        description="[watermark] Minimum number of turns grouped into a Level-0 summary chunk",
+        description="Minimum number of turns grouped into a Level-0 summary chunk",
     )
     context_consolidation_k: int = Field(
         default=4,
@@ -417,8 +401,6 @@ class AgentConfig(BaseModel):
     @model_validator(mode="after")
     def _validate_watermarks(self) -> "AgentConfig":
         """Reject watermark settings that would make compaction thrash every turn."""
-        if self.compression_strategy != "watermark":
-            return self
         if self.context_low_watermark >= self.context_high_watermark:
             raise ValueError(
                 f"context_low_watermark ({self.context_low_watermark}) must be < "

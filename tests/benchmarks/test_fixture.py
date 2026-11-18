@@ -19,7 +19,6 @@ from kesoku.config import KesokuConfig
 def test_profiles_validate(profile: str) -> None:
     cfg = KesokuConfig.model_validate(fx.render_config_dict(profile))
     a = cfg.agent
-    assert a.compression_strategy == "watermark"
     assert a.protect_tail_min_tokens < a.context_low_watermark < a.context_high_watermark
     assert a.protect_front_turns == 1
     assert "chat_search" in a.disabled_tools and "web_search" in a.disabled_tools

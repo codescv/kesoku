@@ -32,11 +32,20 @@ protect_front_turns = 1
 # Number of turns from end protected from compression.
 protect_tail_turns = 3
 
-# Token threshold above which buffer turns are compressed.
-base_node_min_tokens = 25000
+# Compact when the estimated prompt (system + tools + summaries + history) exceeds this many tokens.
+context_high_watermark = 64000
 
-# Number of turns grouped to form a Level-0 node.
-base_node_turns = 4
+# Once triggered, compress the oldest turns until the estimated prompt is below this (must be < high).
+context_low_watermark = 24000
+
+# Minimum estimated tokens of the most recent uncompressed turns kept verbatim (must be < low).
+protect_tail_min_tokens = 12000
+
+# Target estimated source tokens per Level-0 summary chunk.
+watermark_chunk_tokens = 24000
+
+# Minimum number of turns grouped into a Level-0 summary chunk.
+watermark_chunk_min_turns = 2
 
 # Branching factor K to merge K Level-n nodes into Level-n+1.
 context_consolidation_k = 4

@@ -422,7 +422,6 @@ class BenchSession:
         if overhead_tokens is None:
             overhead_tokens = await self.overhead_tokens()
         cfg_tmp = cfg.model_copy(deep=True)
-        cfg_tmp.agent.compression_strategy = "watermark"
         cfg_tmp.agent.context_high_watermark = 1
         cfg_tmp.agent.context_low_watermark = 0
         cfg_tmp.agent.protect_tail_min_tokens = 0

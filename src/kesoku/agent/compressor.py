@@ -144,9 +144,6 @@ Learnings:
 # Labelled groups of the rendered "Pending State" section, in display order.
 _PENDING_STATE_GROUPS = (("unfinished", "Unfinished"), ("constraints", "Constraints"), ("key_files", "Key files"))
 
-# Default summary length budget (legacy chunk strategy and fixed consolidation budget).
-DEFAULT_SUMMARY_MAX_CHARS = 1200
-
 SCAFFOLD_HEADER = (
     "[Note: This conversation uses custom turn-based context management. Earlier turns have been compacted "
     "into the hierarchical summaries below. These summaries are HISTORICAL and may be outdated: whenever they "
@@ -161,7 +158,7 @@ _LEGACY_SECTIONS_RE = re.compile(
     re.DOTALL,
 )
 
-# Watermark strategy summary budgets (characters). The floor leaves room for the Dead Ends / Pending State sections.
+# Summary length budgets (characters). The floor leaves room for the Dead Ends / Pending State sections.
 MIN_L0_SUMMARY_CHARS = 1500
 MAX_L0_SUMMARY_CHARS = 3000
 MAX_MERGED_SUMMARY_CHARS = 4000
@@ -296,7 +293,7 @@ def estimate_tokens_calibrated(text: str | None) -> int:
 
 
 def summary_max_chars(source_tokens: int) -> int:
-    """Length budget for a Level-0 summary in the watermark strategy (~8% of source tokens, clamped)."""
+    """Length budget for a Level-0 summary (~8% of source tokens, clamped)."""
     return min(MAX_L0_SUMMARY_CHARS, max(MIN_L0_SUMMARY_CHARS, int(source_tokens * 0.08)))
 
 
@@ -486,19 +483,10 @@ class HistoryCompressor:
         """
         return segment_logical_turns(messages)
 
-    @staticmethod
-    def _tokens(llm: BaseLLM, text: str, calibrated: bool) -> int:
-        """Estimate tokens with either the legacy fallback or the calibrated estimator."""
-        if calibrated:
-            return estimate_tokens_calibrated(text)
-        return llm.estimate_tokens_fallback(prompt=text)
-
     def estimate_prepared_turn_tokens(
         self,
         turn: list[Message],
-        llm: BaseLLM,
         max_historical_tool_chars: int = 500,
-        calibrated: bool = False,
     ) -> int:
         """Estimate token count for a completed turn as prepared for the LLM.
 
@@ -508,12 +496,10 @@ class HistoryCompressor:
 
         Args:
             turn: List of Message objects forming a single turn.
-            llm: BaseLLM instance providing token estimation methods.
             max_historical_tool_chars: Maximum character limit for historical tool results.
-            calibrated: Use the calibrated estimator (watermark strategy) instead of the legacy fallback.
 
         Returns:
-            Estimated total tokens for the turn.
+            Estimated total tokens for the turn (calibrated estimator).
         """
         total_tokens = 0
         for msg in turn:
@@ -535,7 +521,7 @@ class HistoryCompressor:
                     tool_name = (msg.metadata or {}).get("tool_name")
                     content = json.dumps(truncate_tool_call_arguments(tool_name, args), ensure_ascii=False)
 
-            total_tokens += self._tokens(llm, content, calibrated)
+            total_tokens += estimate_tokens_calibrated(content)
         return total_tokens
 
     def format_turn_for_summary(self, turn: list[Message]) -> str:
@@ -611,7 +597,7 @@ class HistoryCompressor:
         staging_dir: str | None = None,
         overhead_tokens: int = 0,
     ) -> bool:
-        """Check context usage and automatically compact history in-place using the configured strategy.
+        """Check context usage and automatically compact history in-place using the watermark algorithm.
 
         Holds the per-session compaction lock, so it never runs concurrently with a manual compaction.
 
@@ -619,9 +605,9 @@ class HistoryCompressor:
             session_id: Session identifier.
             history: Raw session history (including the current turn).
             llm: LLM used for summarization.
-            config: Kesoku configuration (agent.compression_strategy selects the algorithm).
+            config: Kesoku configuration (watermark settings live under `config.agent`).
             staging_dir: Optional session staging directory.
-            overhead_tokens: Estimated fixed prompt overhead (system prompt + tool schemas); watermark only.
+            overhead_tokens: Estimated fixed prompt overhead (system prompt + tool schemas).
 
         Returns:
             True if any compression/consolidation took place, False otherwise.
@@ -629,9 +615,7 @@ class HistoryCompressor:
         async with _locked(session_id):
             # A concurrent compaction may have compressed turns of this (older) history snapshot meanwhile.
             await self._apply_known_links(session_id, history)
-            if config.agent.compression_strategy == "watermark":
-                return await self._compact_watermark(session_id, history, llm, config, overhead_tokens)
-            return await self._compact_chunk(session_id, history, llm, config)
+            return await self._compact_watermark(session_id, history, llm, config, overhead_tokens)
 
     async def force_compact_session(
         self,
@@ -682,7 +666,7 @@ class HistoryCompressor:
                 return 0
 
             directive = sanitize_directive(directive)
-            turn_tokens = {i: self.estimate_prepared_turn_tokens(turns[i], llm, calibrated=True) for i in candidates}
+            turn_tokens = {i: self.estimate_prepared_turn_tokens(turns[i]) for i in candidates}
             logger.info(
                 f"Session {session_id}: manual compaction of {len(candidates)} turn(s)"
                 + (f' with focus "{directive}"' if directive else "")
@@ -702,7 +686,7 @@ class HistoryCompressor:
                 nodes_created += 1
 
             await self._consolidate_forest_locked(
-                session_id, llm, agent.context_consolidation_k, proportional=True, directive=directive
+                session_id, llm, agent.context_consolidation_k, directive=directive
             )
             return nodes_created
 
@@ -719,51 +703,6 @@ class HistoryCompressor:
             src += turn_tokens[i]
         return chunk_idx, src
 
-    async def _compact_chunk(
-        self,
-        session_id: str,
-        history: list[Message],
-        llm: BaseLLM,
-        config: KesokuConfig,
-    ) -> bool:
-        """Legacy strategy: compress every qualifying chunk as soon as it leaves the protected tail."""
-        turns = self.segment_turns(history)
-
-        protect_front = config.agent.protect_front_turns
-        protect_tail = config.agent.protect_tail_turns
-        min_tokens = config.agent.base_node_min_tokens
-        base_turns = config.agent.base_node_turns
-        K = config.agent.context_consolidation_k
-
-        if len(turns) <= protect_front + protect_tail:
-            return False
-
-        # Candidates for compression are the middle turns that have not yet been compressed.
-        # If any message in a turn has summary_node_id set, the whole turn is considered compressed.
-        uncompressed_turns = [
-            t for t in turns[protect_front:-protect_tail] if not any(m.summary_node_id is not None for m in t)
-        ]
-        if not uncompressed_turns:
-            return False
-
-        # Accumulator loop to generate Level-0 nodes
-        compacted_occurred = False
-        current_chunk: list[list[Message]] = []
-        current_tokens = 0
-        for turn in uncompressed_turns:
-            current_chunk.append(turn)
-            current_tokens += self.estimate_prepared_turn_tokens(turn, llm)
-            if len(current_chunk) >= base_turns and current_tokens >= min_tokens:
-                await self._summarize_chunk(session_id, current_chunk, current_tokens, llm, DEFAULT_SUMMARY_MAX_CHARS)
-                compacted_occurred = True
-                current_chunk = []
-                current_tokens = 0
-
-        # If any Level-0 nodes were created, trigger forest consolidation
-        if compacted_occurred:
-            await self._consolidate_forest_locked(session_id, llm, K)
-        return compacted_occurred
-
     async def _compact_watermark(
         self,
         session_id: str,
@@ -772,7 +711,7 @@ class HistoryCompressor:
         config: KesokuConfig,
         overhead_tokens: int,
     ) -> bool:
-        """Watermark strategy: compress only above the high watermark, down to the low watermark.
+        """Compress only above the high watermark, down to the low watermark.
 
         The whole prompt (fixed overhead + scaffold + uncompressed history) is estimated with the calibrated
         estimator. When it exceeds `context_high_watermark`, the oldest unprotected turns are summarized in
@@ -787,7 +726,7 @@ class HistoryCompressor:
 
         compressed = [any(m.summary_node_id is not None for m in t) for t in turns]
         turn_tokens = [
-            0 if compressed[i] else self.estimate_prepared_turn_tokens(t, llm, calibrated=True)
+            0 if compressed[i] else self.estimate_prepared_turn_tokens(t)
             for i, t in enumerate(turns)
         ]
         roots = await self.db.get_root_summary_nodes(session_id)
@@ -836,7 +775,7 @@ class HistoryCompressor:
             compacted_occurred = True
 
         if compacted_occurred:
-            await self._consolidate_forest_locked(session_id, llm, agent.context_consolidation_k, proportional=True)
+            await self._consolidate_forest_locked(session_id, llm, agent.context_consolidation_k)
         return compacted_occurred
 
     async def _summarize_chunk(
@@ -921,18 +860,17 @@ class HistoryCompressor:
         llm: BaseLLM,
         K: int,
         staging_dir: str | None = None,
-        proportional: bool = False,
         directive: str | None = None,
     ) -> None:
         """Consolidate root summary nodes hierarchically when they accumulate to 2K nodes.
 
-        Holds the per-session compaction lock. Only the oldest K nodes are merged. With `proportional`, the
-        merged summary's length budget scales with the children's total length instead of the fixed legacy
-        budget. `directive` (manual `/compact` focus) only steers ordering/emphasis of the merge.
+        Holds the per-session compaction lock. Only the oldest K nodes are merged. The merged summary's
+        length budget scales with the children's total length. `directive` (manual `/compact` focus) only
+        steers ordering/emphasis of the merge.
         """
         async with _locked(session_id):
             await self._consolidate_forest_locked(
-                session_id, llm, K, proportional=proportional, directive=directive
+                session_id, llm, K, directive=directive
             )
 
     async def _consolidate_forest_locked(
@@ -940,7 +878,6 @@ class HistoryCompressor:
         session_id: str,
         llm: BaseLLM,
         K: int,
-        proportional: bool = False,
         directive: str | None = None,
     ) -> None:
         """Body of consolidate_forest; the caller must hold the session's compaction lock."""
@@ -976,12 +913,10 @@ class HistoryCompressor:
                     e_str = self.format_ts(nd.end_timestamp)
                     summaries_text += f"--- Summary {idx + 1} (from {s_str} to {e_str}) ---\n{text}\n\n"
 
-                max_chars = DEFAULT_SUMMARY_MAX_CHARS
-                if proportional:
-                    max_chars = min(
-                        MAX_MERGED_SUMMARY_CHARS,
-                        max(MIN_L0_SUMMARY_CHARS, sum(len(c) for c in children) // 2),
-                    )
+                max_chars = min(
+                    MAX_MERGED_SUMMARY_CHARS,
+                    max(MIN_L0_SUMMARY_CHARS, sum(len(c) for c in children) // 2),
+                )
 
                 start_dt = datetime.datetime.fromtimestamp(start_ts).astimezone()
                 end_dt = datetime.datetime.fromtimestamp(end_ts).astimezone()

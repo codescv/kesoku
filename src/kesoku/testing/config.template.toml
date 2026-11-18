@@ -17,7 +17,6 @@ memory_extraction_enabled = false
 disabled_tools = ["chat_search", "view_message", "analyze_media", "web_search"]
 recent_user_messages_limit = 100
 context_consolidation_k = 4
-compression_strategy = "watermark"
 protect_front_turns = 1
 protect_tail_turns = 4
 context_high_watermark = 64000

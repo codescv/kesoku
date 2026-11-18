@@ -1700,8 +1700,11 @@ async def test_history_compressor_in_place_update(temp_db: str) -> None:
     # Setup configuration to trigger compaction for 1 turn (Turn 1)
     cfg.agent.protect_front_turns = 0
     cfg.agent.protect_tail_turns = 1  # protect only the active Turn 2
-    cfg.agent.base_node_turns = 1
-    cfg.agent.base_node_min_tokens = 0
+    cfg.agent.context_high_watermark = 1
+    cfg.agent.context_low_watermark = 0
+    cfg.agent.protect_tail_min_tokens = 0
+    cfg.agent.watermark_chunk_tokens = 1
+    cfg.agent.watermark_chunk_min_turns = 1
 
     gw = Gateway(context=KesokuContext(config=cfg))
     await gw.create_session("sess_real_compact", title="Real Compact Session")

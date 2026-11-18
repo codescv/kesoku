@@ -157,8 +157,11 @@ async def test_auto_compact_session(tmp_path):
     cfg = KesokuConfig()
     cfg.agent.protect_front_turns = 1
     cfg.agent.protect_tail_turns = 1
-    cfg.agent.base_node_turns = 2
-    cfg.agent.base_node_min_tokens = 1000
+    # Tiny watermarks so the two short middle turns are compacted into one Level-0 node.
+    cfg.agent.context_high_watermark = 1
+    cfg.agent.context_low_watermark = 0
+    cfg.agent.protect_tail_min_tokens = 0
+    cfg.agent.watermark_chunk_tokens = 1
 
     # Build 4 turns (1 front protect, 2 candidates, 1 tail protect)
     messages = []
@@ -248,12 +251,7 @@ async def test_consolidate_forest():
 
 def test_estimate_prepared_turn_tokens():
     """Test estimate_prepared_turn_tokens drops thoughts and truncates long tool outputs."""
-    db_mock = AsyncMock()
-    llm_mock = MagicMock()
-    # Mock fallback token estimation to return len(prompt) // 4
-    llm_mock.estimate_tokens_fallback.side_effect = lambda prompt: len(prompt) // 4
-
-    compressor = HistoryCompressor(db_mock)
+    compressor = HistoryCompressor(AsyncMock())
 
     turn = [
         Message(
@@ -294,8 +292,8 @@ def test_estimate_prepared_turn_tokens():
         ),
     ]
 
-    tokens = compressor.estimate_prepared_turn_tokens(turn, llm_mock, max_historical_tool_chars=500)
-    # Expected: 60 // 4 = 15 tokens from msg_1 + 500 // 4 = 125 tokens from truncated msg_3 = 140
+    tokens = compressor.estimate_prepared_turn_tokens(turn, max_historical_tool_chars=500)
+    # Calibrated estimator (0.25/ASCII char): 15 tokens from msg_1 + 125 from the 500-char preview of msg_3
     assert tokens == 140
 
 
@@ -366,15 +364,13 @@ async def test_consolidate_strips_legacy_user_asks_from_children():
 def test_estimate_prepared_turn_tokens_truncates_notes_tool_args():
     """Estimation mirrors history truncation of long update_session_notes arguments."""
     compressor = HistoryCompressor(AsyncMock())
-    llm_mock = MagicMock()
-    llm_mock.estimate_tokens_fallback = MagicMock(side_effect=lambda prompt=None, **_: len(prompt or ""))
     call = Message(
         session_id="s", chatbot_id="cb", channel_id="ch", sender="update_session_notes",
         role=MessageRole.TOOL, type=MessageType.TOOL_CALL, content="Calling tool ...",
         status=MessageStatus.RESPONDED,
         metadata={"tool_name": "update_session_notes", "tool_arguments": {"content": "n" * 5000}},
     )
-    assert compressor.estimate_prepared_turn_tokens([call], llm_mock) < 500
+    assert compressor.estimate_prepared_turn_tokens([call]) < 500
 
 
 
@@ -521,8 +517,11 @@ async def test_auto_compact_prompt_has_no_directive_and_new_sections_persist(tmp
     cfg = KesokuConfig()
     cfg.agent.protect_front_turns = 1
     cfg.agent.protect_tail_turns = 1
-    cfg.agent.base_node_turns = 2
-    cfg.agent.base_node_min_tokens = 1000
+    # Tiny watermarks so the two short middle turns are compacted into one Level-0 node.
+    cfg.agent.context_high_watermark = 1
+    cfg.agent.context_low_watermark = 0
+    cfg.agent.protect_tail_min_tokens = 0
+    cfg.agent.watermark_chunk_tokens = 1
     messages = [
         Message(
             id=f"golden_{idx}", session_id="sess_golden", chatbot_id="cb", channel_id="ch", sender="user",

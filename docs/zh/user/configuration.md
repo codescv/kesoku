@@ -32,7 +32,9 @@ kesoku init -c config.toml
 
 *   **`llm`**（字符串，默认：`"gemini"`）：当前选用的核心 LLM 驱动引擎。支持 `"gemini"` 或 `"claude"`。
 *   **`protect_front_turns`** / **`protect_tail_turns`**（整数，默认：`1` / `3`）：自动上下文压缩时在会话开头和末尾保留的完整回合数。
-*   **`base_node_min_tokens`**（整数，默认：`25000`）：触发自动 Level-0 摘要压缩的缓冲区 Token 阈值。
+*   **`context_high_watermark`** / **`context_low_watermark`**（整数，默认：`64000` / `24000`）：估算 prompt 超过高水位时开始压缩，从最老的未保护回合开始摘要，直到低于低水位。
+*   **`protect_tail_min_tokens`**（整数，默认：`12000`）：最近未压缩回合至少保留原文的估算 Token 数（须满足 `< context_low_watermark < context_high_watermark`）。
+*   **`watermark_chunk_tokens`** / **`watermark_chunk_min_turns`**（整数，默认：`24000` / `2`）：每个 Level-0 摘要块的目标原文 Token 数与最少回合数。
 *   **`recent_user_messages_limit`** / **`recent_user_messages_total_chars`** / **`recent_user_message_ceiling_chars`**（整数，默认：`100` / `12000` / `6000`）：已压缩回合中保留在 `<recent_user_messages>` 内的用户原话数量上限、注水算法总字符预算与单条上限。
 *   **`repo_rules_files`**（字符串列表，默认：`["AGENTS.md", "GEMINI.md"]`）：沿访问路径向上至 `$AWD` 自动发现并注入到 `<context name="repo_rules">` 的仓库规范文件名。
 *   **`repo_rules_max_files`** / **`repo_rules_max_chars`**（整数，默认：`3` / `4000`）：最多注入的仓库规范文件数与单文件字符上限。

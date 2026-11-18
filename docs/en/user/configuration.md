@@ -32,7 +32,9 @@ Defines active agent features, context compaction, repository rules, and sub-age
 
 *   **`llm`** (string, default: `"gemini"`): The active LLM engine provider. Supported values are `"gemini"` and `"claude"`.
 *   **`protect_front_turns`** / **`protect_tail_turns`** (int, defaults: `1` / `3`): Number of initial and most-recent logical turns protected from automatic compaction.
-*   **`base_node_min_tokens`** (int, default: `25000`): Token watermark above which eligible buffer turns are compacted into Level-0 summary nodes.
+*   **`context_high_watermark`** / **`context_low_watermark`** (ints, defaults: `64000` / `24000`): Compaction starts when the estimated prompt exceeds the high watermark and summarizes the oldest unprotected turns until it is below the low watermark.
+*   **`protect_tail_min_tokens`** (int, default: `12000`): Minimum estimated tokens of the most recent uncompressed turns kept verbatim (must be `< context_low_watermark < context_high_watermark`).
+*   **`watermark_chunk_tokens`** / **`watermark_chunk_min_turns`** (ints, defaults: `24000` / `2`): Target source tokens and minimum turns per Level-0 summary chunk.
 *   **`recent_user_messages_limit`** / **`recent_user_messages_total_chars`** / **`recent_user_message_ceiling_chars`** (ints, defaults: `100` / `12000` / `6000`): Water-filling budget for verbatim user messages retained in `<recent_user_messages>` across compacted turns.
 *   **`repo_rules_files`** (list of strings, default: `["AGENTS.md", "GEMINI.md"]`): Filenames discovered automatically along touched directory paths up to `$AWD` and injected as `<context name="repo_rules">`.
 *   **`repo_rules_max_files`** / **`repo_rules_max_chars`** (ints, defaults: `3` / `4000`): Cap on discovered repository rule files and characters per file.

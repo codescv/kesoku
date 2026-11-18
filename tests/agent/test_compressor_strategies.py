@@ -1,4 +1,4 @@
-"""Tests for compression strategies (legacy chunk vs. watermark), forced compaction and related helpers."""
+"""Tests for the watermark compression algorithm, forced compaction and related helpers."""
 
 import asyncio
 import time
@@ -9,8 +9,8 @@ import pytest
 
 from kesoku.agent import compressor as compressor_module
 from kesoku.agent.compressor import (
-    DEFAULT_SUMMARY_MAX_CHARS,
     MAX_L0_SUMMARY_CHARS,
+    MAX_MERGED_SUMMARY_CHARS,
     MIN_L0_SUMMARY_CHARS,
     RECENT_USER_MESSAGE_OMISSION,
     HistoryCompressor,
@@ -61,7 +61,7 @@ def make_history(n_turns: int, reply_chars: int) -> list[Message]:
 
 
 def make_llm() -> AsyncMock:
-    """LLM mock returning a fixed summary and the legacy fallback estimator."""
+    """LLM mock returning a fixed summary and a simple fallback estimator (used for stored node token counts)."""
     llm = AsyncMock()
     llm.generate.return_value = LLMResponse(content=SUMMARY_JSON)
     llm.estimate_tokens_fallback = MagicMock(side_effect=lambda prompt=None, **_: max(1, len(prompt or "") // 4))
@@ -93,35 +93,47 @@ def test_summary_max_chars_scales_and_clamps() -> None:
 
 
 def test_watermark_config_validation() -> None:
-    """Invalid watermark settings are rejected only when the watermark strategy is selected."""
+    """Invalid watermark settings are always rejected; the defaults are valid."""
     with pytest.raises(ValueError):
-        AgentConfig(compression_strategy="watermark", context_high_watermark=10000, context_low_watermark=20000)
+        AgentConfig(context_high_watermark=10000, context_low_watermark=20000)
     with pytest.raises(ValueError):
-        AgentConfig(compression_strategy="watermark", context_low_watermark=10000, protect_tail_min_tokens=12000)
-    # Same values are fine for the legacy strategy (fields unused).
-    AgentConfig(compression_strategy="chunk", context_high_watermark=10000, context_low_watermark=20000)
+        AgentConfig(context_high_watermark=10000, context_low_watermark=10000)
+    with pytest.raises(ValueError):
+        AgentConfig(context_low_watermark=10000, protect_tail_min_tokens=12000)
+    a = AgentConfig()
+    assert a.protect_tail_min_tokens < a.context_low_watermark < a.context_high_watermark
+
+
+def test_removed_chunk_strategy_keys_are_ignored() -> None:
+    """Stale `compression_strategy` / `base_node_*` keys in old configs load without error and have no effect."""
+    a = AgentConfig.model_validate({"compression_strategy": "chunk", "base_node_min_tokens": 1, "base_node_turns": 1})
+    for name in ("compression_strategy", "base_node_min_tokens", "base_node_turns"):
+        assert not hasattr(a, name)
+        assert name not in AgentConfig.model_fields
 
 
 @pytest.mark.asyncio
-async def test_chunk_strategy_is_default_and_unchanged() -> None:
-    """Default strategy is the legacy chunk algorithm (4 turns and 25K fallback-estimated tokens per node)."""
+async def test_default_config_uses_watermark() -> None:
+    """The default config compacts by watermark: many small turns below 64K are never chunk-compressed."""
     cfg = KesokuConfig()
-    assert cfg.agent.compression_strategy == "chunk"
     db, llm = make_db(), make_llm()
-    # 12 turns x 8000 chars (~2000 fallback tokens): never reaches 25K in one 4+ turn chunk -> no compaction.
-    assert not await HistoryCompressor(db).auto_compact_session("s", make_history(12, 8000), llm, cfg)
-    # 12 turns x 40000 chars (~10000 tokens): chunks close at 4 turns.
-    db, llm = make_db(), make_llm()
-    assert await HistoryCompressor(db).auto_compact_session("s", make_history(12, 40000), llm, cfg)
+    # 12 turns x 40000 chars (~10K calibrated tokens each, ~120K total) exceeds the 64K high watermark.
+    history = make_history(12, 40000)
+    assert await HistoryCompressor(db).auto_compact_session("s", history, llm, cfg)
     prompt = llm.generate.call_args_list[0][1]["prompt"]
-    assert f"< {DEFAULT_SUMMARY_MAX_CHARS} chars" in prompt
+    # First chunk reaches watermark_chunk_tokens (24K) after 3 turns (m1..m3; m0 is the protected head).
+    assert "user 1\n" in prompt and "user 3\n" in prompt and "user 4\n" not in prompt
+    assert f"< {summary_max_chars(30003)} chars" in prompt
+    # 12 turns x 8000 chars (~24K tokens total) stays below the high watermark: nothing is compacted.
+    db, llm = make_db(), make_llm()
+    assert not await HistoryCompressor(db).auto_compact_session("s", make_history(12, 8000), llm, cfg)
+    llm.generate.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_watermark_no_compaction_below_high() -> None:
-    """Below the high watermark, the watermark strategy never compacts."""
+    """Below the high watermark, nothing is compacted."""
     cfg = KesokuConfig()
-    cfg.agent.compression_strategy = "watermark"
     db, llm = make_db(), make_llm()
     # 20 turns x 4000 chars = ~20K calibrated tokens < 64K
     assert not await HistoryCompressor(db).auto_compact_session("s", make_history(20, 4000), llm, cfg)
@@ -132,7 +144,6 @@ async def test_watermark_no_compaction_below_high() -> None:
 async def test_watermark_compacts_down_to_low_and_protects_tail() -> None:
     """Above high, oldest turns are compacted until the estimate is below low; the tail stays raw."""
     cfg = KesokuConfig()
-    cfg.agent.compression_strategy = "watermark"
     db, llm = make_db(), make_llm()
     history = make_history(40, 8000)  # ~2000 tokens/turn, ~80K total
     compacted = await HistoryCompressor(db).auto_compact_session("s", history, llm, cfg, overhead_tokens=1000)
@@ -153,7 +164,6 @@ async def test_watermark_compacts_down_to_low_and_protects_tail() -> None:
 async def test_watermark_does_not_thrash_on_small_candidates() -> None:
     """If less than one chunk of tokens sits outside the tail, nothing is compacted even above high."""
     cfg = KesokuConfig()
-    cfg.agent.compression_strategy = "watermark"
     db, llm = make_db(), make_llm()
     # Huge fixed overhead pushes the total over high, but only a few small turns exist.
     history = make_history(8, 4000)
@@ -322,7 +332,6 @@ async def test_watermark_estimate_uses_recent_user_message_pool() -> None:
     for pool, ceiling in [(12000, 6000), (600, 200)]:
         cfg = KesokuConfig()
         agent = cfg.agent
-        agent.compression_strategy = "watermark"
         agent.context_high_watermark = 7000
         agent.context_low_watermark = 3000
         agent.protect_tail_min_tokens = 500
@@ -491,7 +500,7 @@ async def test_concurrent_compactions_produce_one_node_set() -> None:
 
 @pytest.mark.asyncio
 async def test_auto_and_forced_compaction_serialised() -> None:
-    """An auto (chunk) compaction waiting on a forced one does not re-summarise the same turns."""
+    """An auto (watermark) compaction waiting on a forced one does not re-summarise the same turns."""
     db = make_db()
     llm = make_llm()
 
@@ -501,8 +510,11 @@ async def test_auto_and_forced_compaction_serialised() -> None:
 
     llm.generate.side_effect = slow_generate
     cfg = _force_cfg()
-    cfg.agent.base_node_turns = 1
-    cfg.agent.base_node_min_tokens = 1
+    cfg.agent.context_high_watermark = 1
+    cfg.agent.context_low_watermark = 0
+    cfg.agent.protect_tail_min_tokens = 0
+    cfg.agent.watermark_chunk_tokens = 1
+    cfg.agent.watermark_chunk_min_turns = 6  # one node for the 6 middle turns
     compressor = HistoryCompressor(db)
     forced, auto = await asyncio.gather(
         compressor.force_compact_session("s", make_history(10, 100), llm, cfg),
@@ -510,6 +522,23 @@ async def test_auto_and_forced_compaction_serialised() -> None:
     )
     assert forced == 1 and auto is False
     assert db.insert_summary_node.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_consolidation_budget_scales_with_children() -> None:
+    """The merge budget is half the children's total length, clamped to [MIN_L0, MAX_MERGED] chars."""
+    for child_chars, expected in [(10, MIN_L0_SUMMARY_CHARS), (1000, 2000), (5000, MAX_MERGED_SUMMARY_CHARS)]:
+        db, llm = make_db(), make_llm()
+        roots = [
+            SummaryNode(
+                id=f"n{i}", session_id="s", level=0, summary="T" * child_chars,
+                start_timestamp=1000 + i, end_timestamp=1001 + i, token_count=10, source_token_count=100,
+            )
+            for i in range(8)
+        ]
+        db.get_root_summary_nodes.side_effect = [roots, []]
+        await HistoryCompressor(db).consolidate_forest("s", llm, K=4)
+        assert f"< {expected} chars" in llm.generate.call_args[1]["prompt"]
 
 
 @pytest.mark.asyncio

@@ -381,12 +381,11 @@ def test_history_preview_short_outputs_untouched(tmp_path) -> None:
 def test_estimate_prepared_turn_tokens_uses_same_preview() -> None:
     from kesoku.agent.compressor import estimate_tokens_calibrated
     from kesoku.agent.history import history_preview
-    from kesoku.agent.llm import MockLLM
 
     full = B3_HEADER + B3_BODY + B3_TAIL
     turn = _tool_turn(result=full)[:2]
     comp = HistoryCompressor(db=None)  # type: ignore[arg-type]
-    tokens = comp.estimate_prepared_turn_tokens(turn, MockLLM(), calibrated=True)
+    tokens = comp.estimate_prepared_turn_tokens(turn)
     expected = estimate_tokens_calibrated("run it") + estimate_tokens_calibrated(history_preview(full, 500))
     assert tokens == expected
 

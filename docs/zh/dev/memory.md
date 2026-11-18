@@ -82,9 +82,7 @@ CREATE TABLE IF NOT EXISTS agent_memories (
 长对话历史如果以原始文本一直堆积，会极快耗尽上下文窗口。Kesoku 采用自定义的分层回合历史压缩器，实现历史压缩与无损找回的平衡。
 
 ### 4.1 分层回合历史压缩 (`HistoryCompressor`)
-1. 每次 LLM 推理前检查是否需要压缩。通过 `[agent].compression_strategy` 选择两种策略：
-    *   **`chunk`**（旧算法，默认）：中间回合（除受保护的头部和最后 `protect_tail_turns` 轮）一旦同时攒够 `base_node_turns` 轮和 `base_node_min_tokens` token（旧的 fallback 估算），立即压成 Level-0 节点。原文上下文在"受保护尾部"和"尾部 + 约 25K 估算 token"之间来回跳。
-    *   **`watermark`**（高低水位）：用校准后的估算器（ASCII 约 0.25 token/字，非 ASCII 约 0.9 token/字，按 Gemini `count_tokens` 拟合）估算整个 prompt（system prompt + 工具定义 + scaffold + 未压缩历史）。不超过 `context_high_watermark` 时什么都不做；超过后从最老的未保护回合开始，按约 `watermark_chunk_tokens`（至少 `watermark_chunk_min_turns` 轮）一块压成 L0，直到估算值低于 `context_low_watermark`。尾部同时受 `protect_tail_turns` 和 `protect_tail_min_tokens` 保护。可压缩内容不足一块时跳过（防抖动），配置校验要求 `protect_tail_min_tokens < context_low_watermark < context_high_watermark`。摘要长度按原文规模缩放（L0 约为原文 token 的 8%，1200–3000 字；合并时为子节点总长度的一半，上限 4000 字）。
+1. 每次 LLM 推理前按高低水位算法（唯一的内置策略）检查是否需要压缩：用校准后的估算器（ASCII 约 0.25 token/字，非 ASCII 约 0.9 token/字，按 Gemini `count_tokens` 拟合）估算整个 prompt（system prompt + 工具定义 + scaffold + 未压缩历史）。不超过 `context_high_watermark` 时什么都不做；超过后从最老的未保护回合开始，按约 `watermark_chunk_tokens`（至少 `watermark_chunk_min_turns` 轮）一块压成 L0，直到估算值低于 `context_low_watermark`。尾部同时受 `protect_tail_turns` 和 `protect_tail_min_tokens` 保护。可压缩内容不足一块时跳过（防抖动），配置校验要求 `protect_tail_min_tokens < context_low_watermark < context_high_watermark`。摘要长度按原文规模缩放（L0 约为原文 token 的 8%，1500–3000 字；合并时为子节点总长度的一半，上限 4000 字）。
 2. 摘要由专门的压缩模型生成（`[agent].context_llm` / `[gemini|claude].context_model_name`）。
 3. 摘要节点是“续写式”摘要，包含四段：**Timeline**；**Dead Ends**（尝试过但失败、回退或被用户否决的方案及原因，避免重试）；**Pending State**（`Unfinished` 未完成的工作及下一步、`Constraints` 仍然有效的用户规则（简短的原文引用）、`Key files` 后续工作依赖的文件）；**Learnings**（仅工具与技能使用经验）。合并摘要时 dead ends 去重，后续摘要显示已完成的待办会被删除，新规则覆盖冲突的旧规则，仍然有效的约束永远不会被丢弃。`notes.md`（`<context name="notes">`）仍是当前规则的权威来源。旧节点里的 "User Asks" / "Tools & Skills" 段在发送给 LLM 前会被剥离。L0 摘要预算为 1500–3000 字。
 4. 在 SQLite 数据库中更新原消息记录，将其 `summary_node_id` 字段指向新创建的 0 级摘要节点。
