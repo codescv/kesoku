@@ -1094,7 +1094,7 @@ class TurnExecutor:
                 llm_history = prepare_history_for_llm(
                     history,
                     staging_dir=session_staging_dir,
-                    strip_old_questions=cfg.agent.strip_historical_question_options,
+                    strip_old_questions=True,
                 )
 
                 # Read per-(session, model) explicit cache snapshot without blocking R1..RN on cache creation RPCs.
@@ -1567,7 +1567,7 @@ class TurnExecutor:
             prepared_all = prepare_history_for_llm(
                 [*post_assembled, sentinel_msg],
                 staging_dir=session_staging_dir,
-                strip_old_questions=cfg.agent.strip_historical_question_options,
+                strip_old_questions=True,
             )
             prefix_messages = (
                 prepared_all[:-1]
@@ -1855,7 +1855,7 @@ class TurnExecutor:
             sync_db = getattr(self.context.db, "_sync", getattr(self.context.db, "sync_db", None))
             has_real_db = isinstance(sync_db, DatabaseManager)
 
-            if cfg.agent.memory_pinned_enabled and active_role:
+            if active_role:
                 try:
                     memories_dir = self._resolve_memories_dir(active_role)
                     consolidator = getattr(self.context, "memory_consolidator", None)

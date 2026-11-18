@@ -119,7 +119,7 @@ def history_search(
     db = DatabaseManager(cfg.workspace.db_path)
     db.verify_db()
 
-    threshold = min(0.45, cfg.agent.search_threshold)
+    threshold = cfg.agent.search_threshold
     matches = search_role_memories(
         db,
         role,

@@ -108,12 +108,8 @@ class AgentConfig(BaseModel):
         default=None,
         description="LLM provider identifier for context compression and background memory (if None, defaults to llm)",
     )
-    embedding_model: str = Field(
-        default_factory=lambda: os.getenv("CONTEXT_EMBEDDING_MODEL", "vertex_ai/text-multilingual-embedding-002"),
-        description="Model name to use for context compression vector embedding generation",
-    )
     search_threshold: float = Field(
-        default=0.55,
+        default=0.35,
         description="Minimum similarity score threshold for semantic search results (between 0.0 and 1.0)",
     )
     protect_front_turns: int = Field(
@@ -193,10 +189,6 @@ class AgentConfig(BaseModel):
             "<memory> block (paths and descriptions only) before <current_message>"
         ),
     )
-    auto_context_search_threshold: float = Field(
-        default=0.50,
-        description="Deprecated alias; kept for config.toml compatibility",
-    )
     auto_context_search_semantic_min: float = Field(
         default=0.50,
         description="Minimum relevance score (MAX chunk cosine + lexical boost) for ambient <memory> disclosure",
@@ -247,23 +239,12 @@ class AgentConfig(BaseModel):
     subagent_model_name: str = Field(
         default="", description="Optional override for sub-agent LLM model"
     )
-    strip_historical_question_options: bool = Field(
-        default=True,
-        description=(
-            "Collapse `[question: ...]` stems/options in completed turns older than the last completed turn "
-            "to reduce in-context self-imitation"
-        ),
-    )
     user_clock_file: str = Field(
         default="",
         description=(
             "Optional path (relative to agent working directory or absolute) to a JSON file tracking the user's "
             "physical IANA timezone and location; empty disables user-local clock attributes on <current_message>"
         ),
-    )
-    memory_pinned_enabled: bool = Field(
-        default=True,
-        description="Whether to inject PINNED memory files into <memory_pinned> each turn",
     )
     memory_pinned_max_chars: int = Field(
         default=2500,

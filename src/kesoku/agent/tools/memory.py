@@ -211,9 +211,9 @@ async def memory_search(
     sync_db = getattr(db, "sync_db", db)
 
     try:
-        threshold = 0.45
+        threshold = 0.35
         if context.gateway.context and context.gateway.context.config:
-            threshold = min(0.45, context.gateway.context.config.agent.search_threshold)
+            threshold = context.gateway.context.config.agent.search_threshold
 
         list_all = (query or "").strip() in ("", "*")
         matches = await asyncio.to_thread(
