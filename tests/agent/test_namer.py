@@ -66,11 +66,7 @@ async def test_session_namer_success(temp_db: str) -> None:
 
     # Verify rename message posted
     messages = await gw.db.get_messages_by_filters(filters={"session_id": "sess1"})
-    rename_msgs = [
-        m
-        for m in messages
-        if m.role == MessageRole.SYSTEM and m.type == MessageType.SESSION_RENAME
-    ]
+    rename_msgs = [m for m in messages if m.role == MessageRole.SYSTEM and m.type == MessageType.SESSION_RENAME]
     assert len(rename_msgs) == 1
     assert rename_msgs[0].content == "Kesoku Introduction"
     assert rename_msgs[0].chatbot_id == "discord"
@@ -358,3 +354,122 @@ def test_parse_title_response_variants() -> None:
     assert parse_title_response('"Plain Title"') == ("Plain Title", False)
     assert parse_title_response("「标题」\nextra") == ("标题", False)
     assert parse_title_response("") == ("", False)
+
+
+@pytest.mark.asyncio
+async def test_translator_card_cleaning_and_two_stage_naming(temp_db: str) -> None:
+    """Translator YAML cards strip ruby/tokens noise and upgrade provisional launch titles to topic titles."""
+    gw = await _gateway(temp_db)
+    await gw.create_session("sess1", title="New Session", chatbot_id="app", channel_id="app:sess1")
+
+    await _seed_turn(
+        gw,
+        "进入通用极速翻译模式：母语 zh-CN ⇄ 常用外语 ja（常用外语：ja、en、ko），零寒暄。",
+        "翻译台已就绪。",
+    )
+    captured: list[str] = []
+    replies = [
+        '{"title": "中日翻译", "provisional": true}',
+        '{"title": "用户文档日译", "provisional": false}',
+    ]
+
+    class CapturingLLM(MockLLM):
+        async def generate(self, prompt=None, system_prompt=None, history=None, tools=None, **kwargs):  # type: ignore[override]
+            captured.append(history[-1].content)
+            return LLMResponse(content=replies.pop(0), tool_calls=[])
+
+    namer = SessionNamer(db=gw.db, gateway=gw, llm=CapturingLLM())
+    assert await namer.auto_rename_session("sess1") is True
+    sess = await gw.db.get_session("sess1")
+    assert (sess.title, sess.title_source) == ("中日翻译", "provisional")
+
+    card_reply = (
+        "```card\n"
+        "kind: translation\n"
+        "src_lang: zh-CN\n"
+        "dst_lang: ja\n"
+        "source: 这份用户文档是AI生成的，请帮忙确认一下\n"
+        "source_ruby: <ruby>漢字<rt>かんじ</rt></ruby>" + "x" * 400 + "\n"
+        "target: このユーザー向けドキュメントはAIが作成したものです。\n"
+        "target_ruby: このユーザー<ruby>向<rt>む</rt></ruby>け<ruby>文書<rt>ぶんしょ</rt></ruby>\n"
+        "tokens:\n"
+        "  - surface: ユーザー\n"
+        "    reading: ユーザー\n"
+        "    pos: 名词\n"
+        "back_translation: 这份面向用户的文档是AI生成的。\n"
+        "```\n"
+        "注：<ruby>確認<rt>かくにん</rt></ruby>一下"
+    )
+    await _seed_turn(gw, "这份用户文档是AI生成的，请帮忙确认一下", card_reply)
+    assert await namer.auto_rename_session("sess1") is True
+    sess = await gw.db.get_session("sess1")
+    assert (sess.title, sess.title_source) == ("用户文档日译", "auto")
+    assert "source_ruby:" not in captured[1]
+    assert "target_ruby:" not in captured[1]
+    assert "surface: ユーザー" not in captured[1]
+    assert "このユーザー向けドキュメントはAIが作成したものです。" in captured[1]
+    assert "back_translation: 这份面向用户的文档是AI生成的。" in captured[1]
+    assert "<rt>" not in captured[1] and "確認一下" in captured[1]
+
+    # Turn 3: already `auto`, must not call LLM again.
+    await _seed_turn(gw, "再翻译一句", "好的")
+    assert await namer.auto_rename_session("sess1") is False
+
+
+@pytest.mark.asyncio
+async def test_session_namer_fallback_on_unsupported_thinking_level(temp_db: str) -> None:
+    """When primary LLM fails with THINKING_LEVEL_MINIMAL, SessionNamer retries on fallback_llm and promotes it."""
+    gw = await _gateway(temp_db)
+    await gw.create_session("sess1", title="New Session", chatbot_id="app", channel_id="app:sess1")
+    await _seed_turn(gw, "印度人口最多的城市是哪些", "孟买、德里、班加罗尔等。")
+
+    primary_calls = 0
+
+    class FailingLLM(MockLLM):
+        async def generate(self, prompt=None, system_prompt=None, history=None, tools=None, **kwargs):  # type: ignore[override]
+            nonlocal primary_calls
+            primary_calls += 1
+            raise RuntimeError(
+                "ClientError: 400 INVALID_ARGUMENT. Thinking level is unsupported: THINKING_LEVEL_MINIMAL"
+            )
+
+    fallback = MockLLM(responses=[LLMResponse(content='{"title": "印度人口最多城市", "provisional": false}')])
+    namer = SessionNamer(db=gw.db, gateway=gw, llm=FailingLLM(), fallback_llm=fallback)
+
+    assert await namer.auto_rename_session("sess1") is True
+    sess = await gw.db.get_session("sess1")
+    assert (sess.title, sess.title_source) == ("印度人口最多城市", "auto")
+    assert primary_calls == 1
+    assert namer.llm is fallback
+    assert namer.fallback_llm is None
+
+
+def test_session_worker_namer_llm_uses_low_thinking_level(temp_db: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """SessionWorker._namer_llm must request thinking_level='low' (never 'minimal') and return a fallback."""
+    from kesoku.agent.agent import SessionWorker
+    from kesoku.config import AgentConfig, GeminiConfig
+
+    DatabaseManager(temp_db).init_tables()
+    cfg = KesokuConfig(
+        workspace=WorkspaceConfig(db_path=temp_db),
+        agent=AgentConfig(llm="gemini"),
+        gemini=GeminiConfig(model_name="gemini-4-hydrogen", context_model_name="gemini-3.8-flash"),
+    )
+    ctx = KesokuContext(config=cfg)
+    gw = Gateway(context=ctx)
+
+    calls: list[tuple[str | None, str | None]] = []
+    session_llm = MockLLM()
+    flash_llm = MockLLM()
+
+    def fake_get_llm(model_name=None, thinking_level=None, **kwargs):
+        calls.append((model_name, thinking_level))
+        return flash_llm if model_name == "gemini-3.8-flash" else session_llm
+
+    monkeypatch.setattr(ctx, "get_llm", fake_get_llm)
+    worker = SessionWorker(session_id="sess1", gateway=gw, context=ctx)
+    primary, fallback = worker._namer_llm()
+    assert primary is flash_llm
+    assert fallback is session_llm
+    assert ("gemini-3.8-flash", "low") in calls
+    assert all(tl != "minimal" for _, tl in calls)

@@ -89,7 +89,6 @@ class SessionWorker:
         self.cached_messages_len = 0
         self.cache_expires_at = 0.0
 
-
     @property
     def running(self) -> bool:
         """Check if the session worker is currently running.
@@ -245,24 +244,26 @@ class SessionWorker:
             except Exception as db_err:
                 logger.error(f"Failed to update message status to ERROR: {db_err}")
 
-    def _namer_llm(self) -> BaseLLM:
-        """Resolve a lightweight LLM for session naming.
+    def _namer_llm(self) -> tuple[BaseLLM, BaseLLM | None]:
+        """Resolve a lightweight LLM (and optional fallback) for session naming.
 
-        Uses the active provider's `context_model_name` with minimal thinking when configured, otherwise the
-        session LLM.
+        Uses the active provider's `context_model_name` with `thinking_level="low"` when configured
+        (universally supported across Gemini and Claude, avoiding `THINKING_LEVEL_MINIMAL` 400 errors),
+        with the session LLM as a fallback if `context_model_name` fails.
         """
         cfg = self.context.config
         provider = str(getattr(cfg.agent, "llm", "") or "").lower()
         provider_cfg = getattr(cfg, provider, None) if provider else None
         model_name = getattr(provider_cfg, "context_model_name", None)
+        session_llm = self.context.get_llm()
         if model_name:
-            # Claude has no "minimal" thinking level; "low" is its lightest setting.
-            thinking_level = "low" if provider == "claude" else "minimal"
             try:
-                return self.context.get_llm(model_name=model_name, thinking_level=thinking_level)
+                namer_llm = self.context.get_llm(model_name=model_name, thinking_level="low")
+                fallback = session_llm if namer_llm is not session_llm else None
+                return namer_llm, fallback
             except Exception as e:
                 logger.warning(f"Failed to resolve naming LLM '{model_name}', using session LLM: {e}")
-        return self.context.get_llm()
+        return session_llm, None
 
     async def _auto_rename_session(self, staging_dir: str | None = None) -> None:
         """Run `SessionNamer` after a turn (manual / initial-context titles are locked inside the namer)."""
@@ -271,7 +272,13 @@ class SessionWorker:
         self._auto_naming_in_progress = True
         try:
             if self.namer is None:
-                self.namer = SessionNamer(db=self.context.db, gateway=self.gateway, llm=self._namer_llm())
+                llm, fallback_llm = self._namer_llm()
+                self.namer = SessionNamer(
+                    db=self.context.db,
+                    gateway=self.gateway,
+                    llm=llm,
+                    fallback_llm=fallback_llm,
+                )
             await self.namer.auto_rename_session(self.session_id, staging_dir=staging_dir or self.session_staging_dir)
         except Exception as e:
             logger.error(f"Auto-naming failed for session {self.session_id}: {e}", exc_info=True)

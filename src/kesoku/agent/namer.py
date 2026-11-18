@@ -37,6 +37,10 @@ _TITLE_MAX_CHARS = 40
 
 _SPOILER_BLOCK_RE = re.compile(r"<spoiler>.*?</spoiler>", re.DOTALL | re.IGNORECASE)
 _SPOILER_TAG_RE = re.compile(r"</?spoiler>", re.IGNORECASE)
+_RUBY_RT_RE = re.compile(r"<r[tp][^>]*>.*?</r[tp]>", re.DOTALL | re.IGNORECASE)
+_RUBY_TAG_RE = re.compile(r"</?ruby[^>]*>", re.IGNORECASE)
+_CARD_NOISE_SCALAR_KEYS = ("source_ruby", "target_ruby")
+_CARD_NOISE_BLOCK_KEYS = ("tokens", "source_tokens", "target_tokens")
 _CODE_FENCE_RE = re.compile(r"^```[a-zA-Z0-9_-]*\s*\n?(.*?)\n?```$", re.DOTALL)
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 _QUOTE_PAIRS = (('"', '"'), ("'", "'"), ("“", "”"), ("「", "」"), ("『", "』"), ("《", "》"))
@@ -44,22 +48,67 @@ _QUOTE_PAIRS = (('"', '"'), ("'", "'"), ("“", "”"), ("「", "」"), ("『", 
 _TITLE_PROMPT = (
     "Name the conversation below with a short, concrete topic title.\n"
     "Rules:\n"
-    "- Write the title in the same language the user writes in.\n"
+    "- Write the title in the same language the user writes in (for translation sessions, use the user's "
+    "native/target language).\n"
     "- Chinese: 4-10 characters (never more than 14). English: 2-5 words.\n"
     "- Use concrete topic nouns/phrases (the subject, story, task or question actually being discussed).\n"
+    "- For translation sessions: once actual text, voice, or image content is translated, name the concrete "
+    'subject with a concise translation cue (e.g. "用户文档日译", "拉面店点餐翻译", "会议时间日译中"); '
+    "if the user only launched the translator with no content to translate yet, give a short language-pair "
+    'placeholder (e.g. "中日翻译") and set "provisional": true.\n'
     "- Never use meta/process labels that describe the conversation mechanics instead of its topic, such as "
     '"模式启动", "世界观选择", "开启对话", "Interactive Mode", "New Chat".\n'
     "- No quotes, no trailing punctuation, no prefixes.\n"
     'Return ONLY a JSON object: {"title": "...", "provisional": false}\n'
-    'Set "provisional" to true ONLY when the user has just opened a menu or setup step and has not picked a '
-    "concrete topic yet (so the title should be replaced once they choose); otherwise false."
+    'Set "provisional" to true ONLY when the user has just opened a menu, mode, or setup step and has not '
+    "provided a concrete topic or content yet (so the title should be replaced on a later turn); otherwise false."
 )
 
 
+def _strip_card_noise(text: str) -> str:
+    """Drop verbose furigana/token fields (`source_ruby`, `target_ruby`, `tokens`) from YAML card blocks."""
+    if "```card" not in text:
+        return text
+    out: list[str] = []
+    in_card = False
+    skip_indent: int | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```card"):
+            in_card = True
+            skip_indent = None
+            out.append(line)
+            continue
+        if in_card and stripped == "```":
+            in_card = False
+            skip_indent = None
+            out.append(line)
+            continue
+        if not in_card:
+            out.append(line)
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if skip_indent is not None:
+            if stripped == "" or indent > skip_indent:
+                continue
+            skip_indent = None
+        key = stripped.split(":", 1)[0].strip() if ":" in stripped else ""
+        if key in _CARD_NOISE_SCALAR_KEYS:
+            continue
+        if key in _CARD_NOISE_BLOCK_KEYS:
+            skip_indent = indent
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
 def _clean_text(content: str) -> str:
-    """Remove spoiler blocks/tags and truncate a transcript message to `_MESSAGE_MAX_CHARS`."""
+    """Remove spoiler blocks, furigana ruby markup, verbose card metadata, and truncate to `_MESSAGE_MAX_CHARS`."""
     text = _SPOILER_BLOCK_RE.sub("", content or "")
-    text = _SPOILER_TAG_RE.sub("", text).strip()
+    text = _SPOILER_TAG_RE.sub("", text)
+    text = _strip_card_noise(text)
+    text = _RUBY_RT_RE.sub("", text)
+    text = _RUBY_TAG_RE.sub("", text).strip()
     if len(text) > _MESSAGE_MAX_CHARS:
         text = text[:_MESSAGE_MAX_CHARS].rstrip() + "…"
     return text
@@ -126,17 +175,25 @@ def _collect_transcript(history: list[Message]) -> list[Message] | None:
 class SessionNamer:
     """Handles automatic session renaming from context frontmatter or the opening conversation turns."""
 
-    def __init__(self, db: AsyncDatabaseManager, gateway: Gateway, llm: BaseLLM) -> None:
+    def __init__(
+        self,
+        db: AsyncDatabaseManager,
+        gateway: Gateway,
+        llm: BaseLLM,
+        fallback_llm: BaseLLM | None = None,
+    ) -> None:
         """Initialize SessionNamer.
 
         Args:
             db: AsyncDatabaseManager instance.
             gateway: Gateway instance.
             llm: BaseLLM instance (a lightweight model is sufficient).
+            fallback_llm: Optional fallback LLM used if `llm.generate` fails (e.g. unsupported thinking level).
         """
         self.db = db
         self.gateway = gateway
         self.llm = llm
+        self.fallback_llm = fallback_llm
 
     async def auto_rename_session(self, session_id: str, staging_dir: str | None = None) -> bool:
         """Attempt to automatically (re)name the session.
@@ -203,7 +260,19 @@ class SessionNamer:
         ]
 
         logger.info(f"Generating auto title for session {session_id}...")
-        res = await self.llm.generate(system_prompt=None, history=naming_history, tools=None)
+        try:
+            res = await self.llm.generate(system_prompt=None, history=naming_history, tools=None)
+        except Exception as primary_err:
+            if self.fallback_llm is None:
+                raise
+            logger.warning(
+                f"Primary naming LLM failed for session {session_id} ({primary_err}); retrying with fallback LLM"
+            )
+            res = await self.fallback_llm.generate(system_prompt=None, history=naming_history, tools=None)
+            err_s = str(primary_err)
+            if "THINKING_LEVEL_MINIMAL" in err_s or "Thinking level is unsupported" in err_s:
+                self.llm = self.fallback_llm
+                self.fallback_llm = None
         new_title, provisional = parse_title_response(res.content or "")
         if not new_title:
             logger.warning(f"LLM returned empty title for session {session_id}")
