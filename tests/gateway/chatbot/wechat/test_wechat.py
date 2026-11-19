@@ -710,3 +710,227 @@ async def test_ilink_client_upload_ciphertext_success_json(
     result = await client.upload_ciphertext(b"ciphertext", "https://upload.url")
 
     assert result == "json_param_value"
+
+
+@pytest.mark.asyncio
+async def test_wechat_typing_keepalive_fetches_ticket_refreshes_and_stops(
+    mock_config: KesokuConfig, mock_gateway: MagicMock
+) -> None:
+    """Typing keep-alive fetches missing ticket on first turn, refreshes periodically, and stops on delivery."""
+    import asyncio
+
+    with patch("kesoku.gateway.chatbot.wechat.adapter.get_config", return_value=mock_config):
+        bot = WechatChatbot("wechat_test", mock_gateway, wechat_config=mock_config.wechat)
+        bot.send_client = AsyncMock()
+        bot.poll_client = AsyncMock()
+        bot.poll_client.get_config = AsyncMock(return_value={"typing_ticket": "ticket_abc"})
+        bot.send_client.send_typing = AsyncMock(return_value={"ret": 0})
+        bot._typing_refresh_interval = 0.02
+
+        bot._start_typing("user_1", sender_id="user_1", context_token="ctx_1")
+        await asyncio.sleep(0.07)
+
+        bot.poll_client.get_config.assert_awaited_once()
+        start_calls = [c for c in bot.send_client.send_typing.await_args_list if c.kwargs.get("typing_status") == 1]
+        assert len(start_calls) >= 2
+
+        final_msg = Message(
+            id="m_final",
+            session_id="sess_1",
+            chatbot_id="wechat_test",
+            channel_id="user_1",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="done",
+            status=MessageStatus.PENDING,
+        )
+        await bot.on_message_delivered(final_msg)
+        assert "user_1" not in bot._typing_tasks
+        stop_calls = [c for c in bot.send_client.send_typing.await_args_list if c.kwargs.get("typing_status") == 2]
+        assert len(stop_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_wechat_typing_stops_on_delivery_failure(mock_config: KesokuConfig, mock_gateway: MagicMock) -> None:
+    """Typing keep-alive stops cleanly when message delivery fails."""
+    import asyncio
+
+    with patch("kesoku.gateway.chatbot.wechat.adapter.get_config", return_value=mock_config):
+        bot = WechatChatbot("wechat_test", mock_gateway, wechat_config=mock_config.wechat)
+        bot.send_client = AsyncMock()
+        bot.send_client.send_typing = AsyncMock(return_value={"ret": 0})
+        bot._typing_cache.set("user_2", "ticket_xyz")
+        bot._typing_refresh_interval = 0.05
+
+        bot._start_typing("user_2", sender_id="user_2", context_token="ctx_2")
+        await asyncio.sleep(0.02)
+        assert "user_2" in bot._typing_tasks
+
+        failed_msg = Message(
+            id="m_fail",
+            session_id="sess_2",
+            chatbot_id="wechat_test",
+            channel_id="user_2",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="boom",
+            status=MessageStatus.PENDING,
+        )
+        await bot.on_message_delivery_failed(failed_msg, RuntimeError("net error"))
+        assert "user_2" not in bot._typing_tasks
+        stop_calls = [c for c in bot.send_client.send_typing.await_args_list if c.kwargs.get("typing_status") == 2]
+        assert len(stop_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_wechat_tool_progress_hints_delay_throttle_and_cancel(
+    mock_config: KesokuConfig, mock_gateway: MagicMock
+) -> None:
+    """Tool-call progress hints respect first delay, throttle interval, new-tool gating, and final-reply cancel."""
+    import asyncio
+
+    mock_config.wechat.progress_feedback = "status"
+    mock_config.wechat.progress_delay_seconds = 0.04
+    mock_config.wechat.progress_interval_seconds = 0.08
+
+    with patch("kesoku.gateway.chatbot.wechat.adapter.get_config", return_value=mock_config):
+        bot = WechatChatbot("wechat_test", mock_gateway, wechat_config=mock_config.wechat)
+        bot.send_client = AsyncMock()
+        bot.send_client.send_message = AsyncMock(return_value={"ret": 0})
+        bot.send_client.send_typing = AsyncMock(return_value={"ret": 0})
+        bot._typing_cache.set("u_prog", "ticket_p")
+        bot._token_store.set("test_bot_id", "u_prog", "ctx_p")
+        assert bot.supports_intermediate_messages() is True
+
+        # 1. THOUGHT messages never send a bubble
+        bot._reset_progress_state("sess_p", "u_prog")
+        thought_msg = Message(
+            id="t1",
+            session_id="sess_p",
+            chatbot_id="wechat_test",
+            channel_id="u_prog",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.THOUGHT,
+            content="thinking...",
+            status=MessageStatus.RESPONDED,
+        )
+        await bot.handle_intermediate_message(thought_msg)
+        await asyncio.sleep(0.06)
+        bot.send_client.send_message.assert_not_awaited()
+
+        # 2. First tool call emits after progress_delay_seconds and re-pulses typing
+        bot._reset_progress_state("sess_p", "u_prog")
+        tc1 = Message(
+            id="tc1",
+            session_id="sess_p",
+            chatbot_id="wechat_test",
+            channel_id="u_prog",
+            sender="web_search",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_CALL,
+            content="searching",
+            status=MessageStatus.RESPONDED,
+            metadata={"tool_name": "web_search"},
+        )
+        await bot.handle_intermediate_message(tc1)
+        bot.send_client.send_message.assert_not_awaited()
+        await asyncio.sleep(0.06)
+        assert bot.send_client.send_message.await_count == 1
+        assert bot.send_client.send_message.await_args.kwargs["text"] == "🔍 正在联网查询…"
+        assert bot.send_client.send_typing.await_count >= 1
+
+        # 3. No new tool call -> no second hint even after interval passes
+        await asyncio.sleep(0.10)
+        assert bot.send_client.send_message.await_count == 1
+
+        # 4. New tool call after interval emits immediately
+        tc2 = Message(
+            id="tc2",
+            session_id="sess_p",
+            chatbot_id="wechat_test",
+            channel_id="u_prog",
+            sender="run_shell_command",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_CALL,
+            content="running",
+            status=MessageStatus.RESPONDED,
+            metadata={"tool_name": "run_shell_command"},
+        )
+        await bot.handle_intermediate_message(tc2)
+        assert bot.send_client.send_message.await_count == 2
+        assert bot.send_client.send_message.await_args.kwargs["text"] == "💻 正在执行任务…"
+
+        # 5. Fast turn: final reply cancels pending delayed hint so zero extra bubbles are sent
+        bot.send_client.send_message.reset_mock()
+        bot._reset_progress_state("sess_fast", "u_prog")
+        tc_fast = Message(
+            id="tc_fast",
+            session_id="sess_fast",
+            chatbot_id="wechat_test",
+            channel_id="u_prog",
+            sender="read_file",
+            role=MessageRole.TOOL,
+            type=MessageType.TOOL_CALL,
+            content="reading",
+            status=MessageStatus.RESPONDED,
+            metadata={"tool_name": "read_file"},
+        )
+        await bot.handle_intermediate_message(tc_fast)
+        final_fast = Message(
+            id="m_fast",
+            session_id="sess_fast",
+            chatbot_id="wechat_test",
+            channel_id="u_prog",
+            sender="Kesoku",
+            role=MessageRole.ASSISTANT,
+            type=MessageType.TEXT,
+            content="quick answer",
+            status=MessageStatus.PENDING,
+        )
+        await bot.handle_message(final_fast)
+        await asyncio.sleep(0.06)
+        # Only the final reply was sent, never the delayed tool hint
+        assert bot.send_client.send_message.await_count == 1
+        assert bot.send_client.send_message.await_args.kwargs["text"] == "quick answer"
+
+
+def test_turn_executor_resolves_wechat_llm_override() -> None:
+    """TurnExecutor._resolve_llm applies WechatConfig model_name and thinking_level overrides."""
+    from kesoku.agent.turn_executor import TurnExecutor
+
+    cfg = KesokuConfig()
+    cfg.wechat = WechatConfig(
+        enabled=True,
+        chatbot_id="wechat",
+        model_name="gemini-4-hydrogen",
+        thinking_level="low",
+    )
+    mock_context = MagicMock()
+    mock_context.config = cfg
+    expected_llm = MagicMock()
+    mock_context.get_llm = MagicMock(return_value=expected_llm)
+
+    executor = TurnExecutor.__new__(TurnExecutor)
+    executor.context = mock_context
+    executor.gateway = MagicMock()
+
+    msg = Message(
+        id="m1",
+        session_id="s1",
+        chatbot_id="wechat",
+        channel_id="u1",
+        sender="u1",
+        role=MessageRole.USER,
+        type=MessageType.TEXT,
+        content="hi",
+        status=MessageStatus.PENDING,
+    )
+    resolved = executor._resolve_llm(msg)
+    assert resolved is expected_llm
+    mock_context.get_llm.assert_called_once_with(
+        model_name="gemini-4-hydrogen",
+        thinking_level="low",
+    )

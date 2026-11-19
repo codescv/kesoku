@@ -965,6 +965,32 @@ class TurnExecutor:
                     f"model='{override.model_name}', thinking_level='{override.thinking_level}'): {e}"
                 )
 
+        get_wechat_cfg = getattr(self.context.config, "get_wechat_config", None)
+        wechat_cfg = get_wechat_cfg(current_msg.chatbot_id) if callable(get_wechat_cfg) else None
+        if wechat_cfg is not None and (
+            getattr(wechat_cfg, "llm", None) is not None
+            or getattr(wechat_cfg, "model_name", None) is not None
+            or getattr(wechat_cfg, "thinking_level", None) is not None
+        ):
+            logger.info(
+                f"Applying LLM override (provider={wechat_cfg.llm}, model={wechat_cfg.model_name}, "
+                f"thinking_level={wechat_cfg.thinking_level}) for WeChat chatbot '{current_msg.chatbot_id}'"
+            )
+            kwargs_w: dict[str, Any] = {}
+            if wechat_cfg.llm is not None:
+                kwargs_w["provider"] = wechat_cfg.llm
+            if wechat_cfg.model_name is not None:
+                kwargs_w["model_name"] = wechat_cfg.model_name
+            if wechat_cfg.thinking_level is not None:
+                kwargs_w["thinking_level"] = wechat_cfg.thinking_level
+            try:
+                return self.context.get_llm(**kwargs_w)
+            except Exception as e:
+                logger.error(
+                    f"Failed to get WeChat override LLM (provider='{wechat_cfg.llm}', "
+                    f"model='{wechat_cfg.model_name}', thinking_level='{wechat_cfg.thinking_level}'): {e}"
+                )
+
         return self.context.get_llm()
 
     def _resolve_stream(self, current_msg: Message, llm: BaseLLM) -> bool:

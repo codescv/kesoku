@@ -16,6 +16,7 @@ import ssl
 import textwrap
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,7 @@ import certifi
 import qrcode
 
 from kesoku.config import WechatConfig, get_config
-from kesoku.constants import MessageRole, MessageType
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.attachment_manager import AttachmentManager
 from kesoku.gateway.chatbot.base import Chatbot, InboundMessageAttachment, InboundMessageDTO
@@ -72,6 +73,43 @@ logger = setup_logger(__name__)
 
 MESSAGE_DEDUP_TTL_SECONDS = 300
 WEIXIN_COPY_LINE_WIDTH = 120
+TYPING_REFRESH_INTERVAL_SECONDS = 5.0
+TYPING_MAX_DURATION_SECONDS = 600.0
+TYPING_MAX_CONSECUTIVE_ERRORS = 3
+ATTACHMENT_DOWNLOAD_CONCURRENCY = 6
+
+_WECHAT_TOOL_LABELS: dict[str, str] = {
+    "web_search": "🔍 正在联网查询…",
+    "run_shell_command": "💻 正在执行任务…",
+    "read_file": "📖 正在读取文件…",
+    "update_file": "📝 正在编辑文件…",
+    "analyze_media": "🖼️ 正在分析媒体…",
+    "memory_search": "🧠 正在检索记忆…",
+    "use_skill": "🧩 正在调用技能…",
+    "list_skills": "🧩 正在查找技能…",
+    "skill_manager": "🧩 正在管理技能…",
+    "manage_job": "⚙️ 正在处理后台任务…",
+    "delegate_subagent": "🤖 正在协作处理…",
+}
+_DEFAULT_WECHAT_TOOL_LABEL = "🛠️ 正在调用工具…"
+
+
+def _format_wechat_tool_status(tool_name: str) -> str:
+    """Format a concise, user-friendly Chinese status line for a WeChat tool call."""
+    return _WECHAT_TOOL_LABELS.get(tool_name, _DEFAULT_WECHAT_TOOL_LABEL)
+
+
+@dataclass
+class _WechatTurnProgress:
+    """Tracks per-session throttled tool-call status hints for WeChat."""
+
+    channel_id: str
+    turn_started_at: float
+    last_sent_at: float | None = None
+    pending_tool_label: str | None = None
+    has_new_tool_call: bool = False
+    timer_task: asyncio.Task[None] | None = None
+    closed: bool = False
 
 _HEADER_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _TABLE_RULE_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$")
@@ -124,7 +162,10 @@ class ContextTokenStore:
 
     def set(self, account_id: str, user_id: str, token: str) -> None:
         """Store context token for the given user ID."""
-        self._cache[self._key(account_id, user_id)] = token
+        key = self._key(account_id, user_id)
+        if self._cache.get(key) == token:
+            return
+        self._cache[key] = token
         self._save()
 
     def get_all_channels(self, account_id: str) -> list[str]:
@@ -154,6 +195,10 @@ class TypingTicketCache:
     def set(self, user_id: str, ticket: str) -> None:
         """Store typing ticket for the given user ID."""
         self._cache[user_id] = (ticket, time.time())
+
+    def invalidate(self, user_id: str) -> None:
+        """Remove cached typing ticket for the given user ID."""
+        self._cache.pop(user_id, None)
 
 
 class MessageDeduplicator:
@@ -669,6 +714,11 @@ class WechatChatbot(Chatbot):
         self.media_manager: WeChatMediaManager | None = None
         self.listener: WeChatListener | None = None
 
+        self._typing_tasks: dict[str, asyncio.Task[None]] = {}
+        self._typing_refresh_interval: float = TYPING_REFRESH_INTERVAL_SECONDS
+        self._typing_max_duration: float = TYPING_MAX_DURATION_SECONDS
+        self._progress_states: dict[str, _WechatTurnProgress] = {}
+
     @property
     def _poll_session(self) -> aiohttp.ClientSession | None:
         return self._poll_session_val
@@ -749,6 +799,12 @@ You are interacting with the user via WeChat (Weixin).
     def stop(self) -> None:
         """Stop the WeChat bot and disconnect sessions."""
         self._running = False
+        for task in list(self._typing_tasks.values()):
+            if not task.done():
+                task.cancel()
+        self._typing_tasks.clear()
+        for session_id in list(self._progress_states.keys()):
+            self._clear_progress_state(session_id)
         super().stop()
         if self.listener:
             self.listener.stop()
@@ -822,17 +878,9 @@ You are interacting with the user via WeChat (Weixin).
             role=role,
         )
 
-        # Start typing indicator
-        typing_ticket = self._typing_cache.get(channel_id)
-        if typing_ticket:
-            try:
-                await self.send_client.send_typing(
-                    to=channel_id,
-                    typing_status=TYPING_START,
-                    ticket=typing_ticket,
-                )
-            except Exception as e:
-                logger.debug("WeChat: typing start failed: %s", e)
+        # Start typing keep-alive indicator
+        context_token = self._token_store.get(self._account_id, channel_id)
+        self._start_typing(channel_id, sender_id=channel_id, context_token=context_token)
 
     async def _process_message_safe(self, message: dict[str, Any]) -> None:
         try:
@@ -849,72 +897,64 @@ You are interacting with the user via WeChat (Weixin).
         context_token = dto.raw_metadata.get("context_token")
         if context_token:
             self._token_store.set(self._account_id, dto.channel_id, context_token)
-        asyncio.create_task(self._maybe_fetch_typing_ticket(dto.sender_id, context_token or None))
+        asyncio.create_task(self._maybe_fetch_typing_ticket(dto.channel_id, dto.sender_id, context_token or None))
 
     async def process_attachments_hook(
         self, session: Any, dto: InboundMessageDTO, raw_message: Any
     ) -> list[InboundMessageAttachment]:
-        """Hook to process and save attachments using the resolved session workspace."""
+        """Hook to process and save attachments concurrently using the resolved session workspace."""
         item_list = raw_message.get("item_list") or []
-        attachments_metadata = []
+        if not item_list:
+            return []
 
-        for item in item_list:
+        sem = asyncio.Semaphore(ATTACHMENT_DOWNLOAD_CONCURRENCY)
+
+        async def _process_item(item: dict[str, Any]) -> InboundMessageAttachment | None:
             item_type = item.get("type")
             filename = None
             data = None
             mime = "application/octet-stream"
 
-            if item_type == ITEM_IMAGE:
-                media = _media_reference(item, "image_item")
-                aeskey = (item.get("image_item") or {}).get("aeskey")
-                aes_key_b64 = (
-                    base64.b64encode(bytes.fromhex(str(aeskey))).decode("ascii") if aeskey else media.get("aes_key")
-                )
-                try:
-                    data = await self.media_manager.download_and_decrypt(
-                        encrypted_query_param=media.get("encrypt_query_param"),
-                        aes_key_b64=aes_key_b64,
-                        full_url=media.get("full_url"),
-                        timeout_seconds=30.0,
+            async with sem:
+                if item_type == ITEM_IMAGE:
+                    media = _media_reference(item, "image_item")
+                    aeskey = (item.get("image_item") or {}).get("aeskey")
+                    aes_key_b64 = (
+                        base64.b64encode(bytes.fromhex(str(aeskey))).decode("ascii")
+                        if aeskey
+                        else media.get("aes_key")
                     )
-                    mime, ext = _detect_image_mime_type(data, fallback_mime="image/jpeg")
-                    filename = f"wechat_image_{secrets.token_hex(4)}{ext}"
-                except Exception as e:
-                    logger.warning("WeChat: image download failed: %s", e)
+                    try:
+                        data = await self.media_manager.download_and_decrypt(
+                            encrypted_query_param=media.get("encrypt_query_param"),
+                            aes_key_b64=aes_key_b64,
+                            full_url=media.get("full_url"),
+                            timeout_seconds=30.0,
+                        )
+                        mime, ext = _detect_image_mime_type(data, fallback_mime="image/jpeg")
+                        filename = f"wechat_image_{secrets.token_hex(4)}{ext}"
+                    except Exception as e:
+                        logger.warning("WeChat: image download failed: %s", e)
 
-            elif item_type == ITEM_VIDEO:
-                media = _media_reference(item, "video_item")
-                try:
-                    data = await self.media_manager.download_and_decrypt(
-                        encrypted_query_param=media.get("encrypt_query_param"),
-                        aes_key_b64=media.get("aes_key"),
-                        full_url=media.get("full_url"),
-                        timeout_seconds=120.0,
-                    )
-                    filename = f"wechat_video_{secrets.token_hex(4)}.mp4"
-                    mime = "video/mp4"
-                except Exception as e:
-                    logger.warning("WeChat: video download failed: %s", e)
+                elif item_type == ITEM_VIDEO:
+                    media = _media_reference(item, "video_item")
+                    try:
+                        data = await self.media_manager.download_and_decrypt(
+                            encrypted_query_param=media.get("encrypt_query_param"),
+                            aes_key_b64=media.get("aes_key"),
+                            full_url=media.get("full_url"),
+                            timeout_seconds=120.0,
+                        )
+                        filename = f"wechat_video_{secrets.token_hex(4)}.mp4"
+                        mime = "video/mp4"
+                    except Exception as e:
+                        logger.warning("WeChat: video download failed: %s", e)
 
-            elif item_type == ITEM_FILE:
-                file_item = item.get("file_item") or {}
-                media = file_item.get("media") or {}
-                filename = str(file_item.get("file_name") or "document.bin")
-                mime = _mime_from_filename(filename)
-                try:
-                    data = await self.media_manager.download_and_decrypt(
-                        encrypted_query_param=media.get("encrypt_query_param"),
-                        aes_key_b64=media.get("aes_key"),
-                        full_url=media.get("full_url"),
-                        timeout_seconds=60.0,
-                    )
-                except Exception as e:
-                    logger.warning("WeChat: file download failed: %s", e)
-
-            elif item_type == ITEM_VOICE:
-                voice_item = item.get("voice_item") or {}
-                media = voice_item.get("media") or {}
-                if not voice_item.get("text"):
+                elif item_type == ITEM_FILE:
+                    file_item = item.get("file_item") or {}
+                    media = file_item.get("media") or {}
+                    filename = str(file_item.get("file_name") or "document.bin")
+                    mime = _mime_from_filename(filename)
                     try:
                         data = await self.media_manager.download_and_decrypt(
                             encrypted_query_param=media.get("encrypt_query_param"),
@@ -922,10 +962,24 @@ You are interacting with the user via WeChat (Weixin).
                             full_url=media.get("full_url"),
                             timeout_seconds=60.0,
                         )
-                        filename = f"wechat_voice_{secrets.token_hex(4)}.silk"
-                        mime = "audio/silk"
                     except Exception as e:
-                        logger.warning("WeChat: voice download failed: %s", e)
+                        logger.warning("WeChat: file download failed: %s", e)
+
+                elif item_type == ITEM_VOICE:
+                    voice_item = item.get("voice_item") or {}
+                    media = voice_item.get("media") or {}
+                    if not voice_item.get("text"):
+                        try:
+                            data = await self.media_manager.download_and_decrypt(
+                                encrypted_query_param=media.get("encrypt_query_param"),
+                                aes_key_b64=media.get("aes_key"),
+                                full_url=media.get("full_url"),
+                                timeout_seconds=60.0,
+                            )
+                            filename = f"wechat_voice_{secrets.token_hex(4)}.silk"
+                            mime = "audio/silk"
+                        except Exception as e:
+                            logger.warning("WeChat: voice download failed: %s", e)
 
             if data and filename:
                 saved = await self.attachment_manager.save_attachment(
@@ -934,28 +988,34 @@ You are interacting with the user via WeChat (Weixin).
                     data=data,
                     collision_id=secrets.token_hex(4),
                 )
-                attachments_metadata.append(
-                    InboundMessageAttachment(
-                        path=saved["path"],
-                        mime_type=mime,
-                        filename=filename,
-                    )
+                return InboundMessageAttachment(
+                    path=saved["path"],
+                    mime_type=mime,
+                    filename=filename,
                 )
+            return None
+
+        results = await asyncio.gather(*(_process_item(item) for item in item_list))
+        attachments_metadata = [att for att in results if att is not None]
+
+        image_paths = [att.path for att in attachments_metadata if att.mime_type.startswith("image/")]
+        if image_paths:
+            try:
+                from kesoku.agent.llm import prewarm_image_attachments
+
+                await asyncio.to_thread(prewarm_image_attachments, image_paths)
+            except Exception as e:
+                logger.debug("WeChat: image attachment prewarm skipped: %s", e)
+
         return attachments_metadata
 
     async def post_ingest_hook(self, session: Any, message: Message, dto: InboundMessageDTO) -> None:
         """Hook executed after the message is successfully posted to the gateway."""
-        # Start typing indicator
-        typing_ticket = self._typing_cache.get(dto.channel_id)
-        if typing_ticket:
-            try:
-                await self.send_client.send_typing(
-                    to=dto.channel_id,
-                    typing_status=TYPING_START,
-                    ticket=typing_ticket,
-                )
-            except Exception as e:
-                logger.debug("WeChat: typing start failed: %s", e)
+        self._reset_progress_state(session.id, dto.channel_id)
+        context_token = dto.raw_metadata.get("context_token") or self._token_store.get(
+            self._account_id, dto.channel_id
+        )
+        self._start_typing(dto.channel_id, sender_id=dto.sender_id, context_token=context_token)
 
     async def _process_message(self, message: dict[str, Any]) -> None:
         sender_id = str(message.get("from_user_id") or "").strip()
@@ -1016,24 +1076,233 @@ You are interacting with the user via WeChat (Weixin).
 
         await self.ingest_message(dto, raw_message=message, reply_callback=reply_func)
 
-    async def _maybe_fetch_typing_ticket(self, user_id: str, context_token: str | None) -> None:
-        if not self._poll_session or not self._token:
-            return
-        if self._typing_cache.get(user_id):
-            return
+    async def _fetch_typing_ticket(
+        self,
+        channel_id: str,
+        user_id: str,
+        context_token: str | None,
+    ) -> str | None:
+        client = self.poll_client or self.send_client
+        if not client or not self._token:
+            return None
+        cached = self._typing_cache.get(channel_id)
+        if cached:
+            return cached
         try:
-            response = await self.poll_client.get_config(
+            response = await client.get_config(
                 user_id=user_id,
                 context_token=context_token,
             )
             typing_ticket = str(response.get("typing_ticket") or "")
             if typing_ticket:
-                self._typing_cache.set(user_id, typing_ticket)
+                self._typing_cache.set(channel_id, typing_ticket)
+                return typing_ticket
         except Exception as e:
             logger.debug("WeChat: getConfig failed: %s", e)
+        return None
+
+    async def _maybe_fetch_typing_ticket(
+        self,
+        channel_id: str,
+        user_id: str | None = None,
+        context_token: str | None = None,
+    ) -> None:
+        await self._fetch_typing_ticket(channel_id, user_id or channel_id, context_token)
+
+    def _start_typing(
+        self,
+        channel_id: str,
+        sender_id: str | None = None,
+        context_token: str | None = None,
+    ) -> None:
+        """Start or keep alive the WeChat typing indicator loop for ``channel_id``."""
+        if self.config.progress_feedback == "off":
+            return
+        if not self.send_client:
+            return
+        existing = self._typing_tasks.get(channel_id)
+        if existing is not None and not existing.done():
+            return
+        self._typing_tasks[channel_id] = asyncio.create_task(
+            self._keep_typing(channel_id, sender_id or channel_id, context_token)
+        )
+
+    async def _keep_typing(
+        self,
+        channel_id: str,
+        user_id: str,
+        context_token: str | None,
+    ) -> None:
+        """Continuously refresh ``TYPING_START`` until stopped or timeout."""
+        deadline = time.monotonic() + self._typing_max_duration
+        consecutive_errors = 0
+        current_task = asyncio.current_task()
+        try:
+            while self.send_client is not None and time.monotonic() < deadline:
+                ticket = self._typing_cache.get(channel_id)
+                if not ticket:
+                    ticket = await self._fetch_typing_ticket(channel_id, user_id, context_token)
+                    if not ticket:
+                        return
+                try:
+                    await self.send_client.send_typing(
+                        to=channel_id,
+                        typing_status=TYPING_START,
+                        ticket=ticket,
+                    )
+                    consecutive_errors = 0
+                except Exception as e:
+                    consecutive_errors += 1
+                    logger.debug("WeChat: typing refresh failed (%d): %s", consecutive_errors, e)
+                    self._typing_cache.invalidate(channel_id)
+                    if consecutive_errors >= TYPING_MAX_CONSECUTIVE_ERRORS:
+                        return
+                await asyncio.sleep(self._typing_refresh_interval)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self._typing_tasks.get(channel_id) is current_task:
+                self._typing_tasks.pop(channel_id, None)
+
+    async def _pulse_typing_start(self, channel_id: str) -> None:
+        """Immediately re-send ``TYPING_START`` after emitting an intermediate status bubble."""
+        if self.config.progress_feedback == "off" or not self.send_client:
+            return
+        ticket = self._typing_cache.get(channel_id)
+        if not ticket:
+            return
+        try:
+            await self.send_client.send_typing(
+                to=channel_id,
+                typing_status=TYPING_START,
+                ticket=ticket,
+            )
+        except Exception as e:
+            logger.debug("WeChat: typing pulse failed: %s", e)
+
+    async def _stop_typing(self, channel_id: str) -> None:
+        """Cancel the typing keep-alive loop and send ``TYPING_STOP``."""
+        task = self._typing_tasks.pop(channel_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+        if not self.send_client:
+            return
+        typing_ticket = self._typing_cache.get(channel_id)
+        if typing_ticket:
+            try:
+                await self.send_client.send_typing(
+                    to=channel_id,
+                    typing_status=TYPING_STOP,
+                    ticket=typing_ticket,
+                )
+            except Exception as e:
+                logger.debug("WeChat: typing stop failed: %s", e)
+
+    def _reset_progress_state(self, session_id: str, channel_id: str) -> _WechatTurnProgress:
+        """Start fresh per-turn tool-call progress tracking for ``session_id``."""
+        self._clear_progress_state(session_id)
+        state = _WechatTurnProgress(channel_id=channel_id, turn_started_at=time.monotonic())
+        self._progress_states[session_id] = state
+        return state
+
+    def _clear_progress_state(self, session_id: str) -> None:
+        """Close and cancel any pending tool-call status timer for ``session_id``."""
+        state = self._progress_states.pop(session_id, None)
+        if state is None:
+            return
+        state.closed = True
+        if state.timer_task is not None and not state.timer_task.done():
+            state.timer_task.cancel()
+
+    def _has_pending_interruption(self, session_id: str) -> bool:
+        agent = getattr(self.gateway, "agent", None)
+        if agent is None:
+            return False
+        workers = getattr(agent, "workers", None)
+        if not isinstance(workers, dict):
+            return False
+        worker = workers.get(session_id)
+        return bool(worker and not worker.queue_empty())
+
+    async def _emit_progress_hint(self, session_id: str, state: _WechatTurnProgress) -> None:
+        """Send a single concise tool-call status bubble and re-pulse typing."""
+        if state.closed or not state.has_new_tool_call or not state.pending_tool_label:
+            return
+        if self._has_pending_interruption(session_id):
+            return
+        if not self.send_client:
+            return
+        label = state.pending_tool_label
+        state.has_new_tool_call = False
+        state.last_sent_at = time.monotonic()
+        context_token = self._token_store.get(self._account_id, state.channel_id)
+        client_id = f"kesoku-wechat-status-{uuid.uuid4().hex}"
+        try:
+            await self.send_client.send_message(
+                to=state.channel_id,
+                text=label,
+                context_token=context_token,
+                client_id=client_id,
+            )
+            await self._pulse_typing_start(state.channel_id)
+        except Exception as e:
+            logger.debug("WeChat: failed to send tool progress hint: %s", e)
+
+    async def _delayed_progress_emit(self, session_id: str, state: _WechatTurnProgress, delay: float) -> None:
+        """Wait until the next throttle window opens, then emit if a new tool call is pending."""
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            await self._emit_progress_hint(session_id, state)
+        except asyncio.CancelledError:
+            pass
+
+    def supports_intermediate_messages(self) -> bool:
+        """Enable intermediate hook for throttled tool-call hints when configured."""
+        return self.config.progress_feedback == "status"
+
+    async def handle_intermediate_message(self, message: Message) -> None:
+        """Emit concise, throttled WeChat status hints on new tool calls only."""
+        try:
+            if message.type != MessageType.TOOL_CALL or message.role != MessageRole.TOOL:
+                return
+            if self._has_pending_interruption(message.session_id):
+                return
+
+            state = self._progress_states.get(message.session_id)
+            if state is None or state.closed:
+                state = self._reset_progress_state(message.session_id, message.channel_id)
+            else:
+                state.channel_id = message.channel_id
+
+            meta = message.metadata if isinstance(message.metadata, dict) else {}
+            tool_name = str(meta.get("tool_name") or message.sender or "tool")
+            state.pending_tool_label = _format_wechat_tool_status(tool_name)
+            state.has_new_tool_call = True
+
+            now = time.monotonic()
+            if state.last_sent_at is None:
+                next_allowed = state.turn_started_at + self.config.progress_delay_seconds
+            else:
+                next_allowed = state.last_sent_at + self.config.progress_interval_seconds
+
+            if now >= next_allowed:
+                if state.timer_task is not None and not state.timer_task.done():
+                    state.timer_task.cancel()
+                await self._emit_progress_hint(message.session_id, state)
+            elif state.timer_task is None or state.timer_task.done():
+                state.timer_task = asyncio.create_task(
+                    self._delayed_progress_emit(message.session_id, state, next_allowed - now)
+                )
+        finally:
+            await self.gateway.db.update_message_status(message.id, MessageStatus.DELIVERED)
 
     async def handle_message(self, message: Message) -> None:
         """Process and send outgoing assistant messages to WeChat API."""
+        is_tool_result = message.role == MessageRole.TOOL and message.type != MessageType.TOOL_CALL
+        if not self.is_intermediate_message(message) and not is_tool_result:
+            # Cancel pending delayed status bubbles before delivering final reply segments.
+            self._clear_progress_state(message.session_id)
         await self.render_outgoing_message(message)
 
     def format_text(self, text: str) -> str:
@@ -1175,18 +1444,16 @@ You are interacting with the user via WeChat (Weixin).
         await self.send_question_as_text(question, choices, message, multi, max_choices)
 
     async def on_message_delivered(self, message: Message) -> None:
-        """Lifecycle hook: stop the typing indicator spinner when the final text is delivered."""
+        """Lifecycle hook: clear progress state and stop the typing keep-alive when final text is delivered."""
         if message.role == MessageRole.ASSISTANT and message.type == MessageType.TEXT:
-            typing_ticket = self._typing_cache.get(message.channel_id)
-            if typing_ticket:
-                try:
-                    await self.send_client.send_typing(
-                        to=message.channel_id,
-                        typing_status=TYPING_STOP,
-                        ticket=typing_ticket,
-                    )
-                except Exception as e:
-                    logger.debug("WeChat: typing stop failed: %s", e)
+            self._clear_progress_state(message.session_id)
+            await self._stop_typing(message.channel_id)
+
+    async def on_message_delivery_failed(self, message: Message, exception: Exception) -> None:
+        """Lifecycle hook: ensure progress timers and typing keep-alive stop on delivery failure."""
+        await super().on_message_delivery_failed(message, exception)
+        self._clear_progress_state(message.session_id)
+        await self._stop_typing(message.channel_id)
 
     async def _send_file(
         self,

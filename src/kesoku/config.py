@@ -644,6 +644,32 @@ class WechatConfig(BaseModel):
         default=None,
         description="Path to custom system prompt file for WeChat relative to agent working directory",
     )
+    progress_feedback: Literal["off", "typing_only", "status"] = Field(
+        default="status",
+        description="Intermediate feedback mode: 'off', 'typing_only', or 'status' (throttled tool-call hints)",
+    )
+    progress_delay_seconds: float = Field(
+        default=4.0,
+        ge=0.0,
+        description="Delay in seconds before sending the first tool-call status hint",
+    )
+    progress_interval_seconds: float = Field(
+        default=10.0,
+        ge=1.0,
+        description="Minimum interval in seconds between tool-call status hints",
+    )
+    llm: Literal["gemini", "claude"] | None = Field(
+        default=None,
+        description="LLM provider override for WeChat (e.g. 'gemini', 'claude')",
+    )
+    model_name: str | None = Field(
+        default=None,
+        description="Model identifier override for WeChat (e.g. 'gemini-4-hydrogen')",
+    )
+    thinking_level: Literal["minimal", "low", "medium", "high", "xhigh", "max"] | None = Field(
+        default=None,
+        description="Thinking/reasoning level override for WeChat",
+    )
 
 
 APP_MEMORY_POLICIES: tuple[str, ...] = ("full", "confirm_only", "isolated")
