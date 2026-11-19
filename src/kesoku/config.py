@@ -424,6 +424,10 @@ class GeminiConfig(BaseModel):
         default=None,
         description="Model name override to use for context compression and background memory",
     )
+    search_model_name: str | None = Field(
+        default=None,
+        description="Fast/lightweight Gemini model override for web_search grounding (e.g., gemini-3.5-flash-lite)",
+    )
     auth_mode: Literal["api_key", "vertex"] = Field(default="vertex", description="Authentication mode")
     api_key: str | None = Field(default=None, description="API key (if auth_mode='api_key')")
     project_id: str | None = Field(

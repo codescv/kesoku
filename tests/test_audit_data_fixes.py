@@ -438,11 +438,16 @@ def _search_response(text: str = "answer") -> MagicMock:
     return res
 
 
-async def test_web_search_caches_client_and_uses_context_model_with_low_thinking(monkeypatch) -> None:
+async def test_web_search_caches_client_and_uses_search_model_with_minimal_thinking(monkeypatch) -> None:
     import kesoku.agent.tools.search as search_mod
 
     cfg = KesokuConfig()
-    cfg.gemini = GeminiConfig(model_name="main-model", context_model_name="flash-model", thinking_level="high")
+    cfg.gemini = GeminiConfig(
+        model_name="main-model",
+        context_model_name="context-model",
+        search_model_name="flash-lite-model",
+        thinking_level="high",
+    )
     monkeypatch.setattr(search_mod, "get_config", lambda: cfg)
     created: list[MagicMock] = []
 
@@ -459,15 +464,74 @@ async def test_web_search_caches_client_and_uses_context_model_with_low_thinking
     assert len(created) == 1  # client cached
 
     kwargs = created[0].aio.models.generate_content.await_args.kwargs
-    assert kwargs["model"] == "flash-model"
+    assert kwargs["model"] == "flash-lite-model"
+    assert kwargs["config"].max_output_tokens == search_mod.WEB_SEARCH_MAX_OUTPUT_TOKENS
+    assert kwargs["config"].system_instruction == search_mod.WEB_SEARCH_SYSTEM_INSTRUCTION
     thinking = kwargs["config"].thinking_config
-    assert thinking is not None and "LOW" in str(thinking.thinking_level).upper()
+    assert thinking is not None and "MINIMAL" in str(thinking.thinking_level).upper()
 
-    cfg.gemini = GeminiConfig(model_name="main-model", context_model_name=None, thinking_level=None)
+    # Falls back to context_model_name when search_model_name is unset
+    cfg.gemini = GeminiConfig(model_name="main-model", context_model_name="flash-model", thinking_level="high")
     await tool.web_search("q3")
+    kwargs = created[0].aio.models.generate_content.await_args.kwargs
+    assert kwargs["model"] == "flash-model"
+
+    # Falls back to model_name when both overrides are unset, and omits thinking when thinking_level=None
+    cfg.gemini = GeminiConfig(model_name="main-model", context_model_name=None, thinking_level=None)
+    await tool.web_search("q4")
     kwargs = created[0].aio.models.generate_content.await_args.kwargs
     assert kwargs["model"] == "main-model"
     assert kwargs["config"].thinking_config is None
+
+
+async def test_web_search_falls_back_from_minimal_to_low_and_remembers_model(monkeypatch) -> None:
+    import kesoku.agent.tools.search as search_mod
+
+    cfg = KesokuConfig()
+    cfg.gemini = GeminiConfig(model_name="gemini-3.8-flash", thinking_level="low")
+    monkeypatch.setattr(search_mod, "get_config", lambda: cfg)
+
+    client = MagicMock()
+    client.aio.models.generate_content = AsyncMock(
+        side_effect=[
+            Exception("400 INVALID_ARGUMENT: Thinking level is unsupported: THINKING_LEVEL_MINIMAL"),
+            _search_response("ok1"),
+            _search_response("ok2"),
+        ]
+    )
+    tool = WebSearchTool(client=client)
+    assert await tool.web_search("first query") == "ok1"
+    assert await tool.web_search("second query") == "ok2"
+
+    # Call 1 tried MINIMAL, Call 2 fell back to LOW, Call 3 went straight to LOW (no wasted 400 retry).
+    calls = client.aio.models.generate_content.await_args_list
+    assert len(calls) == 3
+    assert "MINIMAL" in str(calls[0].kwargs["config"].thinking_config.thinking_level).upper()
+    assert "LOW" in str(calls[1].kwargs["config"].thinking_config.thinking_level).upper()
+    assert "LOW" in str(calls[2].kwargs["config"].thinking_config.thinking_level).upper()
+
+
+async def test_web_search_ttl_cache_hits_and_skips_errors(monkeypatch) -> None:
+    import kesoku.agent.tools.search as search_mod
+
+    cfg = KesokuConfig()
+    cfg.gemini = GeminiConfig(model_name="main-model", search_model_name="flash-lite-model", thinking_level="low")
+    monkeypatch.setattr(search_mod, "get_config", lambda: cfg)
+
+    client = MagicMock()
+    client.aio.models.generate_content = AsyncMock(
+        side_effect=[Exception("temporary error"), _search_response("fresh answer")]
+    )
+    tool = WebSearchTool(client=client, cache_ttl_seconds=60.0)
+
+    # Error must not be cached
+    err_out = await tool.web_search("  Tokyo   Weather ")
+    assert err_out.startswith("Web search failed:")
+    # Next call succeeds and populates cache
+    assert await tool.web_search("tokyo weather") == "fresh answer"
+    # Normalized repeat hits cache without calling API again
+    assert await tool.web_search("  TOKYO  weather  ") == "fresh answer"
+    assert client.aio.models.generate_content.await_count == 2
 
 
 async def test_web_search_retries_without_thinking_when_rejected() -> None:
