@@ -1025,3 +1025,22 @@ async def test_gateway_abort_session_forwards_skip_memory_close(tmp_path):
     mock_agent.stop_session_worker.assert_awaited_once_with(
         "sess_xyz", immediate=True, skip_memory_close=True
     )
+
+
+async def test_continuous_listen_sec_3s_not_clamped_to_8s():
+    from types import SimpleNamespace
+
+    bot = _make_stub_xiaoai_bot()
+    bot.config = XiaoAiConfig(enabled=True, continuous_listen_sec=3.0)
+    bot._wake_word_to_role = {"小张小张": "xiaozhang"}
+    bot._personas = {"xiaozhang": object()}
+    bot._persona_cues["xiaozhang"] = VoiceCueBank()
+    bot.tts = SimpleNamespace(set_active_voice=lambda r: None)
+
+    await bot._handle_wakeup("小张小张")
+    wake_window = bot._listen_deadline - bot._vad_unmute_ts
+    assert 2.9 <= wake_window <= 3.1
+
+    bot.config = XiaoAiConfig(enabled=True, continuous_listen_sec=0.0)
+    await bot._handle_wakeup("小张小张")
+    assert 5.9 <= (bot._listen_deadline - bot._vad_unmute_ts) <= 6.1

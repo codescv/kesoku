@@ -474,7 +474,7 @@ class XiaoAiChatbot(Chatbot):
                     return
                 is_speech, segments = await asyncio.to_thread(self.pipeline.feed_vad, samples)
                 if is_speech:
-                    self._listen_deadline = time.monotonic() + max(self.config.continuous_listen_sec, 6.0)
+                    self._listen_deadline = time.monotonic() + max(self.config.continuous_listen_sec, 2.5)
                 for seg in segments:
                     await self._handle_utterance(seg)
                     break
@@ -513,7 +513,8 @@ class XiaoAiChatbot(Chatbot):
         self.pipeline.reset_vad()
         self._vad_unmute_ts = time.monotonic() + cue_dur + 0.15
         self.state = SpeakerState.LISTENING
-        self._listen_deadline = self._vad_unmute_ts + max(self.config.continuous_listen_sec, 8.0)
+        wake_window = self.config.continuous_listen_sec if self.config.continuous_listen_sec > 0 else 6.0
+        self._listen_deadline = self._vad_unmute_ts + wake_window
         await self.ws_server.play_pcm(out_pcm)
 
     async def _handle_utterance(self, audio_f32: np.ndarray) -> None:
