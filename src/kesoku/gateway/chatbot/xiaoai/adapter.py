@@ -105,6 +105,15 @@ class SpeakerState(enum.StrEnum):
     SPEAKING = "speaking"
 
 
+_LED_EFFECT_BY_STATE: dict[SpeakerState, int | None] = {
+    SpeakerState.IDLE: None,
+    SpeakerState.LISTENING: 1,  # native LX06 wakeup / listening ring
+    SpeakerState.THINKING: 2,  # native LX06 thinking / loading animation
+    SpeakerState.SPEAKING: 3,  # native LX06 TTS speaking breathing ring
+}
+_MANAGED_LED_EFFECTS: tuple[int, ...] = (1, 2, 3)
+
+
 def _resolve_awd_path(raw_path: str, awd: str | None) -> str:
     """Resolve `raw_path` relative to `awd` when not already absolute."""
     expanded = os.path.expanduser(raw_path)
@@ -222,6 +231,7 @@ class XiaoAiChatbot(Chatbot):
         self._local_wakeup_task: asyncio.Task[None] | None = None
         self._mic_mute_task: asyncio.Task[None] | None = None
         self._mic_muted = False
+        self._active_led: int | None = None
         self._last_tool_hint_ts = 0.0
         self._turn_start_ts = 0.0
         self._vad_unmute_ts = 0.0
@@ -320,9 +330,41 @@ class XiaoAiChatbot(Chatbot):
                 if t is not None and not t.done():
                     t.cancel()
 
+    async def _sync_led(self, state: SpeakerState, *, force: bool = False) -> None:
+        """Synchronize LX06 native LED ring with speaker state without touching mute LED (7)."""
+        if not getattr(self.config, "led_feedback", True):
+            return
+        ws = getattr(self, "ws_server", None)
+        run_shell = getattr(ws, "run_shell", None) if ws is not None else None
+        if ws is None or not getattr(ws, "connected", False) or not callable(run_shell):
+            return
+
+        target_led = None if getattr(self, "_mic_muted", False) else _LED_EFFECT_BY_STATE.get(state)
+        prev_led = getattr(self, "_active_led", None)
+        if not force and target_led == prev_led:
+            return
+
+        self._active_led = target_led
+        if target_led is None:
+            cmd = "; ".join(f"/bin/shut_led {lid} >/dev/null 2>&1" for lid in _MANAGED_LED_EFFECTS)
+        elif prev_led is not None and prev_led != target_led:
+            cmd = f"/bin/show_led {target_led} >/dev/null 2>&1; /bin/shut_led {prev_led} >/dev/null 2>&1"
+        else:
+            cmd = f"/bin/show_led {target_led} >/dev/null 2>&1"
+
+        try:
+            await run_shell(cmd)
+        except Exception as e:
+            logger.debug(f"Failed to update XiaoAi LED for state={state}: {e}")
+
+    async def _set_state(self, new_state: SpeakerState, *, force_led: bool = False) -> None:
+        """Update speaker state machine and sync the hardware LED ring."""
+        self.state = new_state
+        await self._sync_led(new_state, force=force_led)
+
     async def _enter_idle(self) -> None:
         """Transition speaker to IDLE, reset pipelines, and stop recording when using local KWS."""
-        self.state = SpeakerState.IDLE
+        await self._set_state(SpeakerState.IDLE)
         self.pipeline.reset_kws()
         self.pipeline.reset_vad()
         if self.config.local_kws and self.ws_server.connected:
@@ -330,7 +372,7 @@ class XiaoAiChatbot(Chatbot):
 
     async def _on_speaker_connected(self) -> None:
         """Reset speaker audio pipeline state silently when the LX06 connects."""
-        self.state = SpeakerState.IDLE
+        await self._set_state(SpeakerState.IDLE, force_led=True)
         self.pipeline.reset_kws()
         self.pipeline.reset_vad()
         logger.info(
@@ -343,6 +385,7 @@ class XiaoAiChatbot(Chatbot):
         """Cancel active playback when the speaker disconnects."""
         self._turn_in_progress = False
         await self._cancel_playback()
+        self._active_led = None
         self.state = SpeakerState.IDLE
 
     async def _on_speaker_event(self, event_name: str, data: Any) -> None:
@@ -471,7 +514,7 @@ class XiaoAiChatbot(Chatbot):
                         or getattr(self, "_active_turn_id", None) is not None
                     ):
                         await self._interrupt_active_turns(suppress=True)
-                    self.state = SpeakerState.IDLE
+                    await self._set_state(SpeakerState.IDLE, force_led=True)
                     self.pipeline.reset_kws()
                     self.pipeline.reset_vad()
                     if self.ws_server.connected:
@@ -565,7 +608,7 @@ class XiaoAiChatbot(Chatbot):
         logger.info(f"Playing wakeup {'cue' if using_cue else 'chime'} (role='{role}', duration={cue_dur:.2f}s)")
         self.pipeline.reset_vad()
         self._vad_unmute_ts = time.monotonic() + cue_dur + 0.15
-        self.state = SpeakerState.LISTENING
+        await self._set_state(SpeakerState.LISTENING, force_led=True)
         wake_window = self.config.continuous_listen_sec if self.config.continuous_listen_sec > 0 else 6.0
         self._listen_deadline = self._vad_unmute_ts + wake_window
         await self.ws_server.play_pcm(out_pcm)
@@ -612,7 +655,7 @@ class XiaoAiChatbot(Chatbot):
         if has_active_work:
             await self._interrupt_active_turns(suppress=False)
 
-        self.state = SpeakerState.THINKING
+        await self._set_state(SpeakerState.THINKING)
         self._turn_start_ts = time.monotonic()
         self._last_tool_hint_ts = 0.0
         self._chunker.reset()
@@ -936,7 +979,7 @@ class XiaoAiChatbot(Chatbot):
             return
         if self.config.continuous_listen_sec > 0:
             self.pipeline.reset_vad()
-            self.state = SpeakerState.LISTENING
+            await self._set_state(SpeakerState.LISTENING)
             self._listen_deadline = time.monotonic() + self.config.continuous_listen_sec
         else:
             await self._enter_idle()
@@ -955,7 +998,7 @@ class XiaoAiChatbot(Chatbot):
                         and time.monotonic() >= self._play_end_ts
                     ):
                         if getattr(self, "_turn_in_progress", False):
-                            self.state = SpeakerState.THINKING
+                            await self._set_state(SpeakerState.THINKING)
                         else:
                             await self._finish_speaking_turn()
                     continue
@@ -965,7 +1008,7 @@ class XiaoAiChatbot(Chatbot):
             try:
                 if gen != self._tts_generation or not self.ws_server.connected or not pcm:
                     continue
-                self.state = SpeakerState.SPEAKING
+                await self._set_state(SpeakerState.SPEAKING)
 
                 ahead = self._play_end_ts - time.monotonic()
                 if ahead > 0.8:

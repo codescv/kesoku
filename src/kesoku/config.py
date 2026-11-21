@@ -926,6 +926,10 @@ class XiaoAiConfig(BaseModel):
             "omitting desktop/UI/file/shell/notes boilerplate"
         ),
     )
+    led_feedback: bool = Field(
+        default=True,
+        description="Sync LX06 hardware LED ring effects with speaker state (listening/thinking/speaking)",
+    )
     allowed_tools: list[str] | None = Field(
         default=None,
         description=(

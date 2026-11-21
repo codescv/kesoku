@@ -398,6 +398,7 @@ def _make_stub_xiaoai_bot(*, progress_feedback: str = "status"):
     bot._streamed_any_sentence = False
     bot._mic_muted = False
     bot._mic_mute_task = None
+    bot._active_led = None
     bot._chunker = SentenceChunker()
     bot._sleep_chime = make_sleep_chime()
     bot._wakeup_chime = make_wakeup_chime()
@@ -1303,3 +1304,71 @@ async def test_chatbot_mic_mute_stops_and_resumes_recording():
     assert await bot._on_mic_mute(False) == "unmuted"
     await bot._mic_mute_task
     assert rec_calls == [("stop", True)]
+
+
+async def test_led_feedback_syncs_native_effects_with_state():
+    from types import SimpleNamespace
+
+    from kesoku.gateway.chatbot.xiaoai.adapter import SpeakerState
+
+    assert XiaoAiConfig().led_feedback is True
+
+    shell_cmds: list[str] = []
+
+    async def fake_run_shell(cmd: str) -> None:
+        shell_cmds.append(cmd)
+
+    bot = _make_stub_xiaoai_bot()
+    bot._wake_word_to_role = {"小张小张": "xiaozhang"}
+    bot._all_wake_words = ["小张小张"]
+    bot._personas = {"xiaozhang": object()}
+    bot._persona_cues["xiaozhang"] = VoiceCueBank()
+    bot.tts = SimpleNamespace(set_active_voice=lambda r: None)
+    bot.ws_server.run_shell = fake_run_shell
+
+    # Connecting clears managed LEDs 1/2/3 without touching mute LED 7
+    await bot._on_speaker_connected()
+    assert shell_cmds == [
+        "/bin/shut_led 1 >/dev/null 2>&1; /bin/shut_led 2 >/dev/null 2>&1; /bin/shut_led 3 >/dev/null 2>&1"
+    ]
+    assert "7" not in shell_cmds[0]
+
+    # Wakeup -> LISTENING (effect 1)
+    shell_cmds.clear()
+    await bot._handle_wakeup("小张小张")
+    assert shell_cmds == ["/bin/show_led 1 >/dev/null 2>&1"]
+    assert bot._active_led == 1
+
+    # THINKING -> effect 2 on, effect 1 off
+    shell_cmds.clear()
+    await bot._set_state(SpeakerState.THINKING)
+    assert shell_cmds == ["/bin/show_led 2 >/dev/null 2>&1; /bin/shut_led 1 >/dev/null 2>&1"]
+    assert bot._active_led == 2
+
+    # SPEAKING -> effect 3 on, effect 2 off; repeated SPEAKING deduplicated
+    shell_cmds.clear()
+    await bot._set_state(SpeakerState.SPEAKING)
+    await bot._set_state(SpeakerState.SPEAKING)
+    assert shell_cmds == ["/bin/show_led 3 >/dev/null 2>&1; /bin/shut_led 2 >/dev/null 2>&1"]
+    assert bot._active_led == 3
+
+    # Returning to IDLE -> shuts managed effects 1/2/3 cleanly
+    shell_cmds.clear()
+    await bot._enter_idle()
+    assert shell_cmds == [
+        "/bin/shut_led 1 >/dev/null 2>&1; /bin/shut_led 2 >/dev/null 2>&1; /bin/shut_led 3 >/dev/null 2>&1"
+    ]
+    assert bot._active_led is None
+
+    # Muted mic suppresses show_led while keeping force clear
+    shell_cmds.clear()
+    bot._mic_muted = True
+    await bot._set_state(SpeakerState.LISTENING)
+    assert shell_cmds == []
+    assert bot._active_led is None
+
+    # Disabled led_feedback emits no shell commands
+    bot._mic_muted = False
+    bot.config = XiaoAiConfig(enabled=True, led_feedback=False)
+    await bot._set_state(SpeakerState.LISTENING, force_led=True)
+    assert shell_cmds == []
