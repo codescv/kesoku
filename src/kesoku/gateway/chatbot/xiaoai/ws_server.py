@@ -19,6 +19,7 @@ AudioCallback = Callable[[np.ndarray], Awaitable[None]]
 EventCallback = Callable[[str, Any], Awaitable[None]]
 LifecycleCallback = Callable[[], Awaitable[None]]
 LocalWakeupCallback = Callable[[str], Awaitable[str]]
+MicMuteCallback = Callable[[bool], Awaitable[str]]
 
 PLAY_SAMPLE_RATE = 24000
 RECORD_SAMPLE_RATE = 16000
@@ -70,6 +71,7 @@ class OpenXiaoAiServer:
         on_disconnected: LifecycleCallback | None = None,
         auto_start_recording: bool = True,
         on_local_wakeup: LocalWakeupCallback | None = None,
+        on_mic_mute: MicMuteCallback | None = None,
     ) -> None:
         """Initialize the Open-XiaoAI WebSocket server.
 
@@ -82,6 +84,7 @@ class OpenXiaoAiServer:
             on_disconnected: Async callback invoked when the active speaker disconnects.
             auto_start_recording: Whether to send `start_recording` automatically on connect.
             on_local_wakeup: Async callback handling HTTP `/local-wakeup?keyword=...` requests.
+            on_mic_mute: Async callback handling HTTP `/mic-mute?muted=1|0` requests.
         """
         self.host = host
         self.port = port
@@ -91,17 +94,28 @@ class OpenXiaoAiServer:
         self.on_disconnected = on_disconnected
         self.auto_start_recording = auto_start_recording
         self.on_local_wakeup = on_local_wakeup
+        self.on_mic_mute = on_mic_mute
         self._ws: Any | None = None
         self._send_lock = asyncio.Lock()
         self._server: Any | None = None
         self._play_active = False
         self._play_epoch = 0
         self._recording_active = False
+        self._mic_muted = False
 
     @property
     def connected(self) -> bool:
         """Return True if a speaker client is currently connected."""
         return self._ws is not None
+
+    @property
+    def mic_muted(self) -> bool:
+        """Return whether the speaker hardware microphone is marked muted."""
+        return self._mic_muted
+
+    @mic_muted.setter
+    def mic_muted(self, muted: bool) -> None:
+        self._mic_muted = bool(muted)
 
     @staticmethod
     def _build_json_response(status_code: int, reason_phrase: str, payload: dict[str, Any]) -> Any:
@@ -120,9 +134,25 @@ class OpenXiaoAiServer:
         return Response(status_code, reason_phrase, headers, body)
 
     async def _process_http_request(self, connection: Any, request: Any) -> Any:
-        """Handle HTTP `/local-wakeup` triggers from on-speaker local KWS before WS upgrade."""
+        """Handle HTTP `/local-wakeup` and `/mic-mute` control triggers before WS upgrade."""
         raw_path = str(getattr(request, "path", "") or "")
         parsed = urlsplit(raw_path)
+        if parsed.path == "/mic-mute":
+            qs = parse_qs(parsed.query)
+            raw_muted = (qs.get("muted") or [""])[0].strip().lower()
+            if raw_muted in ("1", "true", "yes", "on"):
+                muted = True
+            elif raw_muted in ("0", "false", "no", "off"):
+                muted = False
+            else:
+                return self._build_json_response(400, "Bad Request", {"error": "invalid muted parameter"})
+            if self.on_mic_mute is None:
+                return self._build_json_response(404, "Not Found", {"error": "mic mute handler disabled"})
+
+            self._mic_muted = muted
+            status = await self.on_mic_mute(muted)
+            return self._build_json_response(200, "OK", {"status": status, "muted": muted})
+
         if parsed.path != "/local-wakeup":
             return None
 
@@ -195,9 +225,9 @@ class OpenXiaoAiServer:
         )
         self._recording_active = True
 
-    async def stop_recording(self) -> None:
-        """Instruct the speaker to stop microphone capture when returning to IDLE."""
-        if not self._recording_active:
+    async def stop_recording(self, *, force: bool = False) -> None:
+        """Instruct the speaker to stop microphone capture."""
+        if self._ws is None or (not self._recording_active and not force):
             return
         self._recording_active = False
         await self.send_rpc("stop_recording")
@@ -287,7 +317,7 @@ class OpenXiaoAiServer:
 
         try:
             await asyncio.sleep(0.3)
-            if self.auto_start_recording:
+            if self.auto_start_recording and not self._mic_muted:
                 await self.start_recording()
             await self.start_play(sample_rate=PLAY_SAMPLE_RATE)
             if self.on_connected is not None:

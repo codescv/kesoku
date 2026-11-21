@@ -205,6 +205,7 @@ class XiaoAiChatbot(Chatbot):
             on_disconnected=self._on_speaker_disconnected,
             auto_start_recording=not xiaoai_config.local_kws,
             on_local_wakeup=self._on_local_wakeup,
+            on_mic_mute=self._on_mic_mute,
         )
 
         self._chunker = SentenceChunker()
@@ -219,6 +220,8 @@ class XiaoAiChatbot(Chatbot):
         self._play_worker_task: asyncio.Task[None] | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
         self._local_wakeup_task: asyncio.Task[None] | None = None
+        self._mic_mute_task: asyncio.Task[None] | None = None
+        self._mic_muted = False
         self._last_tool_hint_ts = 0.0
         self._turn_start_ts = 0.0
         self._vad_unmute_ts = 0.0
@@ -312,6 +315,7 @@ class XiaoAiChatbot(Chatbot):
                 self._play_worker_task,
                 self._watchdog_task,
                 self._local_wakeup_task,
+                self._mic_mute_task,
             ):
                 if t is not None and not t.done():
                     t.cancel()
@@ -331,7 +335,8 @@ class XiaoAiChatbot(Chatbot):
         self.pipeline.reset_vad()
         logger.info(
             f"XiaoAi speaker ready. Say {self._all_wake_words} to wake up! "
-            f"(active_role={self._active_role}, local_kws={self.config.local_kws})"
+            f"(active_role={self._active_role}, local_kws={self.config.local_kws}, "
+            f"mic_muted={getattr(self, '_mic_muted', False)})"
         )
 
     async def _on_speaker_disconnected(self) -> None:
@@ -432,6 +437,9 @@ class XiaoAiChatbot(Chatbot):
 
     async def _on_local_wakeup(self, keyword: str) -> str:
         """Accept an on-speaker local KWS wakeup trigger without blocking the HTTP response."""
+        if getattr(self, "_mic_muted", False):
+            logger.debug(f"Ignoring local wakeup trigger ('{keyword}') while speaker mic is muted")
+            return "muted"
         if self.state != SpeakerState.IDLE:
             logger.debug(
                 f"Ignoring local wakeup trigger ('{keyword}') while speaker state={self.state}"
@@ -442,11 +450,52 @@ class XiaoAiChatbot(Chatbot):
         self._local_wakeup_task = asyncio.create_task(self._activate_local_wakeup(keyword))
         return "ok"
 
+    async def _on_mic_mute(self, muted: bool) -> str:
+        """Accept a speaker hardware mic-mute state update without blocking the HTTP response."""
+        self._mic_muted = muted
+        self.ws_server.mic_muted = muted
+        if getattr(self, "_mic_mute_task", None) is not None and not self._mic_mute_task.done():
+            self._mic_mute_task.cancel()
+        self._mic_mute_task = asyncio.create_task(self._sync_mic_mute_state())
+        return "muted" if muted else "unmuted"
+
+    async def _sync_mic_mute_state(self) -> None:
+        """Apply the latest speaker hardware mic-mute state to recording and active turns."""
+        try:
+            async with self._audio_lock:
+                if self._mic_muted:
+                    logger.info("XiaoAi hardware microphone muted -> stopping recording and active turns")
+                    if (
+                        self.state != SpeakerState.IDLE
+                        or getattr(self, "_turn_in_progress", False)
+                        or getattr(self, "_active_turn_id", None) is not None
+                    ):
+                        await self._interrupt_active_turns(suppress=True)
+                    self.state = SpeakerState.IDLE
+                    self.pipeline.reset_kws()
+                    self.pipeline.reset_vad()
+                    if self.ws_server.connected:
+                        await self.ws_server.stop_recording(force=True)
+                else:
+                    logger.info("XiaoAi hardware microphone unmuted -> resuming listening")
+                    self.pipeline.reset_kws()
+                    self.pipeline.reset_vad()
+                    if not self.config.local_kws and self.ws_server.connected:
+                        await self.ws_server.start_recording()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"Failed to sync XiaoAi mic mute state (muted={self._mic_muted}): {e}")
+
     async def _activate_local_wakeup(self, keyword: str) -> None:
         """Start speaker microphone streaming and enter LISTENING after a local KWS trigger."""
         try:
             async with self._audio_lock:
-                if self.state != SpeakerState.IDLE or not self.ws_server.connected:
+                if (
+                    self.state != SpeakerState.IDLE
+                    or not self.ws_server.connected
+                    or getattr(self, "_mic_muted", False)
+                ):
                     return
                 await self.ws_server.start_recording()
                 await self._handle_wakeup(keyword)
@@ -457,7 +506,11 @@ class XiaoAiChatbot(Chatbot):
 
     async def _on_audio_frame(self, samples: np.ndarray) -> None:
         """Process each 16kHz float32 microphone frame through KWS / VAD / ASR."""
+        if getattr(self, "_mic_muted", False):
+            return
         async with self._audio_lock:
+            if getattr(self, "_mic_muted", False):
+                return
             state = self.state
             if state in (SpeakerState.IDLE, SpeakerState.SPEAKING, SpeakerState.THINKING):
                 keyword = await asyncio.to_thread(self.pipeline.feed_kws, samples)

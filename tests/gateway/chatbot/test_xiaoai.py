@@ -396,6 +396,8 @@ def _make_stub_xiaoai_bot(*, progress_feedback: str = "status"):
     bot._aborted_turn_ids = set()
     bot._active_stream_turn_id = None
     bot._streamed_any_sentence = False
+    bot._mic_muted = False
+    bot._mic_mute_task = None
     bot._chunker = SentenceChunker()
     bot._sleep_chime = make_sleep_chime()
     bot._wakeup_chime = make_wakeup_chime()
@@ -1171,3 +1173,133 @@ def test_allowed_tools_filtering_in_registry_and_turn_executor():
     discord_msg = Message(id="m2", session_id="s2", chatbot_id="discord", channel_id="c1", sender="u", content="hi")
     assert te._resolve_allowed_tools(xiaoai_msg) == ["web_search", "read_file", "run_shell_command"]
     assert te._resolve_allowed_tools(discord_msg) is None
+
+
+async def test_ws_server_mic_mute_http_and_connection():
+    import json
+    from types import SimpleNamespace
+
+    sent_rpcs: list[str] = []
+
+    class FakeWS:
+        remote_address = ("192.168.1.40", 12345)
+
+        async def send(self, data: str | bytes) -> None:
+            if isinstance(data, str):
+                msg = json.loads(data)
+                if "Request" in msg:
+                    sent_rpcs.append(msg["Request"]["command"])
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    mute_events: list[bool] = []
+
+    async def on_mute(muted: bool) -> str:
+        mute_events.append(muted)
+        return "muted" if muted else "unmuted"
+
+    server = OpenXiaoAiServer(auto_start_recording=True, on_mic_mute=on_mute)
+
+    # Missing or invalid muted query parameter -> 400
+    assert (await server._process_http_request(None, SimpleNamespace(path="/mic-mute"))).status_code == 400
+    assert (
+        await server._process_http_request(None, SimpleNamespace(path="/mic-mute?muted=maybe"))
+    ).status_code == 400
+
+    # /mic-mute?muted=1 works even before speaker WS connects and prevents auto-start recording
+    resp_mute = await server._process_http_request(None, SimpleNamespace(path="/mic-mute?muted=1"))
+    assert resp_mute.status_code == 200
+    assert json.loads(resp_mute.body) == {"status": "muted", "muted": True}
+    assert server.mic_muted is True
+    assert mute_events == [True]
+
+    await server._handle_connection(FakeWS())
+    assert sent_rpcs == ["start_play"]
+
+    # Connected while unmuted -> /mic-mute?muted=0 triggers unmute callback and future connect auto-starts
+    sent_rpcs.clear()
+    resp_unmute = await server._process_http_request(None, SimpleNamespace(path="/mic-mute?muted=0"))
+    assert resp_unmute.status_code == 200
+    assert json.loads(resp_unmute.body) == {"status": "unmuted", "muted": False}
+    assert server.mic_muted is False
+    assert mute_events == [True, False]
+
+    await server._handle_connection(FakeWS())
+    assert sent_rpcs == ["start_recording", "start_play"]
+
+    # force=True sends stop_recording even if _recording_active was tracked False
+    sent_rpcs.clear()
+    server._ws = FakeWS()
+    server._recording_active = False
+    await server.stop_recording(force=True)
+    assert sent_rpcs == ["stop_recording"]
+
+
+async def test_chatbot_mic_mute_stops_and_resumes_recording():
+    from kesoku.gateway.chatbot.xiaoai.adapter import SpeakerState
+
+    bot = _make_stub_xiaoai_bot()
+    bot.config = XiaoAiConfig(enabled=True, local_kws=False)
+
+    rec_calls: list[tuple[str, bool]] = []
+
+    async def fake_start_rec() -> None:
+        rec_calls.append(("start", False))
+
+    async def fake_stop_rec(*, force: bool = False) -> None:
+        rec_calls.append(("stop", force))
+
+    bot.ws_server.start_recording = fake_start_rec
+    bot.ws_server.stop_recording = fake_stop_rec
+    bot.ws_server.mic_muted = False
+
+    # Muting during SPEAKING + active turn aborts turn, resets state to IDLE, and stops recording forcefully
+    bot.state = SpeakerState.SPEAKING
+    bot._turn_in_progress = True
+    bot._active_turn_id = "turn_muted_1"
+    await bot._tts_queue.put((0, "leijun", "没说完", None))
+    assert await bot._on_mic_mute(True) == "muted"
+    assert bot._mic_mute_task is not None
+    await bot._mic_mute_task
+
+    assert bot._mic_muted is True
+    assert bot.ws_server.mic_muted is True
+    assert bot.state == SpeakerState.IDLE
+    assert bot._turn_in_progress is False
+    assert "turn_muted_1" in bot._aborted_turn_ids
+    assert bot._test_state.aborted == ["sess_active"]
+    assert bot._test_state.get_stopped_play() == 1
+    assert rec_calls == [("stop", True)]
+
+    # Residual audio frames & local wakeup triggers are ignored while muted
+    kws_called = False
+
+    def spy_kws(samples):
+        nonlocal kws_called
+        kws_called = True
+        return "小张小张"
+
+    bot.pipeline.feed_kws = spy_kws
+    await bot._on_audio_frame(np.ones(512, dtype=np.float32))
+    assert kws_called is False
+    assert await bot._on_local_wakeup("小张小张") == "muted"
+
+    # Unmuting when local_kws=False resumes start_recording
+    assert await bot._on_mic_mute(False) == "unmuted"
+    await bot._mic_mute_task
+    assert bot._mic_muted is False
+    assert bot.ws_server.mic_muted is False
+    assert rec_calls == [("stop", True), ("start", False)]
+
+    # When local_kws=True, unmuting stays IDLE without auto-starting recording
+    rec_calls.clear()
+    bot.config = XiaoAiConfig(enabled=True, local_kws=True)
+    assert await bot._on_mic_mute(True) == "muted"
+    await bot._mic_mute_task
+    assert await bot._on_mic_mute(False) == "unmuted"
+    await bot._mic_mute_task
+    assert rec_calls == [("stop", True)]
