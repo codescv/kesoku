@@ -241,8 +241,15 @@ def start_cmd(
     active_gchats = cfg.active_google_chats
     active_wechats = cfg.active_wechats
     active_apps = cfg.active_apps
+    active_xiaoais = cfg.active_xiaoais
 
-    if not active_discords and not active_gchats and not active_wechats and not active_apps:
+    if (
+        not active_discords
+        and not active_gchats
+        and not active_wechats
+        and not active_apps
+        and not active_xiaoais
+    ):
         console = Console()
         console.print("[bold red]Error: No chatbots are enabled in the configuration.[/bold red]")
         sys.exit(1)
@@ -305,6 +312,17 @@ def start_cmd(
         )
         bot_tasks.append(app_bot.start())
         bots.append(app_bot)
+
+    for x_cfg in active_xiaoais:
+        from kesoku.gateway.chatbot.xiaoai import XiaoAiChatbot
+
+        xiaoai_bot = XiaoAiChatbot(
+            chatbot_id=x_cfg.chatbot_id,
+            gateway=gateway,
+            xiaoai_config=x_cfg,
+        )
+        bot_tasks.append(xiaoai_bot.start())
+        bots.append(xiaoai_bot)
 
     cron_manager = None
     config_dir = cfg.agent_working_dir

@@ -804,6 +804,128 @@ class AppConfig(BaseModel):
         return out
 
 
+class XiaoAiPersonaConfig(BaseModel):
+    """Per-wake-word persona profile for the XiaoAi smart speaker."""
+
+    role: str = Field(..., description="Kesoku role name (e.g. 'leijun', 'xiaozhang')")
+    wake_words: list[str] = Field(..., description="Wake words that activate this persona")
+    qwen_tts_ref_audio: str | None = Field(
+        default=None,
+        description="Reference audio path for MLX Qwen3-TTS voice cloning (relative to AWD if not absolute)",
+    )
+    qwen_tts_ref_text: str | None = Field(
+        default=None,
+        description="Optional transcript for reference audio (defaults to filename stem)",
+    )
+    tts_voice: str | None = Field(
+        default=None,
+        description="Optional Edge-TTS voice override for this persona",
+    )
+    cues_dir: str | None = Field(
+        default=None,
+        description="Optional directory of pre-generated WAV audio cues relative to AWD",
+    )
+
+
+class XiaoAiConfig(BaseModel):
+    """Open-XiaoAI smart speaker adapter settings."""
+
+    enabled: bool = Field(default=False, description="Whether to launch the XiaoAi speaker adapter in daemon mode")
+    chatbot_id: str = Field(default="xiaoai", description="Unique chatbot identifier")
+    default_role: str = Field(
+        default="default",
+        description="Default roleplay persona for the smart speaker",
+    )
+    host: str = Field(default="0.0.0.0", description="WebSocket bind host for Open-XiaoAI speaker clients")
+    port: int = Field(default=4399, ge=1, le=65535, description="WebSocket bind port for Open-XiaoAI speaker clients")
+    wake_words: list[str] = Field(
+        default_factory=lambda: ["小张小张"],
+        description="Custom wake words detected locally via sherpa-onnx KWS",
+    )
+    kws_score: float = Field(default=1.5, description="Keyword spotting boosting score")
+    kws_threshold: float = Field(default=0.25, ge=0.0, le=1.0, description="Keyword spotting trigger threshold")
+    vad_silence_sec: float = Field(
+        default=0.7,
+        ge=0.2,
+        le=3.0,
+        description="Minimum silence duration in seconds to end a user utterance",
+    )
+    continuous_listen_sec: float = Field(
+        default=8.0,
+        ge=0.0,
+        le=60.0,
+        description="Seconds to stay listening after a reply without requiring another wake word",
+    )
+    session_idle_reset_sec: float = Field(
+        default=1800.0,
+        ge=0.0,
+        description="Seconds of inactivity before automatically starting a fresh speaker session (0 disables)",
+    )
+    models_dir: str = Field(
+        default="models/xiaoai",
+        description="Directory for local sherpa-onnx KWS/VAD/ASR models (relative to AWD if not absolute)",
+    )
+    tts_provider: Literal["edge", "qwen_tts"] = Field(
+        default="edge",
+        description="TTS backend: 'edge' (Edge-TTS) or 'qwen_tts'",
+    )
+    tts_voice: str = Field(
+        default="zh-CN-XiaoxiaoNeural",
+        description="Voice identifier for Edge-TTS (e.g. 'zh-CN-XiaoxiaoNeural', 'zh-CN-YunxiNeural')",
+    )
+    tts_rate: str = Field(default="+0%", description="Speech rate adjustment for Edge-TTS (e.g. '+10%')")
+    qwen_tts_model: str = Field(
+        default="mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+        description="HuggingFace MLX model ID for Qwen3-TTS voice cloning on Apple Silicon",
+    )
+    qwen_tts_ref_audio: str | None = Field(
+        default=None,
+        description="Reference audio path for Qwen3-TTS voice cloning (relative to AWD if not absolute)",
+    )
+    qwen_tts_ref_text: str | None = Field(
+        default=None,
+        description="Optional transcript for reference audio (defaults to filename stem)",
+    )
+    cues_dir: str | None = Field(
+        default=None,
+        description="Directory of pre-generated WAV audio cues (wakeup/, tool_search/, tool_work/) relative to AWD",
+    )
+    personas: list[XiaoAiPersonaConfig] = Field(
+        default_factory=list,
+        description="Optional multi-persona wake-word profiles sharing one smart speaker",
+    )
+    sys_prompt_file: str | None = Field(
+        default=None,
+        description="Path to custom system prompt file for the speaker relative to agent working directory",
+    )
+    stream_min_interval_sec: float = Field(
+        default=0.05,
+        ge=0.0,
+        description="Minimum seconds between streamed LLM preview updates delivered to TTS chunker",
+    )
+    progress_feedback: Literal["off", "status"] = Field(
+        default="status",
+        description="Intermediate spoken feedback mode during long tool calls",
+    )
+    progress_delay_seconds: float = Field(
+        default=1.5,
+        ge=0.0,
+        description="Delay in seconds before speaking a tool-call status hint",
+    )
+    llm: Literal["gemini", "claude"] | None = Field(
+        default=None,
+        description="LLM provider override for XiaoAi speaker",
+    )
+    model_name: str | None = Field(
+        default=None,
+        description="Model identifier override for XiaoAi speaker (e.g. 'gemini-4-hydrogen')",
+    )
+    thinking_level: Literal["minimal", "low", "medium", "high", "xhigh", "max"] | None = Field(
+        default=None,
+        description="Thinking/reasoning level override for XiaoAi speaker",
+    )
+
+
 class ChatbotsConfig(BaseModel):
     """Container for multiple chatbot adapter lists."""
 
@@ -811,6 +933,7 @@ class ChatbotsConfig(BaseModel):
     google_chat: list[GoogleChatConfig] = Field(default_factory=list)
     wechat: list[WechatConfig] = Field(default_factory=list)
     app: list[AppConfig] = Field(default_factory=list)
+    xiaoai: list[XiaoAiConfig] = Field(default_factory=list)
 
 
 class PostToolUseHook(BaseModel):
@@ -959,6 +1082,18 @@ class KesokuConfig(BaseModel):
                 return a_cfg
         return None
 
+    @property
+    def active_xiaoais(self) -> list[XiaoAiConfig]:
+        """Get all enabled XiaoAi smart speaker configs."""
+        return [x for x in self.chatbots.xiaoai if x.enabled]
+
+    def get_xiaoai_config(self, chatbot_id: str) -> XiaoAiConfig | None:
+        """Find XiaoAiConfig with matching chatbot_id."""
+        for x_cfg in self.chatbots.xiaoai:
+            if x_cfg.chatbot_id == chatbot_id:
+                return x_cfg
+        return None
+
     def get_chatbot_default_role(self, chatbot_id: str) -> str:
         """Return the configured default_role for the matching chatbot adapter, or 'default'."""
         if not chatbot_id:
@@ -968,6 +1103,7 @@ class KesokuConfig(BaseModel):
             self.get_google_chat_config,
             self.get_wechat_config,
             self.get_app_config,
+            self.get_xiaoai_config,
         ):
             bot_cfg = getter(chatbot_id)
             if bot_cfg is not None:

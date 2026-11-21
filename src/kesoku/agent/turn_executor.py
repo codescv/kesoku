@@ -991,6 +991,32 @@ class TurnExecutor:
                     f"model='{wechat_cfg.model_name}', thinking_level='{wechat_cfg.thinking_level}'): {e}"
                 )
 
+        get_xiaoai_cfg = getattr(self.context.config, "get_xiaoai_config", None)
+        xiaoai_cfg = get_xiaoai_cfg(current_msg.chatbot_id) if callable(get_xiaoai_cfg) else None
+        if xiaoai_cfg is not None and (
+            getattr(xiaoai_cfg, "llm", None) is not None
+            or getattr(xiaoai_cfg, "model_name", None) is not None
+            or getattr(xiaoai_cfg, "thinking_level", None) is not None
+        ):
+            logger.info(
+                f"Applying LLM override (provider={xiaoai_cfg.llm}, model={xiaoai_cfg.model_name}, "
+                f"thinking_level={xiaoai_cfg.thinking_level}) for XiaoAi chatbot '{current_msg.chatbot_id}'"
+            )
+            kwargs_x: dict[str, Any] = {}
+            if xiaoai_cfg.llm is not None:
+                kwargs_x["provider"] = xiaoai_cfg.llm
+            if xiaoai_cfg.model_name is not None:
+                kwargs_x["model_name"] = xiaoai_cfg.model_name
+            if xiaoai_cfg.thinking_level is not None:
+                kwargs_x["thinking_level"] = xiaoai_cfg.thinking_level
+            try:
+                return self.context.get_llm(**kwargs_x)
+            except Exception as e:
+                logger.error(
+                    f"Failed to get XiaoAi override LLM (provider='{xiaoai_cfg.llm}', "
+                    f"model='{xiaoai_cfg.model_name}', thinking_level='{xiaoai_cfg.thinking_level}'): {e}"
+                )
+
         return self.context.get_llm()
 
     def _resolve_stream(self, current_msg: Message, llm: BaseLLM) -> bool:

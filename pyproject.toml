@@ -21,6 +21,16 @@ dependencies = [
     "fastembed>=0.8.0",
 ]
 
+[project.optional-dependencies]
+xiaoai = [
+    "websockets>=13.0",
+    "edge-tts>=7.0.0",
+    "sherpa-onnx>=1.10.0",
+    "numpy>=1.26.0",
+    "pypinyin>=0.51.0",
+    "mlx-audio; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
 [project.scripts]
 kesoku = "kesoku.cli:app"
 
