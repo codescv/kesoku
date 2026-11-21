@@ -31,6 +31,83 @@ _MULTI_SPACE_RE = re.compile(r"\s+")
 _HARD_BREAK_CHARS = frozenset("。！？!?；;\n")
 _SOFT_BREAK_CHARS = frozenset("，,、：:")
 
+_KANA_RE = re.compile(r"[\u3040-\u309f\u30a0-\u30ff]")
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_SPEAKABLE_RE = re.compile(r"[\w\u3040-\u30ff\u4e00-\u9fff]")
+_QUOTED_SPAN_RE = re.compile(r"(「[^」]+」|『[^』]+』|“[^”]+”|\"[^\"]+\")")
+_CLAUSE_SPLIT_RE = re.compile(r"([：:，,])")
+
+
+def detect_tts_lang_code(text: str) -> str:
+    """Detect the Qwen3-TTS `lang_code` for text ('japanese' if Kana present, else 'auto')."""
+    return "japanese" if _KANA_RE.search(text) else "auto"
+
+
+def split_tts_language_segments(text: str) -> list[tuple[str, str]]:
+    """Split bilingual Chinese/Japanese text into `(segment_text, lang_code)` chunks.
+
+    Japanese utterances containing Hiragana/Katakana (and any inline Kanji) are tagged
+    `lang_code="japanese"` so Qwen3-TTS uses Japanese pronunciation rather than drifting
+    into Mandarin readings under a Chinese voice-cloning reference.
+    """
+    cleaned = text.strip()
+    if not cleaned:
+        return []
+    if not _KANA_RE.search(cleaned):
+        return [(cleaned, "auto")]
+
+    def _emit_chunk(chunk: str, out: list[tuple[str, str]]) -> None:
+        stripped = chunk.strip()
+        if not stripped or not _SPEAKABLE_RE.search(stripped):
+            return
+        if not _KANA_RE.search(stripped):
+            out.append((stripped, "auto"))
+            return
+        sep = _CLAUSE_SPLIT_RE.search(stripped)
+        if sep is not None:
+            prefix = stripped[: sep.start()].strip()
+            suffix = stripped[sep.end() :].strip()
+            if (
+                prefix
+                and suffix
+                and _CJK_RE.search(prefix)
+                and not _KANA_RE.search(prefix)
+                and _KANA_RE.search(suffix)
+            ):
+                if _SPEAKABLE_RE.search(prefix):
+                    out.append((prefix, "auto"))
+                _emit_chunk(suffix, out)
+                return
+        out.append((stripped, "japanese"))
+
+    raw_segments: list[tuple[str, str]] = []
+    pos = 0
+    for m in _QUOTED_SPAN_RE.finditer(cleaned):
+        inner = m.group(0)[1:-1]
+        if not _KANA_RE.search(inner):
+            # Leave non-kana quotes (e.g. 「東京」 inside a Japanese sentence) intact
+            continue
+        if m.start() > pos:
+            _emit_chunk(cleaned[pos : m.start()], raw_segments)
+        inner_clean = inner.strip()
+        if _SPEAKABLE_RE.search(inner_clean):
+            raw_segments.append((inner_clean, "japanese"))
+        pos = m.end()
+    if pos < len(cleaned):
+        _emit_chunk(cleaned[pos:], raw_segments)
+
+    merged: list[tuple[str, str]] = []
+    for seg_text, seg_lang in raw_segments:
+        if not _SPEAKABLE_RE.search(seg_text):
+            continue
+        if merged and merged[-1][1] == seg_lang:
+            prev_text, _ = merged[-1]
+            merged[-1] = (f"{prev_text}{seg_text}", seg_lang)
+        else:
+            merged.append((seg_text, seg_lang))
+
+    return merged or [(cleaned, detect_tts_lang_code(cleaned))]
+
 
 def clean_text_for_speech(text: str) -> str:
     """Strip Markdown, code blocks, and Kesoku media tags for natural speech output.
@@ -592,24 +669,30 @@ class MlxQwenTTSEngine:
         vid, ref_mx, ref_text = self._resolve_voice(voice_id)
         assert self._model is not None
 
-        t0 = time.perf_counter()
-        results = list(
-            self._model.generate(
-                text=text,
-                ref_audio=ref_mx,
-                ref_text=ref_text,
-                lang_code="auto",
-                split_pattern="",
-                verbose=False,
-            )
-        )
-        if not results:
+        segments = split_tts_language_segments(text)
+        if not segments:
             return b""
 
-        pcm_parts = [
-            _result_audio_to_pcm24k(res.audio, int(getattr(res, "sample_rate", PLAY_SAMPLE_RATE)))
-            for res in results
-        ]
+        t0 = time.perf_counter()
+        pcm_parts: list[bytes] = []
+        for seg_text, seg_lang in segments:
+            results = list(
+                self._model.generate(
+                    text=seg_text,
+                    ref_audio=ref_mx,
+                    ref_text=ref_text,
+                    lang_code=seg_lang,
+                    split_pattern="",
+                    verbose=False,
+                )
+            )
+            for res in results:
+                chunk_pcm = _result_audio_to_pcm24k(
+                    res.audio, int(getattr(res, "sample_rate", PLAY_SAMPLE_RATE))
+                )
+                if chunk_pcm:
+                    pcm_parts.append(chunk_pcm)
+
         pcm = b"".join(pcm_parts)
         if not pcm:
             return b""
@@ -619,6 +702,7 @@ class MlxQwenTTSEngine:
         rtf = (synth_sec / audio_sec) if audio_sec > 0 else 0.0
         logger.info(
             f"MLX Qwen3-TTS synthesis complete: voice={vid} chars={len(text)} "
+            f"langs={[lang for _, lang in segments]} "
             f"audio_sec={audio_sec:.2f}s synth_sec={synth_sec:.2f}s rtf={rtf:.2f}"
         )
         return pcm
@@ -693,33 +777,41 @@ class MlxQwenTTSEngine:
                 t0 = time.perf_counter()
                 ttfa_sec: float | None = None
                 total_bytes = 0
-                for res in self._model.generate(
-                    text=text,
-                    ref_audio=ref_mx,
-                    ref_text=ref_text,
-                    lang_code="auto",
-                    split_pattern="",
-                    stream=True,
-                    streaming_interval=1.0,
-                    verbose=False,
-                ):
+                segments = split_tts_language_segments(text)
+                for seg_text, seg_lang in segments:
                     if is_cancelled is not None and is_cancelled():
                         cancelled_early = True
                         break
-                    sr = int(getattr(res, "sample_rate", PLAY_SAMPLE_RATE))
-                    pcm = _result_audio_to_pcm24k(res.audio, sr)
-                    if not pcm:
-                        continue
-                    if ttfa_sec is None:
-                        ttfa_sec = time.perf_counter() - t0
-                    total_bytes += len(pcm)
-                    loop.call_soon_threadsafe(chunk_queue.put_nowait, pcm)
+                    for res in self._model.generate(
+                        text=seg_text,
+                        ref_audio=ref_mx,
+                        ref_text=ref_text,
+                        lang_code=seg_lang,
+                        split_pattern="",
+                        stream=True,
+                        streaming_interval=1.0,
+                        verbose=False,
+                    ):
+                        if is_cancelled is not None and is_cancelled():
+                            cancelled_early = True
+                            break
+                        sr = int(getattr(res, "sample_rate", PLAY_SAMPLE_RATE))
+                        pcm = _result_audio_to_pcm24k(res.audio, sr)
+                        if not pcm:
+                            continue
+                        if ttfa_sec is None:
+                            ttfa_sec = time.perf_counter() - t0
+                        total_bytes += len(pcm)
+                        loop.call_soon_threadsafe(chunk_queue.put_nowait, pcm)
+                    if cancelled_early:
+                        break
 
                 synth_sec = time.perf_counter() - t0
                 audio_sec = total_bytes / (PLAY_SAMPLE_RATE * 2)
                 rtf = (synth_sec / audio_sec) if audio_sec > 0 else 0.0
                 logger.info(
                     f"MLX Qwen3-TTS stream complete: voice={resolved_vid} chars={len(text)} "
+                    f"langs={[lang for _, lang in segments]} "
                     f"ttfa={ttfa_sec or 0.0:.2f}s audio_sec={audio_sec:.2f}s "
                     f"synth_sec={synth_sec:.2f}s rtf={rtf:.2f} cancelled={cancelled_early}"
                 )

@@ -9,9 +9,11 @@ from kesoku.gateway.chatbot.xiaoai.tts import (
     SentenceChunker,
     VoiceCueBank,
     clean_text_for_speech,
+    detect_tts_lang_code,
     float32_to_pcm16,
     make_wakeup_chime,
     normalize_pcm16_rms,
+    split_tts_language_segments,
     trim_pcm16_silence,
 )
 from kesoku.gateway.chatbot.xiaoai.ws_server import OpenXiaoAiServer, decode_a113_s32_to_s16
@@ -537,3 +539,62 @@ async def test_ws_server_play_epoch_cancels_inflight_play():
     play_packets = [f for f in sent_frames if isinstance(f, bytes)]
     assert 1 <= len(play_packets) < 10
     assert server._play_epoch == 1
+
+
+def test_detect_and_split_tts_language_segments():
+    assert detect_tts_lang_code("今天天气真不错。") == "auto"
+    assert detect_tts_lang_code("今日はいい天気です。") == "japanese"
+
+    assert split_tts_language_segments("今天天气真不错。") == [("今天天气真不错。", "auto")]
+    assert split_tts_language_segments("Are you OK？今天很棒。") == [("Are you OK？今天很棒。", "auto")]
+    assert split_tts_language_segments("今日はいい天気ですね。") == [("今日はいい天気ですね。", "japanese")]
+    assert split_tts_language_segments("今日は「東京」に行きます。") == [("今日は「東京」に行きます。", "japanese")]
+    assert split_tts_language_segments("去居酒屋可以说「すみません、生ビールを一つください」。") == [
+        ("去居酒屋可以说", "auto"),
+        ("すみません、生ビールを一つください", "japanese"),
+    ]
+    assert split_tts_language_segments("日语里「ありがとう」就是谢谢。") == [
+        ("日语里", "auto"),
+        ("ありがとう", "japanese"),
+        ("就是谢谢。", "auto"),
+    ]
+    assert split_tts_language_segments("这句话用日语说是：おはようございます！") == [
+        ("这句话用日语说是", "auto"),
+        ("おはようございます！", "japanese"),
+    ]
+    assert split_tts_language_segments("私の名前は雷軍です，よろしく。") == [
+        ("私の名前は雷軍です，よろしく。", "japanese"),
+    ]
+
+
+async def test_mlx_qwen_tts_passes_japanese_lang_code():
+    from types import SimpleNamespace
+
+    calls: list[tuple[str, str, bool]] = []
+
+    class FakeBilingualModel:
+        sample_rate = 24000
+
+        def generate(self, **kwargs):
+            calls.append((kwargs["text"], kwargs["lang_code"], bool(kwargs.get("stream", False))))
+            yield SimpleNamespace(audio=np.full(240, 0.2, dtype=np.float32), sample_rate=24000)
+
+    engine = MlxQwenTTSEngine(model_id="fake-model")
+    engine.register_voice("leijun", "/tmp/雷军参考.wav")
+    engine._model = FakeBilingualModel()
+    engine._voice_arrays["leijun"] = (np.zeros(240, dtype=np.float32), "雷军参考")
+
+    pcm_sync = await engine.synthesize("可以说「おはようございます」。", voice_id="leijun")
+    assert len(pcm_sync) == 240 * 2 * 2
+    assert calls == [
+        ("可以说", "auto", False),
+        ("おはようございます", "japanese", False),
+    ]
+
+    calls.clear()
+    chunks = [chunk async for chunk in engine.synthesize_stream("打招呼说「こんにちは」。", voice_id="leijun")]
+    assert len(chunks) == 2
+    assert calls == [
+        ("打招呼说", "auto", True),
+        ("こんにちは", "japanese", True),
+    ]
