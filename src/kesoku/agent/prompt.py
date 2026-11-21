@@ -131,6 +131,21 @@ MEMORY_INSTRUCTIONS = """
   search misses to the user.
 """
 
+COMPACT_MEMORY_INSTRUCTIONS = """
+# Memory Rules
+- Treat any injected `<memory_pinned>` facts as known context; apply them naturally
+  without mentioning memory tags or announcements.
+"""
+
+
+def is_compact_prompt_chatbot(cfg: KesokuConfig, chatbot_id: str | None) -> bool:
+    """Return True if `chatbot_id` enables `compact_system_prompt`."""
+    if not chatbot_id:
+        return False
+    get_xiaoai_cfg = getattr(cfg, "get_xiaoai_config", None)
+    xiaoai_cfg = get_xiaoai_cfg(chatbot_id) if callable(get_xiaoai_cfg) else None
+    return bool(xiaoai_cfg is not None and getattr(xiaoai_cfg, "compact_system_prompt", False))
+
 # Skills index limits (system prompt size control).
 MAX_SKILLS_IN_INDEX = 60
 MAX_SKILL_DESCRIPTION_CHARS = 200
@@ -232,6 +247,8 @@ def build_sys_prompt(
     custom_prompt: str | None = None,
     session: Session | None = None,
     role: str | None = None,
+    *,
+    compact: bool = False,
 ) -> str:
     """Build the complete agent system prompt including instructions on file-sending syntax and staging workspace.
 
@@ -239,6 +256,7 @@ def build_sys_prompt(
         custom_prompt: Optional additional context or platform-specific instructions.
         session: Optional chat session object.
         role: Optional pre-resolved character persona binding. If not provided, resolves from the session.
+        compact: When True, build a minimal voice-focused prompt omitting desktop/UI/file/shell/notes boilerplate.
 
     Returns:
         A complete, modularly constructed system prompt string.
@@ -328,23 +346,28 @@ Unless the user explicitly instructs otherwise, do not refer to any file outside
 """
         sections.append(role_info.strip())
 
-    sections.append(working_dir_info.strip())
-    if session_dir_info:
-        sections.append(session_dir_info.strip())
-    skills_section = build_skills_section(role, cfg)
-    if skills_section:
-        sections.append(skills_section)
+    if compact:
+        if cfg.agent_working_dir:
+            sections.append(f"# Workspace\n> AWD='{cfg.agent_working_dir}'")
+        sections.append(COMPACT_MEMORY_INSTRUCTIONS.strip())
+    else:
+        sections.append(working_dir_info.strip())
+        if session_dir_info:
+            sections.append(session_dir_info.strip())
+        skills_section = build_skills_section(role, cfg)
+        if skills_section:
+            sections.append(skills_section)
 
-    sections.extend(
-        [
-            OUTPUT_FORMATTING_INSTRUCTIONS.strip(),
-            TOOL_CALLING_INSTRUCTIONS.strip(),
-            FILE_TOOL_INSTRUCTIONS.strip(),
-            BACKGROUND_EXECUTION_INSTRUCTIONS.strip(),
-            SESSION_NOTES_INSTRUCTIONS.strip(),
-            MEMORY_INSTRUCTIONS.strip(),
-        ]
-    )
+        sections.extend(
+            [
+                OUTPUT_FORMATTING_INSTRUCTIONS.strip(),
+                TOOL_CALLING_INSTRUCTIONS.strip(),
+                FILE_TOOL_INSTRUCTIONS.strip(),
+                BACKGROUND_EXECUTION_INSTRUCTIONS.strip(),
+                SESSION_NOTES_INSTRUCTIONS.strip(),
+                MEMORY_INSTRUCTIONS.strip(),
+            ]
+        )
 
     sections.extend(user_prompts_sections)
 

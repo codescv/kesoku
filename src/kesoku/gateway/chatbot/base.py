@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from kesoku.agent.context_dir import build_context_prefix
 from kesoku.agent.history import build_history
-from kesoku.agent.prompt import build_sys_prompt
+from kesoku.agent.prompt import build_sys_prompt, is_compact_prompt_chatbot
 from kesoku.agent.tools.registry import ToolContext
 from kesoku.config import get_config, resolve_gateway_default_role
 from kesoku.constants import SYSTEM_START_TIME, MessageRole, MessageStatus, MessageType
@@ -2500,10 +2500,12 @@ class Chatbot(ABC):
 
             # Always rebuild the system prompt to pick up on-disk template changes.
             # Pass pre-resolved role so default-role sessions skip opening a new DatabaseManager.
+            compact = is_compact_prompt_chatbot(self.gateway.context.config, self.chatbot_id)
             new_sys_prompt = build_sys_prompt(
                 custom_prompt=dto.custom_prompt or None,
                 session=session,
                 role=current_role or None,
+                compact=compact,
             )
             await self.gateway.db.update_session_system_prompt(session.id, new_sys_prompt)
 
@@ -2648,7 +2650,8 @@ class Chatbot(ABC):
         session = await self.gateway.db.get_last_session_by_channel_and_role(self.chatbot_id, channel_id, role_name)
         if session:
             await self.gateway.db.set_active_session_for_channel(self.chatbot_id, channel_id, session.id)
-            new_sys_prompt = build_sys_prompt(session=session)
+            compact = is_compact_prompt_chatbot(self.gateway.context.config, self.chatbot_id)
+            new_sys_prompt = build_sys_prompt(session=session, compact=compact)
             await self.gateway.db.update_session_system_prompt(session.id, new_sys_prompt)
         else:
             await self.gateway.create_session(

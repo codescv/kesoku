@@ -919,6 +919,20 @@ class XiaoAiConfig(BaseModel):
         ge=0.0,
         description="Delay in seconds before speaking a tool-call status hint",
     )
+    compact_system_prompt: bool = Field(
+        default=False,
+        description=(
+            "Use a compact voice-focused system prompt (persona + custom speaker prompt + brief memory note) "
+            "omitting desktop/UI/file/shell/notes boilerplate"
+        ),
+    )
+    allowed_tools: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional allow-list of tool names exposed to the LLM for this speaker "
+            "(e.g. ['web_search']). None exposes all globally enabled tools."
+        ),
+    )
     llm: Literal["gemini", "claude"] | None = Field(
         default=None,
         description="LLM provider override for XiaoAi speaker",

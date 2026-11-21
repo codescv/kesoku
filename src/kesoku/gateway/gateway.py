@@ -11,7 +11,7 @@ import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 
-from kesoku.agent.prompt import build_sys_prompt
+from kesoku.agent.prompt import build_sys_prompt, is_compact_prompt_chatbot
 from kesoku.constants import MessageRole, MessageStatus
 from kesoku.context import KesokuContext
 from kesoku.db import Message, Session
@@ -228,7 +228,10 @@ class Gateway:
 
         # Build system prompt if not provided
         if system_prompt is None:
-            system_prompt = build_sys_prompt(custom_prompt=custom_prompt, session=sess, role=role)
+            compact = is_compact_prompt_chatbot(self.context.config, chatbot_id)
+            system_prompt = build_sys_prompt(
+                custom_prompt=custom_prompt, session=sess, role=role, compact=compact
+            )
         sess.system_prompt = system_prompt
 
         await self.db.create_session(sess)

@@ -1044,3 +1044,130 @@ async def test_continuous_listen_sec_3s_not_clamped_to_8s():
     bot.config = XiaoAiConfig(enabled=True, continuous_listen_sec=0.0)
     await bot._handle_wakeup("小张小张")
     assert 5.9 <= (bot._listen_deadline - bot._vad_unmute_ts) <= 6.1
+
+
+def test_xiaoai_config_compact_prompt_and_allowed_tools():
+    default_cfg = XiaoAiConfig()
+    assert default_cfg.compact_system_prompt is False
+    assert default_cfg.allowed_tools is None
+
+    custom_cfg = XiaoAiConfig(
+        enabled=True,
+        compact_system_prompt=True,
+        allowed_tools=["web_search"],
+    )
+    assert custom_cfg.compact_system_prompt is True
+    assert custom_cfg.allowed_tools == ["web_search"]
+
+
+def test_build_sys_prompt_compact_omits_desktop_boilerplate(tmp_path, monkeypatch):
+    from kesoku.agent.prompt import build_sys_prompt, is_compact_prompt_chatbot
+    from kesoku.db import Session
+
+    role_dir = tmp_path / "roles" / "xiaozhang"
+    role_dir.mkdir(parents=True)
+    (role_dir / "intro.md").write_text("# 核心人设\n你是家庭语音助手小张。", encoding="utf-8")
+
+    cfg = KesokuConfig(
+        chatbots={
+            "xiaoai": [
+                XiaoAiConfig(
+                    enabled=True,
+                    chatbot_id="xiaoai",
+                    default_role="xiaozhang",
+                    compact_system_prompt=True,
+                    allowed_tools=["web_search"],
+                )
+            ]
+        },
+        agent_working_dir=str(tmp_path),
+    )
+    monkeypatch.setattr("kesoku.agent.prompt.get_config", lambda: cfg)
+
+    assert is_compact_prompt_chatbot(cfg, "xiaoai") is True
+    assert is_compact_prompt_chatbot(cfg, "discord") is False
+
+    sess = Session(id="s_compact", title="Compact", workspace_name="ws_compact", role_name="xiaozhang")
+    speaker_guide = "# 智能音箱语音交互指南\n- 简洁口语回复，1~3句以内。"
+    compact_prompt = build_sys_prompt(
+        custom_prompt=speaker_guide,
+        session=sess,
+        role="xiaozhang",
+        compact=True,
+    )
+
+    assert "你是家庭语音助手小张" in compact_prompt
+    assert speaker_guide in compact_prompt
+    assert f"AWD='{tmp_path}'" in compact_prompt
+    assert "# Memory Rules" in compact_prompt
+    for omitted in (
+        "# Output Formatting Rules",
+        "# Pinned Session Notes and Context Blocks",
+        "# File Tools",
+        "# Background Tasks",
+        "# Agent Working Directory",
+        "# Session Staging Directory",
+        "# Available Skills",
+    ):
+        assert omitted not in compact_prompt
+    assert len(compact_prompt) < 2000
+
+
+def test_allowed_tools_filtering_in_registry_and_turn_executor():
+    from kesoku.agent.tools.registry import ToolRegistry
+    from kesoku.agent.turn_executor import TurnExecutor
+    from kesoku.context import KesokuContext
+    from kesoku.db import Message
+
+    reg = ToolRegistry()
+
+    @reg.register
+    def web_search(query: str) -> str:
+        """Search the web."""
+        return query
+
+    @reg.register
+    def read_file(file_name: str) -> str:
+        """Read a file."""
+        return file_name
+
+    @reg.register
+    def run_shell_command(cmd: str) -> str:
+        """Run shell."""
+        return cmd
+
+    @reg.register
+    def update_file(file_name: str, new_content: str) -> str:
+        """Update a file."""
+        return file_name
+
+    assert [f.__name__ for f in reg.get_tools_list()] == [
+        "web_search",
+        "read_file",
+        "run_shell_command",
+        "update_file",
+    ]
+    assert [f.__name__ for f in reg.get_tools_list(allowed=["web_search"])] == ["web_search"]
+    assert [
+        f.__name__
+        for f in reg.get_tools_list(allowed=["web_search", "read_file", "run_shell_command"])
+    ] == ["web_search", "read_file", "run_shell_command"]
+
+    cfg = KesokuConfig(
+        chatbots={
+            "xiaoai": [
+                XiaoAiConfig(
+                    enabled=True,
+                    chatbot_id="xiaoai",
+                    allowed_tools=["web_search", "read_file", "run_shell_command"],
+                )
+            ]
+        }
+    )
+    te = TurnExecutor(session_id="s1", gateway=None, tool_runner=None, context=KesokuContext(config=cfg))
+    xiaoai_msg = Message(
+        id="m1", session_id="s1", chatbot_id="xiaoai", channel_id="xiaoai:xiaozhang", sender="u", content="hi"
+    )
+    discord_msg = Message(id="m2", session_id="s2", chatbot_id="discord", channel_id="c1", sender="u", content="hi")
+    assert te._resolve_allowed_tools(xiaoai_msg) == ["web_search", "read_file", "run_shell_command"]
+    assert te._resolve_allowed_tools(discord_msg) is None

@@ -3,7 +3,7 @@
 import functools
 import inspect
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -95,16 +95,25 @@ class ToolRegistry:
         except Exception:  # noqa: BLE001 - registry must work without a loaded config (tests, tooling)
             return set()
 
-    def get_tools_list(self) -> list[Callable]:
+    def get_tools_list(self, *, allowed: Collection[str] | None = None) -> list[Callable]:
         """Retrieve the list of registered tool callables formatted for LLM schema generation.
 
-        Tools listed in `agent.disabled_tools` are omitted so the LLM never sees them.
+        Tools listed in `agent.disabled_tools` are omitted so the LLM never sees them. When `allowed`
+        is provided, only tools whose names are in `allowed` are returned.
+
+        Args:
+            allowed: Optional collection of permitted tool names.
 
         Returns:
             A list of callable functions with context arguments stripped.
         """
         disabled = self._disabled_names()
-        return [f for name, f in self._schema_tools.items() if name not in disabled]
+        allowed_set = set(allowed) if allowed is not None else None
+        return [
+            f
+            for name, f in self._schema_tools.items()
+            if name not in disabled and (allowed_set is None or name in allowed_set)
+        ]
 
     def get_tool(self, name: str) -> Callable:
         """Retrieve a specific tool function by name for execution.

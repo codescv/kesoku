@@ -1019,6 +1019,14 @@ class TurnExecutor:
 
         return self.context.get_llm()
 
+    def _resolve_allowed_tools(self, current_msg: Message) -> list[str] | None:
+        """Return optional per-chatbot tool allow-list (or None for unrestricted tools)."""
+        get_xiaoai_cfg = getattr(self.context.config, "get_xiaoai_config", None)
+        xiaoai_cfg = get_xiaoai_cfg(current_msg.chatbot_id) if callable(get_xiaoai_cfg) else None
+        if xiaoai_cfg is not None and getattr(xiaoai_cfg, "allowed_tools", None) is not None:
+            return list(xiaoai_cfg.allowed_tools)
+        return None
+
     def _resolve_stream(self, current_msg: Message, llm: BaseLLM) -> bool:
         """Resolve whether LLM streaming preview is enabled for `current_msg` and `llm`.
 
@@ -1156,6 +1164,10 @@ class TurnExecutor:
                     system_prompt = apply_reply_channel_rule(system_prompt, self._turn_reply_marker)
 
                 tools_list = self.tool_runner.tool_registry.get_tools_list()
+                allowed_tools = self._resolve_allowed_tools(current_msg)
+                if allowed_tools is not None:
+                    allowed_set = set(allowed_tools)
+                    tools_list = [t for t in tools_list if getattr(t, "__name__", None) in allowed_set]
 
                 # Retrieve and build the raw session history (skip bulky compressed ASSISTANT/TOOL rows)
                 raw_history = await build_history(
