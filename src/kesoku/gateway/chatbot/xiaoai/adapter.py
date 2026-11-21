@@ -79,7 +79,19 @@ _STOP_COMMANDS = frozenset(
         "停止播放",
     }
 )
-_CLEAR_COMMANDS = frozenset({"新对话", "清空对话", "重新开始", "忘记刚才的"})
+_CLEAR_COMMANDS = frozenset(
+    {
+        "新对话",
+        "开新对话",
+        "开启新对话",
+        "清空对话",
+        "重新开始",
+        "重新对话",
+        "换个话题",
+        "忘记刚才的",
+    }
+)
+_CORE_CLEAR_SUBSTRINGS = ("新对话", "清空对话", "重新开始", "重新对话", "换个话题")
 _VOL_UP_COMMANDS = frozenset({"大声点", "声音大一点", "音量大一点", "大点声"})
 _VOL_DOWN_COMMANDS = frozenset({"小声点", "声音小一点", "音量小一点", "小点声"})
 
@@ -212,6 +224,9 @@ class XiaoAiChatbot(Chatbot):
         self._vad_unmute_ts = 0.0
         self._turn_in_progress = False
         self._suppress_until_next_user_turn = False
+        self._active_turn_id: str | None = None
+        self._active_turn_channel_id: str | None = None
+        self._aborted_turn_ids: set[str] = set()
         self._audio_lock = asyncio.Lock()
 
         self.gateway.register_stream_handler(self.chatbot_id, self._handle_stream_update)
@@ -222,6 +237,41 @@ class XiaoAiChatbot(Chatbot):
         if personas and len(personas) > 1:
             return f"xiaoai:{self._active_role}"
         return SPEAKER_CHANNEL_ID
+
+    def _all_channel_ids(self) -> list[str]:
+        """Return all distinct speaker channel IDs across configured personas plus fallback."""
+        channels: list[str] = []
+        personas = getattr(self, "_personas", None)
+        if personas and len(personas) > 1:
+            channels.extend(f"xiaoai:{role}" for role in personas)
+        if SPEAKER_CHANNEL_ID not in channels:
+            channels.append(SPEAKER_CHANNEL_ID)
+        return channels
+
+    def _record_aborted_turn(self, turn_id: str | None) -> None:
+        """Remember an aborted turn ID so late/stale stream chunks and replies are dropped."""
+        if not turn_id:
+            return
+        aborted = getattr(self, "_aborted_turn_ids", None)
+        if aborted is None:
+            aborted = set()
+            self._aborted_turn_ids = aborted
+        if len(aborted) >= 128:
+            aborted.pop()
+        aborted.add(turn_id)
+
+    def _is_stale_turn(self, *, channel_id: str | None, turn_id: str | None) -> bool:
+        """Return True if an outbound update/reply belongs to an aborted or superseded turn."""
+        aborted = getattr(self, "_aborted_turn_ids", None)
+        if turn_id and aborted and turn_id in aborted:
+            return True
+        active_ch = getattr(self, "_active_turn_channel_id", None)
+        if active_ch and channel_id and channel_id != active_ch:
+            return True
+        active_turn = getattr(self, "_active_turn_id", None)
+        if active_turn and turn_id and turn_id != active_turn:
+            return True
+        return False
 
     async def start(self) -> None:
         """Load local speech models and start the Open-XiaoAI WS server + Gateway loop."""
@@ -307,20 +357,56 @@ class XiaoAiChatbot(Chatbot):
             return True
         return len(text) <= 6 and any(sub in text for sub in _CORE_STOP_SUBSTRINGS)
 
+    @staticmethod
+    def _is_clear_utterance(text: str) -> bool:
+        """Return True if an ASR utterance requests starting a fresh conversation."""
+        if text in _CLEAR_COMMANDS:
+            return True
+        return len(text) <= 8 and any(sub in text for sub in _CORE_CLEAR_SUBSTRINGS)
+
     async def _abort_active_turn(self) -> None:
-        """Abort any active Kesoku turn on the current speaker channel."""
+        """Abort any active Kesoku turns across all speaker persona channels."""
         gateway = getattr(self, "gateway", None)
         db = getattr(gateway, "db", None) if gateway is not None else None
         abort_fn = getattr(gateway, "abort_session", None) if gateway is not None else None
         get_sess_fn = getattr(db, "get_session_by_channel", None) if db is not None else None
         if not callable(get_sess_fn) or not callable(abort_fn):
             return
-        try:
-            session = await get_sess_fn(self.chatbot_id, self._active_channel_id())
-            if session is not None:
-                await abort_fn(session.id)
-        except Exception as e:
-            logger.warning(f"Failed to abort active XiaoAi session: {e}")
+        seen_session_ids: set[str] = set()
+        for ch_id in self._all_channel_ids():
+            try:
+                session = await get_sess_fn(self.chatbot_id, ch_id)
+                if session is None or session.id in seen_session_ids:
+                    continue
+                seen_session_ids.add(session.id)
+                try:
+                    await abort_fn(session.id, skip_memory_close=True)
+                except TypeError:
+                    await abort_fn(session.id)
+            except Exception as e:
+                logger.warning(f"Failed to abort active XiaoAi session on '{ch_id}': {e}")
+
+    async def _interrupt_active_turns(self, *, suppress: bool = True) -> None:
+        """Record superseded turn IDs, cancel queued/active playback, and abort backend workers."""
+        self._record_aborted_turn(getattr(self, "_active_turn_id", None))
+        self._record_aborted_turn(self._active_stream_turn_id)
+        self._active_turn_id = None
+        self._active_turn_channel_id = None
+        self._active_stream_turn_id = None
+        self._streamed_any_sentence = False
+        self._turn_in_progress = False
+        self._turn_start_ts = 0.0
+        self._suppress_until_next_user_turn = suppress
+        self._chunker.reset()
+        await self._cancel_playback()
+        await self._abort_active_turn()
+
+    async def post_ingest_hook(self, session: Any, user_msg: Message, dto: InboundMessageDTO) -> None:
+        """Bind `_active_turn_id` to the newly created inbound user message ID."""
+        if getattr(self, "_turn_in_progress", False) and user_msg.channel_id == getattr(
+            self, "_active_turn_channel_id", None
+        ):
+            self._active_turn_id = user_msg.id
 
     async def _mark_delivered(self, message: Message) -> None:
         """Mark `message` as DELIVERED in Kesoku DB when gateway DB is available."""
@@ -335,17 +421,11 @@ class XiaoAiChatbot(Chatbot):
             logger.debug(f"Failed to mark message '{message.id}' as DELIVERED: {e}")
 
     async def _handle_stop_command(self, trigger: str) -> None:
-        """Immediately stop audio output, abort active turn, and return speaker to IDLE."""
+        """Immediately stop audio output, abort active turns, and return speaker to IDLE."""
         logger.info(
             f"Stop command detected ('{trigger}', prev_state={self.state}) -> halting playback and active turn"
         )
-        self._suppress_until_next_user_turn = True
-        self._turn_in_progress = False
-        self._chunker.reset()
-        self._active_stream_turn_id = None
-        self._streamed_any_sentence = False
-        await self._cancel_playback()
-        await self._abort_active_turn()
+        await self._interrupt_active_turns(suppress=True)
         await self._enter_idle()
         if self.ws_server.connected:
             await self.ws_server.play_pcm(self._sleep_chime)
@@ -411,14 +491,12 @@ class XiaoAiChatbot(Chatbot):
             role = self._active_role
 
         logger.info(f"Wake word detected: '{keyword}' -> role='{role}' (prev_state={self.state})")
-        if self.state in (SpeakerState.SPEAKING, SpeakerState.THINKING):
-            self._suppress_until_next_user_turn = True
-            self._turn_in_progress = False
-            self._chunker.reset()
-            self._active_stream_turn_id = None
-            self._streamed_any_sentence = False
-            await self._cancel_playback()
-            await self._abort_active_turn()
+        if (
+            self.state in (SpeakerState.SPEAKING, SpeakerState.THINKING)
+            or getattr(self, "_turn_in_progress", False)
+            or getattr(self, "_active_turn_id", None) is not None
+        ):
+            await self._interrupt_active_turns(suppress=True)
 
         if role != self._active_role:
             logger.info(f"Switching XiaoAi active persona: '{self._active_role}' -> '{role}'")
@@ -446,6 +524,7 @@ class XiaoAiChatbot(Chatbot):
             return
 
         # Strip leading wake word if the user spoke wake word + command in one breath
+        persona_switched = False
         for ww in self._all_wake_words:
             if cleaned.startswith(ww):
                 mapped_role = self._wake_word_to_role.get(ww)
@@ -453,6 +532,7 @@ class XiaoAiChatbot(Chatbot):
                     logger.info(
                         f"Switching XiaoAi active persona via utterance: '{self._active_role}' -> '{mapped_role}'"
                     )
+                    persona_switched = True
                     self._active_role = mapped_role
                     if isinstance(self.tts, MlxQwenTTSEngine):
                         self.tts.set_active_voice(mapped_role)
@@ -466,6 +546,17 @@ class XiaoAiChatbot(Chatbot):
 
         if await self._try_local_command(cleaned):
             return
+
+        has_active_work = (
+            persona_switched
+            or getattr(self, "_turn_in_progress", False)
+            or getattr(self, "_active_turn_id", None) is not None
+            or getattr(self, "_synth_in_flight", False)
+            or not self._tts_queue.empty()
+            or not self._play_queue.empty()
+        )
+        if has_active_work:
+            await self._interrupt_active_turns(suppress=False)
 
         self.state = SpeakerState.THINKING
         self._turn_start_ts = time.monotonic()
@@ -486,6 +577,8 @@ class XiaoAiChatbot(Chatbot):
             custom_prompt=custom_prompt,
             role=self._active_role,
         )
+        self._active_turn_channel_id = channel_id
+        self._active_turn_id = None
         self._suppress_until_next_user_turn = False
         self._turn_in_progress = True
         await self.ingest_message(dto)
@@ -514,8 +607,8 @@ class XiaoAiChatbot(Chatbot):
             await self._handle_stop_command(text)
             return True
 
-        if text in _CLEAR_COMMANDS:
-            await self._cancel_playback()
+        if self._is_clear_utterance(text):
+            await self._interrupt_active_turns(suppress=False)
             await self.clear_session_by_channel(self._active_channel_id())
             await self._enqueue_tts("好的，已经开启新对话。")
             return True
@@ -562,7 +655,11 @@ class XiaoAiChatbot(Chatbot):
         text: str | None,
     ) -> None:
         """Receive 50ms-throttled LLM stream deltas and enqueue complete sentences for TTS."""
-        if not self.ws_server.connected or getattr(self, "_suppress_until_next_user_turn", False):
+        if (
+            not self.ws_server.connected
+            or getattr(self, "_suppress_until_next_user_turn", False)
+            or self._is_stale_turn(channel_id=channel_id, turn_id=turn_id)
+        ):
             return
         if text is None:
             self._chunker.reset()
@@ -590,6 +687,10 @@ class XiaoAiChatbot(Chatbot):
                 self.config.progress_feedback != "status"
                 or not self.ws_server.connected
                 or getattr(self, "_suppress_until_next_user_turn", False)
+                or self._is_stale_turn(
+                    channel_id=getattr(message, "channel_id", None),
+                    turn_id=getattr(message, "parent_id", None),
+                )
             ):
                 return
             if message.role != MessageRole.TOOL or message.type != MessageType.TOOL_CALL:
@@ -619,15 +720,26 @@ class XiaoAiChatbot(Chatbot):
         """Render outbound assistant messages via the standard Chatbot segment pipeline."""
         is_tool_result = message.role == MessageRole.TOOL and message.type != MessageType.TOOL_CALL
         is_final = not self.is_intermediate_message(message) and not is_tool_result
-        if is_final and getattr(self, "_suppress_until_next_user_turn", False):
-            self._turn_in_progress = False
+        channel_id = getattr(message, "channel_id", None)
+        turn_id = getattr(message, "parent_id", None)
+        stale = self._is_stale_turn(channel_id=channel_id, turn_id=turn_id)
+        suppressed = is_final and getattr(self, "_suppress_until_next_user_turn", False)
+        if stale or suppressed:
+            logger.debug(
+                f"Dropping {'stale' if stale else 'suppressed'} XiaoAi message "
+                f"(turn_id={turn_id}, channel={channel_id})"
+            )
+            if suppressed and not stale:
+                self._turn_in_progress = False
             await self._mark_delivered(message)
             return
         try:
             await self.render_outgoing_message(message)
         finally:
-            if is_final:
+            if is_final and not self._is_stale_turn(channel_id=channel_id, turn_id=turn_id):
                 self._turn_in_progress = False
+                if turn_id and getattr(self, "_active_turn_id", None) == turn_id:
+                    self._active_turn_id = None
 
     async def _enqueue_error_cue(self) -> bool:
         """Play a cached persona error cue if available, returning True when queued."""
@@ -831,10 +943,9 @@ class XiaoAiChatbot(Chatbot):
                 self.state == SpeakerState.THINKING
                 and self._turn_in_progress
                 and self._turn_start_ts > 0.0
-                and (now - self._turn_start_ts) > 95.0
+                and (now - self._turn_start_ts) > 60.0
             ):
-                logger.warning("XiaoAi turn timed out in THINKING (>95s); playing error fallback")
-                self._turn_in_progress = False
-                self._turn_start_ts = 0.0
+                logger.warning("XiaoAi turn timed out in THINKING (>60s); aborting turn and playing error fallback")
+                await self._interrupt_active_turns(suppress=True)
                 if not await self._enqueue_error_cue():
                     await self._enter_idle()

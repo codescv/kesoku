@@ -387,8 +387,13 @@ def _make_stub_xiaoai_bot(*, progress_feedback: str = "status"):
     bot._play_end_ts = 0.0
     bot._last_tool_hint_ts = 0.0
     bot._listen_deadline = 0.0
+    bot._turn_start_ts = 0.0
+    bot._vad_unmute_ts = 0.0
     bot._turn_in_progress = False
     bot._suppress_until_next_user_turn = False
+    bot._active_turn_id = None
+    bot._active_turn_channel_id = None
+    bot._aborted_turn_ids = set()
     bot._active_stream_turn_id = None
     bot._streamed_any_sentence = False
     bot._chunker = SentenceChunker()
@@ -768,3 +773,255 @@ async def test_chatbot_local_kws_lifecycle():
         pass
     assert bot.state == SpeakerState.IDLE
     assert rec_calls == ["start", "stop", "start", "stop"]
+
+
+async def test_turn_id_isolation_drops_stale_stream_and_final_messages():
+    from kesoku.constants import MessageRole, MessageStatus, MessageType
+    from kesoku.db import Message
+
+    bot = _make_stub_xiaoai_bot(progress_feedback="status")
+    bot._personas = {"leijun": object(), "xiaozhang": object()}
+    bot._persona_cues["xiaozhang"] = VoiceCueBank()
+    bot._active_role = "xiaozhang"
+    bot._active_turn_channel_id = "xiaoai:xiaozhang"
+    bot._active_turn_id = "turn_2"
+    bot._aborted_turn_ids = {"turn_1"}
+    bot._turn_in_progress = True
+
+    # Stale turn_1 stream delta, tool cue, and final message are all dropped without clobbering turn_2
+    await bot._handle_stream_update("xiaoai:xiaozhang", "s2", "turn_1", "这是一句迟到的旧回复。")
+    assert bot._tts_queue.empty()
+
+    stale_tc = Message(
+        id="tc_stale",
+        session_id="s1",
+        chatbot_id="xiaoai",
+        channel_id="xiaoai:xiaozhang",
+        sender="Kesoku",
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_CALL,
+        content="Calling tool `web_search`",
+        parent_id="turn_1",
+        metadata={"tool_name": "web_search"},
+    )
+    await bot.handle_message(stale_tc)
+    assert bot._tts_queue.empty()
+
+    stale_final = Message(
+        id="msg_stale_final",
+        session_id="s1",
+        chatbot_id="xiaoai",
+        channel_id="xiaoai:xiaozhang",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="旧问题最终答复。",
+        parent_id="turn_1",
+    )
+    await bot.handle_message(stale_final)
+    assert bot._tts_queue.empty()
+    assert bot._turn_in_progress is True
+
+    # Cross-persona message from xiaoai:leijun while xiaoai:xiaozhang is active is also dropped
+    cross_persona_final = Message(
+        id="msg_cross_final",
+        session_id="s_lei",
+        chatbot_id="xiaoai",
+        channel_id="xiaoai:leijun",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="雷军晚到的回复。",
+        parent_id="turn_lei_9",
+    )
+    await bot.handle_message(cross_persona_final)
+    assert bot._tts_queue.empty()
+    assert bot._turn_in_progress is True
+    assert bot._test_state.delivered == [
+        ("tc_stale", MessageStatus.DELIVERED),
+        ("msg_stale_final", MessageStatus.DELIVERED),
+        ("msg_cross_final", MessageStatus.DELIVERED),
+    ]
+
+    # Active turn_2 stream + final reply render normally and finish the turn cleanly
+    await bot._handle_stream_update("xiaoai:xiaozhang", "s2", "turn_2", "你好，这是当前回复。")
+    assert bot._tts_queue.qsize() == 1
+    gen, voice, text, pre_pcm = bot._tts_queue.get_nowait()
+    assert (gen, voice, text, pre_pcm) == (0, "xiaozhang", "你好，这是当前回复。", None)
+    bot._tts_queue.task_done()
+
+    active_final = Message(
+        id="msg_cur_final",
+        session_id="s2",
+        chatbot_id="xiaoai",
+        channel_id="xiaoai:xiaozhang",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="你好，这是当前回复。",
+        parent_id="turn_2",
+    )
+    await bot.handle_message(active_final)
+    assert bot._turn_in_progress is False
+    assert bot._active_turn_id is None
+
+
+async def test_barge_in_persona_switch_and_clear_abort_all_channels():
+    from types import SimpleNamespace
+
+    from kesoku.constants import MessageStatus
+    from kesoku.gateway.chatbot.xiaoai.adapter import SpeakerState
+
+    bot = _make_stub_xiaoai_bot()
+    bot._personas = {"leijun": object(), "xiaozhang": object()}
+    bot._wake_word_to_role = {"小雷小雷": "leijun", "小张小张": "xiaozhang"}
+    bot._all_wake_words = ["小雷小雷", "小张小张"]
+    bot._persona_cues["xiaozhang"] = VoiceCueBank()
+    bot.tts = SimpleNamespace(set_active_voice=lambda r: None)
+
+    abort_calls: list[tuple[str, bool]] = []
+    cleared_channels: list[str] = []
+    ingested: list[object] = []
+
+    async def multi_get_session(chatbot_id: str, channel_id: str):
+        mapping = {
+            "xiaoai:leijun": SimpleNamespace(id="sess_lei"),
+            "xiaoai:xiaozhang": SimpleNamespace(id="sess_zhang"),
+            "xiaoai:default": SimpleNamespace(id="sess_default"),
+        }
+        return mapping.get(channel_id)
+
+    async def multi_abort(session_id: str, *, skip_memory_close: bool = False) -> None:
+        abort_calls.append((session_id, skip_memory_close))
+
+    async def fake_clear(channel_id: str) -> bool:
+        cleared_channels.append(channel_id)
+        return True
+
+    async def fake_compile() -> str:
+        return "prompt"
+
+    async def fake_reset_idle(channel_id: str | None = None) -> bool:
+        return False
+
+    async def fake_ingest(dto) -> bool:
+        ingested.append(dto)
+        await bot.post_ingest_hook(
+            SimpleNamespace(id="sess_zhang"),
+            SimpleNamespace(id="turn_new_2", channel_id=dto.channel_id),
+            dto,
+        )
+        return False
+
+    bot.gateway.db.get_session_by_channel = multi_get_session
+    bot.gateway.abort_session = multi_abort
+    bot.clear_session_by_channel = fake_clear
+    bot._compile_custom_prompt = fake_compile
+    bot._maybe_reset_idle_session = fake_reset_idle
+    bot.ingest_message = fake_ingest
+
+    # 1. Wake-word barge-in from THINKING aborts ALL persona channels & records old turn_id
+    bot.state = SpeakerState.THINKING
+    bot._active_turn_id = "turn_old_1"
+    bot._active_turn_channel_id = "xiaoai:leijun"
+    bot._turn_in_progress = True
+    await bot._handle_wakeup("小张小张")
+    assert ("sess_lei", True) in abort_calls
+    assert ("sess_zhang", True) in abort_calls
+    assert ("sess_default", True) in abort_calls
+    assert "turn_old_1" in bot._aborted_turn_ids
+    assert bot._active_role == "xiaozhang"
+
+    # 2. One-breath persona switch ("小雷小雷今天天气怎么样") interrupts & starts new turn on leijun
+    abort_calls.clear()
+    bot.pipeline.transcribe = lambda arr: "小雷小雷 今天天气怎么样"
+    await bot._handle_utterance(np.zeros(1600, dtype=np.float32))
+    assert bot._active_role == "leijun"
+    assert ("sess_lei", True) in abort_calls
+    assert ("sess_zhang", True) in abort_calls
+    assert len(ingested) == 1
+    assert ingested[0].channel_id == "xiaoai:leijun"
+    assert bot._active_turn_channel_id == "xiaoai:leijun"
+    assert bot._active_turn_id == "turn_new_2"
+    assert bot._turn_in_progress is True
+
+    # 3. Clear / new-conversation command interrupts active work and clears current channel session
+    abort_calls.clear()
+    assert await bot._try_local_command("开新对话") is True
+    assert ("sess_lei", True) in abort_calls
+    assert "turn_new_2" in bot._aborted_turn_ids
+    assert cleared_channels == ["xiaoai:leijun"]
+    assert bot._tts_queue.qsize() == 1
+    assert bot._tts_queue.get_nowait()[2] == "好的，已经开启新对话。"
+    bot._tts_queue.task_done()
+    assert MessageStatus.DELIVERED is not None
+
+
+async def test_thinking_timeout_aborts_and_blocks_late_reply():
+    import asyncio
+    import time
+
+    from kesoku.constants import MessageRole, MessageType
+    from kesoku.db import Message
+    from kesoku.gateway.chatbot.xiaoai.adapter import SpeakerState
+
+    bot = _make_stub_xiaoai_bot()
+    err_pcm = b"\x02\x00" * 480
+    bot._persona_cues["leijun"]._clips["error"] = [err_pcm]
+
+    bot.state = SpeakerState.THINKING
+    bot._turn_in_progress = True
+    bot._turn_start_ts = time.monotonic() - 65.0
+    bot._active_turn_id = "turn_stalled_99"
+    bot._active_turn_channel_id = "xiaoai:default"
+
+    watchdog = asyncio.create_task(bot._listen_watchdog())
+    await asyncio.sleep(0.65)
+    watchdog.cancel()
+    try:
+        await watchdog
+    except asyncio.CancelledError:
+        pass
+
+    assert bot._test_state.aborted == ["sess_active"]
+    assert "turn_stalled_99" in bot._aborted_turn_ids
+    assert bot._turn_in_progress is False
+    assert bot._tts_queue.qsize() == 1
+    assert bot._tts_queue.get_nowait()[3] == err_pcm
+    bot._tts_queue.task_done()
+
+    # Late response for timed-out turn is dropped cleanly
+    late_msg = Message(
+        id="msg_late_99",
+        session_id="sess_active",
+        chatbot_id="xiaoai",
+        channel_id="xiaoai:default",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        type=MessageType.TEXT,
+        content="超时后才返回的旧回复。",
+        parent_id="turn_stalled_99",
+    )
+    await bot.handle_message(late_msg)
+    assert bot._tts_queue.empty()
+
+
+async def test_gateway_abort_session_forwards_skip_memory_close(tmp_path):
+    from unittest.mock import AsyncMock
+
+    from kesoku.config import KesokuConfig, WorkspaceConfig
+    from kesoku.context import KesokuContext
+    from kesoku.db import DatabaseManager
+    from kesoku.gateway.gateway import Gateway
+
+    db_file = str(tmp_path / "gw_abort.db")
+    DatabaseManager(db_file).init_tables()
+    gw = Gateway(context=KesokuContext(config=KesokuConfig(workspace=WorkspaceConfig(db_path=db_file))))
+    mock_agent = AsyncMock()
+    mock_agent.stop_session_worker = AsyncMock()
+    gw.register_agent(mock_agent)
+
+    await gw.abort_session("sess_xyz", skip_memory_close=True)
+    mock_agent.stop_session_worker.assert_awaited_once_with(
+        "sess_xyz", immediate=True, skip_memory_close=True
+    )

@@ -339,11 +339,12 @@ class Gateway:
         except Exception as e:
             logger.warning(f"Failed DB-level deferred media cleanup for session {session_id}: {e}")
 
-    async def abort_session(self, session_id: str) -> None:
-        """Abort any active processing for the session (e.g. if the channel is deleted).
+    async def abort_session(self, session_id: str, *, skip_memory_close: bool = False) -> None:
+        """Abort any active processing for the session (e.g. if the channel is deleted or interrupted).
 
         Args:
             session_id: Target session ID.
+            skip_memory_close: When True, skip closing memory extraction during worker shutdown.
         """
         await self._cancel_session_deferred_media(session_id)
 
@@ -354,7 +355,9 @@ class Gateway:
 
         if self.agent:
             logger.info(f"Aborting active session worker for session {session_id} due to lost channel.")
-            await self.agent.stop_session_worker(session_id, immediate=True)
+            await self.agent.stop_session_worker(
+                session_id, immediate=True, skip_memory_close=skip_memory_close
+            )
 
         # Mark all outstanding (pending, processing, pending_agent) messages in this session as MessageStatus.ERROR
         messages = await self.db.get_messages_by_filters(filters={"session_id": session_id})
