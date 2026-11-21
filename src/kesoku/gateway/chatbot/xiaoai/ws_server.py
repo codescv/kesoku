@@ -87,6 +87,7 @@ class OpenXiaoAiServer:
         self._send_lock = asyncio.Lock()
         self._server: Any | None = None
         self._play_active = False
+        self._play_epoch = 0
 
     @property
     def connected(self) -> bool:
@@ -167,6 +168,7 @@ class OpenXiaoAiServer:
 
     async def stop_play(self) -> None:
         """Immediately halt speaker playback and flush the `aplay` audio buffer."""
+        self._play_epoch += 1
         self._play_active = False
         await self.send_rpc("stop_play")
 
@@ -180,10 +182,13 @@ class OpenXiaoAiServer:
         ws = self._ws
         if ws is None or not pcm_bytes:
             return
+        epoch = self._play_epoch
         if not self._play_active:
             await self.start_play(sample_rate=sample_rate)
+            # Give the LX06 speaker a moment to spawn `aplay` before streaming short cues
+            await asyncio.sleep(0.08)
         for idx in range(0, len(pcm_bytes), PLAY_CHUNK_BYTES):
-            if self._ws is not ws or not self._play_active:
+            if self._ws is not ws or not self._play_active or self._play_epoch != epoch:
                 return
             chunk = pcm_bytes[idx : idx + PLAY_CHUNK_BYTES]
             frame = json.dumps(
@@ -195,7 +200,7 @@ class OpenXiaoAiServer:
                 separators=(",", ":"),
             ).encode("utf-8")
             async with self._send_lock:
-                if self._ws is ws and self._play_active:
+                if self._ws is ws and self._play_active and self._play_epoch == epoch:
                     await ws.send(frame)
             await asyncio.sleep(0)
 

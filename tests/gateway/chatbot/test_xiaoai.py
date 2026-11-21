@@ -11,9 +11,10 @@ from kesoku.gateway.chatbot.xiaoai.tts import (
     clean_text_for_speech,
     float32_to_pcm16,
     make_wakeup_chime,
+    normalize_pcm16_rms,
     trim_pcm16_silence,
 )
-from kesoku.gateway.chatbot.xiaoai.ws_server import decode_a113_s32_to_s16
+from kesoku.gateway.chatbot.xiaoai.ws_server import OpenXiaoAiServer, decode_a113_s32_to_s16
 
 
 def test_decode_a113_s32_to_s16():
@@ -53,6 +54,22 @@ def test_chinese_phrase_to_kws_tokens():
     # Pass-through raw token format
     raw = "x iǎo zh āng @小张"
     assert chinese_phrase_to_kws_tokens(raw) == raw
+    # Per-keyword score and threshold overrides
+    stop_line = chinese_phrase_to_kws_tokens("闭嘴", score=1.5, threshold=0.35)
+    assert stop_line == "b ì z uǐ :1.5 #0.35 @闭嘴"
+
+
+def test_normalize_pcm16_rms():
+    quiet = np.full(1200, 1000, dtype="<i2").tobytes()  # rms ~= 0.0305
+    boosted = normalize_pcm16_rms(quiet, target_rms=0.11, max_peak=0.85, max_gain=3.5)
+    samples = np.frombuffer(boosted, dtype="<i2")
+    assert samples.size == 1200
+    assert int(np.max(np.abs(samples))) > 3000
+    assert int(np.max(np.abs(samples))) <= int(0.85 * 32767) + 1
+    # Clip with peak near max_peak is capped smoothly without clipping
+    spiky = np.array([20000] + [100] * 1199, dtype="<i2").tobytes()
+    capped = normalize_pcm16_rms(spiky, target_rms=0.2, max_peak=0.85, max_gain=4.0)
+    assert int(np.max(np.abs(np.frombuffer(capped, dtype="<i2")))) <= int(0.85 * 32767) + 1
 
 
 def test_make_wakeup_chime():
@@ -188,13 +205,13 @@ async def test_voice_cue_bank_load_and_pick(tmp_path):
 
     wakeup_dir = tmp_path / "wakeup"
     wakeup_dir.mkdir()
-    for name, amp in [("a.wav", 1500), ("b.wav", 2500)]:
+    for name, amp, length in [("a.wav", 1500, 1200), ("b.wav", 2500, 1600)]:
         p = wakeup_dir / name
         with wave.open(str(p), "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(24000)
-            wf.writeframes(np.full(1200, amp, dtype="<i2").tobytes())
+            wf.writeframes(np.full(length, amp, dtype="<i2").tobytes())
 
     bank = VoiceCueBank()
     total = await bank.load_dir(tmp_path)
@@ -309,3 +326,214 @@ async def test_mlx_qwen_tts_multi_voice_and_cache_isolation():
 
     engine.set_active_voice("xiaozhang")
     assert engine.ref_text == "小张参考"
+
+
+def _make_stub_xiaoai_bot(*, progress_feedback: str = "status"):
+    import asyncio
+    from types import SimpleNamespace
+
+    from kesoku.constants import MessageStatus
+    from kesoku.gateway.chatbot.xiaoai.adapter import SpeakerState, XiaoAiChatbot
+    from kesoku.gateway.chatbot.xiaoai.tts import make_sleep_chime
+
+    aborted: list[str] = []
+    delivered: list[tuple[str, MessageStatus]] = []
+    stopped_play = 0
+    played_pcms: list[bytes] = []
+    kws_resets = 0
+    vad_resets = 0
+
+    async def fake_get_session(chatbot_id: str, channel_id: str):
+        return SimpleNamespace(id="sess_active")
+
+    async def fake_abort(session_id: str) -> None:
+        aborted.append(session_id)
+
+    async def fake_update_status(msg_id: str, status: MessageStatus) -> None:
+        delivered.append((msg_id, status))
+
+    async def fake_stop_play() -> None:
+        nonlocal stopped_play
+        stopped_play += 1
+
+    async def fake_play_pcm(pcm: bytes) -> None:
+        played_pcms.append(pcm)
+
+    def fake_reset_kws() -> None:
+        nonlocal kws_resets
+        kws_resets += 1
+
+    def fake_reset_vad() -> None:
+        nonlocal vad_resets
+        vad_resets += 1
+
+    bot = XiaoAiChatbot.__new__(XiaoAiChatbot)
+    bot.chatbot_id = "xiaoai"
+    bot.config = XiaoAiConfig(
+        enabled=True,
+        progress_feedback=progress_feedback,
+        continuous_listen_sec=8.0,
+    )
+    bot.state = SpeakerState.IDLE
+    bot._personas = {"leijun": object()}
+    bot._active_role = "leijun"
+    bot._persona_cues = {"leijun": VoiceCueBank()}
+    bot._tts_queue = asyncio.Queue()
+    bot._play_queue = asyncio.Queue(maxsize=32)
+    bot._tts_generation = 0
+    bot._synth_in_flight = False
+    bot._play_end_ts = 0.0
+    bot._last_tool_hint_ts = 0.0
+    bot._listen_deadline = 0.0
+    bot._turn_in_progress = False
+    bot._suppress_until_next_user_turn = False
+    bot._active_stream_turn_id = None
+    bot._streamed_any_sentence = False
+    bot._chunker = SentenceChunker()
+    bot._sleep_chime = make_sleep_chime()
+    bot._wakeup_chime = make_wakeup_chime()
+    bot._audio_lock = asyncio.Lock()
+    bot.ws_server = SimpleNamespace(connected=True, stop_play=fake_stop_play, play_pcm=fake_play_pcm)
+    bot.pipeline = SimpleNamespace(
+        feed_kws=lambda s: None,
+        reset_kws=fake_reset_kws,
+        reset_vad=fake_reset_vad,
+    )
+    bot.gateway = SimpleNamespace(
+        db=SimpleNamespace(
+            get_session_by_channel=fake_get_session,
+            update_message_status=fake_update_status,
+        ),
+        abort_session=fake_abort,
+    )
+    bot._test_state = SimpleNamespace(
+        aborted=aborted,
+        delivered=delivered,
+        get_stopped_play=lambda: stopped_play,
+        played_pcms=played_pcms,
+        get_kws_resets=lambda: kws_resets,
+        get_vad_resets=lambda: vad_resets,
+    )
+    return bot
+
+
+async def test_tool_call_intermediate_cue_dispatch():
+    from kesoku.constants import MessageRole, MessageStatus, MessageType
+    from kesoku.db import Message
+
+    bot = _make_stub_xiaoai_bot(progress_feedback="status")
+    assert bot.supports_intermediate_messages() is True
+    assert XiaoAiConfig(progress_feedback="off").progress_feedback == "off"
+
+    cue_bytes = b"\x11\x22" * 480
+    bot._persona_cues["leijun"]._clips["tool_search"] = [cue_bytes]
+
+    msg = Message(
+        id="tc_1",
+        session_id="sess_active",
+        chatbot_id="xiaoai",
+        channel_id="xiaoai:default",
+        sender="Kesoku",
+        role=MessageRole.TOOL,
+        type=MessageType.TOOL_CALL,
+        content="Calling tool `web_search`",
+        metadata={"tool_name": "web_search"},
+    )
+    await bot.handle_message(msg)
+
+    assert bot._tts_queue.qsize() == 1
+    gen, voice, text, pre_pcm = bot._tts_queue.get_nowait()
+    assert (gen, voice, text, pre_pcm) == (0, "leijun", "", cue_bytes)
+    assert bot._test_state.delivered == [("tc_1", MessageStatus.DELIVERED)]
+
+
+async def test_stop_command_kws_and_fuzzy_utterance():
+    from kesoku.gateway.chatbot.xiaoai.adapter import SpeakerState
+
+    bot = _make_stub_xiaoai_bot()
+
+    # Stop keyword ignored while already IDLE
+    bot.state = SpeakerState.IDLE
+    bot.pipeline.feed_kws = lambda s: "闭嘴"
+    await bot._on_audio_frame(np.ones(512, dtype=np.float32))
+    assert bot._test_state.aborted == []
+    assert bot._test_state.played_pcms == []
+
+    # Stop keyword during SPEAKING cancels playback, aborts session, suppresses late stream, returns IDLE
+    bot.state = SpeakerState.SPEAKING
+    bot._turn_in_progress = True
+    await bot._tts_queue.put((0, "leijun", "没说完", None))
+    await bot._play_queue.put((0, b"\x01\x02" * 100))
+    await bot._on_audio_frame(np.ones(512, dtype=np.float32))
+
+    assert bot.state == SpeakerState.IDLE
+    assert bot._turn_in_progress is False
+    assert bot._suppress_until_next_user_turn is True
+    assert bot._tts_queue.empty()
+    assert bot._play_queue.empty()
+    assert bot._tts_generation == 1
+    assert bot._test_state.get_stopped_play() == 1
+    assert bot._test_state.aborted == ["sess_active"]
+    assert bot._test_state.played_pcms == [bot._sleep_chime]
+
+    # Late streamed text from cancelled turn is suppressed
+    await bot._handle_stream_update("xiaoai:default", "sess_active", "turn_1", "迟到的恢复句子。")
+    assert bot._tts_queue.empty()
+
+    # Fuzzy short stop utterances match, while normal long sentences containing '闭嘴' do NOT match
+    assert await bot._try_local_command("闭嘴吧") is True
+    assert await bot._try_local_command("停一下") is True
+    assert await bot._try_local_command("帮我查一下闭嘴是什么意思") is False
+
+
+async def test_tool_cue_returns_to_thinking_while_turn_in_progress():
+    import asyncio
+
+    from kesoku.gateway.chatbot.xiaoai.adapter import SpeakerState
+
+    bot = _make_stub_xiaoai_bot()
+    bot.state = SpeakerState.SPEAKING
+    bot._turn_in_progress = True
+    bot._play_end_ts = 0.0
+
+    worker = asyncio.create_task(bot._play_worker())
+    await asyncio.sleep(0.25)
+    assert bot.state == SpeakerState.THINKING
+
+    # Once final response chunks play and finish (_turn_in_progress=False), draining transitions to LISTENING
+    bot._turn_in_progress = False
+    await bot._play_queue.put((0, b"\x00\x00" * 240))
+    await asyncio.sleep(0.25)
+    assert bot.state == SpeakerState.LISTENING
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass
+
+
+async def test_ws_server_play_epoch_cancels_inflight_play():
+    import asyncio
+
+    sent_frames: list[bytes | str] = []
+
+    class FakeWS:
+        async def send(self, data: bytes | str) -> None:
+            sent_frames.append(data)
+            await asyncio.sleep(0.01)
+
+    server = OpenXiaoAiServer()
+    server._ws = FakeWS()
+    server._play_active = True
+
+    big_pcm = b"\x01\x00" * (2400 * 10)  # 10 chunks
+    play_task = asyncio.create_task(server.play_pcm(big_pcm))
+    await asyncio.sleep(0.025)
+    await server.stop_play()
+    # Immediately reactivate playback as a new cue/wakeup would
+    await server.start_play()
+    await play_task
+
+    play_packets = [f for f in sent_frames if isinstance(f, bytes)]
+    assert 1 <= len(play_packets) < 10
+    assert server._play_epoch == 1

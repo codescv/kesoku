@@ -287,6 +287,40 @@ def trim_pcm16_silence(pcm: bytes, *, threshold: int = 300, pad_samples: int = 7
     return samples[start:end].tobytes()
 
 
+def normalize_pcm16_rms(
+    pcm: bytes,
+    *,
+    target_rms: float = 0.11,
+    max_peak: float = 0.85,
+    max_gain: float = 3.5,
+) -> bytes:
+    """Boost quiet S16_LE PCM clips toward `target_rms` without clipping peaks.
+
+    Args:
+        pcm: Raw little-endian int16 mono PCM bytes.
+        target_rms: Target normalized RMS amplitude in (0.0, 1.0].
+        max_peak: Maximum allowed peak amplitude after gain in (0.0, 1.0].
+        max_gain: Maximum amplification factor.
+
+    Returns:
+        Normalized raw S16_LE PCM bytes.
+    """
+    if len(pcm) < 2:
+        return pcm
+    samples = np.frombuffer(pcm[: (len(pcm) // 2) * 2], dtype="<i2").astype(np.float32) / 32768.0
+    if samples.size == 0:
+        return b""
+    rms = float(np.sqrt(np.mean(samples * samples)))
+    peak = float(np.max(np.abs(samples)))
+    if rms <= 0.0 or peak <= 0.0 or rms >= target_rms:
+        return pcm
+    gain = min(target_rms / rms, max_peak / peak, max_gain)
+    if gain <= 1.02:
+        return pcm
+    boosted = np.clip(samples * gain, -1.0, 1.0)
+    return (boosted * 32767.0).astype("<i2").tobytes()
+
+
 def _scan_cue_files(root: Path) -> dict[str, list[Path]] | None:
     """Scan `root` for category subdirectories containing `.wav`/`.mp3` cue files."""
     if not root.is_dir():
@@ -338,7 +372,7 @@ class VoiceCueBank:
                     raw_pcm = await decode_audio_file_to_pcm24k(str(audio_file))
                     trimmed = trim_pcm16_silence(raw_pcm)
                     if trimmed:
-                        clips.append(trimmed)
+                        clips.append(normalize_pcm16_rms(trimmed))
                 except Exception as e:
                     logger.warning(f"Failed to load cue '{audio_file}': {e}")
             if clips:

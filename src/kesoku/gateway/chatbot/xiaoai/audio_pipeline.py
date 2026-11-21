@@ -68,7 +68,13 @@ def _ensure_file_model(models_dir: Path, name: str, url: str) -> Path:
     return target
 
 
-def chinese_phrase_to_kws_tokens(phrase: str, valid_tokens: set[str] | None = None) -> str:
+def chinese_phrase_to_kws_tokens(
+    phrase: str,
+    valid_tokens: set[str] | None = None,
+    *,
+    score: float | None = None,
+    threshold: float | None = None,
+) -> str:
     """Convert a Chinese wake word phrase into sherpa-onnx WenetSpeech KWS token format.
 
     Example:
@@ -77,6 +83,8 @@ def chinese_phrase_to_kws_tokens(phrase: str, valid_tokens: set[str] | None = No
     Args:
         phrase: Chinese wake word phrase (or raw token string if it already contains `@`).
         valid_tokens: Optional set of tokens loaded from `tokens.txt` for validation.
+        score: Optional per-keyword boosting score suffix (e.g. `1.5` -> `:1.5`).
+        threshold: Optional per-keyword trigger threshold suffix (e.g. `0.35` -> `#0.35`).
 
     Returns:
         Formatted `keywords.txt` line.
@@ -104,7 +112,13 @@ def chinese_phrase_to_kws_tokens(phrase: str, valid_tokens: set[str] | None = No
         if missing:
             logger.warning(f"KWS wake word '{stripped}' has unknown tokens {missing}; detection may be degraded")
 
-    return f"{' '.join(tokens)} @{stripped}"
+    suffix_parts: list[str] = []
+    if score is not None:
+        suffix_parts.append(f":{score}")
+    if threshold is not None:
+        suffix_parts.append(f"#{threshold}")
+    suffix = f" {' '.join(suffix_parts)}" if suffix_parts else ""
+    return f"{' '.join(tokens)}{suffix} @{stripped}"
 
 
 class AudioPipeline:
@@ -115,6 +129,7 @@ class AudioPipeline:
         models_dir: str | Path,
         wake_words: list[str],
         *,
+        stop_words: list[str] | None = None,
         kws_score: float = 1.5,
         kws_threshold: float = 0.25,
         vad_silence_sec: float = 0.7,
@@ -125,6 +140,7 @@ class AudioPipeline:
         Args:
             models_dir: Directory where sherpa-onnx models are stored/downloaded.
             wake_words: List of custom wake word phrases (e.g. `["小张小张"]`).
+            stop_words: Optional list of stop/interrupt keywords active during speaking/thinking.
             kws_score: Keyword spotting boosting score.
             kws_threshold: Keyword spotting trigger threshold.
             vad_silence_sec: Minimum trailing silence duration to finalize an utterance.
@@ -132,6 +148,7 @@ class AudioPipeline:
         """
         self.models_dir = Path(models_dir)
         self.wake_words = wake_words or ["小张小张"]
+        self.stop_words = list(stop_words) if stop_words else []
         self.kws_score = kws_score
         self.kws_threshold = kws_threshold
         self.vad_silence_sec = vad_silence_sec
@@ -152,7 +169,7 @@ class AudioPipeline:
         vad_path = _ensure_file_model(self.models_dir, VAD_MODEL_NAME, VAD_MODEL_URL)
         asr_dir = _ensure_tar_model(self.models_dir, ASR_MODEL_NAME, ASR_MODEL_URL)
 
-        # Build keywords.txt from configured wake_words
+        # Build keywords.txt from configured wake_words and stop_words
         tokens_path = kws_dir / "tokens.txt"
         valid_tokens = {
             line.split()[0]
@@ -160,6 +177,14 @@ class AudioPipeline:
             if line.strip()
         }
         kw_lines = [chinese_phrase_to_kws_tokens(w, valid_tokens) for w in self.wake_words]
+        wake_set = set(self.wake_words)
+        for sw in self.stop_words:
+            if sw in wake_set:
+                continue
+            stop_threshold = 0.35 if len(sw.strip()) <= 2 else 0.30
+            kw_lines.append(
+                chinese_phrase_to_kws_tokens(sw, valid_tokens, score=1.5, threshold=stop_threshold)
+            )
         kw_file = self.models_dir / "keywords.txt"
         kw_file.write_text("\n".join(kw_lines) + "\n", encoding="utf-8")
         logger.info(f"Prepared KWS keywords ({kw_file}): {kw_lines}")

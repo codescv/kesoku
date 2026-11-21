@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 
 from kesoku.config import XiaoAiConfig, XiaoAiPersonaConfig, get_config
-from kesoku.constants import MessageRole
+from kesoku.constants import MessageRole, MessageStatus, MessageType
 from kesoku.db import Message
 from kesoku.gateway.chatbot.base import Chatbot, InboundMessageDTO
 from kesoku.gateway.gateway import Gateway
@@ -46,9 +46,39 @@ _TOOL_VOICE_HINTS: dict[str, str] = {
     "delegate_subagent": "稍等，我正在分析。",
 }
 _DEFAULT_TOOL_VOICE_HINT = "稍等一下，我正在处理。"
-_SEARCH_TOOLS = frozenset({"web_search", "web_fetch", "read_file", "memory_search"})
+_SEARCH_TOOLS = frozenset(
+    {
+        "web_search",
+        "web_fetch",
+        "read_file",
+        "memory_search",
+        "session_search",
+        "search_memory",
+        "list_files",
+        "grep_search",
+    }
+)
 
-_STOP_COMMANDS = frozenset({"停下", "停止", "闭嘴", "别说了", "退下", "好了", "静音"})
+_KWS_STOP_WORDS = ("闭嘴", "停下", "别说了", "退下", "停止播放")
+_CORE_STOP_SUBSTRINGS = ("闭嘴", "停下", "别说了", "不要说了", "别讲了", "退下", "停止播放")
+_STOP_COMMANDS = frozenset(
+    {
+        "停下",
+        "停止",
+        "闭嘴",
+        "闭嘴吧",
+        "停一下",
+        "别说了",
+        "不要说了",
+        "别讲了",
+        "退下",
+        "好了",
+        "行了",
+        "停",
+        "静音",
+        "停止播放",
+    }
+)
 _CLEAR_COMMANDS = frozenset({"新对话", "清空对话", "重新开始", "忘记刚才的"})
 _VOL_UP_COMMANDS = frozenset({"大声点", "声音大一点", "音量大一点", "大点声"})
 _VOL_DOWN_COMMANDS = frozenset({"小声点", "声音小一点", "音量小一点", "小点声"})
@@ -133,6 +163,7 @@ class XiaoAiChatbot(Chatbot):
         self.pipeline = AudioPipeline(
             models_dir=models_dir,
             wake_words=self._all_wake_words,
+            stop_words=list(_KWS_STOP_WORDS),
             kws_score=xiaoai_config.kws_score,
             kws_threshold=xiaoai_config.kws_threshold,
             vad_silence_sec=xiaoai_config.vad_silence_sec,
@@ -176,6 +207,8 @@ class XiaoAiChatbot(Chatbot):
         self._last_tool_hint_ts = 0.0
         self._turn_start_ts = 0.0
         self._vad_unmute_ts = 0.0
+        self._turn_in_progress = False
+        self._suppress_until_next_user_turn = False
         self._audio_lock = asyncio.Lock()
 
         self.gateway.register_stream_handler(self.chatbot_id, self._handle_stream_update)
@@ -242,12 +275,71 @@ class XiaoAiChatbot(Chatbot):
 
     async def _on_speaker_disconnected(self) -> None:
         """Cancel active playback when the speaker disconnects."""
+        self._turn_in_progress = False
         await self._cancel_playback()
         self.state = SpeakerState.IDLE
 
     async def _on_speaker_event(self, event_name: str, data: Any) -> None:
         """Log speaker hardware/instruction events."""
         logger.debug(f"XiaoAi speaker event: {event_name} -> {data}")
+
+    @staticmethod
+    def _is_stop_keyword(keyword: str) -> bool:
+        """Return True if a KWS trigger corresponds to a stop/interrupt command."""
+        clean = keyword.strip()
+        return any(sw == clean or sw in clean for sw in _KWS_STOP_WORDS)
+
+    @staticmethod
+    def _is_stop_utterance(text: str) -> bool:
+        """Return True if an ASR utterance is a stop/interrupt command."""
+        if text in _STOP_COMMANDS:
+            return True
+        return len(text) <= 6 and any(sub in text for sub in _CORE_STOP_SUBSTRINGS)
+
+    async def _abort_active_turn(self) -> None:
+        """Abort any active Kesoku turn on the current speaker channel."""
+        gateway = getattr(self, "gateway", None)
+        db = getattr(gateway, "db", None) if gateway is not None else None
+        abort_fn = getattr(gateway, "abort_session", None) if gateway is not None else None
+        get_sess_fn = getattr(db, "get_session_by_channel", None) if db is not None else None
+        if not callable(get_sess_fn) or not callable(abort_fn):
+            return
+        try:
+            session = await get_sess_fn(self.chatbot_id, self._active_channel_id())
+            if session is not None:
+                await abort_fn(session.id)
+        except Exception as e:
+            logger.warning(f"Failed to abort active XiaoAi session: {e}")
+
+    async def _mark_delivered(self, message: Message) -> None:
+        """Mark `message` as DELIVERED in Kesoku DB when gateway DB is available."""
+        gateway = getattr(self, "gateway", None)
+        db = getattr(gateway, "db", None) if gateway is not None else None
+        update_fn = getattr(db, "update_message_status", None) if db is not None else None
+        if not callable(update_fn):
+            return
+        try:
+            await update_fn(message.id, MessageStatus.DELIVERED)
+        except Exception as e:
+            logger.debug(f"Failed to mark message '{message.id}' as DELIVERED: {e}")
+
+    async def _handle_stop_command(self, trigger: str) -> None:
+        """Immediately stop audio output, abort active turn, and return speaker to IDLE."""
+        logger.info(
+            f"Stop command detected ('{trigger}', prev_state={self.state}) -> halting playback and active turn"
+        )
+        self._suppress_until_next_user_turn = True
+        self._turn_in_progress = False
+        self._chunker.reset()
+        self._active_stream_turn_id = None
+        self._streamed_any_sentence = False
+        await self._cancel_playback()
+        await self._abort_active_turn()
+        self.state = SpeakerState.IDLE
+        self.pipeline.reset_kws()
+        self.pipeline.reset_vad()
+        if self.ws_server.connected:
+            await self.ws_server.play_pcm(self._sleep_chime)
 
     async def _on_audio_frame(self, samples: np.ndarray) -> None:
         """Process each 16kHz float32 microphone frame through KWS / VAD / ASR."""
@@ -256,7 +348,11 @@ class XiaoAiChatbot(Chatbot):
             if state in (SpeakerState.IDLE, SpeakerState.SPEAKING, SpeakerState.THINKING):
                 keyword = await asyncio.to_thread(self.pipeline.feed_kws, samples)
                 if keyword:
-                    await self._handle_wakeup(keyword)
+                    if self._is_stop_keyword(keyword):
+                        if state in (SpeakerState.SPEAKING, SpeakerState.THINKING):
+                            await self._handle_stop_command(keyword)
+                    else:
+                        await self._handle_wakeup(keyword)
                 return
 
             if state == SpeakerState.LISTENING:
@@ -282,7 +378,13 @@ class XiaoAiChatbot(Chatbot):
 
         logger.info(f"Wake word detected: '{keyword}' -> role='{role}' (prev_state={self.state})")
         if self.state in (SpeakerState.SPEAKING, SpeakerState.THINKING):
+            self._suppress_until_next_user_turn = True
+            self._turn_in_progress = False
+            self._chunker.reset()
+            self._active_stream_turn_id = None
+            self._streamed_any_sentence = False
             await self._cancel_playback()
+            await self._abort_active_turn()
 
         if role != self._active_role:
             logger.info(f"Switching XiaoAi active persona: '{self._active_role}' -> '{role}'")
@@ -291,13 +393,16 @@ class XiaoAiChatbot(Chatbot):
             self.tts.set_active_voice(role)
 
         cue_bank = self._persona_cues.get(role)
-        cue_pcm = (cue_bank.pick("wakeup") if cue_bank is not None else None) or self._wakeup_chime
-        cue_dur = len(cue_pcm) / (24000 * 2)
+        cue_pcm = cue_bank.pick("wakeup") if cue_bank is not None else None
+        using_cue = cue_pcm is not None
+        out_pcm = cue_pcm if cue_pcm is not None else self._wakeup_chime
+        cue_dur = len(out_pcm) / (24000 * 2)
+        logger.info(f"Playing wakeup {'cue' if using_cue else 'chime'} (role='{role}', duration={cue_dur:.2f}s)")
         self.pipeline.reset_vad()
         self._vad_unmute_ts = time.monotonic() + cue_dur + 0.15
         self.state = SpeakerState.LISTENING
         self._listen_deadline = self._vad_unmute_ts + max(self.config.continuous_listen_sec, 8.0)
-        await self.ws_server.play_pcm(cue_pcm)
+        await self.ws_server.play_pcm(out_pcm)
 
     async def _handle_utterance(self, audio_f32: np.ndarray) -> None:
         """Transcribe a completed user speech segment and route to fast command or Kesoku."""
@@ -347,6 +452,8 @@ class XiaoAiChatbot(Chatbot):
             custom_prompt=custom_prompt,
             role=self._active_role,
         )
+        self._suppress_until_next_user_turn = False
+        self._turn_in_progress = True
         await self.ingest_message(dto)
 
     async def _maybe_reset_idle_session(self, channel_id: str | None = None) -> bool:
@@ -369,10 +476,8 @@ class XiaoAiChatbot(Chatbot):
 
     async def _try_local_command(self, text: str) -> bool:
         """Intercept instant local speaker commands without invoking the LLM."""
-        if text in _STOP_COMMANDS:
-            await self._cancel_playback()
-            self.state = SpeakerState.IDLE
-            await self.ws_server.play_pcm(self._sleep_chime)
+        if self._is_stop_utterance(text):
+            await self._handle_stop_command(text)
             return True
 
         if text in _CLEAR_COMMANDS:
@@ -423,7 +528,7 @@ class XiaoAiChatbot(Chatbot):
         text: str | None,
     ) -> None:
         """Receive 50ms-throttled LLM stream deltas and enqueue complete sentences for TTS."""
-        if not self.ws_server.connected:
+        if not self.ws_server.connected or getattr(self, "_suppress_until_next_user_turn", False):
             return
         if text is None:
             self._chunker.reset()
@@ -440,29 +545,55 @@ class XiaoAiChatbot(Chatbot):
             self._streamed_any_sentence = True
             await self._enqueue_tts(sentence)
 
+    def supports_intermediate_messages(self) -> bool:
+        """Enable intermediate hooks for instant tool-call transition cues when configured."""
+        return self.config.progress_feedback == "status"
+
     async def handle_intermediate_message(self, message: Message) -> None:
         """Speak a brief cached transition cue immediately when a tool call starts."""
-        if self.config.progress_feedback != "status" or not self.ws_server.connected:
-            return
-        if message.role != MessageRole.ASSISTANT or not message.tool_calls:
-            return
-        now = time.monotonic()
-        if now - self._last_tool_hint_ts < 6.0:
-            return
-        self._last_tool_hint_ts = now
-        tool_name = str(message.tool_calls[0].get("name", ""))
-        category = "tool_search" if tool_name in _SEARCH_TOOLS else "tool_work"
-        cue_bank = self._persona_cues.get(self._active_role)
-        cue_pcm = cue_bank.pick(category) if cue_bank is not None else None
-        if cue_pcm is not None:
-            await self._tts_queue.put((self._tts_generation, self._active_role, "", cue_pcm))
-            return
-        hint = _TOOL_VOICE_HINTS.get(tool_name, _DEFAULT_TOOL_VOICE_HINT)
-        await self._enqueue_tts(hint)
+        try:
+            if (
+                self.config.progress_feedback != "status"
+                or not self.ws_server.connected
+                or getattr(self, "_suppress_until_next_user_turn", False)
+            ):
+                return
+            if message.role != MessageRole.TOOL or message.type != MessageType.TOOL_CALL:
+                return
+            now = time.monotonic()
+            if now - self._last_tool_hint_ts < 6.0:
+                return
+            self._last_tool_hint_ts = now
+            meta = message.metadata if isinstance(message.metadata, dict) else {}
+            tool_name = str(meta.get("tool_name") or message.sender or "")
+            category = "tool_search" if tool_name in _SEARCH_TOOLS else "tool_work"
+            cue_bank = self._persona_cues.get(self._active_role)
+            cue_pcm = cue_bank.pick(category) if cue_bank is not None else None
+            logger.info(
+                f"Playing tool cue (role='{self._active_role}', category='{category}', "
+                f"tool='{tool_name}', cached={cue_pcm is not None})"
+            )
+            if cue_pcm is not None:
+                await self._tts_queue.put((self._tts_generation, self._active_role, "", cue_pcm))
+                return
+            hint = _TOOL_VOICE_HINTS.get(tool_name, _DEFAULT_TOOL_VOICE_HINT)
+            await self._enqueue_tts(hint)
+        finally:
+            await self._mark_delivered(message)
 
     async def handle_message(self, message: Message) -> None:
         """Render outbound assistant messages via the standard Chatbot segment pipeline."""
-        await self.render_outgoing_message(message)
+        is_tool_result = message.role == MessageRole.TOOL and message.type != MessageType.TOOL_CALL
+        is_final = not self.is_intermediate_message(message) and not is_tool_result
+        if is_final and getattr(self, "_suppress_until_next_user_turn", False):
+            self._turn_in_progress = False
+            await self._mark_delivered(message)
+            return
+        try:
+            await self.render_outgoing_message(message)
+        finally:
+            if is_final:
+                self._turn_in_progress = False
 
     async def send_text_chunks(self, channel_id: str, chunks: list[str], message: Message) -> None:
         """Flush remaining streamed text or speak full text for non-streamed messages."""
@@ -602,7 +733,10 @@ class XiaoAiChatbot(Chatbot):
                         and not self._synth_in_flight
                         and time.monotonic() >= self._play_end_ts
                     ):
-                        self._finish_speaking_turn()
+                        if getattr(self, "_turn_in_progress", False):
+                            self.state = SpeakerState.THINKING
+                        else:
+                            self._finish_speaking_turn()
                     continue
             else:
                 gen, pcm = await self._play_queue.get()
