@@ -649,3 +649,122 @@ async def test_on_speaker_connected_is_silent():
     assert bot._test_state.get_kws_resets() == 1
     assert bot._test_state.get_vad_resets() == 1
     assert bot._test_state.played_pcms == []
+
+
+async def test_ws_server_local_kws_recording_control_and_http():
+    import json
+    from types import SimpleNamespace
+
+    sent_rpcs: list[str] = []
+
+    class FakeWS:
+        remote_address = ("192.168.1.40", 12345)
+
+        async def send(self, data: str | bytes) -> None:
+            if isinstance(data, str):
+                msg = json.loads(data)
+                if "Request" in msg:
+                    sent_rpcs.append(msg["Request"]["command"])
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    triggered: list[str] = []
+
+    async def on_wakeup(keyword: str) -> str:
+        triggered.append(keyword)
+        return "ok"
+
+    server = OpenXiaoAiServer(auto_start_recording=False, on_local_wakeup=on_wakeup)
+
+    # Disconnected -> 503 Service Unavailable; missing keyword -> 400; other paths -> None
+    assert await server._process_http_request(None, SimpleNamespace(path="/")) is None
+    resp_400 = await server._process_http_request(None, SimpleNamespace(path="/local-wakeup"))
+    assert resp_400.status_code == 400
+    resp_503 = await server._process_http_request(
+        None, SimpleNamespace(path="/local-wakeup?keyword=%E5%B0%8F%E5%BC%A0%E5%B0%8F%E5%BC%A0")
+    )
+    assert resp_503.status_code == 503
+
+    # Connecting with auto_start_recording=False skips start_recording
+    await server._handle_connection(FakeWS())
+    assert sent_rpcs == ["start_play"]
+    assert server.connected is False
+
+    # Connected + start/stop recording idempotency + 200 OK /local-wakeup
+    sent_rpcs.clear()
+    server._ws = FakeWS()
+    resp_200 = await server._process_http_request(
+        None, SimpleNamespace(path="/local-wakeup?keyword=%E5%B0%8F%E5%BC%A0%E5%B0%8F%E5%BC%A0")
+    )
+    assert resp_200.status_code == 200
+    assert json.loads(resp_200.body) == {"status": "ok"}
+    assert triggered == ["小张小张"]
+
+    await server.start_recording()
+    await server.start_recording()  # idempotent
+    await server.stop_recording()
+    await server.stop_recording()  # idempotent
+    assert sent_rpcs == ["start_recording", "stop_recording"]
+
+
+async def test_chatbot_local_kws_lifecycle():
+    import asyncio
+    from types import SimpleNamespace
+
+    from kesoku.gateway.chatbot.xiaoai.adapter import SpeakerState
+
+    assert XiaoAiConfig().local_kws is False
+
+    bot = _make_stub_xiaoai_bot()
+    bot.config = XiaoAiConfig(enabled=True, local_kws=True, continuous_listen_sec=8.0)
+    bot._local_wakeup_task = None
+    bot._wake_word_to_role = {"小雷小雷": "leijun", "小张小张": "xiaozhang"}
+    bot._personas = {"leijun": object(), "xiaozhang": object()}
+    bot._persona_cues["xiaozhang"] = VoiceCueBank()
+    bot.tts = SimpleNamespace(set_active_voice=lambda r: None)
+
+    rec_calls: list[str] = []
+
+    async def fake_start_rec() -> None:
+        rec_calls.append("start")
+
+    async def fake_stop_rec() -> None:
+        rec_calls.append("stop")
+
+    bot.ws_server.start_recording = fake_start_rec
+    bot.ws_server.stop_recording = fake_stop_rec
+
+    # Local wakeup in IDLE schedules activation -> starts recording & enters LISTENING
+    assert await bot._on_local_wakeup("小张小张") == "ok"
+    assert bot._local_wakeup_task is not None
+    await bot._local_wakeup_task
+    assert rec_calls == ["start"]
+    assert bot.state == SpeakerState.LISTENING
+    assert bot._active_role == "xiaozhang"
+
+    # Subsequent local wakeup while active is ignored
+    assert await bot._on_local_wakeup("小雷小雷") == "active"
+
+    # Stop command returns to IDLE and stops recording
+    await bot._handle_stop_command("闭嘴")
+    assert bot.state == SpeakerState.IDLE
+    assert rec_calls == ["start", "stop"]
+
+    # Watchdog expiry from LISTENING returns to IDLE and stops recording
+    assert await bot._on_local_wakeup("小雷小雷") == "ok"
+    await bot._local_wakeup_task
+    assert bot.state == SpeakerState.LISTENING
+    bot._listen_deadline = 0.0
+    watchdog = asyncio.create_task(bot._listen_watchdog())
+    await asyncio.sleep(0.65)
+    watchdog.cancel()
+    try:
+        await watchdog
+    except asyncio.CancelledError:
+        pass
+    assert bot.state == SpeakerState.IDLE
+    assert rec_calls == ["start", "stop", "start", "stop"]

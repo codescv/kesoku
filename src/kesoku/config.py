@@ -842,6 +842,13 @@ class XiaoAiConfig(BaseModel):
         default_factory=lambda: ["小张小张"],
         description="Custom wake words detected locally via sherpa-onnx KWS",
     )
+    local_kws: bool = Field(
+        default=False,
+        description=(
+            "Use on-speaker local wake-word detection: keep microphone recording stopped while IDLE "
+            "and start recording on HTTP /local-wakeup trigger until returning to IDLE"
+        ),
+    )
     kws_score: float = Field(default=1.5, description="Keyword spotting boosting score")
     kws_threshold: float = Field(default=0.25, ge=0.0, le=1.0, description="Keyword spotting trigger threshold")
     vad_silence_sec: float = Field(

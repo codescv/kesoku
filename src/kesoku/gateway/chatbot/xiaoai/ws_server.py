@@ -7,6 +7,7 @@ import json
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import numpy as np
 
@@ -17,6 +18,7 @@ logger = setup_logger(__name__)
 AudioCallback = Callable[[np.ndarray], Awaitable[None]]
 EventCallback = Callable[[str, Any], Awaitable[None]]
 LifecycleCallback = Callable[[], Awaitable[None]]
+LocalWakeupCallback = Callable[[str], Awaitable[str]]
 
 PLAY_SAMPLE_RATE = 24000
 RECORD_SAMPLE_RATE = 16000
@@ -66,6 +68,8 @@ class OpenXiaoAiServer:
         on_event: EventCallback | None = None,
         on_connected: LifecycleCallback | None = None,
         on_disconnected: LifecycleCallback | None = None,
+        auto_start_recording: bool = True,
+        on_local_wakeup: LocalWakeupCallback | None = None,
     ) -> None:
         """Initialize the Open-XiaoAI WebSocket server.
 
@@ -76,6 +80,8 @@ class OpenXiaoAiServer:
             on_event: Async callback receiving `(event_name, event_data)` from the speaker.
             on_connected: Async callback invoked after a speaker connects and audio streams start.
             on_disconnected: Async callback invoked when the active speaker disconnects.
+            auto_start_recording: Whether to send `start_recording` automatically on connect.
+            on_local_wakeup: Async callback handling HTTP `/local-wakeup?keyword=...` requests.
         """
         self.host = host
         self.port = port
@@ -83,16 +89,54 @@ class OpenXiaoAiServer:
         self.on_event = on_event
         self.on_connected = on_connected
         self.on_disconnected = on_disconnected
+        self.auto_start_recording = auto_start_recording
+        self.on_local_wakeup = on_local_wakeup
         self._ws: Any | None = None
         self._send_lock = asyncio.Lock()
         self._server: Any | None = None
         self._play_active = False
         self._play_epoch = 0
+        self._recording_active = False
 
     @property
     def connected(self) -> bool:
         """Return True if a speaker client is currently connected."""
         return self._ws is not None
+
+    @staticmethod
+    def _build_json_response(status_code: int, reason_phrase: str, payload: dict[str, Any]) -> Any:
+        """Construct an HTTP/1.1 JSON response for non-WebSocket control endpoints."""
+        from websockets.datastructures import Headers
+        from websockets.http11 import Response
+
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = Headers(
+            [
+                ("Content-Type", "application/json; charset=utf-8"),
+                ("Content-Length", str(len(body))),
+                ("Connection", "close"),
+            ]
+        )
+        return Response(status_code, reason_phrase, headers, body)
+
+    async def _process_http_request(self, connection: Any, request: Any) -> Any:
+        """Handle HTTP `/local-wakeup` triggers from on-speaker local KWS before WS upgrade."""
+        raw_path = str(getattr(request, "path", "") or "")
+        parsed = urlsplit(raw_path)
+        if parsed.path != "/local-wakeup":
+            return None
+
+        qs = parse_qs(parsed.query)
+        keyword = (qs.get("keyword") or [""])[0].strip()
+        if not keyword:
+            return self._build_json_response(400, "Bad Request", {"error": "missing keyword"})
+        if not self.connected:
+            return self._build_json_response(503, "Service Unavailable", {"error": "speaker not connected"})
+        if self.on_local_wakeup is None:
+            return self._build_json_response(404, "Not Found", {"error": "local wakeup handler disabled"})
+
+        status = await self.on_local_wakeup(keyword)
+        return self._build_json_response(200, "OK", {"status": status})
 
     async def start(self) -> None:
         """Start listening for incoming Open-XiaoAI WebSocket connections until cancelled."""
@@ -103,6 +147,7 @@ class OpenXiaoAiServer:
             self.host,
             self.port,
             max_size=16 * 1024 * 1024,
+            process_request=self._process_http_request,
         )
         logger.info(f"Open-XiaoAI WebSocket server listening on ws://{self.host}:{self.port}")
         try:
@@ -134,7 +179,9 @@ class OpenXiaoAiServer:
                 await ws.send(json.dumps(req))
 
     async def start_recording(self) -> None:
-        """Instruct the speaker to start 16kHz S32_LE microphone capture."""
+        """Instruct the speaker to start 16kHz S32_LE microphone capture (idempotent)."""
+        if self._ws is None or self._recording_active:
+            return
         await self.send_rpc(
             "start_recording",
             {
@@ -146,6 +193,14 @@ class OpenXiaoAiServer:
                 "buffer_size": 1440,
             },
         )
+        self._recording_active = True
+
+    async def stop_recording(self) -> None:
+        """Instruct the speaker to stop microphone capture when returning to IDLE."""
+        if not self._recording_active:
+            return
+        self._recording_active = False
+        await self.send_rpc("stop_recording")
 
     async def start_play(self, sample_rate: int = PLAY_SAMPLE_RATE) -> None:
         """Instruct the speaker to open its `aplay` raw S16_LE playback stream.
@@ -227,11 +282,13 @@ class OpenXiaoAiServer:
 
         self._ws = ws
         self._play_active = False
+        self._recording_active = False
         logger.info(f"Open-XiaoAI speaker connected from {ws.remote_address}")
 
         try:
             await asyncio.sleep(0.3)
-            await self.start_recording()
+            if self.auto_start_recording:
+                await self.start_recording()
             await self.start_play(sample_rate=PLAY_SAMPLE_RATE)
             if self.on_connected is not None:
                 await self.on_connected()
@@ -247,6 +304,7 @@ class OpenXiaoAiServer:
             if self._ws is ws:
                 self._ws = None
                 self._play_active = False
+                self._recording_active = False
                 if self.on_disconnected is not None:
                     try:
                         await self.on_disconnected()

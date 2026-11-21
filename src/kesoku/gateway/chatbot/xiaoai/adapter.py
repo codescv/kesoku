@@ -191,6 +191,8 @@ class XiaoAiChatbot(Chatbot):
             on_event=self._on_speaker_event,
             on_connected=self._on_speaker_connected,
             on_disconnected=self._on_speaker_disconnected,
+            auto_start_recording=not xiaoai_config.local_kws,
+            on_local_wakeup=self._on_local_wakeup,
         )
 
         self._chunker = SentenceChunker()
@@ -204,6 +206,7 @@ class XiaoAiChatbot(Chatbot):
         self._synth_worker_task: asyncio.Task[None] | None = None
         self._play_worker_task: asyncio.Task[None] | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
+        self._local_wakeup_task: asyncio.Task[None] | None = None
         self._last_tool_hint_ts = 0.0
         self._turn_start_ts = 0.0
         self._vad_unmute_ts = 0.0
@@ -230,7 +233,7 @@ class XiaoAiChatbot(Chatbot):
         logger.info(
             f"Starting XiaoAiChatbot '{self.chatbot_id}' on ws://{self.config.host}:{self.config.port} "
             f"(personas={list(self._personas.keys())}, wake_words={self._all_wake_words}, "
-            f"tts={self.config.tts_provider}:{tts_target})"
+            f"local_kws={self.config.local_kws}, tts={self.config.tts_provider}:{tts_target})"
         )
         await asyncio.to_thread(self.pipeline.load)
         if isinstance(self.tts, MlxQwenTTSEngine):
@@ -258,9 +261,18 @@ class XiaoAiChatbot(Chatbot):
                 self._synth_worker_task,
                 self._play_worker_task,
                 self._watchdog_task,
+                self._local_wakeup_task,
             ):
                 if t is not None and not t.done():
                     t.cancel()
+
+    async def _enter_idle(self) -> None:
+        """Transition speaker to IDLE, reset pipelines, and stop recording when using local KWS."""
+        self.state = SpeakerState.IDLE
+        self.pipeline.reset_kws()
+        self.pipeline.reset_vad()
+        if self.config.local_kws and self.ws_server.connected:
+            await self.ws_server.stop_recording()
 
     async def _on_speaker_connected(self) -> None:
         """Reset speaker audio pipeline state silently when the LX06 connects."""
@@ -269,7 +281,7 @@ class XiaoAiChatbot(Chatbot):
         self.pipeline.reset_vad()
         logger.info(
             f"XiaoAi speaker ready. Say {self._all_wake_words} to wake up! "
-            f"(active_role={self._active_role})"
+            f"(active_role={self._active_role}, local_kws={self.config.local_kws})"
         )
 
     async def _on_speaker_disconnected(self) -> None:
@@ -334,11 +346,34 @@ class XiaoAiChatbot(Chatbot):
         self._streamed_any_sentence = False
         await self._cancel_playback()
         await self._abort_active_turn()
-        self.state = SpeakerState.IDLE
-        self.pipeline.reset_kws()
-        self.pipeline.reset_vad()
+        await self._enter_idle()
         if self.ws_server.connected:
             await self.ws_server.play_pcm(self._sleep_chime)
+
+    async def _on_local_wakeup(self, keyword: str) -> str:
+        """Accept an on-speaker local KWS wakeup trigger without blocking the HTTP response."""
+        if self.state != SpeakerState.IDLE:
+            logger.debug(
+                f"Ignoring local wakeup trigger ('{keyword}') while speaker state={self.state}"
+            )
+            return "active"
+        if self._local_wakeup_task is not None and not self._local_wakeup_task.done():
+            return "active"
+        self._local_wakeup_task = asyncio.create_task(self._activate_local_wakeup(keyword))
+        return "ok"
+
+    async def _activate_local_wakeup(self, keyword: str) -> None:
+        """Start speaker microphone streaming and enter LISTENING after a local KWS trigger."""
+        try:
+            async with self._audio_lock:
+                if self.state != SpeakerState.IDLE or not self.ws_server.connected:
+                    return
+                await self.ws_server.start_recording()
+                await self._handle_wakeup(keyword)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"Failed to activate local wakeup ('{keyword}'): {e}")
 
     async def _on_audio_frame(self, samples: np.ndarray) -> None:
         """Process each 16kHz float32 microphone frame through KWS / VAD / ASR."""
@@ -729,7 +764,7 @@ class XiaoAiChatbot(Chatbot):
                 self._synth_in_flight = False
                 self._tts_queue.task_done()
 
-    def _finish_speaking_turn(self) -> None:
+    async def _finish_speaking_turn(self) -> None:
         """Transition out of SPEAKING once all queued playback has drained."""
         if self.state != SpeakerState.SPEAKING:
             return
@@ -738,7 +773,7 @@ class XiaoAiChatbot(Chatbot):
             self.state = SpeakerState.LISTENING
             self._listen_deadline = time.monotonic() + self.config.continuous_listen_sec
         else:
-            self.state = SpeakerState.IDLE
+            await self._enter_idle()
 
     async def _play_worker(self) -> None:
         """Stream synthesized PCM chunks continuously to the LX06 speaker."""
@@ -756,7 +791,7 @@ class XiaoAiChatbot(Chatbot):
                         if getattr(self, "_turn_in_progress", False):
                             self.state = SpeakerState.THINKING
                         else:
-                            self._finish_speaking_turn()
+                            await self._finish_speaking_turn()
                     continue
             else:
                 gen, pcm = await self._play_queue.get()
@@ -789,8 +824,7 @@ class XiaoAiChatbot(Chatbot):
             now = time.monotonic()
             if self.state == SpeakerState.LISTENING and now > self._listen_deadline:
                 logger.info("Continuous listening window expired -> returning to IDLE")
-                self.state = SpeakerState.IDLE
-                self.pipeline.reset_vad()
+                await self._enter_idle()
                 if self.ws_server.connected:
                     await self.ws_server.play_pcm(self._sleep_chime)
             elif (
@@ -803,4 +837,4 @@ class XiaoAiChatbot(Chatbot):
                 self._turn_in_progress = False
                 self._turn_start_ts = 0.0
                 if not await self._enqueue_error_cue():
-                    self.state = SpeakerState.IDLE
+                    await self._enter_idle()
