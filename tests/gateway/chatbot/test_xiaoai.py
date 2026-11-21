@@ -598,3 +598,40 @@ async def test_mlx_qwen_tts_passes_japanese_lang_code():
         ("打招呼说", "auto", True),
         ("こんにちは", "japanese", True),
     ]
+
+
+async def test_error_cue_on_warning_message_and_tts_failure():
+    import asyncio
+    from types import SimpleNamespace
+
+    bot = _make_stub_xiaoai_bot()
+    err_pcm = b"\x05\x00" * 480
+    bot._persona_cues["leijun"]._clips["error"] = [err_pcm]
+
+    # 1. Warning error message from Kesoku plays cached error cue instead of raw English text
+    await bot.send_text_chunks(
+        "xiaoai:default",
+        ["⚠️ The model returned an empty response after 3 attempts"],
+        SimpleNamespace(id="m_warn"),
+    )
+    assert bot._tts_queue.qsize() == 1
+    gen, voice, text, pre_pcm = bot._tts_queue.get_nowait()
+    assert (gen, voice, text, pre_pcm) == (0, "leijun", "", err_pcm)
+    bot._tts_queue.task_done()
+
+    # 2. Failed TTS synthesis pushes cached error cue PCM onto _play_queue
+    class BrokenTTS:
+        async def synthesize(self, s: str) -> bytes:
+            raise RuntimeError("tts boom")
+
+    bot.tts = BrokenTTS()
+    await bot._tts_queue.put((0, "leijun", "测试失败", None))
+    worker = asyncio.create_task(bot._synth_worker())
+    queued_gen, queued_pcm = await asyncio.wait_for(bot._play_queue.get(), timeout=1.0)
+    assert (queued_gen, queued_pcm) == (0, err_pcm)
+    bot._play_queue.task_done()
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass

@@ -595,6 +595,18 @@ class XiaoAiChatbot(Chatbot):
             if is_final:
                 self._turn_in_progress = False
 
+    async def _enqueue_error_cue(self) -> bool:
+        """Play a cached persona error cue if available, returning True when queued."""
+        if not self.ws_server.connected:
+            return False
+        cue_bank = self._persona_cues.get(self._active_role)
+        cue_pcm = cue_bank.pick("error") if cue_bank is not None else None
+        if cue_pcm is None:
+            return False
+        logger.info(f"Playing error cue (role='{self._active_role}')")
+        await self._tts_queue.put((self._tts_generation, self._active_role, "", cue_pcm))
+        return True
+
     async def send_text_chunks(self, channel_id: str, chunks: list[str], message: Message) -> None:
         """Flush remaining streamed text or speak full text for non-streamed messages."""
         if not self.ws_server.connected:
@@ -602,6 +614,10 @@ class XiaoAiChatbot(Chatbot):
         full_text = "".join(chunks).strip()
         if not full_text:
             return
+        if full_text.startswith("⚠️") and not self._streamed_any_sentence:
+            if await self._enqueue_error_cue():
+                self._active_stream_turn_id = None
+                return
 
         if self._streamed_any_sentence:
             tail_sentences = self._chunker.flush(full_text)
@@ -705,6 +721,11 @@ class XiaoAiChatbot(Chatbot):
                 raise
             except Exception as e:
                 logger.warning(f"XiaoAi TTS synthesis error for '{text[:30]}': {e}")
+                if gen == self._tts_generation and self.ws_server.connected:
+                    cue_bank = self._persona_cues.get(voice_id) or self._persona_cues.get(self._active_role)
+                    cue_pcm = cue_bank.pick("error") if cue_bank is not None else None
+                    if cue_pcm is not None:
+                        await self._play_queue.put((gen, cue_pcm))
             finally:
                 self._synth_in_flight = False
                 self._tts_queue.task_done()
@@ -763,12 +784,24 @@ class XiaoAiChatbot(Chatbot):
                 self._play_queue.task_done()
 
     async def _listen_watchdog(self) -> None:
-        """Return to IDLE when the continuous listening window expires."""
+        """Return to IDLE when continuous listening expires or recover a stalled THINKING turn."""
         while True:
             await asyncio.sleep(0.5)
-            if self.state == SpeakerState.LISTENING and time.monotonic() > self._listen_deadline:
+            now = time.monotonic()
+            if self.state == SpeakerState.LISTENING and now > self._listen_deadline:
                 logger.info("Continuous listening window expired -> returning to IDLE")
                 self.state = SpeakerState.IDLE
                 self.pipeline.reset_vad()
                 if self.ws_server.connected:
                     await self.ws_server.play_pcm(self._sleep_chime)
+            elif (
+                self.state == SpeakerState.THINKING
+                and self._turn_in_progress
+                and self._turn_start_ts > 0.0
+                and (now - self._turn_start_ts) > 95.0
+            ):
+                logger.warning("XiaoAi turn timed out in THINKING (>95s); playing error fallback")
+                self._turn_in_progress = False
+                self._turn_start_ts = 0.0
+                if not await self._enqueue_error_cue():
+                    self.state = SpeakerState.IDLE
