@@ -263,11 +263,10 @@ class XiaoAiChatbot(Chatbot):
                     t.cancel()
 
     async def _on_speaker_connected(self) -> None:
-        """Reset state and play a short ready chime when the LX06 connects."""
+        """Reset speaker audio pipeline state silently when the LX06 connects."""
         self.state = SpeakerState.IDLE
         self.pipeline.reset_kws()
         self.pipeline.reset_vad()
-        await self.ws_server.play_pcm(self._wakeup_chime)
         logger.info(
             f"XiaoAi speaker ready. Say {self._all_wake_words} to wake up! "
             f"(active_role={self._active_role})"

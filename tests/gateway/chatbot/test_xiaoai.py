@@ -635,3 +635,17 @@ async def test_error_cue_on_warning_message_and_tts_failure():
         await worker
     except asyncio.CancelledError:
         pass
+
+
+async def test_on_speaker_connected_is_silent():
+    from kesoku.gateway.chatbot.xiaoai.adapter import SpeakerState
+
+    bot = _make_stub_xiaoai_bot()
+    bot._all_wake_words = ["小雷小雷"]
+    bot.state = SpeakerState.LISTENING
+    await bot._on_speaker_connected()
+
+    assert bot.state == SpeakerState.IDLE
+    assert bot._test_state.get_kws_resets() == 1
+    assert bot._test_state.get_vad_resets() == 1
+    assert bot._test_state.played_pcms == []
