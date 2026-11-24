@@ -1,6 +1,7 @@
 """Unit tests for the Open-XiaoAI smart speaker adapter components."""
 
 import numpy as np
+import pytest
 
 from kesoku.config import KesokuConfig, XiaoAiConfig
 from kesoku.gateway.chatbot.xiaoai.audio_pipeline import chinese_phrase_to_kws_tokens
@@ -50,6 +51,7 @@ def test_sentence_chunker_streaming():
 
 
 def test_chinese_phrase_to_kws_tokens():
+    pytest.importorskip("pypinyin")
     line = chinese_phrase_to_kws_tokens("小张小张")
     assert line.endswith("@小张小张")
     assert "x" in line and "zh" in line

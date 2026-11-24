@@ -690,7 +690,7 @@ async def test_resolve_or_create_session_passes_role_to_build_sys_prompt(tmp_pat
         ):
             resolved_def, created2 = await chatbot._resolve_or_create_session(dto2)
             assert created2 is False
-            spy_bsp.assert_called_once_with(custom_prompt="Extra context", session=ANY, role="default")
+            spy_bsp.assert_called_once_with(custom_prompt="Extra context", session=ANY, role="default", compact=False)
             assert spy_bsp.call_args.kwargs["session"].id == session_def.id
             assert spy_bsp.call_args.kwargs["role"] == "default"
             assert resolved_def.id == session_def.id
@@ -701,7 +701,7 @@ async def test_resolve_or_create_session_passes_role_to_build_sys_prompt(tmp_pat
         with patch("kesoku.gateway.chatbot.base.build_sys_prompt", wraps=real_build_sys_prompt) as spy_bsp_writer:
             resolved_writer, created3 = await chatbot._resolve_or_create_session(dto3)
             assert created3 is False
-            spy_bsp_writer.assert_called_once_with(custom_prompt=None, session=ANY, role="writer")
+            spy_bsp_writer.assert_called_once_with(custom_prompt=None, session=ANY, role="writer", compact=False)
             assert spy_bsp_writer.call_args.kwargs["session"].id == resolved_writer.id
             assert spy_bsp_writer.call_args.kwargs["role"] == "writer"
 
@@ -722,4 +722,6 @@ async def test_resolve_or_create_session_passes_role_to_build_sys_prompt(tmp_pat
             ):
                 dto4 = InboundMessageDTO(sender_id="u1", channel_id="c1", text="Fourth", timestamp=1006.0)
                 await chatbot._resolve_or_create_session(dto4)
-                spy_bsp_empty.assert_called_once_with(custom_prompt=None, session=existing_empty, role=None)
+                spy_bsp_empty.assert_called_once_with(
+                    custom_prompt=None, session=existing_empty, role=None, compact=False
+                )
