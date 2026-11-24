@@ -648,8 +648,8 @@ class AppChatbot(Chatbot):
             await self.send_raw(
                 make_envelope("stream.clear", {"turn_id": msg.id, "round_id": 0}, session_id=session_id)
             )
+            await self.gateway.db.update_session_updated_at(session_id, float(msg.timestamp))
             if not cross_channel:
-                await self.gateway.db.update_session_updated_at(session_id, time.time())
                 role = session.role_name or self.app_config.default_role
                 await self.gateway.db.update_session_system_prompt(
                     session_id, build_sys_prompt(session=session, role=role)
@@ -1080,6 +1080,8 @@ class AppChatbot(Chatbot):
         }
         await self._preflight_self_healing(message, jobs)
         await self.emit_session_event(message.session_id, "message.final", payload)
+        final_ts = max(float(session.updated_at) if session else 0.0, float(message.timestamp))
+        await self.gateway.db.update_session_updated_at(message.session_id, final_ts)
         if message.sender != "Notification":
             self._mark_finalized(message.session_id, turn_id)
         for job in jobs:

@@ -2347,3 +2347,37 @@ async def test_media_hydrate_offline_fails_fast(env) -> None:
     link.connected = False
     reply = await rpc(env, "media.hydrate", {"session_id": sid, "ref": "o.png"})
     assert reply["type"] == "error" and reply["payload"]["code"] == "ENGINE_OFFLINE"
+
+
+async def test_session_list_ordered_by_updated_at_after_final_and_cross_channel_send(env) -> None:
+    bot, gw = env["bot"], env["gw"]
+    s_old = await create_session(env, title="Old")
+    s_new = await create_session(env, title="New")
+    await gw.db.update_session_updated_at(s_old, 100.0)
+    await gw.db.update_session_updated_at(s_new, 200.0)
+
+    # Assistant final delivery bumps updated_at so s_old moves ahead of s_new.
+    final = Message(
+        session_id=s_old,
+        chatbot_id="app",
+        channel_id=f"app:{s_old}",
+        sender="Kesoku",
+        role=MessageRole.ASSISTANT,
+        content="reply",
+        timestamp=300.0,
+        status=MessageStatus.PENDING,
+    )
+    await gw.db.save_message(final)
+    await bot.render_outgoing_message(final)
+    listed = (await rpc(env, "session.list", {}))["payload"]["sessions"]
+    assert [s["session_id"] for s in listed[:2]] == [s_old, s_new]
+    assert listed[0]["updated_at"] == pytest.approx(300.0)
+
+    # Cross-channel session replied to from app also bumps updated_at to the top.
+    cross = await gw.create_session(title="Discord", chatbot_id="discord", channel_id="chan-upd", role="helper")
+    await gw.db.update_session_updated_at(cross.id, 50.0)
+    ack = await rpc(env, "message.send", {"session_id": cross.id, "client_msg_id": "xc1", "text": "bump"})
+    assert ack["type"] == "message.ack"
+    listed_all = (await rpc(env, "session.list", {"all_channels": True}))["payload"]["sessions"]
+    assert listed_all[0]["session_id"] == cross.id
+    assert listed_all[0]["updated_at"] > 300.0
