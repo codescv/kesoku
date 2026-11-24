@@ -47,6 +47,7 @@ from benchmarks.kesoku_bench.harness.metering import (
 )
 from benchmarks.kesoku_bench.harness.session import BenchSession, LLMFactory, TurnOutcome
 from benchmarks.kesoku_bench.harness.taskspec import RESULTS_DIR, TaskSpec
+from kesoku.agent.tools.shell import DEFAULT_MAX_OUTPUT_CHARS
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 EVAL_SCRIPT = REPO_ROOT / "scripts" / "eval_bench.py"
@@ -161,7 +162,7 @@ def generic_diagnostics(
             max_chars = int(e["args"].get("max_output_chars") or 0)
         except (TypeError, ValueError):
             max_chars = 0
-        if _REREAD_RE.search(cmd) or max_chars > 5000:
+        if _REREAD_RE.search(cmd) or max_chars > DEFAULT_MAX_OUTPUT_CHARS:
             shell_rereads += 1
     read_file_rereads = sum(1 for e in reads if _REREAD_RE.search(str(e["args"].get("file_name", ""))))
     shell_reads = sum(1 for e in shell if _READ_LIKE_RE.search(str(e["args"].get("command", ""))))

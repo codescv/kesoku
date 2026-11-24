@@ -16,6 +16,7 @@ mode = "blocklist"
 allowlist_patterns = ["^(echo|ls|pwd|cat|git|uv|grep|find|python|sed|awk)(\\s|$)"]
 blocklist_patterns = ["(\\b|^)(rm|sudo|shutdown|reboot|mkfs|dd|chmod|chown)(\\b|\\s|$)"]
 background_threshold_seconds = 300.0
+max_output_chars = 15000
 
 [shell.forbidden_patterns]
 "ping" = "Ping is not allowed for security reasons."
@@ -39,7 +40,10 @@ background_threshold_seconds = 300.0
 5.  **`background_threshold_seconds`** (float, default: `300.0`):
     The maximum execution duration allowed for a command in the foreground. If a command runs longer than this threshold, it is automatically safely detached into a background execution job.
 
-6.  **`forbidden_patterns`** (table/dictionary of regex to string):
+6.  **`max_output_chars`** (integer, default: `15000`, range: `100`–`30000`):
+    Default maximum number of output characters returned by `run_shell_command`. Output exceeding this limit is middle-truncated and the full text is saved to a staging file. A per-call `max_output_chars` argument overrides this setting (still capped at `30000`).
+
+7.  **`forbidden_patterns`** (table/dictionary of regex to string):
     Custom mapping of regex patterns to custom error messages. Commands matching these patterns are blocked, and their mapped error message is returned to the agent.
 
 ---

@@ -16,6 +16,7 @@ mode = "blocklist"
 allowlist_patterns = ["^(echo|ls|pwd|cat|git|uv|grep|find|python|sed|awk)(\\s|$)"]
 blocklist_patterns = ["(\\b|^)(rm|sudo|shutdown|reboot|mkfs|dd|chmod|chown)(\\b|\\s|$)"]
 background_threshold_seconds = 300.0
+max_output_chars = 15000
 
 [shell.forbidden_patterns]
 "ping" = "Ping is not allowed for security reasons."
@@ -39,7 +40,10 @@ background_threshold_seconds = 300.0
 5.  **`background_threshold_seconds`**（浮点数，默认：`300.0`）：
     允许命令在前台运行的最长时间（秒）。如果一条命令执行时间超过此阈值，系统会自动将其转为后台非阻塞任务，防止会话卡死。
 
-6.  **`forbidden_patterns`**（键值为正则表达式、Value 为错误信息的字典/映射表）：
+6.  **`max_output_chars`**（整数，默认：`15000`，范围：`100`–`30000`）：
+    `run_shell_command` 默认返回的最大输出字符数。超出该长度的输出会在中间截断，完整内容保存到会话暂存目录（staging）文件中；单次调用传入的 `max_output_chars` 参数会覆盖此配置（上限仍为 `30000`）。
+
+7.  **`forbidden_patterns`**（键值为正则表达式、Value 为错误信息的字典/映射表）：
     自定义禁止命令正则及其对应的错误信息。若匹配成功，命令将被拒绝，并直接返回配置的自定义错误信息。
 
 ---
