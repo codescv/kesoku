@@ -290,7 +290,7 @@ async def test_run_shell_command_failure_truncation(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_run_shell_command_max_output_chars(tmp_path) -> None:
-    """Test that run_shell_command truncates output to max_output_chars and appends help message."""
+    """Test that run_shell_command respects default, config, override, and clamp for max_output_chars."""
     import kesoku.config
     from kesoku.config import init_config, load_config
 
@@ -303,22 +303,37 @@ async def test_run_shell_command_max_output_chars(tmp_path) -> None:
 
         ctx = ToolContext(session_id="test_sess", session_workspace="test_ws")
 
-        # Test default (max_output_chars = 5000)
+        # 6,000 chars is NOT truncated under the 15,000 default
         cmd_6000 = "python3 -c 'print(\"a\" * 6000)'"
-        res = await run_shell_command(cmd_6000, context=ctx)
+        res_6000 = await run_shell_command(cmd_6000, context=ctx)
+        assert "Output truncated" not in res_6000
+        assert "a" * 6000 in res_6000
 
-        assert "Output truncated" in res
-        assert "Preview (first ~45% and last ~55% of 5000 chars):" in res
-        assert "read_file(" in res and "max_output_chars" in res
+        # 16,000 chars IS middle-truncated to the default 15,000
+        cmd_16000 = "python3 -c 'print(\"a\" * 16000)'"
+        res_16000 = await run_shell_command(cmd_16000, context=ctx)
+        assert "Output truncated" in res_16000
+        assert "Preview (first ~45% and last ~55% of 15000 chars):" in res_16000
+        assert "read_file(" in res_16000 and "max_output_chars" in res_16000
 
         # Middle-out preview keeps both the head (STDOUT header) and the tail (STDERR footer)
-        preview_part = res.split("Preview (first ~45% and last ~55% of 5000 chars):\n")[1]
+        preview_part = res_16000.split("Preview (first ~45% and last ~55% of 15000 chars):\n")[1]
         assert preview_part.startswith("=== STDOUT ===")
         assert "=== STDERR ===" in preview_part
         assert "chars omitted from the middle" in preview_part
-        assert len(preview_part) <= 5000
+        assert len(preview_part) <= 15000
 
-        # Test custom max_output_chars = 100
+        # Config override applies when max_output_chars argument is omitted
+        cfg.shell.max_output_chars = 2000
+        res_cfg = await run_shell_command(cmd_6000, context=ctx)
+        assert "Output truncated" in res_cfg
+        assert "Preview (first ~45% and last ~55% of 2000 chars):" in res_cfg
+        preview_part_cfg = res_cfg.split("Preview (first ~45% and last ~55% of 2000 chars):\n")[1]
+        assert preview_part_cfg.startswith("=== STDOUT ===")
+        assert "=== STDERR ===" in preview_part_cfg
+        assert len(preview_part_cfg) <= 2000
+
+        # Explicit max_output_chars overrides config
         res_custom = await run_shell_command(cmd_6000, max_output_chars=100, context=ctx)
         assert "Output truncated" in res_custom
         preview_part_custom = res_custom.split("Preview (first ~45% and last ~55% of 100 chars):\n")[1]
@@ -326,7 +341,17 @@ async def test_run_shell_command_max_output_chars(tmp_path) -> None:
         assert "=== STDERR ===" in preview_part_custom
         assert len(preview_part_custom) <= 100
 
-        # Test no truncation if content is shorter than max_output_chars
+        # Explicit max_output_chars above 30,000 clamps to 30,000
+        cmd_35000 = "python3 -c 'print(\"a\" * 35000)'"
+        res_clamped = await run_shell_command(cmd_35000, max_output_chars=50000, context=ctx)
+        assert "Output truncated" in res_clamped
+        assert "Preview (first ~45% and last ~55% of 30000 chars):" in res_clamped
+        preview_part_clamped = res_clamped.split("Preview (first ~45% and last ~55% of 30000 chars):\n")[1]
+        assert preview_part_clamped.startswith("=== STDOUT ===")
+        assert "=== STDERR ===" in preview_part_clamped
+        assert len(preview_part_clamped) <= 30000
+
+        # No truncation if content is shorter than max_output_chars
         cmd_50 = "python3 -c 'print(\"a\" * 50)'"
         res_short = await run_shell_command(cmd_50, max_output_chars=100, context=ctx)
         assert "Output truncated" not in res_short

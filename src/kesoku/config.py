@@ -610,6 +610,14 @@ class ShellConfig(BaseModel):
         default=300.0,
         description="Time limit in seconds before a shell command is transitioned to background execution",
     )
+    max_output_chars: int = Field(
+        default=15000,
+        ge=100,
+        le=30000,
+        description=(
+            "Default maximum output characters returned by run_shell_command before middle truncation (max 30000)"
+        ),
+    )
 
 
 class GoogleChatConfig(BaseModel):

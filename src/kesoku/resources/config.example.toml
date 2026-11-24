@@ -266,6 +266,9 @@ blocklist_patterns = [
 # Max seconds a shell command can run before it is transitioned to background execution.
 background_threshold_seconds = 300.0
 
+# Default maximum output characters returned by run_shell_command before middle truncation (100-30000).
+# max_output_chars = 15000
+
 
 [shell.env]
 # Custom environment variables injected into subprocess execution environments.
