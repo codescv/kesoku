@@ -70,7 +70,7 @@ if is_interrupted and is_interrupted():
 *   **`update_file(file_name, old_content=None, new_content=None)`**：省略 `old_content` 即创建文件（已存在则拒绝）；否则替换只出现一次的精确文本块（出现两次会都替换并给出警告，超过两次拒绝并列出行号和上下文）。`new_content` 必填（`""` 表示删除）。匹配失败时给出恢复提示：忽略空白差异的匹配及其原文行，或最相近的行和 `read_file` 行号范围；误复制的 `N: ` 前缀会被自动去除。成功消息包含受影响的行号范围。
 
 ### 输出截断（中间截断）
-*   `run_shell_command` 最多保留 `max_output_chars`（默认 5000，上限 30000）：预览保留约 45% 开头和 55% 结尾，完整输出保存到 `$STAGING_DIR/cmd_output_*.txt`。
+*   `run_shell_command` 最多保留 `max_output_chars`（默认 15000，可通过 `[shell].max_output_chars` 配置，上限 30000）：预览保留约 45% 开头和 55% 结尾，完整输出保存到 `$STAGING_DIR/cmd_output_*.txt`。
 *   已完成回合中，`prepare_history_for_llm` 把工具结果/错误缩成 500 字符的首尾预览（`history_preview`），先去掉 shell 自己的截断说明，使开头预算展示真实输出（保留开头的 `Command failed with exit code N.`）。完整内容保留在磁盘上。`HistoryCompressor.estimate_prepared_turn_tokens` 使用同一个函数。
 
 ### 3. 多线程与并发安全

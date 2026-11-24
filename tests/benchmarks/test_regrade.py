@@ -70,6 +70,7 @@ def test_generic_diagnostics_count_read_file_as_reads(make_task: Callable[..., P
     events = [
         _ev("run_shell_command", command="cat repo/a.py"),
         _ev("run_shell_command", command="head -n 30 /s/cmd_output_1.txt"),
+        _ev("run_shell_command", command="uv run pytest", max_output_chars=10000),
         _ev("run_shell_command", command="uv run pytest", max_output_chars=30000),
         _ev("read_file", file_name="repo/a.py"),
         _ev("read_file", file_name="/s/cmd_output_2.txt", start_line=1),
@@ -77,6 +78,7 @@ def test_generic_diagnostics_count_read_file_as_reads(make_task: Callable[..., P
     ]
     d = generic_diagnostics(spec, events, None, None)
     assert d["read_like_shell_calls"] == 2 and d["read_file_calls"] == 3 and d["read_calls_total"] == 5
+    # max_output_chars=10000 (<= default 15000) is NOT counted as a reread; only cmd_output_1 and 30000 count.
     assert d["shell_log_rereads"] == 2 and d["read_file_log_rereads"] == 2 and d["log_rereads_total"] == 4
     assert "llm_calls_before_first_use_skill" not in d and "skills_installed" not in d
 

@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from kesoku.agent.prompt import build_sys_prompt
 from kesoku.agent.tools.file import _resolve_role_sync
@@ -22,6 +23,7 @@ from kesoku.config import (
     GeminiConfig,
     GoogleChatConfig,
     KesokuConfig,
+    ShellConfig,
     WechatConfig,
     WorkspaceConfig,
     init_config,
@@ -672,3 +674,26 @@ def test_reply_channel_config_surface_is_server_side_only() -> None:
     from kesoku.agent.turn_executor import validate_llm_override
 
     assert validate_llm_override({"model_name": "m", "reply_channel": True}, ["m"]) is None
+
+
+def test_shell_max_output_chars_default_and_validation(tmp_path: Path) -> None:
+    """ShellConfig.max_output_chars defaults to 15000 and enforces ge=100, le=30000."""
+    assert ShellConfig().max_output_chars == 15000
+    assert ShellConfig(max_output_chars=100).max_output_chars == 100
+    assert ShellConfig(max_output_chars=30000).max_output_chars == 30000
+
+    with pytest.raises(ValidationError):
+        ShellConfig(max_output_chars=99)
+    with pytest.raises(ValidationError):
+        ShellConfig(max_output_chars=30001)
+
+    config_path = tmp_path / "config.toml"
+    init_config(str(config_path))
+    assert "# max_output_chars = 15000" in config_path.read_text(encoding="utf-8")
+    cfg_default = load_config(str(config_path))
+    assert cfg_default.shell.max_output_chars == 15000
+
+    custom_path = tmp_path / "custom.toml"
+    custom_path.write_text("[workspace]\ndb_path = 'kesoku.db'\n\n[shell]\nmax_output_chars = 8000\n", encoding="utf-8")
+    cfg_custom = load_config(str(custom_path))
+    assert cfg_custom.shell.max_output_chars == 8000
