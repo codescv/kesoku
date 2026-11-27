@@ -1,12 +1,13 @@
 """Tests for the app channel / memory proposal DAOs (`kesoku.db.app_tables`, migration v4)."""
 
+import re
 import sqlite3
 import time
 
 import pytest
 
 from kesoku.constants import MessageRole, MessageStatus, MessageType
-from kesoku.db.app_tables import APP_SCHEMA_VERSION
+from kesoku.db.app_tables import APP_SCHEMA_VERSION, get_or_create_workspace_id
 from kesoku.db.manager import DatabaseManager
 from kesoku.db.models import Message, Session
 
@@ -39,7 +40,7 @@ def test_v4_tables_exist_and_user_version(db):
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])
     expected = {
         "app_devices", "app_pairings", "app_outbox", "app_session_prefs", "app_mode_memory_prefs",
-        "memory_proposals", "memory_proposal_blocklist", "avatar_jobs",
+        "memory_proposals", "memory_proposal_blocklist", "avatar_jobs", "app_meta",
     }
     assert expected <= names
     assert version == APP_SCHEMA_VERSION == 4
@@ -397,3 +398,29 @@ def test_avatar_jobs_crud_rate_count_and_expiry(db):
     assert [j["job_id"] for j in db.list_expired_avatar_jobs(now=250.0)] == ["j1"]
     db.delete_avatar_job("j1")
     assert db.get_avatar_job("j1") is None
+
+
+# ---------------------------------------------------------------- app meta
+
+
+def test_get_or_create_workspace_id_persists_across_reopen(tmp_path):
+    db_file = str(tmp_path / "ws.db")
+    mgr1 = DatabaseManager(db_file)
+    mgr1.init_tables()
+    ws_id1 = mgr1.get_or_create_workspace_id()
+    assert re.fullmatch(r"ws_[0-9a-f]{32}", ws_id1)
+    assert mgr1.get_or_create_workspace_id() == ws_id1
+
+    # Direct connection helper returns the exact same id.
+    with mgr1.connection_provider.connection() as conn:
+        assert get_or_create_workspace_id(conn) == ws_id1
+
+    # Reopening a fresh DatabaseManager on the same file preserves workspace_id.
+    mgr2 = DatabaseManager(db_file)
+    mgr2.init_tables()
+    assert mgr2.get_or_create_workspace_id() == ws_id1
+
+    # A separate database gets a distinct workspace_id.
+    mgr_other = DatabaseManager(str(tmp_path / "other.db"))
+    mgr_other.init_tables()
+    assert mgr_other.get_or_create_workspace_id() != ws_id1

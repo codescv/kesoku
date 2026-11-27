@@ -1095,6 +1095,296 @@ async def test_workspace_mutations_reject_traversal_and_hidden(env) -> None:
     assert big["type"] == "error"
 
 
+async def test_workspace_id_and_read_raw_sha256(env) -> None:
+    import hashlib
+    import re
+
+    tmp = env["tmp"]
+    # Root list exposes persistent workspace_id and workspace_cas flag; subdirs do not.
+    root_list = (await rpc(env, "workspace.list", {}))["payload"]
+    ws_id = root_list["workspace_id"]
+    assert re.fullmatch(r"ws_[0-9a-f]{32}", ws_id)
+    assert root_list["workspace_cas"] is True
+
+    sub_list = (await rpc(env, "workspace.list", {"rel_path": "roles/helper"}))["payload"]
+    assert "workspace_id" not in sub_list
+    assert "workspace_cas" not in sub_list
+
+    # Simulating reconnect / restart with a fresh RequestHandlers instance preserves workspace_id.
+    env["bot"].requests = commands_mod.RequestHandlers(env["bot"])
+    env["bot"]._handlers = env["bot"]._build_handlers()
+    root_list_2 = (await rpc(env, "workspace.list", {}))["payload"]
+    assert root_list_2["workspace_id"] == ws_id
+
+    # Raw-byte sha256 is computed BEFORE lossy UTF-8 decoding.
+    raw_invalid_utf8 = b"header\xff\xfetail\r\n"
+    (tmp / "raw.txt").write_bytes(raw_invalid_utf8)
+    read_raw = (await rpc(env, "workspace.read", {"rel_path": "raw.txt"}))["payload"]
+    expected_raw_sha = hashlib.sha256(raw_invalid_utf8).hexdigest()
+    decoded_sha = hashlib.sha256(read_raw["content"].encode("utf-8")).hexdigest()
+    assert expected_raw_sha != decoded_sha
+    assert read_raw["truncated"] is False
+    assert read_raw["sha256"] == expected_raw_sha
+
+    # Truncated text files omit sha256 (or return None).
+    (tmp / "huge.txt").write_bytes(b"a" * (commands_mod.WORKSPACE_TEXT_MAX_BYTES + 10))
+    read_huge = (await rpc(env, "workspace.read", {"rel_path": "huge.txt"}))["payload"]
+    assert read_huge["truncated"] is True
+    assert read_huge.get("sha256") is None
+
+
+async def test_workspace_write_cas_semantics_and_validation(env) -> None:
+    import hashlib
+
+    tmp = env["tmp"]
+
+    # 1. expected_sha256=None: create-only succeeds when absent.
+    w1 = (
+        await rpc(env, "workspace.write", {"path": "cas/log.json", "content": '{"v":1}', "expected_sha256": None})
+    )["payload"]
+    sha1 = hashlib.sha256(b'{"v":1}').hexdigest()
+    assert w1["cas"] is True
+    assert w1["sha256"] == sha1
+    assert "conflict" not in w1
+
+    # 2. expected_sha256=None: conflicts when file already exists without overwriting.
+    c1 = (
+        await rpc(env, "workspace.write", {"path": "cas/log.json", "content": '{"v":99}', "expected_sha256": None})
+    )["payload"]
+    assert c1["conflict"] is True
+    assert c1["cas"] is True
+    assert c1["path"] == "cas/log.json"
+    assert c1["sha256"] == sha1
+    assert isinstance(c1["mtime"], float)
+    assert (tmp / "cas" / "log.json").read_text(encoding="utf-8") == '{"v":1}'
+
+    # 3. expected_sha256=<matching>: succeeds and updates sha256.
+    w2 = (
+        await rpc(env, "workspace.write", {"path": "cas/log.json", "content": '{"v":2}', "expected_sha256": sha1})
+    )["payload"]
+    sha2 = hashlib.sha256(b'{"v":2}').hexdigest()
+    assert w2["cas"] is True
+    assert w2["sha256"] == sha2
+    assert (tmp / "cas" / "log.json").read_text(encoding="utf-8") == '{"v":2}'
+
+    # 4. expected_sha256=<stale>: conflicts without overwriting.
+    c2 = (
+        await rpc(env, "workspace.write", {"path": "cas/log.json", "content": '{"v":3}', "expected_sha256": sha1})
+    )["payload"]
+    assert c2["conflict"] is True
+    assert c2["cas"] is True
+    assert c2["sha256"] == sha2
+    assert (tmp / "cas" / "log.json").read_text(encoding="utf-8") == '{"v":2}'
+
+    # 5. expected_sha256=<hex> on missing file: conflicts with sha256=None, mtime=None.
+    c3 = (
+        await rpc(env, "workspace.write", {"path": "cas/missing.json", "content": "{}", "expected_sha256": sha1})
+    )["payload"]
+    assert c3 == {"conflict": True, "cas": True, "path": "cas/missing.json", "sha256": None, "mtime": None}
+    assert not (tmp / "cas" / "missing.json").exists()
+
+    # 6. Raw-byte CAS works even when disk file has invalid UTF-8 bytes.
+    raw_bytes = b"bad\xffbytes"
+    (tmp / "cas" / "raw.txt").write_bytes(raw_bytes)
+    raw_sha = hashlib.sha256(raw_bytes).hexdigest()
+    bad_utf8_sha = hashlib.sha256(raw_bytes.decode("utf-8", errors="replace").encode("utf-8")).hexdigest()
+    c_raw = (
+        await rpc(env, "workspace.write", {"path": "cas/raw.txt", "content": "ok", "expected_sha256": bad_utf8_sha})
+    )["payload"]
+    assert c_raw["conflict"] is True and c_raw["sha256"] == raw_sha
+    w_raw = (
+        await rpc(env, "workspace.write", {"path": "cas/raw.txt", "content": "ok", "expected_sha256": raw_sha})
+    )["payload"]
+    assert w_raw["cas"] is True and w_raw["sha256"] == hashlib.sha256(b"ok").hexdigest()
+
+    # 7. Validation: expected_sha256 + append is forbidden; malformed hashes are rejected.
+    for bad_payload in (
+        {"path": "cas/log.json", "content": "x", "append": True, "expected_sha256": None},
+        {"path": "cas/log.json", "content": "x", "append": True, "expected_sha256": sha2},
+        {"path": "cas/log.json", "content": "x", "expected_sha256": ""},
+        {"path": "cas/log.json", "content": "x", "expected_sha256": "A" * 64},
+        {"path": "cas/log.json", "content": "x", "expected_sha256": "a" * 63},
+        {"path": "cas/log.json", "content": "x", "expected_sha256": "g" * 64},
+        {"path": "cas/log.json", "content": "x", "expected_sha256": 12345},
+        {"path": "cas/log.json", "content": "x", "expected_sha256": True},
+    ):
+        err = await rpc(env, "workspace.write", bad_payload)
+        assert err["type"] == "error" and err["payload"]["code"] == "BAD_REQUEST", (bad_payload, err)
+
+    # 8. append=True returns sha256 of the complete post-append bytes and cas=True.
+    a1 = (await rpc(env, "workspace.write", {"path": "cas/app.txt", "content": "hello "}))["payload"]
+    assert a1["cas"] is True and a1["sha256"] == hashlib.sha256(b"hello ").hexdigest()
+    a2 = (await rpc(env, "workspace.write", {"path": "cas/app.txt", "content": "world", "append": True}))["payload"]
+    assert a2["cas"] is True and a2["sha256"] == hashlib.sha256(b"hello world").hexdigest()
+
+
+async def test_workspace_concurrent_cas_and_path_lock_serialization(env, monkeypatch) -> None:
+    import hashlib
+    import threading
+
+    tmp = env["tmp"]
+    handlers = env["bot"].requests
+
+    # Case A: Two concurrent create-only CAS writes (expected_sha256=None) -> strictly 1 succeeds, 1 conflicts.
+    r1, r2 = await asyncio.gather(
+        rpc(env, "workspace.write", {"path": "race/create.json", "content": '{"who":"A"}', "expected_sha256": None}),
+        rpc(env, "workspace.write", {"path": "race/create.json", "content": '{"who":"B"}', "expected_sha256": None}),
+    )
+    payloads = [r1["payload"], r2["payload"]]
+    winners = [p for p in payloads if not p.get("conflict")]
+    losers = [p for p in payloads if p.get("conflict")]
+    assert len(winners) == 1 and len(losers) == 1
+    assert losers[0]["cas"] is True
+    assert losers[0]["sha256"] == winners[0]["sha256"]
+    assert hashlib.sha256((tmp / "race" / "create.json").read_bytes()).hexdigest() == winners[0]["sha256"]
+
+    # Case B: Two concurrent CAS writes with the same expected_sha256 -> strictly 1 succeeds, 1 conflicts.
+    base_sha = winners[0]["sha256"]
+    r3, r4 = await asyncio.gather(
+        rpc(
+            env,
+            "workspace.write",
+            {"path": "race/create.json", "content": '{"who":"C"}', "expected_sha256": base_sha},
+        ),
+        rpc(
+            env,
+            "workspace.write",
+            {"path": "race/create.json", "content": '{"who":"D"}', "expected_sha256": base_sha},
+        ),
+    )
+    payloads2 = [r3["payload"], r4["payload"]]
+    winners2 = [p for p in payloads2 if not p.get("conflict")]
+    losers2 = [p for p in payloads2 if p.get("conflict")]
+    assert len(winners2) == 1 and len(losers2) == 1
+    assert losers2[0]["sha256"] == winners2[0]["sha256"]
+    assert hashlib.sha256((tmp / "race" / "create.json").read_bytes()).hexdigest() == winners2[0]["sha256"]
+
+    # Case C: Non-CAS write, CAS write, and delete share the exact same per-canonical-path lock (zero overlap).
+    (tmp / "race" / "shared.txt").write_text("init", encoding="utf-8")
+    init_sha = hashlib.sha256(b"init").hexdigest()
+    active_lock = threading.Lock()
+    active_count = 0
+    max_concurrent = 0
+    real_replace = os.replace
+    real_unlink = os.unlink
+
+    def tracked_replace(src: str, dst: str) -> None:
+        nonlocal active_count, max_concurrent
+        if dst.endswith("shared.txt"):
+            with active_lock:
+                active_count += 1
+                max_concurrent = max(max_concurrent, active_count)
+            try:
+                time.sleep(0.05)
+                real_replace(src, dst)
+            finally:
+                with active_lock:
+                    active_count -= 1
+        else:
+            real_replace(src, dst)
+
+    def tracked_unlink(p: str) -> None:
+        nonlocal active_count, max_concurrent
+        if str(p).endswith("shared.txt"):
+            with active_lock:
+                active_count += 1
+                max_concurrent = max(max_concurrent, active_count)
+            try:
+                time.sleep(0.05)
+                real_unlink(p)
+            finally:
+                with active_lock:
+                    active_count -= 1
+        else:
+            real_unlink(p)
+
+    monkeypatch.setattr(os, "replace", tracked_replace)
+    monkeypatch.setattr(os, "unlink", tracked_unlink)
+
+    await asyncio.gather(
+        rpc(env, "workspace.write", {"path": "race/shared.txt", "content": "non-cas"}),
+        rpc(env, "workspace.write", {"path": "race/shared.txt", "content": "cas", "expected_sha256": init_sha}),
+        rpc(env, "workspace.delete", {"path": "race/shared.txt"}),
+    )
+    assert max_concurrent == 1
+    # Ref-counted path lock map must not leak entries after operations complete.
+    assert handlers._workspace_locks == {}
+
+
+async def test_workspace_list_survives_workspace_id_db_error(env, monkeypatch) -> None:
+    tmp = env["tmp"]
+    (tmp / "README.md").write_text("hi", encoding="utf-8")
+    handlers = env["bot"].requests
+    handlers._workspace_id = None
+
+    def boom() -> str:
+        raise RuntimeError("sqlite locked")
+
+    monkeypatch.setattr(env["bot"].sync_db, "get_or_create_workspace_id", boom)
+    res = await rpc(env, "workspace.list", {})
+    assert res["type"] == "workspace.list.result"
+    payload = res["payload"]
+    assert any(e["name"] == "README.md" for e in payload["entries"])
+    assert "workspace_id" not in payload
+    assert "workspace_cas" not in payload
+
+
+async def test_workspace_path_lock_held_until_cancelled_thread_finishes(env, monkeypatch) -> None:
+    import threading
+
+    tmp = env["tmp"]
+    handlers = env["bot"].requests
+    (tmp / "cancel.txt").write_text("v0", encoding="utf-8")
+
+    entered = threading.Event()
+    release = threading.Event()
+    overlap = False
+    in_flight = False
+    state_lock = threading.Lock()
+    real_replace = os.replace
+
+    def slow_replace(src: str, dst: str) -> None:
+        nonlocal overlap, in_flight
+        if dst.endswith("cancel.txt"):
+            with state_lock:
+                if in_flight:
+                    overlap = True
+                in_flight = True
+            entered.set()
+            try:
+                release.wait(timeout=2.0)
+                real_replace(src, dst)
+            finally:
+                with state_lock:
+                    in_flight = False
+        else:
+            real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", slow_replace)
+
+    ctx = commands_mod.RequestContext(device_id="dev1", request_id="req1", request_type="workspace.write")
+    t1 = asyncio.create_task(handlers.handle_workspace_write(ctx, {"path": "cancel.txt", "content": "v1"}))
+    await asyncio.to_thread(entered.wait, 2.0)
+    assert entered.is_set()
+
+    # Cancel t1 while its worker thread is still inside os.replace; start a second write on the same path.
+    t1.cancel()
+    t2 = asyncio.create_task(handlers.handle_workspace_write(ctx, {"path": "cancel.txt", "content": "v2"}))
+    await asyncio.sleep(0.05)
+    # Lock must still be held (t2 cannot finish while t1's thread is blocked).
+    assert not t2.done()
+    assert not overlap
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await t1
+    r2 = await t2
+    assert r2["cas"] is True
+    assert not overlap
+    assert (tmp / "cancel.txt").read_text(encoding="utf-8") == "v2"
+    assert handlers._workspace_locks == {}
+
+
 async def test_mode_stop_triggers_mode_exit_extraction(env, monkeypatch) -> None:
     bot = env["bot"]
     calls: list[tuple[str, str]] = []
