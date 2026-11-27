@@ -1,6 +1,6 @@
 [project]
 name = "kesoku"
-version = "0.3.14"
+version = "0.3.15"
 description = "Kesoku - A readable AI Agent implementation"
 readme = "README.md"
 requires-python = ">=3.12"
