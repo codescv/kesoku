@@ -7,6 +7,7 @@ Tables:
   * `app_mode_memory_prefs`: user-configurable per-mode memory policy (authoritative override).
   * `memory_proposals` / `memory_proposal_blocklist`: `confirm_only` memory candidates awaiting the user.
   * `avatar_jobs`: asynchronous avatar restyle jobs.
+  * `app_meta`: key-value workspace metadata (such as persistent `workspace_id`).
 
 Every statement is parameterized. The mixin is combined into `DatabaseManager` and relies on its
 `connection_provider`.
@@ -17,6 +18,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
@@ -148,6 +150,15 @@ _V4_STATEMENTS: tuple[tuple[str, str], ...] = (
         """,
     ),
     (
+        "app_meta",
+        """
+        CREATE TABLE IF NOT EXISTS app_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """,
+    ),
+    (
         "seed_chat_policy",
         # Only the generic default chat mode is seeded here; configured modes are seeded by the app
         # adapter at startup via `seed_app_mode_memory_prefs` (OR IGNORE never overrides user rows).
@@ -155,6 +166,23 @@ _V4_STATEMENTS: tuple[tuple[str, str], ...] = (
         "VALUES ('chat', 'full', CAST(strftime('%s','now') AS REAL))",
     ),
 )
+
+
+def get_or_create_workspace_id(conn: sqlite3.Connection) -> str:
+    """Return the persistent workspace identifier (`ws_<32hex>`) in `app_meta`, creating it on first call."""
+    candidate = f"ws_{uuid.uuid4().hex}"
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO app_meta (key, value) VALUES (?, ?)",
+            ("workspace_id", candidate),
+        )
+    row = conn.execute(
+        "SELECT value FROM app_meta WHERE key = ?",
+        ("workspace_id",),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("Failed to read workspace_id from app_meta")
+    return str(row["value"] if isinstance(row, sqlite3.Row) else row[0])
 
 
 def _json_or_none(value: Any) -> str | None:
@@ -970,3 +998,9 @@ class AppTablesMixin:
         with self.connection_provider.connection() as conn:
             with conn:
                 conn.execute("DELETE FROM avatar_jobs WHERE job_id = ?", (job_id,))
+
+    # ------------------------------------------------------------------ app meta
+    def get_or_create_workspace_id(self) -> str:
+        """Return the persistent per-workspace UUID (`ws_<32hex>`), creating it once if absent."""
+        with self.connection_provider.connection() as conn:
+            return get_or_create_workspace_id(conn)

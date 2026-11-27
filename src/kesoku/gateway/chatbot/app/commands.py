@@ -11,6 +11,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import hashlib
 import json
 import mimetypes
 import os
@@ -110,6 +111,7 @@ WORKSPACE_DELETE_SCAN_MAX_ENTRIES = 20000
 # Top-level `$AWD` directories that may be edited inside but never deleted as a whole.
 WORKSPACE_PROTECTED_TOP_DIRS = frozenset({"roles", "instructions", "skills", "sessions"})
 _WORKSPACE_DB_NAME_RE = re.compile(r"\.(?:db|sqlite3?)(?:[-.][a-z0-9_-]*)*$", re.IGNORECASE)
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 _FRONTMATTER_BLOCK_RE = re.compile(r"\A---\r?\n(?P<body>.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
 _VISIBILITY_LINE_RE = re.compile(r"^visibility\s*:.*$", re.MULTILINE)
 CROSS_CHANNEL_IGNORE_GLOBS = ["game-*"]
@@ -159,6 +161,9 @@ class RequestHandlers:
         # `media.hydrate`: bounded concurrency + single-flight per (realpath, st_mtime_ns, st_size).
         self._hydrate_semaphore = asyncio.Semaphore(HYDRATE_MAX_CONCURRENCY)
         self._hydrate_inflight: dict[tuple[str, int, int], asyncio.Task[dict[str, Any]]] = {}
+        # Per-canonical-path ref-counted locks serializing workspace writes/deletes.
+        self._workspace_locks: dict[str, tuple[asyncio.Lock, int]] = {}
+        self._workspace_id: str | None = None
 
     # ------------------------------------------------------------------ helpers
     @property
@@ -1308,6 +1313,49 @@ class RequestHandlers:
         }
 
     # ------------------------------------------------------------------ workspace browser
+    @contextlib.asynccontextmanager
+    async def _workspace_path_lock(self, real_path: str):
+        """Serialize workspace mutations targeting the same canonical path with ref-counted cleanup."""
+        key = await asyncio.to_thread(os.path.realpath, real_path)
+        existing = self._workspace_locks.get(key)
+        if existing is None:
+            lock = asyncio.Lock()
+            self._workspace_locks[key] = (lock, 1)
+        else:
+            lock, refs = existing
+            self._workspace_locks[key] = (lock, refs + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            cur = self._workspace_locks.get(key)
+            if cur is not None and cur[0] is lock:
+                if cur[1] <= 1:
+                    del self._workspace_locks[key]
+                else:
+                    self._workspace_locks[key] = (lock, cur[1] - 1)
+
+    async def _get_workspace_id(self) -> str:
+        """Return and cache the persistent workspace identifier from SQLite `app_meta`."""
+        if self._workspace_id is None:
+            self._workspace_id = await asyncio.to_thread(self.db.get_or_create_workspace_id)
+        return self._workspace_id
+
+    @staticmethod
+    def _file_sha256_and_mtime(path: str) -> tuple[str | None, float | None]:
+        """Compute raw-byte SHA-256 hex digest and mtime for `path`, or `(None, None)` if unreadable."""
+        if not os.path.isfile(path):
+            return None, None
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            st = os.fstat(f.fileno())
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest(), float(st.st_mtime)
+
     @staticmethod
     def _is_workspace_blocked(name: str) -> bool:
         """Return True if a path component is blocked in the workspace browser."""
@@ -1421,7 +1469,11 @@ class RequestHandlers:
             entries.sort(key=lambda e: (0 if e["kind"] == "dir" else 1, str(e["name"]).lower()))
             return entries[:WORKSPACE_LIST_MAX]
 
-        return {"rel_path": rel_path, "entries": await asyncio.to_thread(_list_dir)}
+        result: dict[str, Any] = {"rel_path": rel_path, "entries": await asyncio.to_thread(_list_dir)}
+        if rel_path == "":
+            result["workspace_id"] = await self._get_workspace_id()
+            result["workspace_cas"] = True
+        return result
 
     async def handle_workspace_read(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
         """`workspace.read{rel_path}` -> text content or uploaded media URL jailed inside `$AWD`."""
@@ -1455,39 +1507,49 @@ class RequestHandlers:
 
         def _read_file() -> dict[str, Any]:
             with open(real_file, "rb") as f:
+                fst = os.fstat(f.fileno())
                 head = f.read(WORKSPACE_TEXT_MAX_BYTES + 1)
+            cur_size = int(fst.st_size)
+            cur_mtime = float(fst.st_mtime)
             if b"\x00" in head[:4096]:
                 return {
                     "rel_path": rel_path,
                     "name": name,
                     "kind": "binary",
                     "mime": "application/octet-stream",
-                    "bytes": size,
-                    "mtime": mtime,
+                    "bytes": cur_size,
+                    "mtime": cur_mtime,
                 }
             truncated = len(head) > WORKSPACE_TEXT_MAX_BYTES
-            text = head[:WORKSPACE_TEXT_MAX_BYTES].decode("utf-8", errors="replace")
+            raw_bytes = head if not truncated else head[:WORKSPACE_TEXT_MAX_BYTES]
+            sha256 = hashlib.sha256(raw_bytes).hexdigest() if not truncated else None
+            text = raw_bytes.decode("utf-8", errors="replace")
             mime = "text/markdown" if ext == ".md" else ("application/json" if ext == ".json" else "text/plain")
-            return {
+            out: dict[str, Any] = {
                 "rel_path": rel_path,
                 "name": name,
                 "kind": "text",
                 "mime": mime,
-                "bytes": size,
-                "mtime": mtime,
+                "bytes": cur_size,
+                "mtime": cur_mtime,
                 "content": text,
                 "truncated": truncated,
                 # Saving a truncated preview would cut the file, so only complete text files are editable.
                 "writable": not truncated and not self._is_workspace_protected(name),
             }
+            if sha256 is not None:
+                out["sha256"] = sha256
+            return out
 
         return await asyncio.to_thread(_read_file)
 
     async def handle_workspace_write(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
-        """`workspace.write{path, content? | base64?, overwrite?=true, append?=false}` -> atomic jailed write.
+        """`workspace.write{path, content?|base64?, overwrite?, append?, expected_sha256?}` -> atomic write.
 
         `append:true` (base64 or text) appends a chunk to an existing file so clients can upload files larger
         than one 1 MiB relay frame in several requests; the resulting file is still capped at 10 MiB.
+        `expected_sha256` enables compare-and-swap (`null` = must not exist; 64-char lowercase hex = must match
+        raw bytes on disk) and cannot be combined with `append:true`.
         """
         rel_path, lexical, real_path = self._resolve_workspace_mutation(payload)
         content = payload.get("content")
@@ -1502,6 +1564,15 @@ class RequestHandlers:
         append = payload.get("append", False)
         if not isinstance(overwrite, bool) or not isinstance(append, bool):
             raise ProtocolError("BAD_REQUEST", "overwrite/append must be booleans")
+        has_expected = "expected_sha256" in payload
+        expected_sha256 = payload.get("expected_sha256")
+        if has_expected:
+            if append:
+                raise ProtocolError("BAD_REQUEST", "expected_sha256 cannot be combined with append")
+            if expected_sha256 is not None and (
+                not isinstance(expected_sha256, str) or not _SHA256_HEX_RE.fullmatch(expected_sha256)
+            ):
+                raise ProtocolError("BAD_REQUEST", "expected_sha256 must be null or a 64-char lowercase hex digest")
         if b64 is not None:
             if len(b64) > (WORKSPACE_WRITE_MAX_BYTES * 4) // 3 + 8:
                 raise ProtocolError("BAD_REQUEST", "file too large (max 10 MiB)")
@@ -1519,6 +1590,35 @@ class RequestHandlers:
             if os.path.isdir(lexical) or os.path.isdir(real_path):
                 raise ProtocolError("BAD_REQUEST", "path is a directory")
             exists = os.path.lexists(lexical)
+            if has_expected:
+                if expected_sha256 is None:
+                    if exists or os.path.exists(real_path):
+                        cur_sha, cur_mtime = self._file_sha256_and_mtime(real_path)
+                        return {
+                            "conflict": True,
+                            "cas": True,
+                            "path": rel_path,
+                            "sha256": cur_sha,
+                            "mtime": cur_mtime,
+                        }
+                else:
+                    if not os.path.isfile(real_path):
+                        return {
+                            "conflict": True,
+                            "cas": True,
+                            "path": rel_path,
+                            "sha256": None,
+                            "mtime": None,
+                        }
+                    cur_sha, cur_mtime = self._file_sha256_and_mtime(real_path)
+                    if cur_sha != expected_sha256:
+                        return {
+                            "conflict": True,
+                            "cas": True,
+                            "path": rel_path,
+                            "sha256": cur_sha,
+                            "mtime": cur_mtime,
+                        }
             if exists and not overwrite and not append:
                 raise ProtocolError("BAD_REQUEST", "file already exists")
             parent = os.path.dirname(real_path)
@@ -1529,11 +1629,13 @@ class RequestHandlers:
             in_root = os.path.realpath(parent) == os.path.realpath(self.app.awd)
             if not (in_root or realpath_within(self.app.awd, parent)):
                 raise ProtocolError("BAD_REQUEST", "path escapes workspace")
+            did_append = False
             if append and os.path.isfile(real_path):
                 if os.path.getsize(real_path) + len(data) > WORKSPACE_WRITE_MAX_BYTES:
                     raise ProtocolError("BAD_REQUEST", "file too large (max 10 MiB)")
                 with open(real_path, "ab") as f:
                     f.write(data)
+                did_append = True
             else:
                 mode = (os.stat(real_path).st_mode & 0o777) if os.path.isfile(real_path) else 0o644
                 fd, tmp = tempfile.mkstemp(prefix=".kesoku-upload-", dir=parent)
@@ -1549,15 +1651,22 @@ class RequestHandlers:
                         os.unlink(tmp)
                     raise
             st = os.stat(real_path)
+            if did_append:
+                new_sha, _ = self._file_sha256_and_mtime(real_path)
+            else:
+                new_sha = hashlib.sha256(data).hexdigest()
             return {
                 "path": rel_path,
                 "name": os.path.basename(real_path),
                 "size": int(st.st_size),
                 "mtime": float(st.st_mtime),
                 "kind": self._classify_workspace_file(real_path),
+                "sha256": new_sha,
+                "cas": True,
             }
 
-        return await asyncio.to_thread(_write)
+        async with self._workspace_path_lock(real_path):
+            return await asyncio.to_thread(_write)
 
     async def handle_workspace_mkdir(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
         """`workspace.mkdir{path}` -> create a jailed directory (parents included, idempotent)."""
@@ -1608,7 +1717,8 @@ class RequestHandlers:
                 os.unlink(real_path)
             return {"path": rel_path, "deleted": True}
 
-        return await asyncio.to_thread(_delete)
+        async with self._workspace_path_lock(real_path):
+            return await asyncio.to_thread(_delete)
 
     async def handle_workspace_download(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
         """`workspace.download{path}` -> `{path, name, size, mime_type, base64}` (≤ 15 MiB).
