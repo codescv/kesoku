@@ -21,6 +21,7 @@ import tempfile
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -1335,6 +1336,32 @@ class RequestHandlers:
                 else:
                     self._workspace_locks[key] = (lock, cur[1] - 1)
 
+    async def _run_workspace_mutation_locked(
+        self, real_path: str, fn: Callable[[], dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Run a blocking mutation in a thread while holding the per-path lock until the thread finishes.
+
+        If the awaiting coroutine is cancelled mid-write, keep holding the lock until the already-started
+        worker thread completes before re-raising `CancelledError`, preventing interleaving with the next CAS.
+        """
+        async with self._workspace_path_lock(real_path):
+            task: asyncio.Task[dict[str, Any]] = asyncio.ensure_future(asyncio.to_thread(fn))
+            cancelled: asyncio.CancelledError | None = None
+            while True:
+                try:
+                    result = await asyncio.shield(task)
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+                    if task.done():
+                        break
+                    continue
+                break
+            if cancelled is not None:
+                if not task.cancelled():
+                    task.exception()
+                raise cancelled
+            return result
+
     async def _get_workspace_id(self) -> str:
         """Return and cache the persistent workspace identifier from SQLite `app_meta`."""
         if self._workspace_id is None:
@@ -1471,8 +1498,11 @@ class RequestHandlers:
 
         result: dict[str, Any] = {"rel_path": rel_path, "entries": await asyncio.to_thread(_list_dir)}
         if rel_path == "":
-            result["workspace_id"] = await self._get_workspace_id()
-            result["workspace_cas"] = True
+            try:
+                result["workspace_id"] = await self._get_workspace_id()
+                result["workspace_cas"] = True
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Failed loading workspace_id for root workspace.list: {e}")
         return result
 
     async def handle_workspace_read(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1665,8 +1695,7 @@ class RequestHandlers:
                 "cas": True,
             }
 
-        async with self._workspace_path_lock(real_path):
-            return await asyncio.to_thread(_write)
+        return await self._run_workspace_mutation_locked(real_path, _write)
 
     async def handle_workspace_mkdir(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
         """`workspace.mkdir{path}` -> create a jailed directory (parents included, idempotent)."""
@@ -1717,8 +1746,7 @@ class RequestHandlers:
                 os.unlink(real_path)
             return {"path": rel_path, "deleted": True}
 
-        async with self._workspace_path_lock(real_path):
-            return await asyncio.to_thread(_delete)
+        return await self._run_workspace_mutation_locked(real_path, _delete)
 
     async def handle_workspace_download(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
         """`workspace.download{path}` -> `{path, name, size, mime_type, base64}` (≤ 15 MiB).

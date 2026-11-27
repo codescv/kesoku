@@ -1311,6 +1311,80 @@ async def test_workspace_concurrent_cas_and_path_lock_serialization(env, monkeyp
     assert handlers._workspace_locks == {}
 
 
+async def test_workspace_list_survives_workspace_id_db_error(env, monkeypatch) -> None:
+    tmp = env["tmp"]
+    (tmp / "README.md").write_text("hi", encoding="utf-8")
+    handlers = env["bot"].requests
+    handlers._workspace_id = None
+
+    def boom() -> str:
+        raise RuntimeError("sqlite locked")
+
+    monkeypatch.setattr(env["bot"].sync_db, "get_or_create_workspace_id", boom)
+    res = await rpc(env, "workspace.list", {})
+    assert res["type"] == "workspace.list.result"
+    payload = res["payload"]
+    assert any(e["name"] == "README.md" for e in payload["entries"])
+    assert "workspace_id" not in payload
+    assert "workspace_cas" not in payload
+
+
+async def test_workspace_path_lock_held_until_cancelled_thread_finishes(env, monkeypatch) -> None:
+    import threading
+
+    tmp = env["tmp"]
+    handlers = env["bot"].requests
+    (tmp / "cancel.txt").write_text("v0", encoding="utf-8")
+
+    entered = threading.Event()
+    release = threading.Event()
+    overlap = False
+    in_flight = False
+    state_lock = threading.Lock()
+    real_replace = os.replace
+
+    def slow_replace(src: str, dst: str) -> None:
+        nonlocal overlap, in_flight
+        if dst.endswith("cancel.txt"):
+            with state_lock:
+                if in_flight:
+                    overlap = True
+                in_flight = True
+            entered.set()
+            try:
+                release.wait(timeout=2.0)
+                real_replace(src, dst)
+            finally:
+                with state_lock:
+                    in_flight = False
+        else:
+            real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", slow_replace)
+
+    ctx = commands_mod.RequestContext(device_id="dev1", request_id="req1", request_type="workspace.write")
+    t1 = asyncio.create_task(handlers.handle_workspace_write(ctx, {"path": "cancel.txt", "content": "v1"}))
+    await asyncio.to_thread(entered.wait, 2.0)
+    assert entered.is_set()
+
+    # Cancel t1 while its worker thread is still inside os.replace; start a second write on the same path.
+    t1.cancel()
+    t2 = asyncio.create_task(handlers.handle_workspace_write(ctx, {"path": "cancel.txt", "content": "v2"}))
+    await asyncio.sleep(0.05)
+    # Lock must still be held (t2 cannot finish while t1's thread is blocked).
+    assert not t2.done()
+    assert not overlap
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await t1
+    r2 = await t2
+    assert r2["cas"] is True
+    assert not overlap
+    assert (tmp / "cancel.txt").read_text(encoding="utf-8") == "v2"
+    assert handlers._workspace_locks == {}
+
+
 async def test_mode_stop_triggers_mode_exit_extraction(env, monkeypatch) -> None:
     bot = env["bot"]
     calls: list[tuple[str, str]] = []
