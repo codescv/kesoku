@@ -1326,6 +1326,8 @@ class RequestHandlers:
                 raise ProtocolError(
                     "BAD_REQUEST", f"'transform_prompt' must be a string (≤ {ROSTER_PROMPT_MAX_CHARS} chars)"
                 )
+            if not raw_tf.strip():
+                raise ProtocolError("BAD_REQUEST", "'transform_prompt' must not be empty")
             transform_prompt_val = raw_tf
 
         fusion_val: bool | None = None
@@ -1415,12 +1417,24 @@ class RequestHandlers:
                 if prompt_val is not None:
                     clean_prompt = prompt_val.strip()
                     base["prompt"] = clean_prompt
+                    outfit = str(card.get("outfit") or "").strip()
+                    if outfit and clean_prompt != outfit and not clean_prompt.endswith("，" + outfit):
+                        card.pop("outfit", None)
                     if not is_transformed:
                         card["prompt"] = clean_prompt
 
                 if transform_prompt_val is not None and is_transformed and isinstance(tf, dict):
                     clean_tf = transform_prompt_val.strip()
-                    tf["prompt"] = clean_tf
+                    effective_ref = (
+                        resolved_ref
+                        if resolved_ref is not None
+                        else str(tf.get("ref") or base.get("ref") or card.get("ref") or "")
+                    )
+                    card["transformed_appearance"] = {
+                        "prompt": clean_tf,
+                        "ref": effective_ref,
+                        "rendered": True,
+                    }
                     card["prompt"] = clean_tf
 
                 if fusion_val is not None:
@@ -2294,10 +2308,17 @@ def _render_roster_markdown(members: dict[str, Any]) -> str:
         form = "🔮已变身" if is_tf else "基础形态"
         base_prompt = str(base_obj.get("prompt") or ("" if is_tf else m.get("prompt") or "")).strip()
         if is_tf and tf_obj is not None:
-            active_prompt = str(tf_obj.get("prompt") if "prompt" in tf_obj else m.get("prompt") or "").strip()
+            active_prompt = str(m.get("prompt") or tf_obj.get("prompt") or "").strip()
         else:
             active_prompt = str(m.get("prompt") if "prompt" in m else base_prompt).strip()
-        prompt_str = _escape_roster_cell(_clip_one_line(active_prompt, ROSTER_MD_PROMPT_CELL_CHARS) or "-")
+        tf_suffix = next((sfx for sfx in ("（生图用 ", "（保留 ") if sfx in active_prompt), "")
+        if is_tf and tf_suffix and active_prompt.endswith("）"):
+            head_tf, sep_tf, tail_tf = active_prompt.rpartition(tf_suffix)
+            keep_suffix = f"{sep_tf}{tail_tf}"
+            clipped_head = _clip_one_line(head_tf, max(40, ROSTER_MD_PROMPT_CELL_CHARS - len(keep_suffix)))
+            prompt_str = _escape_roster_cell(f"{clipped_head}{keep_suffix}")
+        else:
+            prompt_str = _escape_roster_cell(_clip_one_line(active_prompt, ROSTER_MD_PROMPT_CELL_CHARS) or "-")
         base_str = (
             _escape_roster_cell(_clip_one_line(base_prompt, ROSTER_MD_BASE_CELL_CHARS) or "-")
             if is_tf

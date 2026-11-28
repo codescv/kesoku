@@ -3006,10 +3006,81 @@ async def test_character_list_and_roster_update(env) -> None:
     fox = upd_tf["payload"]["member"]
     assert fox["ref"] == "Custom Unregistered Ref"
     assert fox["base_appearance"] == {"prompt": "updated human base", "ref": "Custom Unregistered Ref"}
-    assert fox["transformed_appearance"] == {"prompt": "fluffy white fox", "ref": "Custom Unregistered Ref"}
+    assert fox["transformed_appearance"] == {
+        "prompt": "fluffy white fox",
+        "ref": "Custom Unregistered Ref",
+        "rendered": True,
+    }
     assert fox["prompt"] == "fluffy white fox"
     roster_md_tf = (staging / "context" / "60-roster.md").read_text(encoding="utf-8")
     assert "| Fox | Custom Unregistered Ref | 🔮已变身 | fluffy white fox | updated human base |" in roster_md_tf
+
+    # Regression: stale outfit is cleared when prompt changes; preserved when suffix still matches;
+    # registered-form metadata is dropped on transform_prompt edit, empty transform_prompt rejected,
+    # and another member's rendered directive in `prompt` is preserved in `60-roster.md`.
+    roster_reg = {
+        "members": {
+            "Styled": {
+                "name": "Styled",
+                "outfit": "red cloak",
+                "prompt": "tall figure，red cloak",
+                "base_appearance": {"prompt": "tall figure，red cloak", "ref": ""},
+            },
+            "RegForm": {
+                "name": "RegForm",
+                "form_state": "transformed",
+                "ref": "OldRef",
+                "prompt": "【形态：星辰】（生图用 OldRef 设计图）",
+                "base_appearance": {"prompt": "normal look", "ref": "OldRef"},
+                "transformed_appearance": {
+                    "prompt": "星辰",
+                    "ref": "OldRef",
+                    "form_key": "star",
+                    "form_ref": "design",
+                    "form_extra": "extra",
+                    "aliases": ["st"],
+                },
+            },
+            "OtherTf": {
+                "name": "OtherTf",
+                "form_state": "transformed",
+                "ref": "KeepRef",
+                "prompt": "【变形术：白猫】（保留 KeepRef 五官）",
+                "base_appearance": {"prompt": "human", "ref": "KeepRef"},
+                "transformed_appearance": {"prompt": "白猫", "ref": "KeepRef"},
+            },
+        }
+    }
+    roster_path.write_text(json.dumps(roster_reg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # Editing Styled with matching outfit suffix preserves outfit; changing it clears stale outfit.
+    keep_out = await rpc(env, "roster.update", {"session_id": sid, "key": "Styled", "prompt": "short hair，red cloak"})
+    assert keep_out["payload"]["member"]["outfit"] == "red cloak"
+    drop_out = await rpc(env, "roster.update", {"session_id": sid, "key": "Styled", "prompt": "blue armor"})
+    assert "outfit" not in drop_out["payload"]["member"]
+
+    # OtherTf's directive in `m["prompt"]` is preserved in 60-roster.md when another member is edited.
+    md_keep = (staging / "context" / "60-roster.md").read_text(encoding="utf-8")
+    assert "【变形术：白猫】（保留 KeepRef 五官）" in md_keep
+
+    # Empty/whitespace transform_prompt is rejected.
+    empty_tf = await rpc(env, "roster.update", {"session_id": sid, "key": "RegForm", "transform_prompt": "   "})
+    assert empty_tf["type"] == "error" and empty_tf["payload"]["code"] == "BAD_REQUEST"
+
+    # Editing transform_prompt on registered form marks rendered=True and drops stale form_* metadata.
+    edit_reg = await rpc(
+        env,
+        "roster.update",
+        {"session_id": sid, "key": "RegForm", "transform_prompt": "custom glowing phoenix"},
+    )
+    assert edit_reg["type"] == "roster.update.result"
+    reg_mem = edit_reg["payload"]["member"]
+    assert reg_mem["prompt"] == "custom glowing phoenix"
+    assert reg_mem["transformed_appearance"] == {
+        "prompt": "custom glowing phoenix",
+        "ref": "OldRef",
+        "rendered": True,
+    }
 
     # 3. Verify exclusive flock on <staging>/game/.gm.lock blocks concurrent update until released.
     lock_path = staging / "game" / ".gm.lock"
@@ -3019,7 +3090,7 @@ async def test_character_list_and_roster_update(env) -> None:
     released = threading.Event()
     try:
         task = asyncio.create_task(
-            rpc(env, "roster.update", {"session_id": sid, "key": "Lead", "prompt": "after lock"})
+            rpc(env, "roster.update", {"session_id": sid, "key": "Styled", "prompt": "after lock"})
         )
         await asyncio.sleep(0.05)
         assert not task.done(), "roster.update must wait while .gm.lock is exclusively locked"
@@ -3069,3 +3140,31 @@ async def test_character_list_and_roster_update(env) -> None:
     os.symlink(outside_roster, roster_path)
     sym_err = await rpc(env, "roster.update", {"session_id": sid, "key": "Char00", "ref": "x"})
     assert sym_err["type"] == "error" and sym_err["payload"]["code"] == "NOT_FOUND"
+
+
+def test_set_app_mode_defaults_preserves_begin_immediate_error(tmp_path) -> None:
+    import sqlite3
+
+    db = DatabaseManager(str(tmp_path / "lock_test.db"))
+    db.init_tables()
+
+    class _FailingConn:
+        in_transaction = False
+        isolation_level: str | None = ""
+
+        def execute(self, sql: str, params: Any = ()) -> Any:
+            if sql == "BEGIN IMMEDIATE":
+                raise sqlite3.OperationalError("database is locked")
+            if sql == "ROLLBACK":
+                raise AssertionError("ROLLBACK must not be called when no transaction is active")
+            return None
+
+    class _Provider:
+        def connection(self) -> Any:
+            import contextlib
+
+            return contextlib.nullcontext(_FailingConn())
+
+    db.connection_provider = _Provider()  # type: ignore[assignment]
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        db.set_app_mode_defaults_for("quiz", {"level": "hard"})
