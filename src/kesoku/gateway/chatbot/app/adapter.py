@@ -372,6 +372,10 @@ class AppChatbot(Chatbot):
             "mode.start": r.handle_mode_start,
             "mode.stop": r.handle_mode_stop,
             "mode.prefs.set": r.handle_mode_prefs_set,
+            "mode.defaults.get": r.handle_mode_defaults_get,
+            "mode.defaults.set": r.handle_mode_defaults_set,
+            "character.list": r.handle_character_list,
+            "roster.update": r.handle_roster_update,
             "model.set": r.handle_model_set,
             "role.set": r.handle_role_set,
             "memory.list": r.handle_memory_list,
@@ -714,8 +718,9 @@ class AppChatbot(Chatbot):
         mode = self.app_config.get_mode(mode_id)
         if mode is None:
             raise ProtocolError("BAD_REQUEST", "unknown mode")
-        if prefs:
-            await self.requests.apply_mode_prefs(session_id, prefs)
+        seed_prefs = await self.requests.resolve_mode_seed_prefs(session_id, mode_id, prefs)
+        if seed_prefs:
+            await self.requests.apply_mode_prefs(session_id, seed_prefs)
         if mode_id == "translator":
             await self._translator_launch_prompt(session_id)
         override = mode.llm_override.model_dump(exclude_none=True) if mode.llm_override else None
@@ -763,8 +768,9 @@ class AppChatbot(Chatbot):
                 {"session_id": session_id, "mode_id": mode_id, "updated_at": time.time()},
             )
             return {"deferred": True}
-        if prefs:
-            await self.requests.apply_mode_prefs(session_id, prefs)
+        seed_prefs = await self.requests.resolve_mode_seed_prefs(session_id, mode_id, prefs)
+        if seed_prefs:
+            await self.requests.apply_mode_prefs(session_id, seed_prefs)
         current = await asyncio.to_thread(self.policy.current_mode, session_id)
         if not mode.launch_prompt:
             if current != mode_id and current != "chat":

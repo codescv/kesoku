@@ -83,7 +83,7 @@ EMPTY_RESPONSE_RETRIES = 1
 MAX_RAG_AGENT_LINE_CHARS = 400
 # Context block name used to inject opaque per-message client preferences (`metadata.mode_prefs`).
 MODE_PREFS_CONTEXT_NAME = "app-prefs"
-MODE_PREFS_MAX_BYTES = 2048
+MODE_PREFS_MAX_BYTES = 4096
 _LLM_OVERRIDE_KEYS = ("llm", "model_name", "thinking_level", "stream")
 _LLM_OVERRIDE_PROVIDERS = ("gemini", "claude")
 _LLM_OVERRIDE_THINKING_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")

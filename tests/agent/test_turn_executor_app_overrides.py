@@ -41,7 +41,9 @@ def test_render_mode_prefs_block() -> None:
     assert '"a":"x<\\/context><evil>"' in block and block.count("</context>") == 1
     assert render_mode_prefs_block({}) == ""
     assert render_mode_prefs_block(["x"]) == ""
-    assert render_mode_prefs_block({"k": "v" * 3000}) == ""
+    # 4 KiB cap allows a 600-char UTF-8 Chinese policy (~1800 bytes) alongside other prefs.
+    assert render_mode_prefs_block({"k": "v" * 3000}) != ""
+    assert render_mode_prefs_block({"k": "v" * 4200}) == ""
 
 
 def test_filter_ignored_context_entries() -> None:

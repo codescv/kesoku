@@ -183,6 +183,11 @@ def test_protocol_envelope_and_binary_frames() -> None:
     assert reply_type_for("session.open") == "session.snapshot"
     assert reply_type_for("message.send") == "message.ack"
     assert reply_type_for("memory.policy.list") == "memory.policy.list.result"
+    assert reply_type_for("mode.defaults.get") == "mode.defaults.get.result"
+    assert reply_type_for("mode.defaults.set") == "mode.defaults.set.result"
+    assert reply_type_for("character.list") == "character.list.result"
+    assert reply_type_for("roster.update") == "roster.update.result"
+    assert LIMITS["MODE_PREFS_MAX_BYTES"] == 4096
 
 
 def test_stream_interval_registration(env) -> None:
@@ -2671,3 +2676,396 @@ async def test_session_list_ordered_by_updated_at_after_final_and_cross_channel_
     listed_all = (await rpc(env, "session.list", {"all_channels": True}))["payload"]["sessions"]
     assert listed_all[0]["session_id"] == cross.id
     assert listed_all[0]["updated_at"] > 300.0
+
+
+# ---------------------------------------------------------------------------------- hydrate, mode defaults & roster
+
+
+async def test_character_hydrate_prefers_avatar_and_awd_relative_paths(env) -> None:
+    tmp = env["tmp"]
+    sid = await create_session(env)
+    (tmp / "secret.png").write_bytes(b"SECRET")
+
+    # Malformed subdir must not break valid subdirs.
+    bad_dir = tmp / "characters" / "00_broken"
+    bad_dir.mkdir(parents=True, exist_ok=True)
+    (bad_dir / "characters.json").write_text("{broken json", encoding="utf-8")
+
+    group_dir = tmp / "characters" / "01_cast"
+    group_dir.mkdir(parents=True, exist_ok=True)
+    (group_dir / "hero_avatar.jpg").write_bytes(b"AVATAR_BYTES")
+    (group_dir / "hero_full.png").write_bytes(b"FULL_IMAGE_BYTES")
+    (group_dir / "legacy.png").write_bytes(b"LEGACY_SUBDIR_BYTES")
+    os.symlink(tmp / "secret.png", group_dir / "escape.png")
+
+    (group_dir / "characters.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "Heroine Alpha",
+                    "trigger": "Alpha Trigger",
+                    "aliases": ["Alpha"],
+                    "avatar": "characters/01_cast/hero_avatar.jpg",
+                    "image": "characters/01_cast/hero_full.png",
+                },
+                {
+                    "name": "Legacy Hero",
+                    "avatar": "characters/01_cast/missing.jpg",
+                    "image": "legacy.png",
+                },
+                {
+                    "name": "Evil Traversal",
+                    "avatar": "../../secret.png",
+                    "image": "escape.png",
+                },
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    # 1. Prefers `avatar` resolved against `$AWD` first.
+    res_avatar = await rpc(env, "media.hydrate", {"session_id": sid, "ref": "Alpha"})
+    assert res_avatar["type"] == "media.ready"
+    obj_avatar = res_avatar["payload"]["object"]
+    assert env["link"].objects[obj_avatar]["data"] == b"AVATAR_BYTES"
+
+    # 2. Falls back to `image` resolved against `characters/<sub>` when `avatar` is missing.
+    res_legacy = await rpc(env, "media.hydrate", {"session_id": sid, "ref": "Legacy Hero"})
+    assert res_legacy["type"] == "media.ready"
+    obj_legacy = res_legacy["payload"]["object"]
+    assert env["link"].objects[obj_legacy]["data"] == b"LEGACY_SUBDIR_BYTES"
+
+    # 3. Path traversal and escaping symlinks are rejected.
+    res_evil = await rpc(env, "media.hydrate", {"session_id": sid, "ref": "Evil Traversal"})
+    assert res_evil["type"] == "error" and res_evil["payload"]["code"] == "NOT_FOUND"
+
+
+async def test_prefs_schema_text_rule_and_4kib_cap(env) -> None:
+    sid = await create_session(env)
+    env["bot"].app_config.modes.append(
+        AppModeConfig(
+            id="theater",
+            title="Theater",
+            launch_prompt="start theater",
+            prefs_schema={"policy": "text", "short_tag": "string", "extra_a": "text", "extra_b": "text"},
+        )
+    )
+
+    # 600 Chinese chars = 1800 UTF-8 bytes fits cleanly under "text" and 4 KiB cap.
+    cn_600 = "角" * 600
+    ok = await rpc(env, "mode.prefs.set", {"session_id": sid, "prefs": {"policy": cn_600, "short_tag": "x" * 200}})
+    assert ok["type"] == "mode.prefs.set.result"
+    assert ok["payload"]["prefs"]["policy"] == cn_600
+
+    # "text" rejects >600 chars, non-string, and NUL bytes.
+    for bad in ("角" * 601, 123, "ok\x00bad"):
+        err = await rpc(env, "mode.prefs.set", {"session_id": sid, "prefs": {"policy": bad}})
+        assert err["type"] == "error" and err["payload"]["code"] == "BAD_REQUEST", bad
+
+    # "string" stays capped at 200 chars.
+    err_str = await rpc(env, "mode.prefs.set", {"session_id": sid, "prefs": {"short_tag": "x" * 201}})
+    assert err_str["type"] == "error" and err_str["payload"]["code"] == "BAD_REQUEST"
+
+    # Combined prefs exceeding 4096 UTF-8 bytes are rejected (3 * 600 * 3 = 5400 bytes > 4096).
+    err_cap = await rpc(
+        env,
+        "mode.prefs.set",
+        {"session_id": sid, "prefs": {"policy": "角" * 600, "extra_a": "角" * 600, "extra_b": "角" * 600}},
+    )
+    assert err_cap["type"] == "error" and err_cap["payload"]["code"] == "BAD_REQUEST"
+
+
+async def test_mode_defaults_crud_and_autoseed(env, monkeypatch) -> None:
+    bot, gw = env["bot"], env["gw"]
+    bot.app_config.modes.append(
+        AppModeConfig(
+            id="theater",
+            title="Theater",
+            launch_prompt="start theater",
+            prefs_schema={"casting_policy": "text", "tone": ["light", "dark"]},
+        )
+    )
+
+    # Empty initially.
+    init_all = await rpc(env, "mode.defaults.get", {})
+    assert init_all["type"] == "mode.defaults.get.result"
+    assert init_all["payload"] == {"defaults": {}}
+    init_one = await rpc(env, "mode.defaults.get", {"mode_id": "theater"})
+    assert init_one["payload"] == {"defaults": {}}
+
+    # Validation errors on set / get.
+    assert (await rpc(env, "mode.defaults.set", {"mode_id": "unknown", "prefs": {"tone": "light"}}))["payload"][
+        "code"
+    ] == "BAD_REQUEST"
+    assert (await rpc(env, "mode.defaults.set", {"mode_id": "theater", "prefs": "bad"}))["payload"][
+        "code"
+    ] == "BAD_REQUEST"
+    assert (await rpc(env, "mode.defaults.set", {"mode_id": "theater", "prefs": {"tone": "invalid"}}))["payload"][
+        "code"
+    ] == "BAD_REQUEST"
+    assert (await rpc(env, "mode.defaults.set", {"mode_id": "theater", "prefs": {"level": "hard"}}))["payload"][
+        "code"
+    ] == "BAD_REQUEST"
+    assert (await rpc(env, "mode.defaults.get", {"mode_id": "../bad"}))["payload"]["code"] == "BAD_REQUEST"
+
+    # Set defaults for two modes and query both filtered and unfiltered.
+    set_t = await rpc(
+        env,
+        "mode.defaults.set",
+        {"mode_id": "theater", "prefs": {"casting_policy": "ask_all", "tone": "dark"}},
+    )
+    assert set_t["type"] == "mode.defaults.set.result"
+    assert set_t["payload"] == {"mode_id": "theater", "prefs": {"casting_policy": "ask_all", "tone": "dark"}}
+    await rpc(env, "mode.defaults.set", {"mode_id": "quiz", "prefs": {"level": "hard"}})
+
+    got_all = (await rpc(env, "mode.defaults.get", {}))["payload"]["defaults"]
+    assert got_all == {"theater": {"casting_policy": "ask_all", "tone": "dark"}, "quiz": {"level": "hard"}}
+    got_t = (await rpc(env, "mode.defaults.get", {"mode_id": "theater"}))["payload"]["defaults"]
+    assert got_t == {"theater": {"casting_policy": "ask_all", "tone": "dark"}}
+
+    # Merge + None deletion.
+    merged_t = await rpc(env, "mode.defaults.set", {"mode_id": "theater", "prefs": {"tone": None}})
+    assert merged_t["payload"] == {"mode_id": "theater", "prefs": {"casting_policy": "ask_all"}}
+
+    # 1. Auto-seed on session.create (deferred mode, default).
+    create_reply = await rpc(env, "session.create", {"mode": "theater"})
+    assert create_reply["type"] == "session.snapshot"
+    sid_defer = create_reply["payload"]["session_id"]
+    assert create_reply["payload"]["mode_prefs"] == {"casting_policy": "ask_all"}
+    prefs_md = (env["tmp"] / "sessions" / sid_defer / "context" / "05-app-prefs.md").read_text(encoding="utf-8")
+    assert "`casting_policy`: ask_all" in prefs_md
+
+    # 2. Explicit prefs on session.create override stored defaults while preserving other default keys.
+    await rpc(env, "mode.defaults.set", {"mode_id": "theater", "prefs": {"tone": "dark"}})
+    create_override = await rpc(env, "session.create", {"mode": "theater", "prefs": {"tone": "light"}})
+    assert create_override["payload"]["mode_prefs"] == {"casting_policy": "ask_all", "tone": "light"}
+
+    # 3. Auto-seed on mode.start (both immediate and deferred) without clobbering existing session prefs.
+    posted: list[Message] = []
+    orig_post = gw.post
+
+    async def capture(msg: Message) -> Message:
+        posted.append(msg)
+        return await orig_post(msg)
+
+    monkeypatch.setattr(gw, "post", capture)
+
+    sid_start = await create_session(env)
+    await rpc(env, "mode.start", {"session_id": sid_start, "mode_id": "theater", "defer": False})
+    assert posted[-1].metadata["mode_prefs"] == {"casting_policy": "ask_all", "tone": "dark"}
+    assert "`casting_policy`: ask_all" in (
+        env["tmp"] / "sessions" / sid_start / "context" / "05-app-prefs.md"
+    ).read_text(encoding="utf-8")
+
+    # Deferred mode.start on an existing session with custom `tone` preserves `tone` and fills missing `casting_policy`.
+    sid_partial = await create_session(env)
+    await rpc(env, "mode.prefs.set", {"session_id": sid_partial, "prefs": {"tone": "light"}})
+    await rpc(env, "mode.start", {"session_id": sid_partial, "mode_id": "theater", "defer": True})
+    assert bot.sync_db.get_app_session_prefs(sid_partial)["mode_prefs"] == {
+        "casting_policy": "ask_all",
+        "tone": "light",
+    }
+
+
+async def test_character_list_and_roster_update(env) -> None:
+    import fcntl
+    import threading
+
+    tmp = env["tmp"]
+    (tmp / "outside.png").write_bytes(b"OUTSIDE")
+
+    # Set up character registry with two groups, avatar/image priority, and security traps.
+    g_b = tmp / "characters" / "group_b"
+    g_b.mkdir(parents=True, exist_ok=True)
+    (g_b / "beta_img.png").write_bytes(b"BETA")
+    (g_b / "characters.json").write_text(
+        json.dumps(
+            [
+                {"name": "Scout Beta", "aliases": ["Beta"], "image": "beta_img.png"},
+                {"name": "No Asset", "trigger": "NoAssetRef", "group": "custom_group", "avatar": "../../outside.png"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    g_a = tmp / "characters" / "group_a"
+    g_a.mkdir(parents=True, exist_ok=True)
+    (g_a / "alpha_av.jpg").write_bytes(b"ALPHA_AV")
+    (g_a / "alpha_img.png").write_bytes(b"ALPHA_IMG")
+    (g_a / "characters.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "Heroine Alpha",
+                    "trigger": "Alpha Canonical",
+                    "aliases": ["Alpha", "主角A"],
+                    "group": "A-Team",
+                    "avatar": "characters/group_a/alpha_av.jpg",
+                    "image": "characters/group_a/alpha_img.png",
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    # 1. character.list deterministic & jailed.
+    listed = await rpc(env, "character.list", {})
+    assert listed["type"] == "character.list.result"
+    chars = listed["payload"]["characters"]
+    assert [c["name"] for c in chars] == ["Heroine Alpha", "No Asset", "Scout Beta"]
+    assert chars[0] == {
+        "name": "Heroine Alpha",
+        "ref": "Alpha Canonical",
+        "aliases": ["Alpha", "主角A"],
+        "group": "A-Team",
+        "avatar": "characters/group_a/alpha_av.jpg",
+    }
+    assert chars[1]["avatar"] == "" and chars[1]["group"] == "custom_group" and chars[1]["ref"] == "NoAssetRef"
+    assert chars[2]["avatar"] == "characters/group_b/beta_img.png" and chars[2]["group"] == "group_b"
+
+    # 2. roster.update on base & transformed members + 60-roster.md sync + state.sync.
+    sid = await create_session(env)
+    staging = tmp / "sessions" / sid
+    (staging / "game").mkdir(parents=True, exist_ok=True)
+
+    # Missing roster.json -> NOT_FOUND.
+    missing_file = await rpc(env, "roster.update", {"session_id": sid, "key": "Lead", "ref": "Alpha"})
+    assert missing_file["type"] == "error" and missing_file["payload"]["code"] == "NOT_FOUND"
+
+    roster_data = {
+        "members": {
+            "Lead": {"name": "Lead", "prompt": "old look", "ref": ""},
+            "Fox": {
+                "name": "Fox",
+                "form_state": "transformed",
+                "ref": "OldRef",
+                "prompt": "old fox form",
+                "base_appearance": {"prompt": "human base", "ref": "OldRef"},
+                "transformed_appearance": {"prompt": "old fox form", "ref": "OldRef"},
+            },
+        }
+    }
+    roster_path = staging / "game" / "roster.json"
+    roster_path.write_text(json.dumps(roster_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # Update base member: resolves alias -> canonical trigger, escapes pipe/newlines in 60-roster.md, sets fusion.
+    upd = await rpc(
+        env,
+        "roster.update",
+        {
+            "session_id": sid,
+            "key": "Lead",
+            "ref": "alpha",
+            "prompt": "silver coat | scarf\nwarm smile",
+            "fusion": True,
+        },
+    )
+    assert upd["type"] == "roster.update.result"
+    member = upd["payload"]["member"]
+    assert member["ref"] == "Alpha Canonical"
+    assert member["base_appearance"] == {"prompt": "silver coat | scarf\nwarm smile", "ref": "Alpha Canonical"}
+    assert member["prompt"] == "silver coat | scarf\nwarm smile"
+    assert member["fusion"] is True
+
+    roster_md = (staging / "context" / "60-roster.md").read_text(encoding="utf-8")
+    assert "# 登场角色与形象设定 (Roster)" in roster_md
+    assert "| 角色名称 (Name) | 参考图绑定 (Ref) | 形态 | 当前形象与设定 Prompt | 基础外表 |" in roster_md
+    assert r"silver coat \| scarf warm smile" in roster_md
+    assert len(roster_md.splitlines()) <= 40
+
+    # state.sync emitted immediately with updated roster.json and 60-roster.md.
+    syncs = [e for e in env["link"].of_type("state.sync") if e["session_id"] == sid]
+    assert syncs and syncs[-1]["payload"]["files"]["game/roster.json"]["members"]["Lead"]["ref"] == "Alpha Canonical"
+    assert "context/60-roster.md" in syncs[-1]["payload"]["files"]
+
+    # Clear ref + unset fusion.
+    cleared = await rpc(env, "roster.update", {"session_id": sid, "key": "Lead", "ref": "  ", "fusion": False})
+    assert cleared["payload"]["member"]["ref"] == ""
+    assert cleared["payload"]["member"]["base_appearance"]["ref"] == ""
+    assert "fusion" not in cleared["payload"]["member"]
+
+    # Non-transformed member with only transform_prompt -> BAD_REQUEST.
+    bad_tf = await rpc(env, "roster.update", {"session_id": sid, "key": "Lead", "transform_prompt": "cat form"})
+    assert bad_tf["type"] == "error" and bad_tf["payload"]["code"] == "BAD_REQUEST"
+
+    # Transformed member: update ref, base prompt, and transform_prompt.
+    upd_tf = await rpc(
+        env,
+        "roster.update",
+        {
+            "session_id": sid,
+            "key": "Fox",
+            "ref": "Custom Unregistered Ref",
+            "prompt": "updated human base",
+            "transform_prompt": "fluffy white fox",
+        },
+    )
+    assert upd_tf["type"] == "roster.update.result"
+    fox = upd_tf["payload"]["member"]
+    assert fox["ref"] == "Custom Unregistered Ref"
+    assert fox["base_appearance"] == {"prompt": "updated human base", "ref": "Custom Unregistered Ref"}
+    assert fox["transformed_appearance"] == {"prompt": "fluffy white fox", "ref": "Custom Unregistered Ref"}
+    assert fox["prompt"] == "fluffy white fox"
+    roster_md_tf = (staging / "context" / "60-roster.md").read_text(encoding="utf-8")
+    assert "| Fox | Custom Unregistered Ref | 🔮已变身 | fluffy white fox | updated human base |" in roster_md_tf
+
+    # 3. Verify exclusive flock on <staging>/game/.gm.lock blocks concurrent update until released.
+    lock_path = staging / "game" / ".gm.lock"
+    assert lock_path.is_file()
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    released = threading.Event()
+    try:
+        task = asyncio.create_task(
+            rpc(env, "roster.update", {"session_id": sid, "key": "Lead", "prompt": "after lock"})
+        )
+        await asyncio.sleep(0.05)
+        assert not task.done(), "roster.update must wait while .gm.lock is exclusively locked"
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        released.set()
+        res_locked = await asyncio.wait_for(task, timeout=2.0)
+        assert res_locked["type"] == "roster.update.result"
+        assert res_locked["payload"]["member"]["prompt"] == "after lock"
+    finally:
+        if not released.is_set():
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+    # 4. Large roster (>40 members) stays <= 40 lines with omitted footer.
+    big_members = {f"Char{i:02d}": {"name": f"Char{i:02d}", "ref": f"Ref{i:02d}", "prompt": "look"} for i in range(45)}
+    roster_path.write_text(json.dumps({"members": big_members}), encoding="utf-8")
+    big_res = await rpc(env, "roster.update", {"session_id": sid, "key": "Char00", "prompt": "updated"})
+    assert big_res["type"] == "roster.update.result"
+    big_md = (staging / "context" / "60-roster.md").read_text(encoding="utf-8")
+    assert len(big_md.splitlines()) <= 40
+    assert "未列出" in big_md
+
+    # 5. Security & input validation edge cases.
+    for bad_payload in (
+        {"session_id": sid, "key": "Char00"},
+        {"session_id": sid, "key": "", "ref": "x"},
+        {"session_id": sid, "key": "k" * 121, "ref": "x"},
+        {"session_id": sid, "key": "bad\x00key", "ref": "x"},
+        {"session_id": sid, "key": "Char00", "ref": "r" * 161},
+        {"session_id": sid, "key": "Char00", "ref": "a\x00b"},
+        {"session_id": sid, "key": "Char00", "prompt": "p" * 2001},
+        {"session_id": sid, "key": "Char00", "prompt": "a\x00b"},
+        {"session_id": sid, "key": "Char00", "transform_prompt": "t" * 2001},
+        {"session_id": sid, "key": "Char00", "transform_prompt": "a\x00b"},
+        {"session_id": sid, "key": "Char00", "fusion": "yes"},
+    ):
+        err = await rpc(env, "roster.update", bad_payload)
+        assert err["type"] == "error" and err["payload"]["code"] == "BAD_REQUEST", bad_payload
+
+    not_found_key = await rpc(env, "roster.update", {"session_id": sid, "key": "NoSuchChar", "ref": "x"})
+    assert not_found_key["type"] == "error" and not_found_key["payload"]["code"] == "NOT_FOUND"
+
+    # Symlinked roster.json escaping staging is refused.
+    outside_roster = tmp / "outside_roster.json"
+    outside_roster.write_text(json.dumps({"members": {"Char00": {"name": "Char00"}}}), encoding="utf-8")
+    roster_path.unlink()
+    os.symlink(outside_roster, roster_path)
+    sym_err = await rpc(env, "roster.update", {"session_id": sid, "key": "Char00", "ref": "x"})
+    assert sym_err["type"] == "error" and sym_err["payload"]["code"] == "NOT_FOUND"

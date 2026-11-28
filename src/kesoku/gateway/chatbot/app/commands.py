@@ -11,6 +11,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import fcntl
 import hashlib
 import json
 import mimetypes
@@ -21,7 +22,7 @@ import tempfile
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -46,6 +47,7 @@ from kesoku.gateway.chatbot.app.proposals import proposal_for_wire
 from kesoku.gateway.chatbot.app.protocol import (
     AVATAR_REF_RE,
     LIMITS,
+    MODE_ID_RE,
     ROLE_ID_RE,
     ProtocolError,
     bounded_int,
@@ -82,6 +84,16 @@ LEX_FIELDS = ("surface", "reading", "pos", "gloss_zh", "lemma", "conj", "textboo
 PKMN_ART_REL = os.path.join("games", "pokemon_assistant", "data", "art")
 PREFS_LIST_MAX_ITEMS = 16
 PREFS_LIST_ITEM_MAX_CHARS = 40
+PREFS_TEXT_MAX_CHARS = 600
+ROSTER_KEY_MAX_CHARS = 120
+ROSTER_REF_MAX_CHARS = 160
+ROSTER_PROMPT_MAX_CHARS = 2000
+ROSTER_JSON_MAX_BYTES = 1024 * 1024
+CHARACTERS_JSON_MAX_BYTES = 4 * 1024 * 1024
+ROSTER_MD_MAX_LINES = 40
+ROSTER_MD_MAX_CHARS = 5500
+ROSTER_MD_PROMPT_CELL_CHARS = 200
+ROSTER_MD_BASE_CELL_CHARS = 80
 TRANSLATOR_PREFS_KEYS = ("native_lang", "foreign_langs", "src_lang", "dst_lang", "formality")
 WORKSPACE_LIST_MAX = 500
 WORKSPACE_TEXT_MAX_BYTES = 256 * 1024
@@ -164,6 +176,7 @@ class RequestHandlers:
         self._hydrate_inflight: dict[tuple[str, int, int], asyncio.Task[dict[str, Any]]] = {}
         # Per-canonical-path ref-counted locks serializing workspace writes/deletes.
         self._workspace_locks: dict[str, tuple[asyncio.Lock, int]] = {}
+        self._mode_defaults_lock = asyncio.Lock()
         self._workspace_id: str | None = None
 
     # ------------------------------------------------------------------ helpers
@@ -384,7 +397,7 @@ class RequestHandlers:
         if prefs is not None and not isinstance(prefs, dict):
             raise ProtocolError("BAD_REQUEST", "prefs must be an object")
         if prefs:
-            self._merge_prefs("", {}, prefs)  # validate before creating anything
+            self._merge_prefs("", {}, prefs, mode_id=mode_id)  # validate before creating anything
         session_id = uuid.uuid4().hex[:8]
         channel_id = self.app.channel_for(session_id)
         await self.app.gateway.db.set_channel_role(self.app.chatbot_id, channel_id, role)
@@ -413,8 +426,10 @@ class RequestHandlers:
                 await self.app.prepare_mode(session_id, mode_id, prefs or None)
             else:
                 await self.app.start_mode(session_id, mode_id, ctx.device_id, prefs or None)
-        elif prefs:
-            await self.apply_mode_prefs(session_id, prefs)
+        else:
+            seed_prefs = await self.resolve_mode_seed_prefs(session_id, mode_id or "chat", prefs or None)
+            if seed_prefs:
+                await self.apply_mode_prefs(session_id, seed_prefs)
         return Reply("session.snapshot", await self.build_snapshot(session_id), session_id=session_id)
 
     async def handle_session_open(self, ctx: RequestContext, payload: dict[str, Any]) -> Reply:
@@ -695,7 +710,7 @@ class RequestHandlers:
         return {"session_id": session_id, **(ack or {})}
 
     async def handle_mode_prefs_set(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
-        """`mode.prefs.set{session_id, prefs}`: persist opaque per-session prefs (≤ 2 KiB, zero LLM turns)."""
+        """`mode.prefs.set{session_id, prefs}`: persist opaque per-session prefs (≤ 4 KiB, zero LLM turns)."""
         session_id = require_session_id(payload)
         prefs = payload.get("prefs")
         if not isinstance(prefs, dict):
@@ -703,6 +718,56 @@ class RequestHandlers:
         await self._get_session(session_id)
         merged = await self.apply_mode_prefs(session_id, prefs)
         return {"session_id": session_id, "prefs": merged}
+
+    async def handle_mode_defaults_get(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
+        """`mode.defaults.get{mode_id?}` -> `{defaults: {mode_id: {...}}}` persisted in SQLite `app_meta`."""
+        mode_id = optional_str(payload, "mode_id", max_len=40)
+        if mode_id is not None:
+            mode_id = mode_id.strip()
+            if not mode_id or "\x00" in mode_id or not MODE_ID_RE.fullmatch(mode_id):
+                raise ProtocolError("BAD_REQUEST", "invalid mode_id")
+        all_defaults = await asyncio.to_thread(self.db.get_app_mode_defaults)
+        if mode_id is not None:
+            filtered = {mode_id: all_defaults[mode_id]} if mode_id in all_defaults else {}
+            return {"defaults": filtered}
+        return {"defaults": all_defaults}
+
+    async def handle_mode_defaults_set(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
+        """`mode.defaults.set{mode_id, prefs}` -> validate, merge & persist per-mode default prefs."""
+        mode_id = require_str(payload, "mode_id", max_len=40).strip()
+        if "\x00" in mode_id or self.app.app_config.get_mode(mode_id) is None:
+            raise ProtocolError("BAD_REQUEST", "unknown mode")
+        prefs = payload.get("prefs")
+        if not isinstance(prefs, dict):
+            raise ProtocolError("BAD_REQUEST", "prefs must be an object")
+        async with self._mode_defaults_lock:
+            all_defaults = await asyncio.to_thread(self.db.get_app_mode_defaults)
+            existing = all_defaults.get(mode_id) or {}
+            merged = self._merge_prefs("", existing, prefs, mode_id=mode_id)
+            await asyncio.to_thread(self.db.set_app_mode_defaults_for, mode_id, merged)
+        return {"mode_id": mode_id, "prefs": merged}
+
+    async def resolve_mode_seed_prefs(
+        self,
+        session_id: str,
+        mode_id: str,
+        explicit_prefs: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Merge stored defaults for `mode_id` under existing session prefs and explicit `prefs`."""
+        all_defaults = await asyncio.to_thread(self.db.get_app_mode_defaults)
+        raw_defaults = all_defaults.get(mode_id) or {}
+        valid_defaults: dict[str, Any] = {}
+        for k, v in raw_defaults.items():
+            try:
+                self._merge_prefs(session_id, {}, {k: v}, mode_id=mode_id)
+            except ProtocolError:
+                continue
+            valid_defaults[k] = v
+        existing = (await asyncio.to_thread(self.db.get_app_session_prefs, session_id) or {}).get("mode_prefs") or {}
+        patch: dict[str, Any] = {k: v for k, v in valid_defaults.items() if k not in existing}
+        if explicit_prefs:
+            patch.update(explicit_prefs)
+        return patch or None
 
     async def apply_mode_prefs(self, session_id: str, prefs: dict[str, Any]) -> dict[str, Any]:
         """Merge `prefs` (None values delete) over the stored session `mode_prefs`, validate, persist and sync.
@@ -713,7 +778,7 @@ class RequestHandlers:
             The merged prefs now stored for the session.
 
         Raises:
-            ProtocolError: BAD_REQUEST for invalid keys / values, schema violations or > 2 KiB.
+            ProtocolError: BAD_REQUEST for invalid keys / values, schema violations or > 4 KiB.
         """
         current = (await asyncio.to_thread(self.db.get_app_session_prefs, session_id) or {}).get("mode_prefs") or {}
         merged = self._merge_prefs(session_id, current, prefs)
@@ -721,7 +786,14 @@ class RequestHandlers:
         await self._sync_mode_prefs_to_staging(session_id, merged)
         return merged
 
-    def _merge_prefs(self, session_id: str, current: dict[str, Any], prefs: dict[str, Any]) -> dict[str, Any]:
+    def _merge_prefs(
+        self,
+        session_id: str,
+        current: dict[str, Any],
+        prefs: dict[str, Any],
+        *,
+        mode_id: str | None = None,
+    ) -> dict[str, Any]:
         """Pure merge + validation of `prefs` over `current` (raises ProtocolError BAD_REQUEST when invalid)."""
         merged = {**current}
         for key, value in prefs.items():
@@ -729,15 +801,21 @@ class RequestHandlers:
                 raise ProtocolError("BAD_REQUEST", "invalid prefs key")
             if value is None:
                 merged.pop(key, None)
-            elif isinstance(value, (str, int, float, bool)) or (
-                isinstance(value, list) and all(isinstance(v, (str, int, float, bool)) for v in value)
-            ):
+            elif isinstance(value, str):
+                if "\x00" in value:
+                    raise ProtocolError("BAD_REQUEST", "prefs string values must not contain NUL bytes")
+                merged[key] = value
+            elif isinstance(value, (int, float, bool)):
+                merged[key] = value
+            elif isinstance(value, list) and all(isinstance(v, (str, int, float, bool)) for v in value):
+                if any(isinstance(v, str) and "\x00" in v for v in value):
+                    raise ProtocolError("BAD_REQUEST", "prefs string values must not contain NUL bytes")
                 merged[key] = value
             else:
                 raise ProtocolError("BAD_REQUEST", "prefs values must be scalars or lists of scalars")
-        self._validate_prefs_schema(session_id, merged)
+        self._validate_prefs_schema(session_id, merged, mode_id=mode_id)
         if len(json.dumps(merged, ensure_ascii=False).encode("utf-8")) > LIMITS["MODE_PREFS_MAX_BYTES"]:
-            raise ProtocolError("BAD_REQUEST", "prefs exceed 2 KiB")
+            raise ProtocolError("BAD_REQUEST", f"prefs exceed {LIMITS['MODE_PREFS_MAX_BYTES'] // 1024} KiB")
         return merged
 
     async def _sync_mode_prefs_to_staging(self, session_id: str, prefs: dict[str, Any]) -> None:
@@ -799,11 +877,18 @@ class RequestHandlers:
         if did_change:
             await self.app.state_watcher.scan(session_id)
 
-    def _validate_prefs_schema(self, session_id: str, prefs: dict[str, Any]) -> None:
-        """Validate keys/values against the union of configured `prefs_schema` whitelists (when any exist)."""
+    def _validate_prefs_schema(
+        self, session_id: str, prefs: dict[str, Any], *, mode_id: str | None = None
+    ) -> None:
+        """Validate keys/values against `mode_id`'s `prefs_schema` (when set) or the union of configured schemas."""
         schemas: dict[str, Any] = {}
-        for mode in self.app.app_config.modes:
-            schemas.update(mode.prefs_schema or {})
+        if mode_id:
+            target_mode = self.app.app_config.get_mode(mode_id)
+            if target_mode is not None and target_mode.prefs_schema:
+                schemas = dict(target_mode.prefs_schema)
+        if not schemas:
+            for mode in self.app.app_config.modes:
+                schemas.update(mode.prefs_schema or {})
         if not schemas:
             return
         for key, value in prefs.items():
@@ -812,8 +897,12 @@ class RequestHandlers:
             rule = schemas[key]
             if isinstance(rule, list) and value not in rule:
                 raise ProtocolError("BAD_REQUEST", f"prefs value for '{key}' is not allowed")
-            if rule == "string" and (not isinstance(value, str) or len(value) > 200):
+            if rule == "string" and (not isinstance(value, str) or len(value) > 200 or "\x00" in value):
                 raise ProtocolError("BAD_REQUEST", f"prefs value for '{key}' must be a short string")
+            if rule == "text" and (not isinstance(value, str) or len(value) > PREFS_TEXT_MAX_CHARS or "\x00" in value):
+                raise ProtocolError(
+                    "BAD_REQUEST", f"prefs value for '{key}' must be text (≤ {PREFS_TEXT_MAX_CHARS} chars)"
+                )
             if rule == "list" and (
                 not isinstance(value, list)
                 or len(value) > PREFS_LIST_MAX_ITEMS
@@ -1089,32 +1178,270 @@ class RequestHandlers:
         chars_root = os.path.join(self.app.awd, "characters")
         needle = raw.strip().lower()
         if needle and os.path.isdir(chars_root):
-            try:
-                for sub in sorted(os.listdir(chars_root)):
-                    cjson = os.path.join(chars_root, sub, "characters.json")
-                    if not os.path.isfile(cjson) or not realpath_within(chars_root, cjson):
-                        continue
-                    with open(cjson, encoding="utf-8") as f:
-                        entries = json.load(f)
-                    if not isinstance(entries, list):
-                        continue
-                    for entry in entries:
-                        if not isinstance(entry, dict):
-                            continue
-                        names = [str(entry.get("name") or ""), str(entry.get("trigger") or "")]
-                        aliases = entry.get("aliases")
-                        if isinstance(aliases, list):
-                            names.extend(str(a) for a in aliases)
-                        if any(n.strip().lower() == needle for n in names if n):
-                            img = str(entry.get("image") or "").strip()
-                            if img:
-                                img_cand = os.path.join(chars_root, sub, img)
-                                jailed = self._jail_hydrate_path(img_cand)
-                                if jailed and os.path.isfile(jailed):
-                                    return jailed
-            except (OSError, ValueError):
-                pass
+            for sub, entry in self._iter_character_registry():
+                names = [str(entry.get("name") or ""), str(entry.get("trigger") or "")]
+                aliases = entry.get("aliases")
+                if isinstance(aliases, list):
+                    names.extend(str(a) for a in aliases)
+                if any(n.strip().lower() == needle for n in names if n):
+                    jailed = self._resolve_character_asset(chars_root, sub, entry)
+                    if jailed:
+                        return jailed
         return None
+
+    def _iter_character_registry(self) -> list[tuple[str, dict[str, Any]]]:
+        """Scan `<awd>/characters/*/characters.json` deterministically (jailed via `realpath_within`)."""
+        chars_root = os.path.join(self.app.awd, "characters")
+        if not os.path.isdir(chars_root) or not realpath_within(self.app.awd, chars_root):
+            return []
+        try:
+            subdirs = sorted(os.listdir(chars_root))
+        except OSError:
+            return []
+        found: list[tuple[str, dict[str, Any]]] = []
+        for sub in subdirs:
+            if not sub or sub.startswith(".") or sub in (".", ".."):
+                continue
+            cjson = os.path.join(chars_root, sub, "characters.json")
+            if not os.path.isfile(cjson) or not realpath_within(chars_root, cjson):
+                continue
+            try:
+                if os.path.getsize(cjson) > CHARACTERS_JSON_MAX_BYTES:
+                    continue
+                with open(cjson, encoding="utf-8") as f:
+                    entries = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if isinstance(entry, dict):
+                    found.append((sub, entry))
+        return found
+
+    def _resolve_character_asset(self, chars_root: str, sub: str, entry: dict[str, Any]) -> str | None:
+        """Resolve a character's `avatar` (preferred) then `image` relative to `$AWD` first, then `characters/<sub>`."""
+        for field in ("avatar", "image"):
+            raw_val = entry.get(field)
+            if not isinstance(raw_val, str):
+                continue
+            rel = raw_val.strip()
+            if not rel or "\x00" in rel or os.path.isabs(rel) or ".." in rel.replace("\\", "/").split("/"):
+                continue
+            for cand in (os.path.join(self.app.awd, rel), os.path.join(chars_root, sub, rel)):
+                jailed = self._jail_hydrate_path(cand)
+                if jailed and os.path.isfile(jailed):
+                    return jailed
+        return None
+
+    def _resolve_character_ref(self, candidate: str) -> str:
+        """Resolve `candidate` against `<awd>/characters/*/characters.json` (exact case-insensitive match)."""
+        trimmed = candidate.strip()
+        if not trimmed:
+            return ""
+        needle = trimmed.lower()
+        for _sub, entry in self._iter_character_registry():
+            name = str(entry.get("name") or "").strip()
+            trigger = str(entry.get("trigger") or "").strip()
+            names = [name, trigger]
+            aliases = entry.get("aliases")
+            if isinstance(aliases, list):
+                names.extend(str(a).strip() for a in aliases if isinstance(a, str))
+            if any(n.lower() == needle for n in names if n):
+                return trigger or name or trimmed
+        return trimmed
+
+    # ------------------------------------------------------------------ characters & roster
+    async def handle_character_list(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
+        """`character.list{}` -> `{characters:[{name, ref, aliases, group, avatar}]}` from `<awd>/characters/*`."""
+
+        def _scan() -> list[dict[str, Any]]:
+            chars_root = os.path.join(self.app.awd, "characters")
+            awd_real = os.path.realpath(self.app.awd)
+            out: list[dict[str, Any]] = []
+            for sub, entry in self._iter_character_registry():
+                name = str(entry.get("name") or "").strip()
+                if not name:
+                    continue
+                ref = str(entry.get("trigger") or name).strip()
+                raw_aliases = entry.get("aliases")
+                aliases = (
+                    [str(a).strip() for a in raw_aliases if isinstance(a, str) and str(a).strip()]
+                    if isinstance(raw_aliases, list)
+                    else []
+                )
+                group = str(entry.get("group") or sub).strip()
+                avatar = ""
+                jailed = self._resolve_character_asset(chars_root, sub, entry)
+                if jailed and realpath_within(self.app.awd, jailed):
+                    avatar = os.path.relpath(jailed, awd_real).replace(os.sep, "/")
+                out.append(
+                    {
+                        "name": name,
+                        "ref": ref,
+                        "aliases": aliases,
+                        "group": group,
+                        "avatar": avatar,
+                    }
+                )
+            out.sort(key=lambda c: (c["group"].lower(), c["name"].lower(), c["ref"].lower()))
+            return out
+
+        return {"characters": await asyncio.to_thread(_scan)}
+
+    async def handle_roster_update(self, ctx: RequestContext, payload: dict[str, Any]) -> dict[str, Any]:
+        """`roster.update{session_id, key, ref?, prompt?, fusion?, transform_prompt?}` -> update `game/roster.json`."""
+        session_id = require_session_id(payload)
+        key = require_str(payload, "key", max_len=ROSTER_KEY_MAX_CHARS)
+        if "\x00" in key:
+            raise ProtocolError("BAD_REQUEST", "'key' must not contain NUL bytes")
+
+        has_ref = "ref" in payload and payload["ref"] is not None
+        has_prompt = "prompt" in payload and payload["prompt"] is not None
+        has_fusion = "fusion" in payload and payload["fusion"] is not None
+        has_transform_prompt = "transform_prompt" in payload and payload["transform_prompt"] is not None
+        if not (has_ref or has_prompt or has_fusion or has_transform_prompt):
+            raise ProtocolError(
+                "BAD_REQUEST", "at least one of ref, prompt, fusion or transform_prompt is required"
+            )
+
+        ref_val: str | None = None
+        if has_ref:
+            raw_ref = payload["ref"]
+            if not isinstance(raw_ref, str) or len(raw_ref) > ROSTER_REF_MAX_CHARS or "\x00" in raw_ref:
+                raise ProtocolError("BAD_REQUEST", f"'ref' must be a string (≤ {ROSTER_REF_MAX_CHARS} chars)")
+            ref_val = raw_ref
+
+        prompt_val: str | None = None
+        if has_prompt:
+            raw_prompt = payload["prompt"]
+            if not isinstance(raw_prompt, str) or len(raw_prompt) > ROSTER_PROMPT_MAX_CHARS or "\x00" in raw_prompt:
+                raise ProtocolError("BAD_REQUEST", f"'prompt' must be a string (≤ {ROSTER_PROMPT_MAX_CHARS} chars)")
+            prompt_val = raw_prompt
+
+        transform_prompt_val: str | None = None
+        if has_transform_prompt:
+            raw_tf = payload["transform_prompt"]
+            if not isinstance(raw_tf, str) or len(raw_tf) > ROSTER_PROMPT_MAX_CHARS or "\x00" in raw_tf:
+                raise ProtocolError(
+                    "BAD_REQUEST", f"'transform_prompt' must be a string (≤ {ROSTER_PROMPT_MAX_CHARS} chars)"
+                )
+            transform_prompt_val = raw_tf
+
+        fusion_val: bool | None = None
+        if has_fusion:
+            raw_fusion = payload["fusion"]
+            if not isinstance(raw_fusion, bool):
+                raise ProtocolError("BAD_REQUEST", "'fusion' must be a boolean")
+            fusion_val = raw_fusion
+
+        session = await self._get_session(session_id)
+        staging = os.path.join(self.app.sessions_dir, session.workspace_name)
+        if not realpath_within(self.app.sessions_dir, staging):
+            raise ProtocolError("BAD_REQUEST", "invalid session staging path")
+
+        def _update() -> dict[str, Any]:
+            game_dir = os.path.join(staging, "game")
+            roster_path = os.path.join(game_dir, "roster.json")
+            lock_path = os.path.join(game_dir, ".gm.lock")
+            ctx_dir = os.path.join(staging, "context")
+            roster_md_path = os.path.join(ctx_dir, "60-roster.md")
+
+            if os.path.islink(game_dir) or not realpath_within(staging, game_dir):
+                raise ProtocolError("NOT_FOUND", "roster.json not found")
+            if (
+                os.path.islink(roster_path)
+                or not realpath_within(staging, roster_path)
+                or not os.path.isfile(roster_path)
+            ):
+                raise ProtocolError("NOT_FOUND", "roster.json not found")
+            if os.path.islink(lock_path) or not realpath_within(staging, lock_path):
+                raise ProtocolError("BAD_REQUEST", "invalid lock path")
+
+            resolved_ref: str | None = None
+            if ref_val is not None:
+                trimmed = ref_val.strip()
+                resolved_ref = self._resolve_character_ref(trimmed) if trimmed else ""
+
+            with _with_gm_lock(lock_path):
+                if (
+                    os.path.islink(roster_path)
+                    or not realpath_within(staging, roster_path)
+                    or not os.path.isfile(roster_path)
+                ):
+                    raise ProtocolError("NOT_FOUND", "roster.json not found")
+                try:
+                    if os.path.getsize(roster_path) > ROSTER_JSON_MAX_BYTES:
+                        raise ProtocolError("BAD_REQUEST", "roster.json too large")
+                    with open(roster_path, encoding="utf-8") as f:
+                        data = json.load(f)
+                except ProtocolError:
+                    raise
+                except (OSError, ValueError) as e:
+                    raise ProtocolError("BAD_REQUEST", "invalid roster.json") from e
+
+                if not isinstance(data, dict) or not isinstance(data.get("members"), dict):
+                    raise ProtocolError("BAD_REQUEST", "invalid roster.json structure")
+
+                members: dict[str, Any] = data["members"]
+                card = members.get(key)
+                if not isinstance(card, dict):
+                    raise ProtocolError("NOT_FOUND", f"roster member '{key}' not found")
+
+                base = card.get("base_appearance")
+                if not isinstance(base, dict):
+                    base = {
+                        "prompt": str(card.get("prompt") or ""),
+                        "ref": str(card.get("ref") or ""),
+                    }
+                    card["base_appearance"] = base
+                else:
+                    base.setdefault("prompt", str(card.get("prompt") or ""))
+                    base.setdefault("ref", str(card.get("ref") or ""))
+
+                tf = card.get("transformed_appearance")
+                is_transformed = card.get("form_state") == "transformed" and isinstance(tf, dict)
+
+                if transform_prompt_val is not None and not is_transformed:
+                    if not (has_ref or has_prompt or has_fusion):
+                        raise ProtocolError("BAD_REQUEST", "member is not transformed")
+
+                if resolved_ref is not None:
+                    base["ref"] = resolved_ref
+                    card["ref"] = resolved_ref
+                    if is_transformed and isinstance(tf, dict):
+                        tf["ref"] = resolved_ref
+
+                if prompt_val is not None:
+                    clean_prompt = prompt_val.strip()
+                    base["prompt"] = clean_prompt
+                    if not is_transformed:
+                        card["prompt"] = clean_prompt
+
+                if transform_prompt_val is not None and is_transformed and isinstance(tf, dict):
+                    clean_tf = transform_prompt_val.strip()
+                    tf["prompt"] = clean_tf
+                    card["prompt"] = clean_tf
+
+                if fusion_val is not None:
+                    if fusion_val:
+                        card["fusion"] = True
+                    else:
+                        card.pop("fusion", None)
+
+                atomic_write_text(roster_path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+                os.makedirs(ctx_dir, exist_ok=True)
+                if os.path.islink(ctx_dir) or not realpath_within(staging, ctx_dir):
+                    raise ProtocolError("BAD_REQUEST", "invalid context directory")
+                if os.path.islink(roster_md_path) or not realpath_within(staging, roster_md_path):
+                    raise ProtocolError("BAD_REQUEST", "invalid roster context path")
+                atomic_write_text(roster_md_path, _render_roster_markdown(members))
+                return dict(card)
+
+        updated_card = await asyncio.to_thread(_update)
+        await self.app.state_watcher.scan(session_id)
+        return {"session_id": session_id, "key": key, "member": updated_card}
 
     async def _hydrate_upload(self, path: str, session_id: str | None) -> dict[str, Any]:
         """Upload `path` for `media.hydrate`, reusing a recent upload of the same unchanged file.
@@ -1900,6 +2227,105 @@ def _parse_lexical_tokens(token: str, raw: str) -> list[dict[str, Any]]:
             synth = single
         tokens.append(synth)
     return tokens
+
+
+@contextlib.contextmanager
+def _with_gm_lock(lock_path: str) -> Iterator[None]:
+    """Acquire an exclusive `fcntl.flock` on `<staging>/game/.gm.lock` (run on worker threads only)."""
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(lock_path, flags, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _clip_one_line(text: Any, limit: int) -> str:
+    """Collapse whitespace/newlines to single spaces and clip `text` to `limit` characters."""
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    return clean if len(clean) <= limit else clean[: limit - 1] + "…"
+
+
+def _escape_roster_cell(value: Any) -> str:
+    """Escape a value for safe display inside a single Markdown table cell."""
+    if value is None:
+        return "-"
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    if not text:
+        return "-"
+    return text.replace("|", r"\|")
+
+
+def _render_roster_markdown(members: dict[str, Any]) -> str:
+    """Render `context/60-roster.md` matching `gm/roster.py`'s 5-column table (≤ 40 lines, ≤ 5500 chars)."""
+    fm_lines = ["---", "memory_policy: real_facts_only", "---"]
+    header = [
+        "# 登场角色与形象设定 (Roster)",
+        (
+            "- **生图说明**: 用 `ai-image` 生图时，直接将下表中的「参考图绑定 (Ref)」全名与"
+            "「当前形象与设定 Prompt」写进 `--prompt`，并把入画真人 Ref 全名传给 "
+            '`--cast "<Ref1>,<Ref2>"` 即可（对于「像 XX 的 YY」复合形象角色，'
+            '须通过 `--ref "<XX>"` 绑定 `<XX>` 参考图并在 Prompt 中写明具有 `<XX>` '
+            "本人五官/发型特征与 `<YY>` 的身体形态/物种/角色神态；"
+            "若画面中仅有「像 XX 的 YY」融合角色出场而独立真人 `<Ref>` 本人未出场，"
+            "须在 `--prompt` 中显式注明 "
+            "`(IMPORTANT: the reference photo of <Ref> is used strictly for the facial/hairstyle "
+            "features on the <YY> character(s); do NOT draw a standalone human <Ref> in this scene)`）。"
+        ),
+        "| 角色名称 (Name) | 参考图绑定 (Ref) | 形态 | 当前形象与设定 Prompt | 基础外表 |",
+        "|---|---|---|---|---|",
+    ]
+    rows: list[tuple[str, str]] = []
+    for mkey, m in members.items():
+        if not isinstance(m, dict):
+            continue
+        disp_raw = str(m.get("name") or mkey)
+        disp_name = _escape_roster_cell(disp_raw)
+        base_obj = m.get("base_appearance") if isinstance(m.get("base_appearance"), dict) else {}
+        tf_obj = m.get("transformed_appearance") if isinstance(m.get("transformed_appearance"), dict) else None
+        is_tf = m.get("form_state") == "transformed" and tf_obj is not None
+        ref_str = _escape_roster_cell(m.get("ref") or base_obj.get("ref") or "-")
+        form = "🔮已变身" if is_tf else "基础形态"
+        base_prompt = str(base_obj.get("prompt") or ("" if is_tf else m.get("prompt") or "")).strip()
+        if is_tf and tf_obj is not None:
+            active_prompt = str(tf_obj.get("prompt") if "prompt" in tf_obj else m.get("prompt") or "").strip()
+        else:
+            active_prompt = str(m.get("prompt") if "prompt" in m else base_prompt).strip()
+        prompt_str = _escape_roster_cell(_clip_one_line(active_prompt, ROSTER_MD_PROMPT_CELL_CHARS) or "-")
+        base_str = (
+            _escape_roster_cell(_clip_one_line(base_prompt, ROSTER_MD_BASE_CELL_CHARS) or "-")
+            if is_tf
+            else "（同左）"
+        )
+        rows.append((disp_raw, f"| {disp_name} | {ref_str} | {form} | {prompt_str} | {base_str} |"))
+
+    if not rows:
+        all_lines = [*fm_lines, *header, "| - | - | - | （暂无登记角色） | - |"]
+        return "\n".join(all_lines) + "\n"
+
+    full_lines = [*fm_lines, *header, *(r for _, r in rows)]
+    if len(full_lines) <= ROSTER_MD_MAX_LINES and len("\n".join(full_lines)) + 1 <= ROSTER_MD_MAX_CHARS:
+        return "\n".join(full_lines) + "\n"
+
+    kept_rows: list[str] = []
+    for idx, (_name, row) in enumerate(rows):
+        omitted = [n for n, _ in rows[idx + 1 :]]
+        footer = f"（另有 {len(omitted)} 人未列出：{_clip_one_line('、'.join(omitted), 80)}）" if omitted else ""
+        candidate = [*fm_lines, *header, *kept_rows, row, *([footer] if footer else [])]
+        if len(candidate) <= ROSTER_MD_MAX_LINES and len("\n".join(candidate)) + 1 <= ROSTER_MD_MAX_CHARS:
+            kept_rows.append(row)
+        else:
+            break
+    omitted_names = [n for n, _ in rows[len(kept_rows) :]]
+    footer = f"（另有 {len(omitted_names)} 人未列出：{_clip_one_line('、'.join(omitted_names), 80)}）"
+    all_lines = [*fm_lines, *header, *kept_rows, footer]
+    return "\n".join(all_lines) + "\n"
 
 
 def is_human_user_message(msg: Any) -> bool:

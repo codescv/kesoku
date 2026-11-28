@@ -1004,3 +1004,60 @@ class AppTablesMixin:
         """Return the persistent per-workspace UUID (`ws_<32hex>`), creating it once if absent."""
         with self.connection_provider.connection() as conn:
             return get_or_create_workspace_id(conn)
+
+    def get_app_meta(self, key: str) -> str | None:
+        """Return the string value stored under `key` in `app_meta`, or None."""
+        with self.connection_provider.connection() as conn:
+            row = conn.execute("SELECT value FROM app_meta WHERE key = ?", (key,)).fetchone()
+        return str(row["value"]) if row else None
+
+    def set_app_meta(self, key: str, value: str) -> None:
+        """UPSERT a string value under `key` in `app_meta`."""
+        with self.connection_provider.connection() as conn:
+            with conn:
+                conn.execute(
+                    "INSERT INTO app_meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, value),
+                )
+
+    def get_app_mode_defaults(self) -> dict[str, dict[str, Any]]:
+        """Return `{mode_id: {pref_key: value}}` persisted in `app_meta['mode_defaults']`."""
+        parsed = _loads(self.get_app_meta("mode_defaults"), {})
+        if not isinstance(parsed, dict):
+            return {}
+        return {
+            str(k): dict(v)
+            for k, v in parsed.items()
+            if isinstance(k, str) and isinstance(v, dict)
+        }
+
+    def set_app_mode_defaults_for(self, mode_id: str, prefs: Mapping[str, Any]) -> dict[str, Any]:
+        """Atomically update default prefs for `mode_id` under `app_meta['mode_defaults']`."""
+        clean = dict(prefs)
+        with self.connection_provider.connection() as conn:
+            conn.isolation_level = None
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT value FROM app_meta WHERE key = ?", ("mode_defaults",)).fetchone()
+                parsed = _loads(row["value"], {}) if row else {}
+                store = {
+                    str(k): dict(v)
+                    for k, v in (parsed.items() if isinstance(parsed, dict) else ())
+                    if isinstance(k, str) and isinstance(v, dict)
+                }
+                if clean:
+                    store[mode_id] = clean
+                else:
+                    store.pop(mode_id, None)
+                body = json.dumps(store, ensure_ascii=False, separators=(",", ":"))
+                conn.execute(
+                    "INSERT INTO app_meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    ("mode_defaults", body),
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return clean

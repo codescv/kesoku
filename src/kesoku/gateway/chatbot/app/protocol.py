@@ -82,7 +82,7 @@ ROLE_ID_RE = re.compile(r"^[a-z0-9_]{2,32}$")
 MODE_ID_RE = re.compile(r"^[a-z0-9_]{1,40}$")
 
 LIMITS: dict[str, int] = {
-    "MODE_PREFS_MAX_BYTES": 2048,
+    "MODE_PREFS_MAX_BYTES": 4096,
     "PROMPT_HINT_MAX": 80,
     "DISPLAY_NAME_MAX": 32,
     "TAGLINE_MAX": 80,
